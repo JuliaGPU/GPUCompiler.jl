@@ -1,56 +1,14 @@
-# common functionality
+# error handling
 
-Base.@kwdef struct CompilerJob
-    # core invocation
-    f::Base.Callable
-    tt::DataType
-    cap::VersionNumber
-    kernel::Bool
-
-    # optional properties
-    minthreads::Union{Nothing,CuDim} = nothing
-    maxthreads::Union{Nothing,CuDim} = nothing
-    blocks_per_sm::Union{Nothing,Integer} = nothing
-    maxregs::Union{Nothing,Integer} = nothing
-    name::Union{Nothing,String} = nothing
-end
-
-CompilerJob(f, tt, cap, kernel; kwargs...) =
-    CompilerJob(f=f, tt=tt, cap=cap, kernel=kernel; kwargs...)
-
-function Base.show(io::IO, job::CompilerJob)
-    print(io, "CUDAnative.CompilerJob for $(job.f)($(join(job.tt.parameters, ", ")))")
-
-    print(io, " (cap=$(job.cap.major).$(job.cap.minor)")
-    job.kernel && print(io, ", kernel=true")
-    job.minthreads !== nothing && print(io, ", minthreads=$(job.minthreads)")
-    job.maxthreads !== nothing && print(io, ", maxthreads=$(job.maxthreads)")
-    job.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.blocks_per_sm)")
-    job.maxregs !== nothing && print(io, ", maxregs=$(job.maxregs)")
-    job.name !== nothing && print(io, ", name=$(job.name)")
-    print(io, ")")
-end
-
-# global job reference
-# FIXME: thread through `job` everywhere (deadlocks the Julia compiler when doing so with
-#        the LLVM passes in CUDAnative)
-current_job = nothing
-
-
-function signature(job::CompilerJob)
-    fn = something(job.name, nameof(job.f))
-    args = join(job.tt.parameters, ", ")
-    return "$fn($(join(job.tt.parameters, ", ")))"
-end
-
+export KernelError, InternalCompilerError
 
 struct KernelError <: Exception
-    job::CompilerJob
+    job::AbstractCompilerJob
     message::String
     help::Union{Nothing,String}
     bt::StackTraces.StackTrace
 
-    KernelError(job::CompilerJob, message::String, help=nothing;
+    KernelError(job::AbstractCompilerJob, message::String, help=nothing;
                 bt=StackTraces.StackTrace()) =
         new(job, message, help, bt)
 end
@@ -65,21 +23,21 @@ end
 
 
 struct InternalCompilerError <: Exception
-    job::CompilerJob
+    job::AbstractCompilerJob
     message::String
     meta::Dict
     InternalCompilerError(job, message; kwargs...) = new(job, message, kwargs)
 end
 
 function Base.showerror(io::IO, err::InternalCompilerError)
-    println(io, """CUDAnative.jl encountered an unexpected internal compiler error.
+    println(io, """GPUCompiler.jl encountered an unexpected internal error.
                    Please file an issue attaching the following information, including the backtrace,
                    as well as a reproducible example (if possible).""")
 
     println(io, "\nInternalCompilerError: $(err.message)")
 
     println(io, "\nCompiler invocation:")
-    for field in fieldnames(CompilerJob)
+    for field in fieldnames(AbstractCompilerJob)
         println(io, " - $field = $(repr(getfield(err.job, field)))")
     end
 

@@ -1,7 +1,7 @@
 # LLVM IR generation
 
 # generate a pseudo-backtrace from a stack of methods being emitted
-function backtrace(job::CompilerJob, call_stack::Vector{Core.MethodInstance})
+function backtrace(job::AbstractCompilerJob, call_stack::Vector{Core.MethodInstance})
     bt = StackTraces.StackFrame[]
     for method_instance in call_stack
         method = method_instance.def
@@ -32,23 +32,23 @@ if VERSION >= v"1.5.0-DEV.393"
 
 # JuliaLang/julia#25984 significantly restructured the compiler
 
-function compile_method_instance(job::CompilerJob, method_instance::Core.MethodInstance, world)
+function compile_method_instance(job::AbstractCompilerJob, method_instance::Core.MethodInstance, world)
     # set-up the compiler interface
     call_stack = [method_instance]
     function hook_emit_function(method_instance, code)
         push!(call_stack, method_instance)
 
-        # check for Base functions that exist in CUDAnative too
+        # check for Base functions that exist in the GPU package
         # FIXME: this might be too coarse
         method = method_instance.def
         if Base.moduleroot(method.module) == Base &&
-           isdefined(CUDAnative, method_instance.def.name) &&
+           isdefined(job.target.mod, method_instance.def.name) &&
            !in(method_instance.def.name, method_substitution_whitelist)
-            substitute_function = getfield(CUDAnative, method.name)
+            substitute_function = getfield(job.target.mod, method.name)
             tt = Tuple{method_instance.specTypes.parameters[2:end]...}
             if hasmethod(substitute_function, tt)
                 method′ = which(substitute_function, tt)
-                if Base.moduleroot(method′.module) == CUDAnative
+                if Base.moduleroot(method′.module) == job.target.mod
                     @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(job, call_stack))
                 end
             end
@@ -154,7 +154,7 @@ function module_setup(mod::LLVM.Module)
     end
 end
 
-function compile_method_instance(job::CompilerJob, method_instance::Core.MethodInstance, world)
+function compile_method_instance(job::AbstractCompilerJob, method_instance::Core.MethodInstance, world)
     function postprocess(ir)
         # get rid of jfptr wrappers
         for llvmf in functions(ir)
@@ -206,17 +206,17 @@ function compile_method_instance(job::CompilerJob, method_instance::Core.MethodI
                               bt=backtrace(job, call_stack)))
         end
 
-        # check for Base functions that exist in CUDAnative too
+        # check for Base functions that exist in the GPU package
         # FIXME: this might be too coarse
         method = method_instance.def
         if Base.moduleroot(method.module) == Base &&
-           isdefined(CUDAnative, method_instance.def.name) &&
+           isdefined(job.target.mod, method_instance.def.name) &&
            !in(method_instance.def.name, method_substitution_whitelist)
-            substitute_function = getfield(CUDAnative, method.name)
+            substitute_function = getfield(job.target.mod, method.name)
             tt = Tuple{method_instance.specTypes.parameters[2:end]...}
             if hasmethod(substitute_function, tt)
                 method′ = which(substitute_function, tt)
-                if Base.moduleroot(method′.module) == CUDAnative
+                if Base.moduleroot(method′.module) == job.target.mod
                     @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(job, call_stack))
                 end
             end
@@ -315,7 +315,7 @@ end
 
 end
 
-function irgen(job::CompilerJob, method_instance::Core.MethodInstance, world)
+function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, world)
     entry, mod = @timeit_debug to "emission" compile_method_instance(job, method_instance, world)
 
     # clean up incompatibilities
@@ -429,7 +429,7 @@ safe_name(x) = safe_name(repr(x))
 # once we have thorough inference (ie. discarding `@nospecialize` and thus supporting
 # exception arguments) and proper debug info to unwind the stack, this pass can go.
 function lower_throw!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+    job = current_job::AbstractCompilerJob
     changed = false
     @timeit_debug to "lower throw" begin
 
@@ -548,7 +548,7 @@ end
 #       only to prevent introducing non-structureness during optimization (ie. the front-end
 #       is still responsible for generating structured control flow).
 function hide_unreachable!(fun::LLVM.Function)
-    job = current_job::CompilerJob
+    job = current_job::AbstractCompilerJob
     changed = false
     @timeit_debug to "hide unreachable" begin
 
@@ -655,7 +655,7 @@ end
 #
 # if LLVM knows we're trapping, code is marked `unreachable` (see `hide_unreachable!`).
 function hide_trap!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+    job = current_job::AbstractCompilerJob
     changed = false
     @timeit_debug to "hide trap" begin
 
@@ -731,7 +731,7 @@ end
 
 # promote a function to a kernel
 # FIXME: sig vs tt (code_llvm vs cufunction)
-function promote_kernel!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
+function promote_kernel!(job::AbstractCompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
     kernel = wrap_entry!(job, mod, entry_f)
 
     # property annotations
@@ -744,18 +744,16 @@ function promote_kernel!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Funct
 
     ## expected CTA sizes
     if job.minthreads != nothing
-        bounds = CUDAdrv.CuDim3(job.minthreads)
-        for dim in (:x, :y, :z)
-            bound = getfield(bounds, dim)
-            append!(annotations, [MDString("reqntid$dim"),
+        for (dim, name) in enumerate([:x, :y, :z])
+            bound = dim <= length(job.minthreads) ? job.minthreads[dim] : 1
+            append!(annotations, [MDString("reqntid$name"),
                                   ConstantInt(Int32(bound), JuliaContext())])
         end
     end
     if job.maxthreads != nothing
-        bounds = CUDAdrv.CuDim3(job.maxthreads)
-        for dim in (:x, :y, :z)
-            bound = getfield(bounds, dim)
-            append!(annotations, [MDString("maxntid$dim"),
+        for (dim, name) in enumerate([:x, :y, :z])
+            bound = dim <= length(job.maxthreads) ? job.maxthreads[dim] : 1
+            append!(annotations, [MDString("maxntid$name"),
                                   ConstantInt(Int32(bound), JuliaContext())])
         end
     end
@@ -790,7 +788,7 @@ function wrapper_type(julia_t::Type, codegen_t::LLVMType)::LLVMType
 end
 
 # generate a kernel wrapper to fix & improve argument passing
-function wrap_entry!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
+function wrap_entry!(job::AbstractCompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
     entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
     @compiler_assert return_type(entry_ft) == LLVM.VoidType(JuliaContext()) job
 

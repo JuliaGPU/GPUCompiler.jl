@@ -1,6 +1,6 @@
 # compiler support for working with run-time libraries
 
-function link_library!(job::CompilerJob, mod::LLVM.Module, lib::LLVM.Module)
+function link_library!(job::AbstractCompilerJob, mod::LLVM.Module, lib::LLVM.Module)
     # linking is destructive, so copy the library
     lib = LLVM.Module(lib)
 
@@ -28,41 +28,12 @@ function link_library!(job::CompilerJob, mod::LLVM.Module, lib::LLVM.Module)
     end
 end
 
+
+#
+# GPU run-time library
+#
+
 const libcache = Dict{String, LLVM.Module}()
-
-
-#
-# CUDA device library
-#
-
-function load_libdevice(cap)
-    path = libdevice()
-
-    get!(libcache, path) do
-        open(path) do io
-            parse(LLVM.Module, read(path), JuliaContext())
-        end
-    end
-end
-
-function link_libdevice!(job::CompilerJob, mod::LLVM.Module, lib::LLVM.Module)
-    # override libdevice's triple and datalayout to avoid warnings
-    triple!(lib, triple(mod))
-    datalayout!(lib, datalayout(mod))
-
-    link_library!(job, mod, lib)
-
-    ModulePassManager() do pm
-        push!(metadata(mod), "nvvm-reflect-ftz",
-              MDNode([ConstantInt(Int32(1), JuliaContext())]))
-        run!(pm, mod)
-    end
-end
-
-
-#
-# CUDAnative run-time library
-#
 
 # get the path to a directory where we can put cache files (machine-specific, ephemeral)
 # NOTE: maybe we should use XDG_CACHE_PATH/%LOCALAPPDATA%, but other Julia cache files
@@ -71,18 +42,20 @@ function cachedir(depot=DEPOT_PATH[1])
     # this mimicks Base.compilecache. we can't just call the function, or we might actually
     # _generate_ a cache file, e.g., when running with `--compiled-modules=no`.
     if VERSION >= v"1.3.0-alpha.146"
-        entrypath, entryfile = Base.cache_file_entry(Base.PkgId(CUDAnative))
+        entrypath, entryfile = Base.cache_file_entry(Base.PkgId(GPUCompiler))
         abspath(depot, entrypath, entryfile)
     else
-        cachefile = abspath(depot, Base.cache_file_entry(Base.PkgId(CUDAnative)))
+        cachefile = abspath(depot, Base.cache_file_entry(Base.PkgId(GPUCompiler)))
 
-        # the cachefile consists of `/depot/compiled/vXXX/CUDAnative/$slug.ji`
-        # transform that into `/depot/compiled/vXXX/CUDAnative/$slug/`
+        # the cachefile consists of `/depot/compiled/vXXX/GPUCompiler/$slug.ji`
+        # transform that into `/depot/compiled/vXXX/GPUCompiler/$slug/`
         splitext(cachefile)[1]
     end
 end
 
-# remove the existing cache globally, so any change to CUDAnative triggers recompilation.
+# remove the existing cache globally, so any change to GPUCompiler triggers recompilation.
+# FIXME: downstream changes to, e.g., CUDAnative should trigger recompilation, not here.
+#        maybe have a rm_runtime(target)
 rm(cachedir(); recursive=true, force=true)
 # create an empty cache directory. since we only ever load from the first existing cachedir,
 # this effectively invalidates preexisting caches in lower layers of the depot.
@@ -125,25 +98,26 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, cap, f, types, name)
+function emit_function!(mod, job::AbstractCompilerJob, f, types, name)
     tt = Base.to_tuple_type(types)
-    new_mod, entry = codegen(:llvm, CompilerJob(f, tt, cap, #=kernel=# false);
+    new_mod, entry = codegen(:llvm, similar(job, f, tt, #=kernel=# false);
                              libraries=false, strict=false)
     LLVM.name!(entry, name)
     link!(mod, new_mod)
 end
 
-function build_runtime(cap)
-    mod = LLVM.Module("CUDAnative run-time library", JuliaContext())
+function build_runtime(job::AbstractCompilerJob)
+    mod = LLVM.Module("GPUCompiler run-time library", JuliaContext())
 
     for method in values(Runtime.methods)
-        emit_function!(mod, cap, method.def, method.types, method.llvm_name)
+        def = isa(method.def, Symbol) ? getfield(job.target.mod, method.def) : method.def
+        emit_function!(mod, job, def, method.types, method.llvm_name)
     end
 
     mod
 end
 
-function load_runtime(cap)
+function load_runtime(job::AbstractCompilerJob)
     # find the first existing cache directory (for when dealing with layered depots)
     cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
     filter!(isdir, cachedirs)
@@ -162,7 +136,7 @@ function load_runtime(cap)
         cp(input_dir, output_dir)
     end
 
-    name = "runtime_$(cap.major)$(cap.minor).bc"
+    name = "runtime_$(job.cap.major)$(job.cap.minor).bc"
     path = joinpath(output_dir, name)
 
     get!(libcache, path) do
@@ -171,8 +145,8 @@ function load_runtime(cap)
                 parse(LLVM.Module, read(io), JuliaContext())
             end
         else
-            @debug "Building the CUDAnative run-time library for sm_$(cap.major)$(cap.minor)."
-            lib = build_runtime(cap)
+            @debug "Building the GPU runtime library for sm_$(job.cap.major)$(job.cap.minor)."
+            lib = build_runtime(job)
             open(path, "w") do io
                 write(io, lib)
             end

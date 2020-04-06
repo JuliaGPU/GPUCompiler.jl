@@ -1,7 +1,7 @@
-# CUDAnative runtime library
+# GPU runtime library
 #
-# This module defines method instances that will be compiled into a device-specific image
-# and will be available to the CUDAnative compiler to call after Julia has generated code.
+# This module defines method instances that will be compiled into a target-specific image
+# and will be available to the GPU compiler to call after Julia has generated code.
 #
 # Most functions implement, or are used to support Julia runtime functions that are expected
 # by the Julia compiler to be available at run time, e.g., to dynamically allocate memory,
@@ -9,7 +9,7 @@
 
 module Runtime
 
-using ..CUDAnative
+using ..GPUCompiler
 using LLVM
 using LLVM.Interop
 
@@ -17,7 +17,8 @@ using LLVM.Interop
 ## representation of a runtime method instance
 
 struct RuntimeMethodInstance
-    def::Function
+    # either a function defined here, or a symbol to fetch a target-specific definition
+    def::Union{Function,Symbol}
 
     return_type::Type
     types::Tuple
@@ -52,7 +53,12 @@ function Base.getproperty(rt::RuntimeMethodInstance, field::Symbol)
 end
 
 const methods = Dict{Symbol,RuntimeMethodInstance}()
-get(name::Symbol) = methods[name]
+function get(name::Symbol)
+    if !haskey(methods, name)
+        display(methods)
+    end
+    methods[name]
+end
 
 # Register a Julia function `def` as a runtime library function identified by `name`. The
 # function will be compiled upon first use for argument types `types` and should return
@@ -67,7 +73,7 @@ get(name::Symbol) = methods[name]
 # you can always specify `llvm_name` to influence that. Never use an LLVM name that starts
 # with `julia_` or the function might clash with other compiled functions.
 function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=nothing;
-                 name=nameof(def), llvm_name="ptx_$name")
+                 name=isa(def,Symbol) ? def : nameof(def), llvm_name="ptx_$name")
     meth = RuntimeMethodInstance(def,
                                  return_type, types, name,
                                  llvm_return_type, llvm_types, llvm_name)
@@ -81,49 +87,14 @@ end
 
 ## exception handling
 
-function report_exception(ex)
-    @cuprintf("""
-        ERROR: a %s was thrown during kernel execution.
-               Run Julia on debug level 2 for device stack traces.
-        """, ex)
-    return
-end
+# expected functions for simple exception handling
+compile(:report_exception, Nothing, (Ptr{Cchar},))
+compile(:report_oom, Nothing, (Csize_t,))
 
-compile(report_exception, Nothing, (Ptr{Cchar},))
-
-function report_exception_name(ex)
-    @cuprintf("""
-        ERROR: a %s was thrown during kernel execution.
-        Stacktrace:
-        """, ex)
-    return
-end
-
-function report_exception_frame(idx, func, file, line)
-    @cuprintf(" [%i] %s at %s:%i\n", idx, func, file, line)
-    return
-end
-
-@inline exception_flag() =
-    ccall("extern cudanativeExceptionFlag", llvmcall, Ptr{Cvoid}, ())
-
-function signal_exception()
-    ptr = exception_flag()
-    if ptr !== C_NULL
-        unsafe_store!(convert(Ptr{Int}, ptr), 1)
-        threadfence_system()
-    else
-        @cuprintf("""
-            WARNING: could not signal exception status to the host, execution will continue.
-                     Please file a bug.
-            """)
-    end
-    return
-end
-
-compile(report_exception_frame, Nothing, (Cint, Ptr{Cchar}, Ptr{Cchar}, Cint))
-compile(report_exception_name, Nothing, (Ptr{Cchar},))
-compile(signal_exception, Nothing, ())
+# expected functions for verbose exception handling
+compile(:report_exception_frame, Nothing, (Cint, Ptr{Cchar}, Ptr{Cchar}, Cint))
+compile(:report_exception_name, Nothing, (Ptr{Cchar},))
+compile(:signal_exception, Nothing, ())
 
 # NOTE: no throw functions are provided here, but replaced by an LLVM pass instead
 #       in order to provide some debug information without stack unwinding.
@@ -148,7 +119,7 @@ end
 function gc_pool_alloc(sz::Csize_t)
     ptr = malloc(sz)
     if ptr == C_NULL
-        @cuprintf("ERROR: Out of dynamic GPU memory (trying to allocate %i bytes)\n", sz)
+        report_oom(sz)
         throw(OutOfMemoryError())
     end
     return unsafe_pointer_to_objref(ptr)

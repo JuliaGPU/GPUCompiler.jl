@@ -1,6 +1,6 @@
 # LLVM IR optimization
 
-function optimize!(job::CompilerJob, mod::LLVM.Module, entry::LLVM.Function)
+function optimize!(job::AbstractCompilerJob, mod::LLVM.Module, entry::LLVM.Function)
     tm = machine(job.cap, triple(mod))
 
     function initialize!(pm)
@@ -109,7 +109,7 @@ end
 # such IR is hard to clean-up, so we probably will need to have the GC lowering pass emit
 # lower-level intrinsics which then can be lowered to architecture-specific code.
 function lower_gc_frame!(fun::LLVM.Function)
-    job = current_job::CompilerJob
+    job = current_job::AbstractCompilerJob
     mod = LLVM.parent(fun)
     changed = false
 
@@ -167,7 +167,7 @@ end
 # TODO: maybe don't have Julia emit actual uses of the TLS, but use intrinsics instead,
 #       making it easier to remove or reimplement that functionality here.
 function lower_ptls!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+    job = current_job::AbstractCompilerJob
     changed = false
 
     if haskey(functions(mod), "julia.ptls_states")

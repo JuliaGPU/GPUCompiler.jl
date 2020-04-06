@@ -3,13 +3,13 @@
 # NOTE: the keyword arguments to compile/codegen control those aspects of compilation that
 #       might have to be changed (e.g. set libraries=false when recursing, or set
 #       strip=true for reflection). What remains defines the compilation job itself,
-#       and those values are contained in the CompilerJob struct.
+#       and those values are contained in the AbstractCompilerJob struct.
 
-# (::CompilerJob)
+# (::AbstractCompilerJob)
 const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 """
-    compile(target::Symbol, cap::VersionNumber, f, tt, kernel=true;
+    compile(target::Symbol, job::AbstractCompilerJob;
             libraries=true, dynamic_parallelism=true,
             optimize=true, strip=false, strict=true, ...)
 
@@ -19,7 +19,7 @@ LLVM IR, `:ptx` for PTX assembly and `:cuda` for CUDA driver objects. If the `ke
 is set, specialized code generation and optimization for kernel functions is enabled.
 
 The following keyword arguments are supported:
-- `libraries`: link the CUDAnative runtime and `libdevice` libraries (if required)
+- `libraries`: link the GPU runtime and `libdevice` libraries (if required)
 - `dynamic_parallelism`: resolve dynamic parallelism (if required)
 - `optimize`: optimize the code (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
@@ -27,15 +27,7 @@ The following keyword arguments are supported:
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
-compile(target::Symbol, cap::VersionNumber, @nospecialize(f::Base.Callable),
-        @nospecialize(tt), kernel::Bool=true; libraries::Bool=true,
-        dynamic_parallelism::Bool=true, optimize::Bool=true,
-        strip::Bool=false, strict::Bool=true, kwargs...) =
-    compile(target, CompilerJob(f, tt, cap, kernel; kwargs...);
-            libraries=libraries, dynamic_parallelism=dynamic_parallelism,
-            optimize=optimize, strip=strip, strict=strict)
-
-function compile(target::Symbol, job::CompilerJob;
+function compile(target::Symbol, job::AbstractCompilerJob;
                  libraries::Bool=true, dynamic_parallelism::Bool=true,
                  optimize::Bool=true, strip::Bool=false, strict::Bool=true)
     if compile_hook[] != nothing
@@ -47,7 +39,7 @@ function compile(target::Symbol, job::CompilerJob;
                    optimize=optimize, strip=strip, strict=strict)
 end
 
-function codegen(target::Symbol, job::CompilerJob;
+function codegen(target::Symbol, job::AbstractCompilerJob;
                  libraries::Bool=true, dynamic_parallelism::Bool=true, optimize::Bool=true,
                  strip::Bool=false, strict::Bool=true)
     ## Julia IR
@@ -82,26 +74,19 @@ function codegen(target::Symbol, job::CompilerJob;
 
     ## LLVM IR
 
-    defs(mod)  = filter(f -> !isdeclaration(f), collect(functions(mod)))
-    decls(mod) = filter(f ->  isdeclaration(f) && intrinsic_id(f) == 0,
-                        collect(functions(mod)))
-
     # always preload the runtime, and do so early; it cannot be part of any timing block
     # because it recurses into the compiler
     if libraries
-        runtime = load_runtime(job.cap)
+        runtime = load_runtime(job)
         runtime_fns = LLVM.name.(defs(runtime))
     end
 
     @timeit_debug to "LLVM middle-end" begin
         ir, kernel = @timeit_debug to "IR generation" irgen(job, method_instance, world)
 
-        if libraries
+        if libraries && job.target.link_libraries != nothing
             undefined_fns = LLVM.name.(decls(ir))
-            if any(fn->startswith(fn, "__nv_"), undefined_fns)
-                libdevice = load_libdevice(job.cap)
-                @timeit_debug to "device library" link_libdevice!(job, ir, libdevice)
-            end
+            @timeit_debug to "target libraries" job.target.link_libraries(job, ir, undefined_fns)
         end
 
         if optimize
@@ -126,7 +111,7 @@ function codegen(target::Symbol, job::CompilerJob;
     if dynamic_parallelism && haskey(functions(ir), "cudanativeCompileKernel")
         dyn_marker = functions(ir)["cudanativeCompileKernel"]
 
-        cache = Dict{CompilerJob, String}(job => kernel_fn)
+        cache = Dict{AbstractCompilerJob, String}(job => kernel_fn)
 
         # iterative compilation (non-recursive)
         changed = true
@@ -135,7 +120,7 @@ function codegen(target::Symbol, job::CompilerJob;
 
             # find dynamic kernel invocations
             # TODO: recover this information earlier, from the Julia IR
-            worklist = MultiDict{CompilerJob, LLVM.CallInst}()
+            worklist = MultiDict{AbstractCompilerJob, LLVM.CallInst}()
             for use in uses(dyn_marker)
                 # decode the call
                 call = user(use)::LLVM.CallInst
@@ -143,7 +128,7 @@ function codegen(target::Symbol, job::CompilerJob;
 
                 global delayed_cufunctions
                 dyn_f, dyn_tt = delayed_cufunctions[id]
-                dyn_job = CompilerJob(dyn_f, dyn_tt, job.cap, #=kernel=# true)
+                dyn_job = AbstractCompilerJob(dyn_f, dyn_tt, job.cap, #=kernel=# true)
                 push!(worklist, dyn_job => call)
             end
 

@@ -16,7 +16,7 @@ end
 
 # final preparations for the module to be compiled to PTX
 # these passes should not be run when e.g. compiling to write to disk.
-function prepare_execution!(job::CompilerJob, mod::LLVM.Module)
+function prepare_execution!(job::AbstractCompilerJob, mod::LLVM.Module)
     let pm = ModulePassManager()
         global current_job
         current_job = job
@@ -44,7 +44,7 @@ end
 #
 # this pass performs that resolution at link time.
 function resolve_cpu_references!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+    job = current_job::AbstractCompilerJob
     changed = false
 
     for f in functions(mod)
@@ -80,7 +80,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
     return changed
 end
 
-function mcgen(job::CompilerJob, mod::LLVM.Module, f::LLVM.Function)
+function mcgen(job::AbstractCompilerJob, mod::LLVM.Module, f::LLVM.Function)
     tm = machine(job.cap, triple(mod))
 
     InitializeNVPTXAsmPrinter()

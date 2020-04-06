@@ -1,5 +1,40 @@
 module GPUCompiler
 
-greet() = print("Hello World!")
+using LLVM
+using LLVM.Interop
+
+using DataStructures
+
+using TimerOutputs
+
+using Libdl
+
+const to = TimerOutput()
+
+timings() = (TimerOutputs.print_timer(to); println())
+
+enable_timings() = (TimerOutputs.enable_debug_timings(GPUCompiler); return)
+
+include("utils.jl")
+
+include("target.jl")
+include("job.jl")
+include("error.jl")
+
+include("runtime.jl")
+
+include("irgen.jl")
+include("optim.jl")
+include("validation.jl")
+include("rtlib.jl")
+include("mcgen.jl")
+include("debug.jl")
+include("driver.jl")
+
+function __init__()
+    TimerOutputs.reset_timer!(to)
+
+    return
+end
 
 end # module

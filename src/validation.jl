@@ -1,6 +1,8 @@
 # validation of properties and code
 
-function check_method(job::CompilerJob)
+export InvalidIRError
+
+function check_method(job::AbstractCompilerJob)
     isa(job.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
@@ -52,7 +54,7 @@ function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
     return msg
 end
 
-function check_invocation(job::CompilerJob, entry::LLVM.Function)
+function check_invocation(job::AbstractCompilerJob, entry::LLVM.Function)
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
     sig = Base.signature_type(job.f, job.tt)::Type
@@ -83,7 +85,7 @@ end
 const IRError = Tuple{String, StackTraces.StackTrace, Any} # kind, bt, meta
 
 struct InvalidIRError <: Exception
-    job::CompilerJob
+    job::AbstractCompilerJob
     errors::Vector{IRError}
 end
 
