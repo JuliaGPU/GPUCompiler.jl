@@ -10,7 +10,7 @@ const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 """
     compile(target::Symbol, job::AbstractCompilerJob;
-            libraries=true, dynamic_parallelism=true,
+            libraries=true, deferred_codegen=true,
             optimize=true, strip=false, strict=true, ...)
 
 Compile a function `f` invoked with types `tt` for device capability `cap` to one of the
@@ -20,7 +20,7 @@ is set, specialized code generation and optimization for kernel functions is ena
 
 The following keyword arguments are supported:
 - `libraries`: link the GPU runtime and `libdevice` libraries (if required)
-- `dynamic_parallelism`: resolve dynamic parallelism (if required)
+- `deferred_codegen`: resolve deferred compiler invocations (if required)
 - `optimize`: optimize the code (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
 - `strict`: perform code validation either as early or as late as possible
@@ -28,19 +28,33 @@ The following keyword arguments are supported:
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
 function compile(target::Symbol, job::AbstractCompilerJob;
-                 libraries::Bool=true, dynamic_parallelism::Bool=true,
+                 libraries::Bool=true, deferred_codegen::Bool=true,
                  optimize::Bool=true, strip::Bool=false, strict::Bool=true)
     if compile_hook[] != nothing
         compile_hook[](job)
     end
 
     return codegen(target, job;
-                   libraries=libraries, dynamic_parallelism=dynamic_parallelism,
+                   libraries=libraries, deferred_codegen=deferred_codegen,
                    optimize=optimize, strip=strip, strict=strict)
 end
 
+# primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
+# this could both be generalized (e.g. supporting actual function calls, instead of
+# returning a function pointer), and be integrated with the nonrecursive codegen.
+const deferred_codegen_jobs = Vector{Tuple{Core.Function,Type}}()
+@generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
+    push!(deferred_codegen_jobs, (f,tt))
+    id = length(deferred_codegen_jobs)
+
+    quote
+        # TODO: add an edge to this method instance to support method redefinitions
+        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
+    end
+end
+
 function codegen(target::Symbol, job::AbstractCompilerJob;
-                 libraries::Bool=true, dynamic_parallelism::Bool=true, optimize::Bool=true,
+                 libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                  strip::Bool=false, strict::Bool=true)
     ## Julia IR
 
@@ -107,9 +121,9 @@ function codegen(target::Symbol, job::AbstractCompilerJob;
         kernel_fn = LLVM.name(kernel)
     end
 
-    # dynamic parallelism
-    if dynamic_parallelism && haskey(functions(ir), "cudanativeCompileKernel")
-        dyn_marker = functions(ir)["cudanativeCompileKernel"]
+    # deferred code generation
+    if deferred_codegen && haskey(functions(ir), "deferred_codegen")
+        dyn_marker = functions(ir)["deferred_codegen"]
 
         cache = Dict{AbstractCompilerJob, String}(job => kernel_fn)
 
@@ -118,7 +132,7 @@ function codegen(target::Symbol, job::AbstractCompilerJob;
         while changed
             changed = false
 
-            # find dynamic kernel invocations
+            # find deferred compiler
             # TODO: recover this information earlier, from the Julia IR
             worklist = MultiDict{AbstractCompilerJob, LLVM.CallInst}()
             for use in uses(dyn_marker)
@@ -126,9 +140,9 @@ function codegen(target::Symbol, job::AbstractCompilerJob;
                 call = user(use)::LLVM.CallInst
                 id = convert(Int, first(operands(call)))
 
-                global delayed_cufunctions
-                dyn_f, dyn_tt = delayed_cufunctions[id]
-                dyn_job = AbstractCompilerJob(dyn_f, dyn_tt, job.cap, #=kernel=# true)
+                global deferred_codegen_jobs
+                dyn_f, dyn_tt = deferred_codegen_jobs[id]
+                dyn_job = similar(job, dyn_f, dyn_tt, #=kernel=# true)
                 push!(worklist, dyn_job => call)
             end
 
@@ -138,7 +152,7 @@ function codegen(target::Symbol, job::AbstractCompilerJob;
                 dyn_kernel_fn = get!(cache, dyn_job) do
                     dyn_ir, dyn_kernel = codegen(:llvm, dyn_job;
                                                  optimize=optimize, strip=strip,
-                                                 dynamic_parallelism=false, strict=false)
+                                                 deferred_codegen=false, strict=false)
                     dyn_kernel_fn = LLVM.name(dyn_kernel)
                     link!(ir, dyn_ir)
                     changed = true
@@ -159,7 +173,7 @@ function codegen(target::Symbol, job::AbstractCompilerJob;
             end
         end
 
-        # all dynamic launches should have been resolved
+        # all deferred compilations should have been resolved
         @compiler_assert isempty(uses(dyn_marker)) job
         unsafe_delete!(ir, dyn_marker)
     end
