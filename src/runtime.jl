@@ -7,6 +7,10 @@
 # by the Julia compiler to be available at run time, e.g., to dynamically allocate memory,
 # box values, etc.
 
+# TODO: we can't call functions that are defined by the target (e.g. malloc) from here.
+#       workaround: llvmcall. try using the new codegen for that, which should allow to
+#       manage which functions need to be compiled (e.g. target-specific ones) ourselves.
+
 module Runtime
 
 using ..GPUCompiler
@@ -90,6 +94,7 @@ end
 # expected functions for simple exception handling
 compile(:report_exception, Nothing, (Ptr{Cchar},))
 compile(:report_oom, Nothing, (Csize_t,))
+report_oom(sz::Csize_t) = ccall("extern report_oom", llvmcall, Nothing, (Csize_t,), sz) # HACK
 
 # expected functions for verbose exception handling
 compile(:report_exception_frame, Nothing, (Cint, Ptr{Cchar}, Ptr{Cchar}, Cint))
@@ -127,6 +132,9 @@ end
 
 compile(gc_pool_alloc, Any, (Csize_t,), T_prjlvalue)
 
+# expected functions for GC support
+compile(:malloc, Ptr{Nothing}, (Csize_t,))
+malloc(sz::Csize_t) = ccall("extern malloc", llvmcall, Ptr{Nothing}, (Csize_t,), sz) # HACK
 
 ## boxing and unboxing
 
