@@ -1,5 +1,11 @@
 # LLVM IR generation
 
+
+## method compilation tracer
+
+# this functionality is used to detect recursion, and functions that shouldn't be called.
+# it is a hack, and should disappear over time. don't add new features to it.
+
 # generate a pseudo-backtrace from a stack of methods being emitted
 function backtrace(job::AbstractCompilerJob, call_stack::Vector{Core.MethodInstance})
     bt = StackTraces.StackFrame[]
@@ -28,36 +34,62 @@ Base.showerror(io::IO, err::MethodSubstitutionWarning) =
     print(io, "You called $(err.original), maybe you intended to call $(err.substitute) instead?")
 const method_substitution_whitelist = [:hypot]
 
+mutable struct MethodCompileTracer
+    job::AbstractCompilerJob
+    call_stack::Vector{Core.MethodInstance}
+    last_method_instance::Union{Nothing,Core.MethodInstance}
+
+    MethodCompileTracer(job, start) = new(job, Core.MethodInstance[start])
+    MethodCompileTracer(job) = new(job, Core.MethodInstance[])
+end
+
+function Base.push!(tracer::MethodCompileTracer, method_instance)
+    push!(tracer.call_stack, method_instance)
+
+    if VERSION < v"1.5.0-DEV.393"
+        # check for recursion
+        if method_instance in tracer.call_stack[1:end-1]
+            throw(KernelError(job, "recursion is currently not supported";
+                              bt=backtrace(tracer.job, tracer.call_stack)))
+        end
+    end
+
+    # check for Base functions that exist in the GPU package
+    # FIXME: this might be too coarse
+    method = method_instance.def
+    if Base.moduleroot(method.module) == Base &&
+        isdefined(tracer.job.target.runtime_module, method_instance.def.name) &&
+        !in(method_instance.def.name, method_substitution_whitelist)
+        substitute_function = getfield(tracer.job.target.runtime_module, method.name)
+        tt = Tuple{method_instance.specTypes.parameters[2:end]...}
+        if hasmethod(substitute_function, tt)
+            method′ = which(substitute_function, tt)
+            if Base.moduleroot(method′.module) == tracer.job.target.runtime_module
+                @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(tracer.job, tracer.call_stack))
+            end
+        end
+    end
+end
+
+function Base.pop!(tracer::MethodCompileTracer, method_instance)
+    @compiler_assert last(tracer.call_stack) == method_instance tracer.job
+    tracer.last_method_instance = pop!(tracer.call_stack)
+end
+
+Base.last(tracer::MethodCompileTracer) = tracer.last_method_instance
+
+
+## Julia compiler integration
+
 if VERSION >= v"1.5.0-DEV.393"
 
 # JuliaLang/julia#25984 significantly restructured the compiler
 
 function compile_method_instance(job::AbstractCompilerJob, method_instance::Core.MethodInstance, world)
     # set-up the compiler interface
-    call_stack = [method_instance]
-    function hook_emit_function(method_instance, code)
-        push!(call_stack, method_instance)
-
-        # check for Base functions that exist in the GPU package
-        # FIXME: this might be too coarse
-        method = method_instance.def
-        if Base.moduleroot(method.module) == Base &&
-           isdefined(job.target.mod, method_instance.def.name) &&
-           !in(method_instance.def.name, method_substitution_whitelist)
-            substitute_function = getfield(job.target.mod, method.name)
-            tt = Tuple{method_instance.specTypes.parameters[2:end]...}
-            if hasmethod(substitute_function, tt)
-                method′ = which(substitute_function, tt)
-                if Base.moduleroot(method′.module) == job.target.mod
-                    @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(job, call_stack))
-                end
-            end
-        end
-    end
-    function hook_emitted_function(method, code)
-        @compiler_assert last(call_stack) == method job
-        pop!(call_stack)
-    end
+    tracer = MethodCompileTracer(job, method_instance)
+    hook_emit_function(method_instance, code) = push!(tracer, method_instance)
+    hook_emitted_function(method_instance, code) = pop!(tracer, method_instance)
     param_kwargs = [:track_allocations  => false,
                     :code_coverage      => false,
                     :static_alloc       => false,
@@ -75,12 +107,13 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
             LLVM.API.LLVMDebugEmissionKindFullDebug
         end
 
-        #if CUDAdrv.release() < v"10.2"
-            # FIXME: LLVM's debug info crashes CUDA
-            # FIXME: this ought to be fixed on 10.2?
+        # HACK: LLVM's debug info crashes CUDA
+        if job isa PTXCompilerJob
+            # wasn't this supposed to be fixed on 10.2? when it is, add CUDAdrv.version()
+            # to the PTX Compiler Target and branch on that here.
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
-        #end
+        end
 
         push!(param_kwargs, :debug_info_kind => Cint(debug_info_kind))
     end
@@ -120,23 +153,17 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
     llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
     # configure the module
-    # NOTE: NVPTX::TargetMachine's data layout doesn't match the NVPTX user guide,
-    #       so we specify it ourselves
-    if Int === Int64
-        triple!(llvm_mod, "nvptx64-nvidia-cuda")
-        datalayout!(llvm_mod, "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64")
-    else
-        triple!(llvm_mod, "nvptx-nvidia-cuda")
-        datalayout!(llvm_mod, "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64")
-    end
+    triple!(llvm_mod, job.target.triple)
+    datalayout!(llvm_mod, job.target.datalayout)
 
     return llvm_specfunc, llvm_mod
 end
 
 else
 
-function module_setup(mod::LLVM.Module)
-    triple!(mod, Int === Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda")
+function module_setup(job::AbstractCompilerJob, mod::LLVM.Module)
+    # configure the module
+    triple!(mod, job.target.triple)
 
     # add debug info metadata
     if LLVM.version() >= v"8.0"
@@ -165,13 +192,14 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
     end
 
     # set-up the compiler interface
-    last_method_instance = nothing
-    call_stack = Vector{Core.MethodInstance}()
+    tracer = MethodCompileTracer(job)
+    hook_emit_function(method_instance, code, world) = push!(tracer, method_instance)
+    hook_emitted_function(method_instance, code, world) = pop!(tracer, method_instance)
     dependencies = MultiDict{Core.MethodInstance,LLVM.Function}()
     function hook_module_setup(ref::Ptr{Cvoid})
         ref = convert(LLVM.API.LLVMModuleRef, ref)
         ir = LLVM.Module(ref)
-        module_setup(ir)
+        module_setup(job, ir)
     end
     function hook_module_activation(ref::Ptr{Cvoid})
         ref = convert(LLVM.API.LLVMModuleRef, ref)
@@ -195,36 +223,7 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
 
         @compiler_assert llvmf !== nothing job
 
-        insert!(dependencies, last_method_instance, llvmf)
-    end
-    function hook_emit_function(method_instance, code, world)
-        push!(call_stack, method_instance)
-
-        # check for recursion
-        if method_instance in call_stack[1:end-1]
-            throw(KernelError(job, "recursion is currently not supported";
-                              bt=backtrace(job, call_stack)))
-        end
-
-        # check for Base functions that exist in the GPU package
-        # FIXME: this might be too coarse
-        method = method_instance.def
-        if Base.moduleroot(method.module) == Base &&
-           isdefined(job.target.mod, method_instance.def.name) &&
-           !in(method_instance.def.name, method_substitution_whitelist)
-            substitute_function = getfield(job.target.mod, method.name)
-            tt = Tuple{method_instance.specTypes.parameters[2:end]...}
-            if hasmethod(substitute_function, tt)
-                method′ = which(substitute_function, tt)
-                if Base.moduleroot(method′.module) == job.target.mod
-                    @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(job, call_stack))
-                end
-            end
-        end
-    end
-    function hook_emitted_function(method, code, world)
-        @compiler_assert last(call_stack) == method job
-        last_method_instance = pop!(call_stack)
+        insert!(dependencies, last(tracer), llvmf)
     end
     param_kwargs = [:cached             => false,
                     :track_allocations  => false,
@@ -246,12 +245,13 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
             LLVM.API.LLVMDebugEmissionKindFullDebug
         end
 
-        #if CUDAdrv.release() < v"10.2"
-            # FIXME: LLVM's debug info crashes CUDA
-            # FIXME: this ought to be fixed on 10.2?
+        # HACK: LLVM's debug info crashes CUDA
+        if job isa PTXCompilerJob
+            # wasn't this supposed to be fixed on 10.2? when it is, add CUDAdrv.version()
+            # to the PTX Compiler Target and branch on that here.
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
-        #end
+        end
 
         push!(param_kwargs, :debug_info_kind => Cint(debug_info_kind))
     end
