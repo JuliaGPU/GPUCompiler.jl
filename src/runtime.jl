@@ -7,10 +7,6 @@
 # by the Julia compiler to be available at run time, e.g., to dynamically allocate memory,
 # box values, etc.
 
-# TODO: we can't call functions that are defined by the target (e.g. malloc) from here.
-#       workaround: llvmcall. try using the new codegen for that, which should allow to
-#       manage which functions need to be compiled (e.g. target-specific ones) ourselves.
-
 module Runtime
 
 using ..GPUCompiler
@@ -85,7 +81,18 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
         error("Runtime function $name has already been registered!")
     end
     methods[name] = meth
-    meth
+
+    # FIXME: if the function is a symbol, implying it will be specified by the target,
+    #        we won't be able to call this function here or we'll get UndefVarErrors.
+    #        work around that by generating an llvmcall stub. can we do better by
+    #        using the new nonrecursive codegen to handle function lookup ourselves?
+    if def isa Symbol
+        args = [gensym() for typ in types]
+        @eval @inline $def($(args...)) =
+            ccall($"extern $def", llvmcall, $return_type, ($(types...),), $(args...))
+    end
+
+    return
 end
 
 
@@ -94,7 +101,6 @@ end
 # expected functions for simple exception handling
 compile(:report_exception, Nothing, (Ptr{Cchar},))
 compile(:report_oom, Nothing, (Csize_t,))
-report_oom(sz::Csize_t) = ccall("extern report_oom", llvmcall, Nothing, (Csize_t,), sz) # HACK
 
 # expected functions for verbose exception handling
 compile(:report_exception_frame, Nothing, (Cint, Ptr{Cchar}, Ptr{Cchar}, Cint))
@@ -134,7 +140,7 @@ compile(gc_pool_alloc, Any, (Csize_t,), T_prjlvalue)
 
 # expected functions for GC support
 compile(:malloc, Ptr{Nothing}, (Csize_t,))
-malloc(sz::Csize_t) = ccall("extern malloc", llvmcall, Ptr{Nothing}, (Csize_t,), sz) # HACK
+
 
 ## boxing and unboxing
 
