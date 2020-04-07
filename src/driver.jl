@@ -15,8 +15,7 @@ const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 Compile a function `f` invoked with types `tt` for device capability `cap` to one of the
 following formats as specified by the `target` argument: `:julia` for Julia IR, `:llvm` for
-LLVM IR, `:ptx` for PTX assembly and `:cuda` for CUDA driver objects. If the `kernel` flag
-is set, specialized code generation and optimization for kernel functions is enabled.
+LLVM IR and `:asm` for machine code.
 
 The following keyword arguments are supported:
 - `libraries`: link the GPU runtime and `libdevice` libraries (if required)
@@ -193,7 +192,7 @@ function codegen(target::Symbol, job::AbstractCompilerJob;
     target == :llvm && return ir, kernel
 
 
-    ## PTX machine code
+    ## machine code
 
     @timeit_debug to "LLVM back-end" begin
         @timeit_debug to "preparation" prepare_execution!(job, ir)
@@ -202,7 +201,7 @@ function codegen(target::Symbol, job::AbstractCompilerJob;
     end
 
     undefined_fns = LLVM.name.(decls(ir))
-    target == :ptx && return asm, kernel_fn, undefined_fns
+    target == :asm && return asm, kernel_fn, undefined_fns
 
 
     error("Unknown compilation target $target")
