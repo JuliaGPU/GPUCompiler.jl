@@ -149,35 +149,27 @@ const special_fns = (
 const libjulia = Ref{Ptr{Cvoid}}(C_NULL)
 
 function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
+    bt = backtrace(inst)
     dest = called_value(inst)
     if isa(dest, LLVM.Function)
         fn = LLVM.name(dest)
 
         # some special handling for runtime functions that we don't implement
-
         if fn == "jl_get_binding_or_error"
-            # interpret the arguments
-            sym = try
+            try
                 m, sym, _ = operands(inst)
                 sym = first(operands(sym::ConstantExpr))::ConstantInt
                 sym = convert(Int, sym)
                 sym = Ptr{Cvoid}(sym)
-                Base.unsafe_pointer_to_objref(sym)
+                sym = Base.unsafe_pointer_to_objref(sym)
+                push!(errors, (DELAYED_BINDING, bt, sym))
             catch e
                 isa(e,TypeError) || rethrow()
-                @warn "Decoding arguments to jl_get_binding_or_error failed, please file a bug with a reproducer." inst bb=LLVM.parent(inst)
-                nothing
+                @debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=LLVM.parent(inst)
+                push!(errors, (DELAYED_BINDING, bt, nothing))
             end
-
-            if sym !== nothing
-                bt = backtrace(inst)
-                push!(errors, (DELAYED_BINDING, bt, sym))
-                return errors
-            end
-
         elseif fn == "jl_invoke"
-            # interpret the arguments
-            meth = try
+            try
                 if VERSION < v"1.3.0-DEV.244"
                     meth, args, nargs, _ = operands(inst)
                 else
@@ -187,22 +179,15 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 meth = first(operands(meth))::ConstantInt
                 meth = convert(Int, meth)
                 meth = Ptr{Cvoid}(meth)
-                Base.unsafe_pointer_to_objref(meth)::Core.MethodInstance
+                meth = Base.unsafe_pointer_to_objref(meth)::Core.MethodInstance
+                push!(errors, (DYNAMIC_CALL, bt, meth.def))
             catch e
                 isa(e,TypeError) || rethrow()
-                @warn "Decoding arguments to jl_invoke failed, please file a bug with a reproducer." inst bb=LLVM.parent(inst)
-                nothing
+                @debug "Decoding arguments to jl_invoke failed" inst bb=LLVM.parent(inst)
+                push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
-
-            if meth !== nothing
-                bt = backtrace(inst)
-                push!(errors, (DYNAMIC_CALL, bt, meth.def))
-                return errors
-            end
-
         elseif fn == "jl_apply_generic"
-            # interpret the arguments
-            f = try
+            try
                 if VERSION < v"1.3.0-DEV.244"
                     args, nargs, _ = operands(inst)
                     ## args is a buffer where arguments are stored in
@@ -217,22 +202,16 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 f = first(operands(f))::ConstantInt # get rid of inttoptr
                 f = convert(Int, f)
                 f = Ptr{Cvoid}(f)
-                Base.unsafe_pointer_to_objref(f)
+                f = Base.unsafe_pointer_to_objref(f)
+                push!(errors, (DYNAMIC_CALL, bt, f))
             catch e
                 isa(e,TypeError) || rethrow()
-                @warn "Decoding arguments to jl_apply_generic failed, please file a bug with a reproducer." inst bb=LLVM.parent(inst)
-                nothing
+                @debug "Decoding arguments to jl_apply_generic failed" inst bb=LLVM.parent(inst)
+                push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
-
-            if f !== nothing
-                bt = backtrace(inst)
-                push!(errors, (DYNAMIC_CALL, bt, f))
-                return errors
-            end
-        end
 
         # detect calls to undefined functions
-        if isdeclaration(dest) && intrinsic_id(dest) == 0 &&
+        elseif isdeclaration(dest) && intrinsic_id(dest) == 0 &&
            !(fn in special_fns || startswith(fn, "cuda"))
             # figure out if the function lives in the Julia runtime library
             if libjulia[] == C_NULL
@@ -243,15 +222,16 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 libjulia[] = Libdl.dlopen(first(paths))
             end
 
-            bt = backtrace(inst)
             if Libdl.dlsym_e(libjulia[], fn) != C_NULL
                 push!(errors, (RUNTIME_FUNCTION, bt, LLVM.name(dest)))
             else
                 push!(errors, (UNKNOWN_FUNCTION, bt, LLVM.name(dest)))
             end
         end
+
     elseif isa(dest, InlineAsm)
         # let's assume it's valid ASM
+
     elseif isa(dest, ConstantExpr)
         # detect calls to literal pointers
         if occursin("inttoptr", string(dest))
@@ -262,7 +242,6 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             ptr = Ptr{Cvoid}(ptr_val)
 
             # look it up in the Julia JIT cache
-            bt = backtrace(inst)
             frames = ccall(:jl_lookup_code_address, Any, (Ptr{Cvoid}, Cint,), ptr, 0)
             if length(frames) >= 1
                 @compiler_assert length(frames) == 1 job frames=frames
