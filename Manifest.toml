@@ -8,6 +8,18 @@ git-tree-sha1 = "62847acab40e6855a9b5905ccb99c2b5cf6b3ebb"
 uuid = "fa961155-64e5-5f13-b03f-caf6b980ea82"
 version = "0.2.0"
 
+[[CodeTracking]]
+deps = ["InteractiveUtils", "UUIDs"]
+git-tree-sha1 = "0becdab7e6fbbcb7b88d8de5b72e5bb2f28239f3"
+uuid = "da1fd8a2-8d9e-5ec2-8556-3022fb5608a2"
+version = "0.5.8"
+
+[[Cthulhu]]
+deps = ["CodeTracking", "InteractiveUtils", "REPL", "Unicode"]
+git-tree-sha1 = "484790098c85c26f8e59051f8ff1a0745c034a7d"
+uuid = "f68482b8-f384-11e8-15f7-abe071a5a75f"
+version = "1.0.1"
+
 [[DataStructures]]
 deps = ["InteractiveUtils", "OrderedCollections"]
 git-tree-sha1 = "73eb18320fe3ba58790c8b8f6f89420f0a622773"
@@ -48,9 +60,16 @@ version = "1.1.0"
 deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 
+[[REPL]]
+deps = ["InteractiveUtils", "Markdown", "Sockets"]
+uuid = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"
+
 [[Random]]
 deps = ["Serialization"]
 uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+
+[[SHA]]
+uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 
 [[Serialization]]
 uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
@@ -67,6 +86,10 @@ deps = ["Printf"]
 git-tree-sha1 = "311765af81bbb48d7bad01fb016d9c328c6ede03"
 uuid = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 version = "0.5.3"
+
+[[UUIDs]]
+deps = ["Random", "SHA"]
+uuid = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [[Unicode]]
 uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"

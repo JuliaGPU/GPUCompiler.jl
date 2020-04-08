@@ -30,6 +30,7 @@ include("rtlib.jl")
 include("mcgen.jl")
 include("debug.jl")
 include("driver.jl")
+include("reflection.jl")
 
 function __init__()
     TimerOutputs.reset_timer!(to)
