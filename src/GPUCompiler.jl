@@ -30,6 +30,7 @@ include("rtlib.jl")
 include("mcgen.jl")
 include("debug.jl")
 include("driver.jl")
+include("cache.jl")
 include("reflection.jl")
 
 function __init__()

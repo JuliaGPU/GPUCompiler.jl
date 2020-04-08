@@ -82,8 +82,7 @@ function emit_hooked_compilation(inner_hook, ex...)
     user_kwargs = ex[1:end-1]
     quote
         # wipe the compile cache to force recompilation
-        # FIXME: move execution driver to GPUCompiler
-        #empty!(CUDAnative.compilecache)
+        empty!(GPUCompiler.compilecache)
 
         local kernels = 0
         function outer_hook(job)
