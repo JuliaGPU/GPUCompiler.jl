@@ -1,19 +1,5 @@
 # machine code generation
 
-function machine(cap::VersionNumber, triple::String)
-    InitializeNVPTXTarget()
-    InitializeNVPTXTargetInfo()
-    t = Target(triple)
-
-    InitializeNVPTXTargetMC()
-    cpu = "sm_$(cap.major)$(cap.minor)"
-    feat = "+ptx60" # we only support CUDA 9.0+ and LLVM 6.0+
-    tm = TargetMachine(t, triple, cpu, feat)
-    asm_verbosity!(tm, true)
-
-    return tm
-end
-
 # final preparations for the module to be compiled to PTX
 # these passes should not be run when e.g. compiling to write to disk.
 function prepare_execution!(job::AbstractCompilerJob, mod::LLVM.Module)
@@ -81,7 +67,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
 end
 
 function mcgen(job::AbstractCompilerJob, mod::LLVM.Module, f::LLVM.Function)
-    tm = machine(job.cap, triple(mod))
+    tm = llvm_machine(target(job))
 
     InitializeNVPTXAsmPrinter()
     return String(emit(tm, mod, LLVM.API.LLVMAssemblyFile))

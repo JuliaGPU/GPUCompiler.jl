@@ -98,6 +98,9 @@ end
 
 ## exception handling
 
+# expected functions for exception signalling
+compile(:signal_exception, Nothing, ())
+
 # expected functions for simple exception handling
 compile(:report_exception, Nothing, (Ptr{Cchar},))
 compile(:report_oom, Nothing, (Csize_t,))
@@ -105,7 +108,6 @@ compile(:report_oom, Nothing, (Csize_t,))
 # expected functions for verbose exception handling
 compile(:report_exception_frame, Nothing, (Cint, Ptr{Cchar}, Ptr{Cchar}, Cint))
 compile(:report_exception_name, Nothing, (Ptr{Cchar},))
-compile(:signal_exception, Nothing, ())
 
 # NOTE: no throw functions are provided here, but replaced by an LLVM pass instead
 #       in order to provide some debug information without stack unwinding.

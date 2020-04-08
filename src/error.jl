@@ -14,7 +14,7 @@ struct KernelError <: Exception
 end
 
 function Base.showerror(io::IO, err::KernelError)
-    println(io, "GPU compilation of $(signature(err.job)) failed")
+    println(io, "GPU compilation of ", source(err.job), " failed")
     println(io, "KernelError: $(err.message)")
     println(io)
     println(io, something(err.help, "Try inspecting the generated code with any of the @device_code_... macros."))
@@ -36,10 +36,7 @@ function Base.showerror(io::IO, err::InternalCompilerError)
 
     println(io, "\nInternalCompilerError: $(err.message)")
 
-    println(io, "\nCompiler invocation:")
-    for field in fieldnames(AbstractCompilerJob)
-        println(io, " - $field = $(repr(getfield(err.job, field)))")
-    end
+    println(io, "\nCompiler invocation: ", err.job)
 
     if !isempty(err.meta)
         println(io, "\nAdditional information:")

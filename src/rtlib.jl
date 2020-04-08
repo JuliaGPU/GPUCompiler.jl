@@ -1,6 +1,6 @@
 # compiler support for working with run-time libraries
 
-function link_library!(job::AbstractCompilerJob, mod::LLVM.Module, lib::LLVM.Module)
+function link_library!(mod::LLVM.Module, lib::LLVM.Module)
     # linking is destructive, so copy the library
     lib = LLVM.Module(lib)
 
@@ -100,7 +100,7 @@ end
 
 function emit_function!(mod, job::AbstractCompilerJob, f, types, name)
     tt = Base.to_tuple_type(types)
-    new_mod, entry = codegen(:llvm, similar(job, f, tt, #=kernel=# false);
+    new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
                              libraries=false, strict=false)
     LLVM.name!(entry, name)
     link!(mod, new_mod)
@@ -136,7 +136,8 @@ function load_runtime(job::AbstractCompilerJob)
         cp(input_dir, output_dir)
     end
 
-    name = "runtime_$(job.cap.major)$(job.cap.minor).bc"
+    slug = runtime_slug(job)
+    name = "runtime_$(slug).bc"
     path = joinpath(output_dir, name)
 
     get!(libcache, path) do
@@ -145,7 +146,7 @@ function load_runtime(job::AbstractCompilerJob)
                 parse(LLVM.Module, read(io), JuliaContext())
             end
         else
-            @debug "Building the GPU runtime library for sm_$(job.cap.major)$(job.cap.minor)."
+            @debug "Building the GPU runtime library for $(slug)."
             lib = build_runtime(job)
             open(path, "w") do io
                 write(io, lib)

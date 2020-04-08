@@ -17,9 +17,9 @@ enable_timings() = (TimerOutputs.enable_debug_timings(GPUCompiler); return)
 
 include("utils.jl")
 
-include("target.jl")
-include("job.jl")
+include("interface.jl")
 include("error.jl")
+include("ptx.jl")
 
 include("runtime.jl")
 

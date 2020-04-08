@@ -3,17 +3,17 @@
 export InvalidIRError
 
 function check_method(job::AbstractCompilerJob)
-    isa(job.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
+    isa(source(job).f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
-    ms = Base.methods(job.f, job.tt)
+    ms = Base.methods(source(job).f, source(job).tt)
     isempty(ms)   && throw(KernelError(job, "no method found"))
     length(ms)!=1 && throw(KernelError(job, "no unique matching method"))
     m = first(ms)
 
     # kernels can't return values
-    if job.kernel
-        rt = Base.return_types(job.f, job.tt)[1]
+    if source(job).kernel
+        rt = Base.return_types(source(job).f, source(job).tt)[1]
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
                 """Make sure your kernel function ends in `return`, `return nothing` or `nothing`.
@@ -57,7 +57,7 @@ end
 function check_invocation(job::AbstractCompilerJob, entry::LLVM.Function)
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
-    sig = Base.signature_type(job.f, job.tt)::Type
+    sig = Base.signature_type(source(job).f, source(job).tt)::Type
     for (arg_i,dt) in enumerate(sig.parameters)
         isghosttype(dt) && continue
         real_arg_i += 1
@@ -96,7 +96,7 @@ const DELAYED_BINDING  = "use of an undefined name"
 const DYNAMIC_CALL     = "dynamic function invocation"
 
 function Base.showerror(io::IO, err::InvalidIRError)
-    print(io, "InvalidIRError: compiling $(signature(err.job)) resulted in invalid LLVM IR")
+    print(io, "InvalidIRError: compiling ", source(err.job), " resulted in invalid LLVM IR")
     for (kind, bt, meta) in err.errors
         print(io, "\nReason: unsupported $kind")
         if meta != nothing
@@ -212,7 +212,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
 
         # detect calls to undefined functions
         elseif isdeclaration(dest) && intrinsic_id(dest) == 0 &&
-           !(fn in special_fns || startswith(fn, "cuda"))
+           !(fn in special_fns || isintrinsic(target(job), fn))
             # figure out if the function lives in the Julia runtime library
             if libjulia[] == C_NULL
                 paths = filter(Libdl.dllist()) do path

@@ -58,13 +58,13 @@ function Base.push!(tracer::MethodCompileTracer, method_instance)
     # FIXME: this might be too coarse
     method = method_instance.def
     if Base.moduleroot(method.module) == Base &&
-        isdefined(tracer.job.target.runtime_module, method_instance.def.name) &&
+        isdefined(runtime_module(tracer.job.target), method_instance.def.name) &&
         !in(method_instance.def.name, method_substitution_whitelist)
-        substitute_function = getfield(tracer.job.target.runtime_module, method.name)
+        substitute_function = getfield(runtime_module(tracer.job.target), method.name)
         tt = Tuple{method_instance.specTypes.parameters[2:end]...}
         if hasmethod(substitute_function, tt)
             method′ = which(substitute_function, tt)
-            if Base.moduleroot(method′.module) == tracer.job.target.runtime_module
+            if Base.moduleroot(method′.module) == runtime_module(tracer.job.target)
                 @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(tracer.job, tracer.call_stack))
             end
         end
@@ -107,10 +107,9 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
             LLVM.API.LLVMDebugEmissionKindFullDebug
         end
 
-        # HACK: LLVM's debug info crashes CUDA
-        if job isa PTXCompilerJob
-            # wasn't this supposed to be fixed on 10.2? when it is, add CUDAdrv.version()
-            # to the PTX Compiler Target and branch on that here.
+        # LLVM's debug info crashes older CUDA assemblers
+        if job isa PTXCompilerJob # && driver_version(target(job)) < v"10.2"
+            # FIXME: this was supposed to be fixed on 10.2
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
         end
@@ -153,8 +152,8 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
     llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
     # configure the module
-    triple!(llvm_mod, job.target.triple)
-    datalayout!(llvm_mod, job.target.datalayout)
+    triple!(llvm_mod, llvm_triple(job.target))
+    datalayout!(llvm_mod, llvm_datalayout(job.target))
 
     return llvm_specfunc, llvm_mod
 end
@@ -163,7 +162,7 @@ else
 
 function module_setup(job::AbstractCompilerJob, mod::LLVM.Module)
     # configure the module
-    triple!(mod, job.target.triple)
+    triple!(mod, llvm_triple(job.target))
 
     # add debug info metadata
     if LLVM.version() >= v"8.0"
@@ -245,10 +244,9 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
             LLVM.API.LLVMDebugEmissionKindFullDebug
         end
 
-        # HACK: LLVM's debug info crashes CUDA
-        if job isa PTXCompilerJob
-            # wasn't this supposed to be fixed on 10.2? when it is, add CUDAdrv.version()
-            # to the PTX Compiler Target and branch on that here.
+        # LLVM's debug info crashes older CUDA assemblers
+        if job isa PTXCompilerJob # && driver_version(target(job)) < v"10.2"
+            # FIXME: this was supposed to be fixed on 10.2
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
         end
@@ -336,12 +334,12 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
         end
     end
 
-    # add the global exception indicator flag
-    emit_exception_flag!(mod)
+    # target-specific passes
+    rewrite_ir!(target(job), mod)
 
     # rename the entry point
-    if job.name !== nothing
-        llvmfn = safe_name(string("julia_", job.name))
+    if source(job).name !== nothing
+        llvmfn = safe_name(string("julia_", source(job).name))
     else
         # strip the globalUnique counter
         llvmfn = LLVM.name(entry)
@@ -349,9 +347,9 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
     LLVM.name!(entry, llvmfn)
 
     # promote entry-points to kernels and mangle its name
-    if job.kernel
+    if source(job).kernel
         entry = promote_kernel!(job, mod, entry)
-        LLVM.name!(entry, mangle_call(entry, job.tt))
+        LLVM.name!(entry, mangle_call(entry, source(job).tt))
     end
 
     # minimal required optimization
@@ -661,7 +659,7 @@ function hide_trap!(mod::LLVM.Module)
 
     # inline assembly to exit a thread, hiding control flow from LLVM
     exit_ft = LLVM.FunctionType(LLVM.VoidType(JuliaContext()))
-    exit = if job.cap < v"7"
+    exit = if isa(job, PTXCompilerJob) && cuda_capability(target(job)) < v"7"
         # ptxas for old compute capabilities has a bug where it messes up the
         # synchronization stack in the presence of shared memory and thread-divergend exit.
         InlineAsm(exit_ft, "trap;", "", true)
@@ -688,42 +686,6 @@ function hide_trap!(mod::LLVM.Module)
 
     end
     return changed
-end
-
-# emit a global variable for storing the current exception status
-#
-# since we don't actually support globals, access to this variable is done by calling the
-# cudanativeExceptionFlag function (lowered here to actual accesses of the variable)
-function emit_exception_flag!(mod::LLVM.Module)
-    # add the global variable
-    T_ptr = convert(LLVMType, Ptr{Cvoid})
-    gv = GlobalVariable(mod, T_ptr, "exception_flag")
-    initializer!(gv, LLVM.ConstantInt(T_ptr, 0))
-    linkage!(gv, LLVM.API.LLVMWeakAnyLinkage)
-    extinit!(gv, true)
-
-    # lower uses of the getter
-    if haskey(functions(mod), "cudanativeExceptionFlag")
-        buf_getter = functions(mod)["cudanativeExceptionFlag"]
-        @assert return_type(eltype(llvmtype(buf_getter))) == eltype(llvmtype(gv))
-
-        # find uses
-        worklist = Vector{LLVM.CallInst}()
-        for use in uses(buf_getter)
-            call = user(use)::LLVM.CallInst
-            push!(worklist, call)
-        end
-
-        # replace uses by a load from the global variable
-        for call in worklist
-            Builder(JuliaContext()) do builder
-                position!(builder, call)
-                ptr = load!(builder, gv)
-                replace_uses!(call, ptr)
-            end
-            unsafe_delete!(LLVM.parent(call), call)
-        end
-    end
 end
 
 
@@ -793,7 +755,7 @@ function wrap_entry!(job::AbstractCompilerJob, mod::LLVM.Module, entry_f::LLVM.F
     @compiler_assert return_type(entry_ft) == LLVM.VoidType(JuliaContext()) job
 
     # filter out ghost types, which don't occur in the LLVM function signatures
-    sig = Base.signature_type(job.f, job.tt)::Type
+    sig = Base.signature_type(source(job).f, source(job).tt)::Type
     julia_types = Type[]
     for dt::Type in sig.parameters
         if !isghosttype(dt)
