@@ -73,7 +73,7 @@ end
 # you can always specify `llvm_name` to influence that. Never use an LLVM name that starts
 # with `julia_` or the function might clash with other compiled functions.
 function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=nothing;
-                 name=isa(def,Symbol) ? def : nameof(def), llvm_name="ptx_$name")
+                 name=isa(def,Symbol) ? def : nameof(def), llvm_name="gpu_$name")
     meth = RuntimeMethodInstance(def,
                                  return_type, types, name,
                                  llvm_return_type, llvm_types, llvm_name)

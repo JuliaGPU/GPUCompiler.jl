@@ -115,7 +115,7 @@ end
     @device_code_lowered ex
 
 Evaluates the expression `ex` and returns the result of
-InteractiveUtils.code_lowered for every compiled CUDA kernel.
+InteractiveUtils.code_lowered for every compiled GPU kernel.
 
 See also: InteractiveUtils.@code_lowered
 """
@@ -134,7 +134,7 @@ end
     @device_code_typed ex
 
 Evaluates the expression `ex` and returns the result of
-InteractiveUtils.code_typed for every compiled CUDA kernel.
+InteractiveUtils.code_typed for every compiled GPU kernel.
 
 See also: InteractiveUtils.@code_typed
 """
@@ -153,7 +153,7 @@ end
     @device_code_warntype [io::IO=stdout] ex
 
 Evaluates the expression `ex` and prints the result of
-InteractiveUtils.code_warntype to `io` for every compiled CUDA kernel.
+InteractiveUtils.code_warntype to `io` for every compiled GPU kernel.
 
 See also: InteractiveUtils.@code_warntype
 """
@@ -170,7 +170,7 @@ end
     @device_code_llvm [io::IO=stdout, ...] ex
 
 Evaluates the expression `ex` and prints the result of InteractiveUtils.code_llvm
-to `io` for every compiled CUDA kernel. For other supported keywords, see
+to `io` for every compiled GPU kernel. For other supported keywords, see
 [`GPUCompiler.code_llvm`](@ref).
 
 See also: InteractiveUtils.@code_llvm
@@ -187,7 +187,7 @@ end
     @device_code_native [io::IO=stdout, ...] ex
 
 Evaluates the expression `ex` and prints the result of [`GPUCompiler.code_native`](@ref) to `io`
-for every compiled CUDA kernel. For other supported keywords, see
+for every compiled GPU kernel. For other supported keywords, see
 [`GPUCompiler.code_native`](@ref).
 """
 macro device_code_native(ex...)

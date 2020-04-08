@@ -42,7 +42,13 @@ rewrite_ir!(target::PTXCompilerTarget, mod::LLVM.Module) =
 link_libraries!(target::PTXCompilerTarget, mod::LLVM.Module, undefined_fns::Vector{String}) =
     target.link_libdevice(mod, cuda_capability(target), undefined_fns)
 
-isintrinsic(::PTXCompilerTarget, fn::String) = startswith(fn, "cuda") # libcudadevrt
+const ptx_fns = (
+    # PTX intrinsics
+    "vprintf", "__assertfail", "malloc", "free",
+    # libdevice
+    "__nvvm_reflect",
+)
+isintrinsic(::PTXCompilerTarget, fn::String) = in(fn, ptx_fns) || startswith(fn, "cuda") # libcudadevrt
 
 
 ## job
