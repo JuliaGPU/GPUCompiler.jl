@@ -53,14 +53,6 @@ function cachedir(depot=DEPOT_PATH[1])
     end
 end
 
-# remove the existing cache globally, so any change to GPUCompiler triggers recompilation.
-# FIXME: downstream changes to, e.g., CUDAnative should trigger recompilation, not here.
-#        maybe have a rm_runtime(target)
-rm(cachedir(); recursive=true, force=true)
-# create an empty cache directory. since we only ever load from the first existing cachedir,
-# this effectively invalidates preexisting caches in lower layers of the depot.
-mkdir(cachedir())
-
 
 ## higher-level functionality to work with runtime functions
 
@@ -154,4 +146,13 @@ function load_runtime(job::AbstractCompilerJob)
             lib
         end
     end
+end
+
+# remove the existing cache
+# NOTE: call this function from global scope, so any change triggers recompilation.
+function reset_runtime()
+    rm(cachedir(); recursive=true, force=true)
+    # create an empty cache directory. since we only ever load from the first existing cachedir,
+    # this effectively invalidates preexisting caches in lower layers of the depot.
+    mkdir(cachedir())
 end
