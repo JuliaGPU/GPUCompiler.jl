@@ -33,28 +33,21 @@ link_libraries!(::AbstractCompilerTarget, mod::LLVM.Module, undefined_fns::Vecto
 isintrinsic(::AbstractCompilerTarget, fn::String) = false
 
 
-## job
+## function specification
 
-# a compiler job encodes a specific invocation of the compiler, and together with the
-# compiler target contains all necessary information to generate code.
+# what we'll be compiling
 
-export AbstractCompilerJob, FunctionSpec
+export FunctionSpec
 
-abstract type AbstractCompilerJob end
-
-# link to the AbstractCompilerTarget
-target(::AbstractCompilerJob) = error("Not implemented")
-
-# link to the FunctionSpec
-source(::AbstractCompilerJob) = error("Not implemented")
-
-Base.@kwdef struct FunctionSpec
+Base.@kwdef struct FunctionSpec{F,TT}
     f::Base.Callable
     tt::DataType
     kernel::Bool
     name::Union{Nothing,String}
-    FunctionSpec(f, tt, kernel=true, name=nothing) = new(f, tt, kernel, name)
 end
+
+# put the function and argument types in typevars so that we can access it from generators
+FunctionSpec(f, tt, kernel=true, name=nothing) = FunctionSpec{typeof(f),tt}(f, tt, kernel, name)
 
 function signature(spec::FunctionSpec)
     fn = something(spec.name, nameof(spec.f))
@@ -66,6 +59,22 @@ function Base.show(io::IO, spec::FunctionSpec)
     spec.kernel ? print(io, "kernel ") : print(io, "function ")
     print(io, signature(spec))
 end
+
+
+## job
+
+# a compiler job encodes a specific invocation of the compiler, and together with the
+# compiler target contains all necessary information to generate code.
+
+export AbstractCompilerJob
+
+abstract type AbstractCompilerJob end
+
+# link to the AbstractCompilerTarget
+target(::AbstractCompilerJob) = error("Not implemented")
+
+# link to the FunctionSpec
+source(::AbstractCompilerJob) = error("Not implemented")
 
 # generate a string that represents the type of compilation, for selecting a compiled
 # instance of the runtime library. this slug should encode everything that affects
