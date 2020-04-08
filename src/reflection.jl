@@ -5,6 +5,9 @@ using InteractiveUtils, Cthulhu
 # code_* replacements
 #
 
+code_lowered(job::AbstractCompilerJob; kwargs...) =
+    InteractiveUtils.code_lowered(source(job).f, source(job).tt; kwargs...)
+
 function code_typed(job::AbstractCompilerJob; interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
     if interactive
@@ -211,15 +214,15 @@ macro device_code(ex...)
         mkpath(dir)
 
         open(joinpath(dir, "$fn.lowered.jl"), "w") do io
-            code = only(code_lowered(job.source.f, job.source.tt))
+            code = only(code_lowered(job))
             println(io, code)
         end
 
         open(joinpath(dir, "$fn.typed.jl"), "w") do io
             if VERSION >= v"1.1.0"
-                code = only(code_typed(job.source.f, job.source.tt, debuginfo=:source))
+                code = only(code_typed(job; debuginfo=:source))
             else
-                code = only(code_typed(job.source.f, job.source.tt))
+                code = only(code_typed(job))
             end
             println(io, code)
         end
