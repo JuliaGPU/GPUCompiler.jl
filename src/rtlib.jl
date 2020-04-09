@@ -113,8 +113,11 @@ function load_runtime(job::AbstractCompilerJob)
     # find the first existing cache directory (for when dealing with layered depots)
     cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
     filter!(isdir, cachedirs)
-    @assert !isempty(cachedirs)
-    input_dir = first(cachedirs)
+    input_dir = if isempty(cachedirs)
+        nothing
+    else
+        first(cachedirs)
+    end
 
     # we are only guaranteed to be able to write in the current depot
     output_dir = cachedir()
@@ -123,7 +126,7 @@ function load_runtime(job::AbstractCompilerJob)
     # NOTE: we don't just lazily read from the one and write to the other, because
     #       once we generate additional runtimes in the output dir we don't know if
     #       it's safe to load from other layers (since those could have been invalidated)
-    if input_dir != output_dir
+    if input_dir !== nothing && input_dir != output_dir
         mkpath(dirname(output_dir))
         cp(input_dir, output_dir)
     end
@@ -139,6 +142,7 @@ function load_runtime(job::AbstractCompilerJob)
             end
         else
             @debug "Building the GPU runtime library for $(slug)."
+            mkpath(output_dir)
             lib = build_runtime(job)
             open(path, "w") do io
                 write(io, lib)
