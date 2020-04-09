@@ -153,7 +153,9 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
 
     # configure the module
     triple!(llvm_mod, llvm_triple(job.target))
-    datalayout!(llvm_mod, llvm_datalayout(job.target))
+    if llvm_datalayout(job.target) !== nothing
+        datalayout!(llvm_mod, llvm_datalayout(job.target))
+    end
 
     return llvm_specfunc, llvm_mod
 end

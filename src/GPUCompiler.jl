@@ -19,6 +19,7 @@ include("utils.jl")
 
 include("interface.jl")
 include("error.jl")
+include("native.jl")
 include("ptx.jl")
 
 include("runtime.jl")
