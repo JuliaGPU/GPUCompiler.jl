@@ -40,6 +40,7 @@ for method in (:code_typed, :code_warntype, :code_llvm, :code_native)
             $ptx_method(stdout, func, types; kwargs...)
     end
 end
+GPUCompiler.reset_runtime()
 
 @testset "GPUCompiler" begin
 
