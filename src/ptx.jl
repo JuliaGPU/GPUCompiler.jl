@@ -9,15 +9,21 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
 
     cap::VersionNumber
 
-    emit_exception_flag::Function
-    link_libdevice::Function
+    # hooks for exposing functionality to CUDAnative.jl
+    # FIXME: this isn't particularly nice, duplicating fields and functions
+    #        from the abstract interface over this job to CUDAnative...
+    rewrite_ir_hook::Union{Nothing,Function}=nothing
+    link_library_hook::Union{Nothing,Function}=nothing
+    isintrinsic_hook::Union{Nothing,Function}=nothing
 end
 
 llvm_triple(::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
 llvm_datalayout(::PTXCompilerTarget) = Int===Int64 ?
-    "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64" :
-    "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64"
+    "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64"*
+     "-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64" :
+    "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64"*
+     "-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64"
 
 function llvm_machine(target::PTXCompilerTarget)
     InitializeNVPTXTarget()
@@ -35,20 +41,14 @@ end
 
 runtime_module(target::PTXCompilerTarget) = target.runtime_module
 
-cuda_capability(target::PTXCompilerTarget) = target.cap
-
 rewrite_ir!(target::PTXCompilerTarget, mod::LLVM.Module) =
-    target.emit_exception_flag(mod)
+    target.rewrite_ir_hook !== nothing && target.rewrite_ir_hook(target, mod)
 link_libraries!(target::PTXCompilerTarget, mod::LLVM.Module, undefined_fns::Vector{String}) =
-    target.link_libdevice(mod, cuda_capability(target), undefined_fns)
+    target.link_library_hook !== nothing && target.link_library_hook(target, mod, undefined_fns)
 
-const ptx_fns = (
-    # PTX intrinsics
-    "vprintf", "__assertfail", "malloc", "free",
-    # libdevice
-    "__nvvm_reflect",
-)
-isintrinsic(::PTXCompilerTarget, fn::String) = in(fn, ptx_fns) || startswith(fn, "cuda") # libcudadevrt
+const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
+isintrinsic(target::PTXCompilerTarget, fn::String) =
+    in(fn, ptx_intrinsics) || (target.isintrinsic_hook!==nothing && target.isintrinsic_hook(fn))
 
 
 ## job
@@ -79,8 +79,7 @@ Base.similar(job::PTXCompilerJob, source::FunctionSpec) =
 
 function Base.show(io::IO, job::PTXCompilerJob)
     print(io, "PTX CompilerJob of ", source(job))
-    cap = cuda_capability(target(job))
-    print(io, " for sm_$(cap.major)$(cap.minor)")
+    print(io, " for sm_$(target(job).cap.major)$(target(job).cap.minor)")
 
     job.minthreads !== nothing && print(io, ", minthreads=$(job.minthreads)")
     job.maxthreads !== nothing && print(io, ", maxthreads=$(job.maxthreads)")
