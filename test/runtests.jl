@@ -15,6 +15,7 @@ GPUCompiler.enable_timings()
 
 include("native.jl")
 include("ptx.jl")
+include("gcn.jl")
 
 haskey(ENV, "CI") && GPUCompiler.timings()
 
