@@ -97,6 +97,9 @@ process_module!(::AbstractCompilerJob, mod::LLVM.Module) = return
 # early processing of the newly identified LLVM kernel function
 process_kernel!(::AbstractCompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return
 
+function add_lowering_passes!(::AbstractCompilerJob, pm::LLVM.PassManager)
+    add!(pm, ModulePass("LowerThrow", lower_throw!))
+end
 # LLVM passes that are required to make the IR correct
 add_correctness_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
 
