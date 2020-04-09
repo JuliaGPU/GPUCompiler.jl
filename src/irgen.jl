@@ -64,7 +64,7 @@ function Base.push!(tracer::MethodCompileTracer, method_instance)
         tt = Tuple{method_instance.specTypes.parameters[2:end]...}
         if hasmethod(substitute_function, tt)
             method′ = which(substitute_function, tt)
-            if Base.moduleroot(method′.module) == runtime_module(tracer.job.target)
+            if method′.module == runtime_module(tracer.job.target)
                 @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(tracer.job, tracer.call_stack))
             end
         end
