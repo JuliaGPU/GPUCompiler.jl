@@ -198,11 +198,15 @@ function codegen(output::Symbol, job::AbstractCompilerJob;
     @timeit_debug to "LLVM back-end" begin
         @timeit_debug to "preparation" prepare_execution!(job, ir)
 
-        asm = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel)
+        if output == :asm
+            code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, LLVM.API.LLVMAssemblyFile)
+        elseif output == :obj
+            code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, LLVM.API.LLVMObjectFile)
+        end
     end
 
     undefined_fns = LLVM.name.(decls(ir))
-    output == :asm && return asm, kernel_fn, undefined_fns
+    (output == :asm || output == :obj) && return code, kernel_fn, undefined_fns
 
 
     error("Unknown compilation output $output")
