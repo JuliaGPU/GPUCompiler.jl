@@ -69,6 +69,5 @@ end
 function mcgen(job::AbstractCompilerJob, mod::LLVM.Module, f::LLVM.Function)
     tm = llvm_machine(target(job))
 
-    InitializeNVPTXAsmPrinter()
     return String(emit(tm, mod, LLVM.API.LLVMAssemblyFile))
 end

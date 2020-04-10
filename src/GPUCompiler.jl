@@ -37,6 +37,7 @@ function __init__()
     TimerOutputs.reset_timer!(to)
     InitializeAllTargets()
     InitializeAllTargetInfos()
+    InitializeAllAsmPrinters()
     InitializeAllTargetMCs()
 
     return
