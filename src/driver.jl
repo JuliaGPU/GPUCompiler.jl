@@ -97,9 +97,10 @@ function codegen(output::Symbol, job::AbstractCompilerJob;
     @timeit_debug to "LLVM middle-end" begin
         ir, kernel = @timeit_debug to "IR generation" irgen(job, method_instance, world)
 
+        # target-specific libraries
         if libraries
             undefined_fns = LLVM.name.(decls(ir))
-            @timeit_debug to "target libraries" link_libraries!(target(job), ir, undefined_fns)
+            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
         end
 
         if optimize

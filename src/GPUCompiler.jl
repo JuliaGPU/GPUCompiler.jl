@@ -35,6 +35,9 @@ include("reflection.jl")
 
 function __init__()
     TimerOutputs.reset_timer!(to)
+    InitializeAllTargets()
+    InitializeAllTargetInfos()
+    InitializeAllTargetMCs()
 
     return
 end

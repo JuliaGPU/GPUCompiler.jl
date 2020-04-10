@@ -38,7 +38,7 @@ function optimize!(job::AbstractCompilerJob, mod::LLVM.Module, entry::LLVM.Funct
         run!(pm, mod)
     end
 
-    # PTX-specific optimizations
+    # target-specific optimizations
     ModulePassManager() do pm
         initialize!(pm)
 
@@ -46,36 +46,7 @@ function optimize!(job::AbstractCompilerJob, mod::LLVM.Module, entry::LLVM.Funct
         # FIXME: we should fix the inliner so that inlined code gets optimized early-on
         always_inliner!(pm)
 
-        # NVPTX's target machine info enables runtime unrolling,
-        # but Julia's pass sequence only invokes the simple unroller.
-        loop_unroll!(pm)
-        instruction_combining!(pm)  # clean-up redundancy
-        licm!(pm)                   # the inner runtime check might be outer loop invariant
-
-        # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
-        # that code still needs to be optimized (arguably, multiple unroll passes should be
-        # scheduled by the Julia optimizer). do so here, instead of re-optimizing entirely.
-        early_csemem_ssa!(pm) # TODO: gvn instead? see NVPTXTargetMachine.cpp::addEarlyCSEOrGVNPass
-        dead_store_elimination!(pm)
-
-        constant_merge!(pm)
-
-        # NOTE: if an optimization is missing, try scheduling an entirely new optimization
-        # to see which passes need to be added to the list above
-        #     LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
-        #     ModulePassManager() do pm
-        #         add_library_info!(pm, triple(mod))
-        #         add_transform_info!(pm, tm)
-        #         PassManagerBuilder() do pmb
-        #             populate!(pm, pmb)
-        #         end
-        #         run!(pm, mod)
-        #     end
-
-        cfgsimplification!(pm)
-
-        # get rid of the internalized functions; now possible unused
-        global_dce!(pm)
+        add_optimization_passes!(job, pm)
 
         run!(pm, mod)
     end

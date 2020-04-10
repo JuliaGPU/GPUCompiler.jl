@@ -17,17 +17,25 @@ export AbstractCompilerTarget
 
 abstract type AbstractCompilerTarget end
 
-# LLVM properties
 llvm_triple(::AbstractCompilerTarget) = error("Not implemented")
-llvm_datalayout(::AbstractCompilerTarget) = error("Not implemented")
-llvm_machine(::AbstractCompilerTarget) = error("Not implemented")
 
-# the Julia module to look up target-specific runtime functions in (like `malloc`)
+function llvm_machine(target::AbstractCompilerTarget)
+    triple = llvm_triple(target)
+
+    t = Target(triple)
+
+    tm = TargetMachine(t, triple)
+    asm_verbosity!(tm, true)
+
+    return tm
+end
+
+llvm_datalayout(target::AbstractCompilerTarget) = DataLayout(llvm_machine(target))
+
+# the Julia module to look up target-specific runtime functions in (this includes both
+# target-specific functions from the GPU runtime library, like `malloc`, but also
+# replacements functions for operations like `Base.sin`)
 runtime_module(::AbstractCompilerTarget) = error("Not implemented")
-
-# target-specific hooks to work with LLVM IR
-rewrite_ir!(::AbstractCompilerTarget, mod::LLVM.Module) = return
-link_libraries!(::AbstractCompilerTarget, mod::LLVM.Module, undefined_fns::Vector{String}) = return
 
 # check if a function is an intrinsic that can assumed to be always available
 isintrinsic(::AbstractCompilerTarget, fn::String) = false
@@ -39,15 +47,17 @@ isintrinsic(::AbstractCompilerTarget, fn::String) = false
 
 export FunctionSpec
 
-Base.@kwdef struct FunctionSpec{F,TT}
+struct FunctionSpec{F,TT}
     f::Base.Callable
     tt::DataType
     kernel::Bool
     name::Union{Nothing,String}
 end
 
-# put the function and argument types in typevars so that we can access it from generators
-FunctionSpec(f, tt, kernel=true, name=nothing) = FunctionSpec{typeof(f),tt}(f, tt, kernel, name)
+# put the function and argument types in typevars
+# so that we can access it from generated functions
+FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing) =
+    FunctionSpec{typeof(f),tt}(f, tt, kernel, name)
 
 function signature(spec::FunctionSpec)
     fn = something(spec.name, nameof(spec.f))
@@ -80,3 +90,16 @@ source(::AbstractCompilerJob) = error("Not implemented")
 # instance of the runtime library. this slug should encode everything that affects
 # the generated code of this compiler job (with exception of the function source)
 runtime_slug(::AbstractCompilerJob) = error("Not implemented")
+
+# early processing of the newly generated LLVM IR module
+process_module!(::AbstractCompilerJob, mod::LLVM.Module) = return
+
+# early processing of the newly identified LLVM kernel function
+process_kernel!(::AbstractCompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return
+
+# LLVM passes that are required to make the IR correct
+add_correctness_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
+
+add_optimization_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
+
+link_libraries!(::AbstractCompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) = return

@@ -30,7 +30,7 @@ for method in (:code_typed, :code_warntype, :code_llvm, :code_native)
                              kernel::Bool=false, minthreads=nothing, maxthreads=nothing,
                              blocks_per_sm=nothing, maxregs=nothing, kwargs...)
             source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
-            target = PTXCompilerTarget(runtime_module=$ptx_runtime, cap=$ptx_cap)
+            target = PTXCompilerTarget($ptx_cap; runtime_module=$ptx_runtime)
             job = PTXCompilerJob(target, source;
                                  minthreads=minthreads, maxthreads=maxthreads,
                                  blocks_per_sm=blocks_per_sm, maxregs=maxregs)

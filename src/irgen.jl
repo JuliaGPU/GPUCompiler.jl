@@ -163,6 +163,7 @@ else
 function module_setup(job::AbstractCompilerJob, mod::LLVM.Module)
     # configure the module
     triple!(mod, llvm_triple(job.target))
+    datalayout!(mod, llvm_datalayout(job.target))
 
     # add debug info metadata
     if LLVM.version() >= v"8.0"
@@ -334,8 +335,8 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
         end
     end
 
-    # target-specific passes
-    rewrite_ir!(target(job), mod)
+    # target-specific processing
+    process_module!(job, mod)
 
     # rename the entry point
     if source(job).name !== nothing
@@ -361,9 +362,20 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
         internalize!(pm, [LLVM.name(entry)])
 
         add!(pm, ModulePass("LowerThrow", lower_throw!))
-        add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
-        add!(pm, ModulePass("HideTrap", hide_trap!))
+        add_correctness_passes!(job, pm)
         run!(pm, mod)
+
+        # NOTE: if an optimization is missing, try scheduling an entirely new optimization
+        # to see which passes need to be added to the target-specific list
+        #     LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
+        #     ModulePassManager() do pm
+        #         add_library_info!(pm, triple(mod))
+        #         add_transform_info!(pm, tm)
+        #         PassManagerBuilder() do pmb
+        #             populate!(pm, pmb)
+        #         end
+        #         run!(pm, mod)
+        #     end
     end
 
     return mod, entry
@@ -535,159 +547,6 @@ function emit_exception!(builder, name, inst)
     call!(builder, trap)
 end
 
-# HACK: this pass removes `unreachable` information from LLVM
-#
-# `ptxas` is buggy and cannot deal with thread-divergent control flow in the presence of
-# shared memory (see JuliaGPU/CUDAnative.jl#4). avoid that by rewriting control flow to fall
-# through any other block. this is semantically invalid, but the code is unreachable anyhow
-# (and we expect it to be preceded by eg. a noreturn function, or a trap).
-#
-# TODO: can LLVM do this with structured CFGs? It seems to have some support, but seemingly
-#       only to prevent introducing non-structureness during optimization (ie. the front-end
-#       is still responsible for generating structured control flow).
-function hide_unreachable!(fun::LLVM.Function)
-    job = current_job::AbstractCompilerJob
-    changed = false
-    @timeit_debug to "hide unreachable" begin
-
-    # remove `noreturn` attributes
-    #
-    # when calling a `noreturn` function, LLVM places an `unreachable` after the call.
-    # this leads to an early `ret` from the function.
-    attrs = function_attributes(fun)
-    delete!(attrs, EnumAttribute("noreturn", 0, JuliaContext()))
-
-    # build a map of basic block predecessors
-    predecessors = Dict(bb => Set{LLVM.BasicBlock}() for bb in blocks(fun))
-    @timeit_debug to "predecessors" for bb in blocks(fun)
-        insts = instructions(bb)
-        if !isempty(insts)
-            inst = last(insts)
-            if isterminator(inst)
-                for bb′ in successors(inst)
-                    push!(predecessors[bb′], bb)
-                end
-            end
-        end
-    end
-
-    # scan for unreachable terminators and alternative successors
-    worklist = Pair{LLVM.BasicBlock, Union{Nothing,LLVM.BasicBlock}}[]
-    @timeit_debug to "find" for bb in blocks(fun)
-        unreachable = terminator(bb)
-        if isa(unreachable, LLVM.UnreachableInst)
-            unsafe_delete!(bb, unreachable)
-            changed = true
-
-            try
-                terminator(bb)
-                # the basic-block is still terminated properly, nothing to do
-                # (this can happen with `ret; unreachable`)
-                # TODO: `unreachable; unreachable`
-            catch ex
-                isa(ex, UndefRefError) || rethrow(ex)
-                let builder = Builder(JuliaContext())
-                    position!(builder, bb)
-
-                    # find the strict predecessors to this block
-                    preds = collect(predecessors[bb])
-
-                    # find a fallthrough block: recursively look at predecessors
-                    # and find a successor that branches to any other block
-                    fallthrough = nothing
-                    while !isempty(preds)
-                        # find an alternative successor
-                        for pred in preds, succ in successors(terminator(pred))
-                            if succ != bb
-                                fallthrough = succ
-                                break
-                            end
-                        end
-                        fallthrough === nothing || break
-
-                        # recurse upwards
-                        old_preds = copy(preds)
-                        empty!(preds)
-                        for pred in old_preds
-                            append!(preds, predecessors[pred])
-                        end
-                    end
-                    push!(worklist, bb => fallthrough)
-
-                    dispose(builder)
-                end
-            end
-        end
-    end
-
-    # apply the pending terminator rewrites
-    @timeit_debug to "replace" if !isempty(worklist)
-        let builder = Builder(JuliaContext())
-            for (bb, fallthrough) in worklist
-                position!(builder, bb)
-                if fallthrough !== nothing
-                    br!(builder, fallthrough)
-                else
-                    # couldn't find any other successor. this happens with functions
-                    # that only contain a single block, or when the block is dead.
-                    ft = eltype(llvmtype(fun))
-                    if return_type(ft) == LLVM.VoidType(JuliaContext())
-                        # even though returning can lead to invalid control flow,
-                        # it mostly happens with functions that just throw,
-                        # and leaving the unreachable there would make the optimizer
-                        # place another after the call.
-                        ret!(builder)
-                    else
-                        unreachable!(builder)
-                    end
-                end
-            end
-        end
-    end
-
-    end
-    return changed
-end
-
-# HACK: this pass removes calls to `trap` and replaces them with inline assembly
-#
-# if LLVM knows we're trapping, code is marked `unreachable` (see `hide_unreachable!`).
-function hide_trap!(mod::LLVM.Module)
-    job = current_job::AbstractCompilerJob
-    changed = false
-    @timeit_debug to "hide trap" begin
-
-    # inline assembly to exit a thread, hiding control flow from LLVM
-    exit_ft = LLVM.FunctionType(LLVM.VoidType(JuliaContext()))
-    exit = if isa(job, PTXCompilerJob) && target(job).cap < v"7"
-        # ptxas for old compute capabilities has a bug where it messes up the
-        # synchronization stack in the presence of shared memory and thread-divergend exit.
-        InlineAsm(exit_ft, "trap;", "", true)
-    else
-        InlineAsm(exit_ft, "exit;", "", true)
-    end
-
-    if haskey(functions(mod), "llvm.trap")
-        trap = functions(mod)["llvm.trap"]
-
-        for use in uses(trap)
-            val = user(use)
-            if isa(val, LLVM.CallInst)
-                let builder = Builder(JuliaContext())
-                    position!(builder, val)
-                    call!(builder, exit)
-                    dispose(builder)
-                end
-                unsafe_delete!(LLVM.parent(val), val)
-                changed = true
-            end
-        end
-    end
-
-    end
-    return changed
-end
-
 
 ## kernel promotion
 
@@ -696,42 +555,8 @@ end
 function promote_kernel!(job::AbstractCompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
     kernel = wrap_entry!(job, mod, entry_f)
 
-    # property annotations
-    # TODO: belongs in irgen? maxntidx doesn't appear in ptx code?
-
-    annotations = LLVM.Value[kernel]
-
-    ## kernel metadata
-    append!(annotations, [MDString("kernel"), ConstantInt(Int32(1), JuliaContext())])
-
-    ## expected CTA sizes
-    if job.minthreads != nothing
-        for (dim, name) in enumerate([:x, :y, :z])
-            bound = dim <= length(job.minthreads) ? job.minthreads[dim] : 1
-            append!(annotations, [MDString("reqntid$name"),
-                                  ConstantInt(Int32(bound), JuliaContext())])
-        end
-    end
-    if job.maxthreads != nothing
-        for (dim, name) in enumerate([:x, :y, :z])
-            bound = dim <= length(job.maxthreads) ? job.maxthreads[dim] : 1
-            append!(annotations, [MDString("maxntid$name"),
-                                  ConstantInt(Int32(bound), JuliaContext())])
-        end
-    end
-
-    if job.blocks_per_sm != nothing
-        append!(annotations, [MDString("minctasm"),
-                              ConstantInt(Int32(job.blocks_per_sm), JuliaContext())])
-    end
-
-    if job.maxregs != nothing
-        append!(annotations, [MDString("maxnreg"),
-                              ConstantInt(Int32(job.maxregs), JuliaContext())])
-    end
-
-
-    push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
+    # target-specific processing
+    process_kernel!(job, mod, kernel)
 
     return kernel
 end
