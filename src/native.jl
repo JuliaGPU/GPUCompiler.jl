@@ -53,3 +53,6 @@ end
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::NativeCompilerJob) = "native_$(target(job).cpu)$(target(job).features)"
+
+add_lowering_passes!(::NativeCompilerJob, pm::LLVM.PassManager) = return
+
