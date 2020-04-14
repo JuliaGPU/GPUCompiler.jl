@@ -5,17 +5,18 @@
 export NativeCompilerTarget
 
 Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
-    cpu::String
+    cpu::String=unsafe_string(LLVM.API.LLVMGetHostCPUName())
     features::String=""
 end
 
-llvm_triple(::NativeCompilerTarget) = triple()
-
-llvm_datalayout(::NativeCompilerTarget) =  nothing
+llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
 
 function llvm_machine(target::NativeCompilerTarget)
-    t = Target(llvm_triple(target))
-    tm = TargetMachine(t, llvm_triple(target), target.cpu, target.features)
+    triple = llvm_triple(target)
+
+    t = Target(triple)
+
+    tm = TargetMachine(t, triple, target.cpu, target.features)
     asm_verbosity!(tm, true)
 
     return tm
