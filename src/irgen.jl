@@ -363,8 +363,9 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
         linkage!(entry, LLVM.API.LLVMExternalLinkage)
         internalize!(pm, [LLVM.name(entry)])
 
-        add_lowering_passes!(target(job), pm)
-        add_correctness_passes!(job, pm)
+        can_throw(target(job)) || add!(pm, ModulePass("LowerThrow", lower_throw!))
+
+        add_lowering_passes!(job, pm)
 
         run!(pm, mod)
 

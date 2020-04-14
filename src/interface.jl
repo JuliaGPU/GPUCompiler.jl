@@ -40,6 +40,10 @@ runtime_module(::AbstractCompilerTarget) = error("Not implemented")
 # check if a function is an intrinsic that can assumed to be always available
 isintrinsic(::AbstractCompilerTarget, fn::String) = false
 
+# does this target support throwing Julia exceptions with jl_throw?
+# if not, calls to throw will be replaced with calls to the GPU runtime
+can_throw(::AbstractCompilerTarget) = false
+
 
 ## function specification
 
@@ -97,11 +101,7 @@ process_module!(::AbstractCompilerJob, mod::LLVM.Module) = return
 # early processing of the newly identified LLVM kernel function
 process_kernel!(::AbstractCompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return
 
-function add_lowering_passes!(::AbstractCompilerJob, pm::LLVM.PassManager)
-    add!(pm, ModulePass("LowerThrow", lower_throw!))
-end
-# LLVM passes that are required to make the IR correct
-add_correctness_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
+add_lowering_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
 
 add_optimization_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
 
