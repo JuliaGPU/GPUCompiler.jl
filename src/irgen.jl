@@ -153,7 +153,9 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
 
     # configure the module
     triple!(llvm_mod, llvm_triple(job.target))
-    datalayout!(llvm_mod, llvm_datalayout(job.target))
+    if llvm_datalayout(job.target) !== nothing
+        datalayout!(llvm_mod, llvm_datalayout(job.target))
+    end
 
     return llvm_specfunc, llvm_mod
 end
@@ -361,8 +363,10 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
         linkage!(entry, LLVM.API.LLVMExternalLinkage)
         internalize!(pm, [LLVM.name(entry)])
 
-        add!(pm, ModulePass("LowerThrow", lower_throw!))
-        add_correctness_passes!(job, pm)
+        can_throw(target(job)) || add!(pm, ModulePass("LowerThrow", lower_throw!))
+
+        add_lowering_passes!(job, pm)
+
         run!(pm, mod)
 
         # NOTE: if an optimization is missing, try scheduling an entirely new optimization

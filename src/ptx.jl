@@ -133,7 +133,7 @@ function process_kernel!(job::PTXCompilerJob, mod::LLVM.Module, kernel::LLVM.Fun
     push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
 end
 
-function add_correctness_passes!(job::PTXCompilerJob, pm::LLVM.PassManager)
+function add_lowering_passes!(job::PTXCompilerJob, pm::LLVM.PassManager)
     add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
     add!(pm, ModulePass("HideTrap", hide_trap!))
 end

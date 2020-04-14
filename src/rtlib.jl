@@ -102,7 +102,12 @@ function build_runtime(job::AbstractCompilerJob)
     mod = LLVM.Module("GPUCompiler run-time library", JuliaContext())
 
     for method in values(Runtime.methods)
-        def = isa(method.def, Symbol) ? getfield(runtime_module(job.target), method.def) : method.def
+        def = if isa(method.def, Symbol)
+            isdefined(runtime_module(job.target), method.def) || continue
+            getfield(runtime_module(job.target), method.def)
+        else
+            method.def
+        end
         emit_function!(mod, job, def, method.types, method.llvm_name)
     end
 
