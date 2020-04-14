@@ -5,8 +5,8 @@
 export NativeCompilerTarget
 
 Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
-    cpu::String=unsafe_string(LLVM.API.LLVMGetHostCPUName())
-    features::String=""
+    cpu::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
+    features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
 end
 
 llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
@@ -50,6 +50,6 @@ function Base.show(io::IO, job::NativeCompilerJob)
     print(io, " for $(target(job).cpu) $(target(job).features)")
 end
 
-runtime_slug(job::NativeCompilerJob) = "native_$(target(job).cpu)$(target(job).features)"
+runtime_slug(job::NativeCompilerJob) = "native_$(target(job).cpu)-$(hash(target(job).features))"
 
 add_lowering_passes!(::NativeCompilerJob, pm::LLVM.PassManager) = return
