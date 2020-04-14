@@ -91,9 +91,22 @@ end
 ## functionality to build the runtime library
 
 function emit_function!(mod, job::AbstractCompilerJob, f, types, name)
+    # we don't allow runtime functions to depend on one another, see below (name aliasing)
+    @assert !haskey(functions(mod), name) "Cannot emit runtime function $name into module that already contains a declaration."
     tt = Base.to_tuple_type(types)
     new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
                              libraries=false, strict=false)
+    if VERSION >= v"1.5-"
+        # recent Julia versions include prototypes for all runtime functions, even if unused
+        pm = ModulePassManager()
+        strip_dead_prototypes!(pm)
+        run!(pm, new_mod)
+        dispose(pm)
+    end
+    # note that in theory we should be able to recurse, but it often only happens with bugs
+    # (e.g. a typo in the implementation of signal_exception -> throw -> signal_exception),
+    # and would need extra care to make the names alias (avoiding gpu_signal_exception1).
+    @assert !haskey(functions(new_mod), name) "Runtime function $name cannot call into itself."
     LLVM.name!(entry, name)
     link!(mod, new_mod)
 end
@@ -146,7 +159,7 @@ function load_runtime(job::AbstractCompilerJob)
                 parse(LLVM.Module, read(io), JuliaContext())
             end
         else
-            @debug "Building the GPU runtime library for $(slug)."
+            @debug "Building the GPU runtime library at $path"
             mkpath(output_dir)
             lib = build_runtime(job)
             open(path, "w") do io
