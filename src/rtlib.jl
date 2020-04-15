@@ -163,5 +163,5 @@ function reset_runtime()
     rm(cachedir(); recursive=true, force=true)
     # create an empty cache directory. since we only ever load from the first existing cachedir,
     # this effectively invalidates preexisting caches in lower layers of the depot.
-    mkdir(cachedir())
+    mkpath(cachedir())
 end
