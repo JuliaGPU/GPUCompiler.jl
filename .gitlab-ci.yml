@@ -34,7 +34,7 @@ asserts:1.4:
                 Pkg.develop(PackageSpec(path=pwd()));
                 Pkg.build();'
     - julia -e 'using Pkg;
-                Pkg.add(PackageSpec(name="CUDAnative", rev="tb/gpucompiler"));
+                Pkg.add(PackageSpec(name="CUDAnative", rev="master"));
                 Pkg.test("CUDAnative");'
 
 cudanative:1.3:
