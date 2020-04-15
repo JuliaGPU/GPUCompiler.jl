@@ -32,7 +32,7 @@ struct MethodSubstitutionWarning <: Exception
 end
 Base.showerror(io::IO, err::MethodSubstitutionWarning) =
     print(io, "You called $(err.original), maybe you intended to call $(err.substitute) instead?")
-const method_substitution_whitelist = [:hypot]
+const method_substitution_whitelist = [:hypot, :exp]
 
 mutable struct MethodCompileTracer
     job::AbstractCompilerJob
