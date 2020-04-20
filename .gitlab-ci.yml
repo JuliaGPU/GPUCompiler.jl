@@ -50,3 +50,11 @@ cudanative:1.4:
     - .test_cudanative
   tags:
     - nvidia
+
+
+# other tasks
+
+coverage:
+  extends:
+    - .julia:1.4
+    - .coverage
