@@ -1,19 +1,24 @@
 # compiler support for working with run-time libraries
 
-function link_library!(mod::LLVM.Module, lib::LLVM.Module)
-    # linking is destructive, so copy the library
-    lib = LLVM.Module(lib)
+link_library!(mod::LLVM.Module, lib::LLVM.Module) = link_library!(mod, [lib])
+function link_library!(mod::LLVM.Module, libs::Vector{LLVM.Module})
+    # linking is destructive, so copy the libraries
+    libs = [LLVM.Module(lib) for lib in libs]
 
     # save list of external functions
     exports = String[]
     for f in functions(mod)
         fn = LLVM.name(f)
-        if !haskey(functions(lib), fn)
-            push!(exports, fn)
+        for lib in libs
+            if !haskey(functions(lib), fn)
+                push!(exports, fn)
+            end
         end
     end
 
-    link!(mod, lib)
+    for lib in libs
+        link!(mod, lib)
+    end
 
     ModulePassManager() do pm
         # internalize all functions that aren't exports
