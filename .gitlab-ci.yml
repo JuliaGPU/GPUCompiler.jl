@@ -51,6 +51,32 @@ cudanative:1.4:
   tags:
     - nvidia
 
+# AMDGPUnative.jl
+
+.test_amdgpunative:
+  extends: .test
+  image: rocm/dev-ubuntu-18.04
+  script:
+    - julia -e 'using Pkg;
+                Pkg.develop(PackageSpec(path=pwd()));
+                Pkg.build();'
+    - julia -e 'using Pkg;
+                Pkg.add(PackageSpec(name="AMDGPUnative", rev="jps/gpucompiler"));
+                Pkg.test("AMDGPUnative");'
+
+amdgpunative:1.3:
+  extends:
+    - .julia:1.3
+    - .test_amdgpunative
+  tags:
+    - rocm
+
+amdgpunative:1.4:
+  extends:
+    - .julia:1.4
+    - .test_amdgpunative
+  tags:
+    - rocm
 
 # other tasks
 
