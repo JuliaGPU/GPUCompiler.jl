@@ -209,7 +209,7 @@ macro device_code(ex...)
     only(xs) = (@assert length(xs) == 1; first(xs))
     localUnique = 1
     function hook(job::AbstractCompilerJob; dir::AbstractString)
-        name = something(job.source.name, nameof(job.source.f))
+        name = something(source(job).name, nameof(source(job).f))
         fn = "$(name)_$(localUnique)"
         mkpath(dir)
 

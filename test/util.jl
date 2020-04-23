@@ -28,3 +28,18 @@ end
                      store volatile i64 %0, i64* %slot
                      %value = load volatile i64, i64* %slot
                      ret i64 %value""", Int64, Tuple{Int64}, i)
+
+
+# the GPU runtime library
+module TestRuntime
+    # dummy methods
+    signal_exception() = return
+    malloc(sz) = return
+    report_oom(sz) = return
+    report_exception(ex) = return
+    report_exception_name(ex) = return
+    report_exception_frame(idx, func, file, line) = return
+
+    # for validation
+    sin(x) = Base.sin(x)
+end

@@ -106,3 +106,39 @@ add_lowering_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
 add_optimization_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
 
 link_libraries!(::AbstractCompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) = return
+
+
+## inheritance through composition
+
+# downstream packages likely need to extend the above compiler functionality.
+# to facilitate that, the abstract Composite... types below can be used,
+# where downstream functionality only needs to implement `Base.parent`
+# to make sure non-overloaded functionality is dispatched to the parent.
+
+export CompositeCompilerTarget, CompositeCompilerJob
+
+Base.parent(target::AbstractCompilerTarget) = target
+Base.parent(job::AbstractCompilerJob) = job
+
+abstract type CompositeCompilerTarget <: AbstractCompilerTarget end
+llvm_triple(target::CompositeCompilerTarget) = llvm_triple(Base.parent(target))
+llvm_machine(target::CompositeCompilerTarget) = llvm_machine(Base.parent(target))
+llvm_datalayout(target::CompositeCompilerTarget) = llvm_datalayout(Base.parent(target))
+runtime_module(target::CompositeCompilerTarget) = runtime_module(Base.parent(target))
+isintrinsic(target::CompositeCompilerTarget, fn::String) = isintrinsic(Base.parent(target), fn)
+can_throw(target::CompositeCompilerTarget) = can_throw(Base.parent(target))
+
+abstract type CompositeCompilerJob <: AbstractCompilerJob end
+target(job::CompositeCompilerJob) = target(Base.parent(job))
+source(job::CompositeCompilerJob) = source(Base.parent(job))
+runtime_slug(job::CompositeCompilerJob) = runtime_slug(Base.parent(job))
+process_module!(job::CompositeCompilerJob, mod::LLVM.Module) =
+    process_module!(Base.parent(job), mod)
+process_kernel!(job::CompositeCompilerJob, mod::LLVM.Module, kernel::LLVM.Function) =
+    process_kernel!(Base.parent(job), mod, kernel)
+add_lowering_passes!(job::CompositeCompilerJob, pm::LLVM.PassManager) =
+    add_lowering_passes!(Base.parent(job), pm)
+add_optimization_passes!(job::CompositeCompilerJob, pm::LLVM.PassManager) =
+    add_optimization_passes!(Base.parent(job), pm)
+link_libraries!(job::CompositeCompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) =
+    link_libraries!(Base.parent(job), mod, undefined_fns)

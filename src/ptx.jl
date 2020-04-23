@@ -6,16 +6,7 @@ export PTXCompilerTarget
 
 Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     cap::VersionNumber
-
-    runtime_module::Base.Module
-
-    # hooks for exposing functionality to CUDAnative.jl
-    # FIXME: this isn't particularly nice, duplicating fields and functions
-    #        from the abstract interface over this job to CUDAnative...
-    isintrinsic_hook::Union{Nothing,Function} = nothing
 end
-
-PTXCompilerTarget(cap; kwargs...) = PTXCompilerTarget(; cap=cap, kwargs...)
 
 llvm_triple(::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
@@ -41,8 +32,7 @@ llvm_datalayout(::PTXCompilerTarget) = Int===Int64 ?
 runtime_module(target::PTXCompilerTarget) = target.runtime_module
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
-isintrinsic(target::PTXCompilerTarget, fn::String) =
-    in(fn, ptx_intrinsics) || (target.isintrinsic_hook!==nothing && target.isintrinsic_hook(fn))
+isintrinsic(target::PTXCompilerTarget, fn::String) = in(fn, ptx_intrinsics)
 
 
 ## job
@@ -50,7 +40,7 @@ isintrinsic(target::PTXCompilerTarget, fn::String) =
 export PTXCompilerJob
 
 Base.@kwdef struct PTXCompilerJob <: AbstractCompilerJob
-    target::PTXCompilerTarget
+    target::AbstractCompilerTarget
     source::FunctionSpec
 
     # optional properties
@@ -58,10 +48,6 @@ Base.@kwdef struct PTXCompilerJob <: AbstractCompilerJob
     maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
     blocks_per_sm::Union{Nothing,Int} = nothing
     maxregs::Union{Nothing,Int} = nothing
-
-    # hooks for exposing functionality to CUDAnative.jl
-    rewrite_ir_hook::Union{Nothing,Function} = nothing
-    link_library_hook::Union{Nothing,Function} = nothing
 end
 
 PTXCompilerJob(target, source; kwargs...) =
@@ -70,13 +56,11 @@ PTXCompilerJob(target, source; kwargs...) =
 Base.similar(job::PTXCompilerJob, source::FunctionSpec) =
     PTXCompilerJob(target=job.target, source=source,
                    minthreads=job.minthreads, maxthreads=job.maxthreads,
-                   blocks_per_sm=job.blocks_per_sm, maxregs=job.maxregs,
-                   rewrite_ir_hook=job.rewrite_ir_hook,
-                   link_library_hook=job.link_library_hook)
+                   blocks_per_sm=job.blocks_per_sm, maxregs=job.maxregs)
 
 function Base.show(io::IO, job::PTXCompilerJob)
     print(io, "PTX CompilerJob of ", source(job))
-    print(io, " for sm_$(target(job).cap.major)$(target(job).cap.minor)")
+    print(io, " for sm_$(Base.parent(job.target).cap.major)$(Base.parent(job.target).cap.minor)")
 
     job.minthreads !== nothing && print(io, ", minthreads=$(job.minthreads)")
     job.maxthreads !== nothing && print(io, ", maxthreads=$(job.maxthreads)")
@@ -90,11 +74,7 @@ source(job::PTXCompilerJob) = job.source
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::PTXCompilerJob) = "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)"
-
-function process_module!(job::PTXCompilerJob, mod::LLVM.Module)
-    job.rewrite_ir_hook !== nothing && job.rewrite_ir_hook(job, mod)
-end
+runtime_slug(job::PTXCompilerJob) = "ptx-sm_$(Base.parent(job.target).cap.major)$(Base.parent(job.target).cap.minor)"
 
 function process_kernel!(job::PTXCompilerJob, mod::LLVM.Module, kernel::LLVM.Function)
     # property annotations
@@ -157,10 +137,6 @@ function add_optimization_passes!(job::PTXCompilerJob, pm::LLVM.PassManager)
 
     # get rid of the internalized functions; now possible unused
     global_dce!(pm)
-end
-
-function link_libraries!(job::PTXCompilerJob, mod::LLVM.Module, undefined_fns::Vector{String})
-    job.link_library_hook !== nothing && job.link_library_hook(job, mod, undefined_fns)
 end
 
 
@@ -290,7 +266,7 @@ function hide_trap!(mod::LLVM.Module)
 
     # inline assembly to exit a thread, hiding control flow from LLVM
     exit_ft = LLVM.FunctionType(LLVM.VoidType(JuliaContext()))
-    exit = if isa(job, PTXCompilerJob) && target(job).cap < v"7"
+    exit = if Base.parent(target(job)).cap < v"7"
         # ptxas for old compute capabilities has a bug where it messes up the
         # synchronization stack in the presence of shared memory and thread-divergend exit.
         InlineAsm(exit_ft, "trap;", "", true)
