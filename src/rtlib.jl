@@ -121,8 +121,8 @@ function build_runtime(job::AbstractCompilerJob)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
-            isdefined(runtime_module(job.target), method.def) || continue
-            getfield(runtime_module(job.target), method.def)
+            isdefined(runtime_module(target(job)), method.def) || continue
+            getfield(runtime_module(target(job)), method.def)
         else
             method.def
         end

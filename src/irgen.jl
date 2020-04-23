@@ -58,13 +58,13 @@ function Base.push!(tracer::MethodCompileTracer, method_instance)
     # FIXME: this might be too coarse
     method = method_instance.def
     if Base.moduleroot(method.module) == Base &&
-        isdefined(runtime_module(tracer.job.target), method_instance.def.name) &&
+        isdefined(runtime_module(target(tracer.job)), method_instance.def.name) &&
         !in(method_instance.def.name, method_substitution_whitelist)
-        substitute_function = getfield(runtime_module(tracer.job.target), method.name)
+        substitute_function = getfield(runtime_module(target(tracer.job)), method.name)
         tt = Tuple{method_instance.specTypes.parameters[2:end]...}
         if hasmethod(substitute_function, tt)
             method′ = which(substitute_function, tt)
-            if method′.module == runtime_module(tracer.job.target)
+            if method′.module == runtime_module(target(tracer.job))
                 @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(tracer.job, tracer.call_stack))
             end
         end
@@ -108,7 +108,7 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
         end
 
         # LLVM's debug info crashes older CUDA assemblers
-        if job isa PTXCompilerJob # && driver_version(target(job)) < v"10.2"
+        if Base.parent(job) isa PTXCompilerJob # && driver_version(target(job)) < v"10.2"
             # FIXME: this was supposed to be fixed on 10.2
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
@@ -152,9 +152,9 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
     llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
     # configure the module
-    triple!(llvm_mod, llvm_triple(job.target))
-    if llvm_datalayout(job.target) !== nothing
-        datalayout!(llvm_mod, llvm_datalayout(job.target))
+    triple!(llvm_mod, llvm_triple(target(job)))
+    if llvm_datalayout(target(job)) !== nothing
+        datalayout!(llvm_mod, llvm_datalayout(target(job)))
     end
 
     return llvm_specfunc, llvm_mod
@@ -164,8 +164,8 @@ else
 
 function module_setup(job::AbstractCompilerJob, mod::LLVM.Module)
     # configure the module
-    triple!(mod, llvm_triple(job.target))
-    datalayout!(mod, llvm_datalayout(job.target))
+    triple!(mod, llvm_triple(target(job)))
+    datalayout!(mod, llvm_datalayout(target(job)))
 
     # add debug info metadata
     if LLVM.version() >= v"8.0"
@@ -248,7 +248,7 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
         end
 
         # LLVM's debug info crashes older CUDA assemblers
-        if job isa PTXCompilerJob # && driver_version(target(job)) < v"10.2"
+        if Base.parent(job) isa PTXCompilerJob # && driver_version(target(job)) < v"10.2"
             # FIXME: this was supposed to be fixed on 10.2
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
