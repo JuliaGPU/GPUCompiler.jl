@@ -9,8 +9,8 @@
 [gitlab-img]: https://gitlab.com/JuliaGPU/GPUCompiler.jl/badges/master/pipeline.svg
 [gitlab-url]: https://gitlab.com/JuliaGPU/GPUCompiler.jl/commits/master
 
-[travis-img]: https://api.travis-ci.org/JuliaGPU/GPUCompiler.jl.svg?branch=master
-[travis-url]: https://travis-ci.org/JuliaGPU/GPUCompiler.jl
+[travis-img]: https://api.travis-ci.com/JuliaGPU/GPUCompiler.jl.svg?branch=master
+[travis-url]: https://travis-ci.com/JuliaGPU/GPUCompiler.jl
 
 [pkgeval-img]: https://juliaci.github.io/NanosoldierReports/pkgeval_badges/G/GPUCompiler.svg
 [pkgeval-url]: https://juliaci.github.io/NanosoldierReports/pkgeval_badges/G/GPUCompiler.html
