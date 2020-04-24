@@ -12,3 +12,9 @@ julia:
 
 notifications:
   email: false
+
+codecov: true
+
+branches:
+  only:
+    - master
