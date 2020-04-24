@@ -15,8 +15,8 @@ GPUCompiler.enable_timings()
 
 include("native.jl")
 include("ptx.jl")
-if VERSION < v"1.4.0"
-include("gcn.jl")
+if !parse(Bool, get(ENV, "CI_ASSERTS", "false")) && VERSION < v"1.4"
+  include("gcn.jl")
 end
 
 haskey(ENV, "CI") && GPUCompiler.timings()
