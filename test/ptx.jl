@@ -68,6 +68,17 @@ end
                                          dump_module=true, kernel=true, maxregs=42))
     @test occursin("maxnreg\", i32 42", ir)
 end
+
+@testset "calling convention" begin
+    kernel() = return
+
+    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}; dump_module=true))
+    @test !occursin("ptx_kernel", ir)
+
+    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
+                                         dump_module=true, kernel=true))
+    @test occursin("ptx_kernel", ir)
+end
 end
 
 end
