@@ -47,31 +47,7 @@ end
 
 @testset "IR" begin
 
-@testset "exceptions" begin
-    foobar() = throw(DivideError())
-    ir = sprint(io->gcn_code_llvm(io, foobar, Tuple{}))
-
-    # plain exceptions should get lowered to a call to the GPU run-time
-    @test occursin("gpu_report_exception", ir)
-    # not a jl_throw referencing a jl_value_t representing the exception
-    @test !occursin("jl_throw", ir)
-end
-@testset "kernel functions" begin
-@testset "wrapper function aggregate rewriting" begin
-    kernel(x) = return
-
-    @eval struct Aggregate
-        x::Int
-    end
-
-    ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{Aggregate}))
-    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\]) addrspace\(\d+\)?\*", ir)
-
-    ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{Aggregate}; kernel=true))
-    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\)", ir)
-end
-
-@testset "callconv" begin
+@testset "kernel calling convention" begin
     kernel() = return
 
     ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{}; dump_module=true))
@@ -80,7 +56,6 @@ end
     ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{};
                                          dump_module=true, kernel=true))
     @test occursin("amdgpu_kernel", ir)
-end
 end
 
 end
@@ -253,143 +228,6 @@ end
     ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{Float32,Ptr{Float32}}))
     @test occursin("jl_box_float32", ir)
     gcn_code_native(devnull, kernel, Tuple{Float32,Ptr{Float32}})
-end
-
-end
-
-
-############################################################################################
-
-@testset "errors" begin
-
-# some validation happens in the emit_function hook, which is called by gcn_code_llvm
-
-@testset "base intrinsics" begin
-    foobar(i) = sin(i)
-
-    # NOTE: we don't use test_logs in order to test all of the warning (exception, backtrace)
-    logs, _ = Test.collect_test_logs(min_level=Info) do
-        withenv("JULIA_DEBUG" => nothing) do
-            gcn_code_llvm(devnull, foobar, Tuple{Int})
-        end
-    end
-    @test length(logs) == 1
-    record = logs[1]
-    @test record.level == Base.CoreLogging.Warn
-    @test record.message == "calls to Base intrinsics might be GPU incompatible"
-    @test haskey(record.kwargs, :exception)
-    err,bt = record.kwargs[:exception]
-    err_msg = sprint(showerror, err)
-    @test occursin(Regex("You called sin(.+) in Base.Math .+, maybe you intended to call sin(.+) in $TestRuntime .+ instead?"), err_msg)
-    bt_msg = sprint(Base.show_backtrace, bt)
-    @test occursin("[1] sin", bt_msg)
-    @test occursin(r"\[2\] .+foobar", bt_msg)
-end
-
-# some validation happens in `compile`
-
-@eval Main begin
-struct CleverType{T}
-    x::T
-end
-Base.unsafe_trunc(::Type{Int}, x::CleverType) = unsafe_trunc(Int, x.x)
-end
-
-@testset "non-isbits arguments" begin
-    foobar(i) = (sink(unsafe_trunc(Int,i)); return)
-
-    @test_throws_message(KernelError,
-                         gcn_code_llvm(foobar, Tuple{BigInt}; strict=true)) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
-        occursin("BigInt", msg)
-    end
-
-    # test that we can handle abstract types
-    @test_throws_message(KernelError,
-                         gcn_code_llvm(foobar, Tuple{Any}; strict=true)) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
-        occursin("Any", msg)
-    end
-
-    @test_throws_message(KernelError,
-                         gcn_code_llvm(foobar, Tuple{Union{Int32, Int64}}; strict=true)) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
-        occursin("Union{Int32, Int64}", msg)
-    end
-
-    @test_throws_message(KernelError,
-                         gcn_code_llvm(foobar, Tuple{Union{Int32, Int64}}; strict=true)) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
-        occursin("Union{Int32, Int64}", msg)
-    end
-
-    # test that we get information about fields and reason why something is not isbits
-    @test_throws_message(KernelError,
-                         gcn_code_llvm(foobar, Tuple{CleverType{BigInt}}; strict=true)) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
-        occursin("CleverType", msg) &&
-        occursin("BigInt", msg)
-    end
-end
-
-@testset "invalid LLVM IR" begin
-    foobar(i) = println(i)
-
-    @test_throws_message(InvalidIRError,
-                         gcn_code_llvm(foobar, Tuple{Int}; strict=true)) do msg
-        occursin("invalid LLVM IR", msg) &&
-        occursin(GPUCompiler.RUNTIME_FUNCTION, msg) &&
-        occursin("[1] println", msg) &&
-        occursin(r"\[2\] .+foobar", msg)
-    end
-end
-
-@testset "invalid LLVM IR (ccall)" begin
-    foobar(p) = (unsafe_store!(p, ccall(:time, Cint, ())); nothing)
-
-    @test_throws_message(InvalidIRError,
-                         gcn_code_llvm(foobar, Tuple{Ptr{Int}}; strict=true)) do msg
-        occursin("invalid LLVM IR", msg) &&
-        occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
-        occursin(r"\[1\] .+foobar", msg)
-    end
-end
-
-@testset "delayed bindings" begin
-    kernel() = (undefined; return)
-
-    @test_throws_message(InvalidIRError,
-                         gcn_code_llvm(kernel, Tuple{}; strict=true)) do msg
-        occursin("invalid LLVM IR", msg) &&
-        occursin(GPUCompiler.DELAYED_BINDING, msg) &&
-        occursin("use of 'undefined'", msg) &&
-        occursin(r"\[1\] .+kernel", msg)
-    end
-end
-
-@testset "dynamic call (invoke)" begin
-    @eval @noinline nospecialize_child(@nospecialize(i)) = i
-    kernel(a, b) = (unsafe_store!(b, nospecialize_child(a)); return)
-
-    @test_throws_message(InvalidIRError,
-                         gcn_code_llvm(kernel, Tuple{Int,Ptr{Int}}; strict=true)) do msg
-        occursin("invalid LLVM IR", msg) &&
-        occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
-        occursin("call to nospecialize_child", msg) &&
-        occursin(r"\[1\] .+kernel", msg)
-    end
-end
-
-@testset "dynamic call (apply)" begin
-    func() = pointer(1)
-
-    @test_throws_message(InvalidIRError,
-                         gcn_code_llvm(func, Tuple{}; strict=true)) do msg
-        occursin("invalid LLVM IR", msg) &&
-        occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
-        occursin("call to pointer", msg) &&
-        occursin("[1] func", msg)
-    end
 end
 
 end
