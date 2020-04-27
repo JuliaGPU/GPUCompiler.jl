@@ -10,6 +10,10 @@ julia:
   - 1.4
   - nightly
 
+cache:
+    directories:
+     - /home/travis/.julia/
+
 notifications:
   email: false
 
