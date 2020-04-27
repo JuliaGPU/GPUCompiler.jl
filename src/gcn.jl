@@ -121,7 +121,7 @@ function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
     # (trap is a scalar instruction, and therefore it is executed even when
     # EXEC==0).
     rl_val = call!(builder, rl, [ConstantInt(Int32(32), JuliaContext())])
-    rl_bc = bitcast!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(JuliaContext())))
+    rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(JuliaContext())))
     store!(builder, rl_val, rl_bc)
     call!(builder, trap)
 end
