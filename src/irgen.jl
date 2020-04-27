@@ -49,7 +49,7 @@ function Base.push!(tracer::MethodCompileTracer, method_instance)
     if VERSION < v"1.5.0-DEV.393"
         # check for recursion
         if method_instance in tracer.call_stack[1:end-1]
-            throw(KernelError(job, "recursion is currently not supported";
+            throw(KernelError(tracer.job, "recursion is currently not supported";
                               bt=backtrace(tracer.job, tracer.call_stack)))
         end
     end
