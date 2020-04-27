@@ -107,21 +107,24 @@ function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
     else
         LLVM.Function(mod, "llvm.trap", LLVM.FunctionType(LLVM.VoidType(JuliaContext())))
     end
-    rl_ft = LLVM.FunctionType(LLVM.Int32Type(JuliaContext()), [LLVM.Int32Type(JuliaContext())])
-    rl = if haskey(functions(mod), "llvm.amdgcn.readfirstlane")
-        functions(mod)["llvm.amdgcn.readfirstlane"]
-    else
-        LLVM.Function(mod, "llvm.amdgcn.readfirstlane", rl_ft)
+    if Base.libllvm_version < v"9"
+        rl_ft = LLVM.FunctionType(LLVM.Int32Type(JuliaContext()),
+                                  [LLVM.Int32Type(JuliaContext())])
+        rl = if haskey(functions(mod), "llvm.amdgcn.readfirstlane")
+            functions(mod)["llvm.amdgcn.readfirstlane"]
+        else
+            LLVM.Function(mod, "llvm.amdgcn.readfirstlane", rl_ft)
+        end
+        # FIXME: Early versions of the AMDGPU target fail to skip machine
+        # blocks with certain side effects when EXEC==0, except when certain
+        # criteria are met within said block. We emit a v_readfirstlane_b32
+        # instruction here, as that is sufficient to trigger a skip. Without
+        # this, the target will only attempt to do a "masked branch", which
+        # only works on vector instructions (trap is a scalar instruction, and
+        # therefore it is executed even when EXEC==0).
+        rl_val = call!(builder, rl, [ConstantInt(Int32(32), JuliaContext())])
+        rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(JuliaContext())))
+        store!(builder, rl_val, rl_bc)
     end
-    # FIXME: Early versions of the AMDGPU target fail to skip machine blocks
-    # with certain side effects when EXEC==0, except when certain criteria are
-    # met within said block. We emit a v_readfirstlane_b32 instruction here, as
-    # that is sufficient to trigger a skip. Without this, the target will only
-    # attempt to do a "masked branch", which only works on vector instructions
-    # (trap is a scalar instruction, and therefore it is executed even when
-    # EXEC==0).
-    rl_val = call!(builder, rl, [ConstantInt(Int32(32), JuliaContext())])
-    rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(JuliaContext())))
-    store!(builder, rl_val, rl_bc)
     call!(builder, trap)
 end
