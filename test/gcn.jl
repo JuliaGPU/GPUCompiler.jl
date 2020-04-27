@@ -47,31 +47,7 @@ end
 
 @testset "IR" begin
 
-@testset "exceptions" begin
-    foobar() = throw(DivideError())
-    ir = sprint(io->gcn_code_llvm(io, foobar, Tuple{}))
-
-    # plain exceptions should get lowered to a call to the GPU run-time
-    @test occursin("gpu_report_exception", ir)
-    # not a jl_throw referencing a jl_value_t representing the exception
-    @test !occursin("jl_throw", ir)
-end
-@testset "kernel functions" begin
-@testset "wrapper function aggregate rewriting" begin
-    kernel(x) = return
-
-    @eval struct Aggregate
-        x::Int
-    end
-
-    ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{Aggregate}))
-    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\]) addrspace\(\d+\)?\*", ir)
-
-    ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{Aggregate}; kernel=true))
-    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\)", ir)
-end
-
-@testset "callconv" begin
+@testset "kernel calling convention" begin
     kernel() = return
 
     ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{}; dump_module=true))
@@ -80,7 +56,6 @@ end
     ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{};
                                          dump_module=true, kernel=true))
     @test occursin("amdgpu_kernel", ir)
-end
 end
 
 end
