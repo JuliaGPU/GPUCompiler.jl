@@ -36,6 +36,8 @@ function optimize!(job::AbstractCompilerJob, mod::LLVM.Module, entry::LLVM.Funct
         # the Julia GC lowering pass also has some clean-up that is required
         late_lower_gc_frame!(pm)
 
+        remove_julia_addrspaces!(pm)
+
         run!(pm, mod)
     end
 
