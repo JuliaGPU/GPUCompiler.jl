@@ -589,11 +589,11 @@ function wrap_entry!(job::AbstractCompilerJob, mod::LLVM.Module, entry_f::LLVM.F
     entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
     @compiler_assert return_type(entry_ft) == LLVM.VoidType(JuliaContext()) job
 
-    # filter out ghost types, which don't occur in the LLVM function signatures
+    # filter out types which don't occur in the LLVM function signatures
     sig = Base.signature_type(source(job).f, source(job).tt)::Type
     julia_types = Type[]
     for dt::Type in sig.parameters
-        if !isghosttype(dt)
+        if !isghosttype(dt) && (VERSION < v"1.5.0-DEV.581" || !Core.Compiler.isconstType(dt))
             push!(julia_types, dt)
         end
     end
