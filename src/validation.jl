@@ -60,18 +60,23 @@ function check_invocation(job::AbstractCompilerJob, entry::LLVM.Function)
     sig = Base.signature_type(source(job).f, source(job).tt)::Type
     for (arg_i,dt) in enumerate(sig.parameters)
         isghosttype(dt) && continue
+        VERSION >= v"1.5.0-DEV.581" && Core.Compiler.isconstType(dt) && continue
         real_arg_i += 1
 
         if !isbitstype(dt)
-            param = parameters(entry)[real_arg_i]
-            if !isempty(uses(param))
-                msg = """Argument $arg_i to your kernel function is of type $dt.
-                       That type is not isbits, and such arguments are only allowed when they are unused by the kernel."""
-
-                # explain which fields are not isbits
-                msg *= explain_nonisbits(dt)
-
-                throw(KernelError(job, "passing and using non-bitstype argument", msg))
+            if VERSION >= v"1.5.0-DEV.581"
+                throw(KernelError(job, "passing and using non-bitstype argument",
+                    """Argument $arg_i to your kernel function is of type $dt, which is not isbits:
+                       $(explain_nonisbits(dt))"""))
+            else
+                # be slightly more lenient pre 1.5, to support `function(::Type, ...)`
+                param = parameters(entry)[real_arg_i]
+                if !isempty(uses(param))
+                    throw(KernelError(job, "passing and using non-bitstype argument",
+                    """Argument $arg_i to your kernel function is of type $dt, which is not isbits:
+                       $(explain_nonisbits(dt))
+                       Passing non-isbits types is only allowed if they they are unused by the kernel."""))
+                end
             end
         end
     end
