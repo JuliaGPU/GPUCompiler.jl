@@ -168,8 +168,11 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 else
                     f, args, nargs, meth = operands(inst)
                 end
-                meth = first(operands(meth::ConstantExpr))::ConstantExpr
-                meth = first(operands(meth))::ConstantInt
+                if VERSION < v"1.5.0-DEV.802"
+                    # addrspacecast
+                    meth = first(operands(meth::ConstantExpr))
+                end
+                meth = first(operands(meth::ConstantExpr))::ConstantInt
                 meth = convert(Int, meth)
                 meth = Ptr{Cvoid}(meth)
                 meth = Base.unsafe_pointer_to_objref(meth)::Core.MethodInstance
@@ -191,7 +194,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                     f, args, nargs, _ = operands(inst)
                 end
 
-                f = first(operands(f))::ConstantExpr # get rid of addrspacecast
+                if VERSION < v"1.5.0-DEV.802"
+                    f = first(operands(f::ConstantExpr)) # get rid of addrspacecast
+                end
                 f = first(operands(f))::ConstantInt # get rid of inttoptr
                 f = convert(Int, f)
                 f = Ptr{Cvoid}(f)

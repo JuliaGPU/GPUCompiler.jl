@@ -89,7 +89,7 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     if def isa Symbol
         args = [gensym() for typ in types]
         @eval @inline $def($(args...)) =
-            ccall($"extern $def", llvmcall, $return_type, ($(types...),), $(args...))
+            ccall($"extern $llvm_name", llvmcall, $return_type, ($(types...),), $(args...))
     end
 
     return

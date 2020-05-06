@@ -2,6 +2,7 @@
 
 function optimize!(job::AbstractCompilerJob, mod::LLVM.Module, entry::LLVM.Function)
     tm = llvm_machine(target(job))
+    entry_fn = LLVM.name(entry)
 
     function initialize!(pm)
         add_library_info!(pm, triple(mod))
@@ -35,6 +36,8 @@ function optimize!(job::AbstractCompilerJob, mod::LLVM.Module, entry::LLVM.Funct
         # the Julia GC lowering pass also has some clean-up that is required
         late_lower_gc_frame!(pm)
 
+        remove_julia_addrspaces!(pm)
+
         run!(pm, mod)
     end
 
@@ -65,7 +68,8 @@ function optimize!(job::AbstractCompilerJob, mod::LLVM.Module, entry::LLVM.Funct
         run!(pm, mod)
     end
 
-    return entry
+    # optimization may have replaced functions, so look the entry point up again
+    return functions(mod)[entry_fn]
 end
 
 
