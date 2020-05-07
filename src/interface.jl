@@ -1,19 +1,21 @@
-# target-specific interface for packages to implement
+# interfaces for defining new compilers
 
-# you should create concrete structures that subtype the abstract types in this file,
-# and implement all accessor methods to return fields from your structures.
+# the definition of a new GPU compiler is typically split in two:
+# - a generic compiler that lives in GPUCompiler.jl (e.g., emitting PTX, SPIR-V, etc)
+# - a more specific version in a package that targets an environment (e.g. CUDA, ROCm, etc)
 #
-# you can add additional fields to these structures for use in target-specific sections
-# of the compiler, or add hooks for more specific uses (or to avoid package dependencies).
+# the first level of customizability is found in the AbstractCompilerTarget hierarchy,
+# with methods and interfaces that can only be implemented within GPUCompiler.jl.
+#
+# further customization should be put in a concrete instance of the AbstractCompilerParams
+# type, and can be used to customize interfaces defined on CompilerJob.
 
 
 ## target
 
-# a target represents a logical (sub)device to generate code for, and contains state and
-# data that is unlikely to change across compiler invocations. it is expected you only
-# need to instantiate a handful of these in your package.
-
 export AbstractCompilerTarget
+
+# container for state handled by targets defined in GPUCompiler.jl
 
 abstract type AbstractCompilerTarget end
 
@@ -32,24 +34,21 @@ end
 
 llvm_datalayout(target::AbstractCompilerTarget) = DataLayout(llvm_machine(target))
 
-# the Julia module to look up target-specific runtime functions in (this includes both
-# target-specific functions from the GPU runtime library, like `malloc`, but also
-# replacements functions for operations like `Base.sin`)
-runtime_module(::AbstractCompilerTarget) = error("Not implemented")
 
-# check if a function is an intrinsic that can assumed to be always available
-isintrinsic(::AbstractCompilerTarget, fn::String) = false
+## params
 
-# does this target support throwing Julia exceptions with jl_throw?
-# if not, calls to throw will be replaced with calls to the GPU runtime
-can_throw(::AbstractCompilerTarget) = false
+export AbstractCompilerParams
+
+# container for state handled by external users of GPUCompiler.jl
+
+abstract type AbstractCompilerParams end
 
 
 ## function specification
 
-# what we'll be compiling
-
 export FunctionSpec
+
+# what we'll be compiling
 
 struct FunctionSpec{F,TT}
     f::Base.Callable
@@ -77,68 +76,54 @@ end
 
 ## job
 
-# a compiler job encodes a specific invocation of the compiler, and together with the
-# compiler target contains all necessary information to generate code.
+export CompilerJob
 
-export AbstractCompilerJob
+# a specific invocation of the compiler, bundling everything needed to generate code
 
-abstract type AbstractCompilerJob end
+Base.@kwdef struct CompilerJob{T,P}
+    target::T
+    source::FunctionSpec
+    params::P
 
-# link to the AbstractCompilerTarget
-target(::AbstractCompilerJob) = error("Not implemented")
+    CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams) =
+        new{typeof(target), typeof(params)}(target, source, params)
+end
 
-# link to the FunctionSpec
-source(::AbstractCompilerJob) = error("Not implemented")
+Base.similar(job::CompilerJob, source::FunctionSpec) =
+    CompilerJob(target=job.target, source=source, params=job.params)
+
+function Base.show(io::IO, job::CompilerJob{T}) where {T}
+    print(io, "CompilerJob of ", job.source, " for ", T)
+end
+
+
+## interfaces and fallback definitions
+
+# the Julia module to look up target-specific runtime functions in (this includes both
+# target-specific functions from the GPU runtime library, like `malloc`, but also
+# replacements functions for operations like `Base.sin`)
+runtime_module(::CompilerJob) = error("Not implemented")
+
+# check if a function is an intrinsic that can assumed to be always available
+isintrinsic(::CompilerJob, fn::String) = false
+
+# does this target support throwing Julia exceptions with jl_throw?
+# if not, calls to throw will be replaced with calls to the GPU runtime
+can_throw(::CompilerJob) = false
 
 # generate a string that represents the type of compilation, for selecting a compiled
 # instance of the runtime library. this slug should encode everything that affects
 # the generated code of this compiler job (with exception of the function source)
-runtime_slug(::AbstractCompilerJob) = error("Not implemented")
+runtime_slug(::CompilerJob) = error("Not implemented")
 
 # early processing of the newly generated LLVM IR module
-process_module!(::AbstractCompilerJob, mod::LLVM.Module) = return
+process_module!(::CompilerJob, mod::LLVM.Module) = return
 
 # early processing of the newly identified LLVM kernel function
-process_kernel!(::AbstractCompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return
+process_kernel!(::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return
 
-add_lowering_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
+add_lowering_passes!(::CompilerJob, pm::LLVM.PassManager) = return
 
-add_optimization_passes!(::AbstractCompilerJob, pm::LLVM.PassManager) = return
+add_optimization_passes!(::CompilerJob, pm::LLVM.PassManager) = return
 
-link_libraries!(::AbstractCompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) = return
-
-
-## inheritance through composition
-
-# downstream packages likely need to extend the above compiler functionality.
-# to facilitate that, the abstract Composite... types below can be used,
-# where downstream functionality only needs to implement `Base.parent`
-# to make sure non-overloaded functionality is dispatched to the parent.
-
-export CompositeCompilerTarget, CompositeCompilerJob
-
-Base.parent(target::AbstractCompilerTarget) = target
-Base.parent(job::AbstractCompilerJob) = job
-
-abstract type CompositeCompilerTarget <: AbstractCompilerTarget end
-llvm_triple(target::CompositeCompilerTarget) = llvm_triple(Base.parent(target))
-llvm_machine(target::CompositeCompilerTarget) = llvm_machine(Base.parent(target))
-llvm_datalayout(target::CompositeCompilerTarget) = llvm_datalayout(Base.parent(target))
-runtime_module(target::CompositeCompilerTarget) = runtime_module(Base.parent(target))
-isintrinsic(target::CompositeCompilerTarget, fn::String) = isintrinsic(Base.parent(target), fn)
-can_throw(target::CompositeCompilerTarget) = can_throw(Base.parent(target))
-
-abstract type CompositeCompilerJob <: AbstractCompilerJob end
-target(job::CompositeCompilerJob) = target(Base.parent(job))
-source(job::CompositeCompilerJob) = source(Base.parent(job))
-runtime_slug(job::CompositeCompilerJob) = runtime_slug(Base.parent(job))
-process_module!(job::CompositeCompilerJob, mod::LLVM.Module) =
-    process_module!(Base.parent(job), mod)
-process_kernel!(job::CompositeCompilerJob, mod::LLVM.Module, kernel::LLVM.Function) =
-    process_kernel!(Base.parent(job), mod, kernel)
-add_lowering_passes!(job::CompositeCompilerJob, pm::LLVM.PassManager) =
-    add_lowering_passes!(Base.parent(job), pm)
-add_optimization_passes!(job::CompositeCompilerJob, pm::LLVM.PassManager) =
-    add_optimization_passes!(Base.parent(job), pm)
-link_libraries!(job::CompositeCompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) =
-    link_libraries!(Base.parent(job), mod, undefined_fns)
+link_libraries!(::CompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) = return

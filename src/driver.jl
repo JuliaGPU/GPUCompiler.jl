@@ -3,13 +3,13 @@
 # NOTE: the keyword arguments to compile/codegen control those aspects of compilation that
 #       might have to be changed (e.g. set libraries=false when recursing, or set
 #       strip=true for reflection). What remains defines the compilation job itself,
-#       and those values are contained in the AbstractCompilerJob struct.
+#       and those values are contained in the CompilerJob struct.
 
-# (::AbstractCompilerJob)
+# (::CompilerJob)
 const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 """
-    compile(target::Symbol, job::AbstractCompilerJob;
+    compile(target::Symbol, job::CompilerJob;
             libraries=true, deferred_codegen=true,
             optimize=true, strip=false, strict=true, ...)
 
@@ -26,7 +26,7 @@ The following keyword arguments are supported:
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
-function compile(target::Symbol, job::AbstractCompilerJob;
+function compile(target::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true,
                  optimize::Bool=true, strip::Bool=false, strict::Bool=true)
     if compile_hook[] != nothing
@@ -52,7 +52,7 @@ const deferred_codegen_jobs = Vector{Tuple{Core.Function,Type}}()
     end
 end
 
-function codegen(output::Symbol, job::AbstractCompilerJob;
+function codegen(output::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                  strip::Bool=false, strict::Bool=true)
     ## Julia IR
@@ -63,8 +63,8 @@ function codegen(output::Symbol, job::AbstractCompilerJob;
 
         # get the method instance
         world = typemax(UInt)
-        meth = which(source(job).f, source(job).tt)
-        sig = Base.signature_type(source(job).f, source(job).tt)::Type
+        meth = which(job.source.f, job.source.tt)
+        sig = Base.signature_type(job.source.f, job.source.tt)::Type
         (ti, env) = ccall(:jl_type_intersection_with_env, Any,
                           (Any, Any), sig, meth.sig)::Core.SimpleVector
         if VERSION >= v"1.2.0-DEV.320"
@@ -125,7 +125,7 @@ function codegen(output::Symbol, job::AbstractCompilerJob;
     if deferred_codegen && haskey(functions(ir), "deferred_codegen")
         dyn_marker = functions(ir)["deferred_codegen"]
 
-        cache = Dict{AbstractCompilerJob, String}(job => kernel_fn)
+        cache = Dict{CompilerJob, String}(job => kernel_fn)
 
         # iterative compilation (non-recursive)
         changed = true
@@ -134,7 +134,7 @@ function codegen(output::Symbol, job::AbstractCompilerJob;
 
             # find deferred compiler
             # TODO: recover this information earlier, from the Julia IR
-            worklist = MultiDict{AbstractCompilerJob, LLVM.CallInst}()
+            worklist = MultiDict{CompilerJob, LLVM.CallInst}()
             for use in uses(dyn_marker)
                 # decode the call
                 call = user(use)::LLVM.CallInst

@@ -7,7 +7,7 @@
 # it is a hack, and should disappear over time. don't add new features to it.
 
 # generate a pseudo-backtrace from a stack of methods being emitted
-function backtrace(job::AbstractCompilerJob, call_stack::Vector{Core.MethodInstance})
+function backtrace(job::CompilerJob, call_stack::Vector{Core.MethodInstance})
     bt = StackTraces.StackFrame[]
     for method_instance in call_stack
         method = method_instance.def
@@ -35,7 +35,7 @@ Base.showerror(io::IO, err::MethodSubstitutionWarning) =
 const method_substitution_whitelist = [:hypot, :exp]
 
 mutable struct MethodCompileTracer
-    job::AbstractCompilerJob
+    job::CompilerJob
     call_stack::Vector{Core.MethodInstance}
     last_method_instance::Union{Nothing,Core.MethodInstance}
 
@@ -58,13 +58,13 @@ function Base.push!(tracer::MethodCompileTracer, method_instance)
     # FIXME: this might be too coarse
     method = method_instance.def
     if Base.moduleroot(method.module) == Base &&
-        isdefined(runtime_module(target(tracer.job)), method_instance.def.name) &&
+        isdefined(runtime_module(tracer.job), method_instance.def.name) &&
         !in(method_instance.def.name, method_substitution_whitelist)
-        substitute_function = getfield(runtime_module(target(tracer.job)), method.name)
+        substitute_function = getfield(runtime_module(tracer.job), method.name)
         tt = Tuple{method_instance.specTypes.parameters[2:end]...}
         if hasmethod(substitute_function, tt)
             method′ = which(substitute_function, tt)
-            if method′.module == runtime_module(target(tracer.job))
+            if method′.module == runtime_module(tracer.job)
                 @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(tracer.job, tracer.call_stack))
             end
         end
@@ -85,7 +85,7 @@ if VERSION >= v"1.5.0-DEV.393"
 
 # JuliaLang/julia#25984 significantly restructured the compiler
 
-function compile_method_instance(job::AbstractCompilerJob, method_instance::Core.MethodInstance, world)
+function compile_method_instance(job::CompilerJob, method_instance::Core.MethodInstance, world)
     # set-up the compiler interface
     tracer = MethodCompileTracer(job, method_instance)
     hook_emit_function(method_instance, code) = push!(tracer, method_instance)
@@ -108,7 +108,7 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
         end
 
         # LLVM's debug info crashes older CUDA assemblers
-        if Base.parent(job) isa PTXCompilerJob # && driver_version(target(job)) < v"10.2"
+        if job.target isa PTXCompilerTarget # && driver_version(job.target) < v"10.2"
             # FIXME: this was supposed to be fixed on 10.2
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
@@ -158,9 +158,9 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
     llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
     # configure the module
-    triple!(llvm_mod, llvm_triple(target(job)))
-    if llvm_datalayout(target(job)) !== nothing
-        datalayout!(llvm_mod, llvm_datalayout(target(job)))
+    triple!(llvm_mod, llvm_triple(job.target))
+    if llvm_datalayout(job.target) !== nothing
+        datalayout!(llvm_mod, llvm_datalayout(job.target))
     end
 
     return llvm_specfunc, llvm_mod
@@ -168,10 +168,10 @@ end
 
 else
 
-function module_setup(job::AbstractCompilerJob, mod::LLVM.Module)
+function module_setup(job::CompilerJob, mod::LLVM.Module)
     # configure the module
-    triple!(mod, llvm_triple(target(job)))
-    datalayout!(mod, llvm_datalayout(target(job)))
+    triple!(mod, llvm_triple(job.target))
+    datalayout!(mod, llvm_datalayout(job.target))
 
     # add debug info metadata
     if LLVM.version() >= v"8.0"
@@ -189,7 +189,7 @@ function module_setup(job::AbstractCompilerJob, mod::LLVM.Module)
     end
 end
 
-function compile_method_instance(job::AbstractCompilerJob, method_instance::Core.MethodInstance, world)
+function compile_method_instance(job::CompilerJob, method_instance::Core.MethodInstance, world)
     function postprocess(ir)
         # get rid of jfptr wrappers
         for llvmf in functions(ir)
@@ -254,7 +254,7 @@ function compile_method_instance(job::AbstractCompilerJob, method_instance::Core
         end
 
         # LLVM's debug info crashes older CUDA assemblers
-        if Base.parent(job) isa PTXCompilerJob # && driver_version(target(job)) < v"10.2"
+        if job.target isa PTXCompilerTarget # && driver_version(job.target) < v"10.2"
             # FIXME: this was supposed to be fixed on 10.2
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
@@ -322,7 +322,7 @@ end
 
 end
 
-function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, world)
+function irgen(job::CompilerJob, method_instance::Core.MethodInstance, world)
     entry, mod = @timeit_debug to "emission" compile_method_instance(job, method_instance, world)
 
     # clean up incompatibilities
@@ -347,8 +347,8 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
     process_module!(job, mod)
 
     # rename the entry point
-    if source(job).name !== nothing
-        llvmfn = safe_name(string("julia_", source(job).name))
+    if job.source.name !== nothing
+        llvmfn = safe_name(string("julia_", job.source.name))
     else
         # strip the globalUnique counter
         llvmfn = LLVM.name(entry)
@@ -356,9 +356,9 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
     LLVM.name!(entry, llvmfn)
 
     # promote entry-points to kernels and mangle its name
-    if source(job).kernel
+    if job.source.kernel
         entry = promote_kernel!(job, mod, entry)
-        LLVM.name!(entry, mangle_call(entry, source(job).tt))
+        LLVM.name!(entry, mangle_call(entry, job.source.tt))
     end
 
     # minimal required optimization
@@ -369,7 +369,7 @@ function irgen(job::AbstractCompilerJob, method_instance::Core.MethodInstance, w
         linkage!(entry, LLVM.API.LLVMExternalLinkage)
         internalize!(pm, [LLVM.name(entry)])
 
-        can_throw(target(job)) || add!(pm, ModulePass("LowerThrow", lower_throw!))
+        can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
 
         add_lowering_passes!(job, pm)
 
@@ -449,7 +449,7 @@ safe_name(x) = safe_name(repr(x))
 # once we have thorough inference (ie. discarding `@nospecialize` and thus supporting
 # exception arguments) and proper debug info to unwind the stack, this pass can go.
 function lower_throw!(mod::LLVM.Module)
-    job = current_job::AbstractCompilerJob
+    job = current_job::CompilerJob
     changed = false
     @timeit_debug to "lower throw" begin
 
@@ -562,7 +562,7 @@ end
 
 # promote a function to a kernel
 # FIXME: sig vs tt (code_llvm vs cufunction)
-function promote_kernel!(job::AbstractCompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
+function promote_kernel!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
     kernel = wrap_entry!(job, mod, entry_f)
 
     # target-specific processing
@@ -585,12 +585,12 @@ function wrapper_type(julia_t::Type, codegen_t::LLVMType)::LLVMType
 end
 
 # generate a kernel wrapper to fix & improve argument passing
-function wrap_entry!(job::AbstractCompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
+function wrap_entry!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
     entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
     @compiler_assert return_type(entry_ft) == LLVM.VoidType(JuliaContext()) job
 
     # filter out types which don't occur in the LLVM function signatures
-    sig = Base.signature_type(source(job).f, source(job).tt)::Type
+    sig = Base.signature_type(job.source.f, job.source.tt)::Type
     julia_types = Type[]
     for dt::Type in sig.parameters
         if !isghosttype(dt) && (VERSION < v"1.5.0-DEV.581" || !Core.Compiler.isconstType(dt))

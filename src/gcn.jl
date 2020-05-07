@@ -24,47 +24,27 @@ function llvm_machine(target::GCNCompilerTarget)
     return tm
 end
 
-runtime_module(target::GCNCompilerTarget) = target.runtime_module
-
-const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
-isintrinsic(target::GCNCompilerTarget, fn::String) = in(fn, gcn_intrinsics)
 
 ## job
 
-export GCNCompilerJob
-
-Base.@kwdef struct GCNCompilerJob <: AbstractCompilerJob
-    target::AbstractCompilerTarget
-    source::FunctionSpec
-end
-
-Base.similar(job::GCNCompilerJob, source::FunctionSpec) =
-    GCNCompilerJob(target=job.target, source=source)
-
-function Base.show(io::IO, job::GCNCompilerJob)
-    print(io, "GCN CompilerJob of ", source(job))
-    print(io, " for $(Base.parent(job.target).dev_isa)")
-end
-
-target(job::GCNCompilerJob) = job.target
-
-source(job::GCNCompilerJob) = job.source
-
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::GCNCompilerJob) = "gcn-$(Base.parent(job.target).dev_isa)"
+runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.target.dev_isa)"
 
-function process_kernel!(job::GCNCompilerJob, mod::LLVM.Module, kernel::LLVM.Function)
+const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
+isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
+
+function process_kernel!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     # AMDGPU kernel calling convention
     callconv!(kernel, LLVM.API.LLVMCallConv(91))
 end
 
-function add_lowering_passes!(job::GCNCompilerJob, pm::LLVM.PassManager)
+function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
 end
 
 function lower_throw_extra!(mod::LLVM.Module)
-    job = current_job::AbstractCompilerJob
+    job = current_job::CompilerJob
     changed = false
     @timeit_debug to "lower throw (extra)" begin
 

@@ -2,18 +2,18 @@
 
 export InvalidIRError
 
-function check_method(job::AbstractCompilerJob)
-    isa(source(job).f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
+function check_method(job::CompilerJob)
+    isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
-    ms = Base.methods(source(job).f, source(job).tt)
+    ms = Base.methods(job.source.f, job.source.tt)
     isempty(ms)   && throw(KernelError(job, "no method found"))
     length(ms)!=1 && throw(KernelError(job, "no unique matching method"))
     m = first(ms)
 
     # kernels can't return values
-    if source(job).kernel
-        rt = Base.return_types(source(job).f, source(job).tt)[1]
+    if job.source.kernel
+        rt = Base.return_types(job.source.f, job.source.tt)[1]
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
                 """Make sure your kernel function ends in `return`, `return nothing` or `nothing`.
@@ -54,10 +54,10 @@ function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
     return msg
 end
 
-function check_invocation(job::AbstractCompilerJob, entry::LLVM.Function)
+function check_invocation(job::CompilerJob, entry::LLVM.Function)
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
-    sig = Base.signature_type(source(job).f, source(job).tt)::Type
+    sig = Base.signature_type(job.source.f, job.source.tt)::Type
     for (arg_i,dt) in enumerate(sig.parameters)
         isghosttype(dt) && continue
         VERSION >= v"1.5.0-DEV.581" && Core.Compiler.isconstType(dt) && continue
@@ -90,7 +90,7 @@ end
 const IRError = Tuple{String, StackTraces.StackTrace, Any} # kind, bt, meta
 
 struct InvalidIRError <: Exception
-    job::AbstractCompilerJob
+    job::CompilerJob
     errors::Vector{IRError}
 end
 
@@ -101,7 +101,7 @@ const DELAYED_BINDING  = "use of an undefined name"
 const DYNAMIC_CALL     = "dynamic function invocation"
 
 function Base.showerror(io::IO, err::InvalidIRError)
-    print(io, "InvalidIRError: compiling ", source(err.job), " resulted in invalid LLVM IR")
+    print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
     for (kind, bt, meta) in err.errors
         print(io, "\nReason: unsupported $kind")
         if meta != nothing
@@ -214,7 +214,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             end
 
         # detect calls to undefined functions
-        elseif isdeclaration(dest) && intrinsic_id(dest) == 0 && !isintrinsic(target(job), fn)
+        elseif isdeclaration(dest) && intrinsic_id(dest) == 0 && !isintrinsic(job, fn)
             # figure out if the function lives in the Julia runtime library
             if libjulia[] == C_NULL
                 paths = filter(Libdl.dllist()) do path

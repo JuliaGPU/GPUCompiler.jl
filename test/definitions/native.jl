@@ -7,28 +7,6 @@ end
 
 # create a native test compiler, and generate reflection methods for it
 
-struct NativeTestCompilerTarget <: CompositeCompilerTarget
-    parent::NativeCompilerTarget
-
-    NativeTestCompilerTarget() = new(NativeCompilerTarget())
-end
-
-Base.parent(target::NativeTestCompilerTarget) = target.parent
-
-struct NativeTestCompilerJob <: CompositeCompilerJob
-    parent::AbstractCompilerJob
-end
-
-GPUCompiler.runtime_module(target::NativeTestCompilerTarget) = TestRuntime
-
-NativeTestCompilerJob(target::AbstractCompilerTarget, source::FunctionSpec; kwargs...) =
-    NativeTestCompilerJob(NativeCompilerJob(target, source; kwargs...))
-
-Base.similar(job::NativeTestCompilerJob, source::FunctionSpec; kwargs...) =
-    NativeTestCompilerJob(similar(job.parent, source; kwargs...))
-
-Base.parent(job::NativeTestCompilerJob) = job.parent
-
 for method in (:code_typed, :code_warntype, :code_llvm, :code_native)
     # only code_typed doesn't take a io argument
     args = method == :code_typed ? (:job,) : (:io, :job)
@@ -36,10 +14,11 @@ for method in (:code_typed, :code_warntype, :code_llvm, :code_native)
 
     @eval begin
         function $native_method(io::IO, @nospecialize(func), @nospecialize(types);
-                             kernel::Bool=false, kwargs...)
+                                kernel::Bool=false, kwargs...)
             source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
-            target = NativeTestCompilerTarget()
-            job = NativeTestCompilerJob(target, source)
+            target = NativeCompilerTarget()
+            params = TestCompilerParams()
+            job = CompilerJob(target, source, params)
             GPUCompiler.$method($(args...); kwargs...)
         end
         $native_method(@nospecialize(func), @nospecialize(types); kwargs...) =

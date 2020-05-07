@@ -6,6 +6,12 @@ export PTXCompilerTarget
 
 Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     cap::VersionNumber
+
+    # optional properties
+    minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
+    maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
+    blocks_per_sm::Union{Nothing,Int} = nothing
+    maxregs::Union{Nothing,Int} = nothing
 end
 
 llvm_triple(::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
@@ -29,54 +35,27 @@ llvm_datalayout(::PTXCompilerTarget) = Int===Int64 ?
     "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64"*
      "-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64"
 
-runtime_module(target::PTXCompilerTarget) = target.runtime_module
-
-const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
-isintrinsic(target::PTXCompilerTarget, fn::String) = in(fn, ptx_intrinsics)
-
 
 ## job
 
-export PTXCompilerJob
+function Base.show(io::IO, job::CompilerJob{PTXCompilerTarget})
+    print(io, "PTX CompilerJob of ", job.source)
+    print(io, " for sm_$(job.target.cap.major)$(job.target.cap.minor)")
 
-Base.@kwdef struct PTXCompilerJob <: AbstractCompilerJob
-    target::AbstractCompilerTarget
-    source::FunctionSpec
-
-    # optional properties
-    minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
-    maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
-    blocks_per_sm::Union{Nothing,Int} = nothing
-    maxregs::Union{Nothing,Int} = nothing
+    job.target.minthreads !== nothing && print(io, ", minthreads=$(job.target.minthreads)")
+    job.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.target.maxthreads)")
+    job.target.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.target.blocks_per_sm)")
+    job.target.maxregs !== nothing && print(io, ", maxregs=$(job.target.maxregs)")
 end
 
-PTXCompilerJob(target, source; kwargs...) =
-    PTXCompilerJob(; target=target, source=source, kwargs...)
-
-Base.similar(job::PTXCompilerJob, source::FunctionSpec) =
-    PTXCompilerJob(target=job.target, source=source,
-                   minthreads=job.minthreads, maxthreads=job.maxthreads,
-                   blocks_per_sm=job.blocks_per_sm, maxregs=job.maxregs)
-
-function Base.show(io::IO, job::PTXCompilerJob)
-    print(io, "PTX CompilerJob of ", source(job))
-    print(io, " for sm_$(Base.parent(job.target).cap.major)$(Base.parent(job.target).cap.minor)")
-
-    job.minthreads !== nothing && print(io, ", minthreads=$(job.minthreads)")
-    job.maxthreads !== nothing && print(io, ", maxthreads=$(job.maxthreads)")
-    job.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.blocks_per_sm)")
-    job.maxregs !== nothing && print(io, ", maxregs=$(job.maxregs)")
-end
-
-target(job::PTXCompilerJob) = job.target
-
-source(job::PTXCompilerJob) = job.source
+const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
+isintrinsic(::CompilerJob{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsics)
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::PTXCompilerJob) = "ptx-sm_$(Base.parent(job.target).cap.major)$(Base.parent(job.target).cap.minor)"
+runtime_slug(job::CompilerJob{PTXCompilerTarget}) = "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)"
 
-function process_kernel!(job::PTXCompilerJob, mod::LLVM.Module, kernel::LLVM.Function)
+function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     # property annotations
 
     annotations = LLVM.Value[kernel]
@@ -85,40 +64,40 @@ function process_kernel!(job::PTXCompilerJob, mod::LLVM.Module, kernel::LLVM.Fun
     append!(annotations, [MDString("kernel"), ConstantInt(Int32(1), JuliaContext())])
 
     ## expected CTA sizes
-    if job.minthreads != nothing
+    if job.target.minthreads != nothing
         for (dim, name) in enumerate([:x, :y, :z])
-            bound = dim <= length(job.minthreads) ? job.minthreads[dim] : 1
+            bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
             append!(annotations, [MDString("reqntid$name"),
                                   ConstantInt(Int32(bound), JuliaContext())])
         end
     end
-    if job.maxthreads != nothing
+    if job.target.maxthreads != nothing
         for (dim, name) in enumerate([:x, :y, :z])
-            bound = dim <= length(job.maxthreads) ? job.maxthreads[dim] : 1
+            bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
             append!(annotations, [MDString("maxntid$name"),
                                   ConstantInt(Int32(bound), JuliaContext())])
         end
     end
 
-    if job.blocks_per_sm != nothing
+    if job.target.blocks_per_sm != nothing
         append!(annotations, [MDString("minctasm"),
-                              ConstantInt(Int32(job.blocks_per_sm), JuliaContext())])
+                              ConstantInt(Int32(job.target.blocks_per_sm), JuliaContext())])
     end
 
-    if job.maxregs != nothing
+    if job.target.maxregs != nothing
         append!(annotations, [MDString("maxnreg"),
-                              ConstantInt(Int32(job.maxregs), JuliaContext())])
+                              ConstantInt(Int32(job.target.maxregs), JuliaContext())])
     end
 
     push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
 end
 
-function add_lowering_passes!(job::PTXCompilerJob, pm::LLVM.PassManager)
+function add_lowering_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
     add!(pm, ModulePass("HideTrap", hide_trap!))
 end
 
-function add_optimization_passes!(job::PTXCompilerJob, pm::LLVM.PassManager)
+function add_optimization_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.PassManager)
     # NVPTX's target machine info enables runtime unrolling,
     # but Julia's pass sequence only invokes the simple unroller.
     loop_unroll!(pm)
@@ -153,7 +132,7 @@ end
 #       only to prevent introducing non-structureness during optimization (ie. the front-end
 #       is still responsible for generating structured control flow).
 function hide_unreachable!(fun::LLVM.Function)
-    job = current_job::AbstractCompilerJob
+    job = current_job::CompilerJob
     changed = false
     @timeit_debug to "hide unreachable" begin
 
@@ -260,13 +239,13 @@ end
 #
 # if LLVM knows we're trapping, code is marked `unreachable` (see `hide_unreachable!`).
 function hide_trap!(mod::LLVM.Module)
-    job = current_job::AbstractCompilerJob
+    job = current_job::CompilerJob
     changed = false
     @timeit_debug to "hide trap" begin
 
     # inline assembly to exit a thread, hiding control flow from LLVM
     exit_ft = LLVM.FunctionType(LLVM.VoidType(JuliaContext()))
-    exit = if Base.parent(target(job)).cap < v"7"
+    exit = if job.target.cap < v"7"
         # ptxas for old compute capabilities has a bug where it messes up the
         # synchronization stack in the presence of shared memory and thread-divergend exit.
         InlineAsm(exit_ft, "trap;", "", true)

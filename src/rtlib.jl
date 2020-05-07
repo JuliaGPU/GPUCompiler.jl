@@ -95,7 +95,7 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, job::AbstractCompilerJob, f, types, name)
+function emit_function!(mod, job::CompilerJob, f, types, name)
     tt = Base.to_tuple_type(types)
     new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
                              libraries=false, strict=false)
@@ -122,13 +122,13 @@ function emit_function!(mod, job::AbstractCompilerJob, f, types, name)
     LLVM.name!(entry, name)
 end
 
-function build_runtime(job::AbstractCompilerJob)
+function build_runtime(job::CompilerJob)
     mod = LLVM.Module("GPUCompiler run-time library", JuliaContext())
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
-            isdefined(runtime_module(target(job)), method.def) || continue
-            getfield(runtime_module(target(job)), method.def)
+            isdefined(runtime_module(job), method.def) || continue
+            getfield(runtime_module(job), method.def)
         else
             method.def
         end
@@ -138,7 +138,7 @@ function build_runtime(job::AbstractCompilerJob)
     mod
 end
 
-function load_runtime(job::AbstractCompilerJob)
+function load_runtime(job::CompilerJob)
     # find the first existing cache directory (for when dealing with layered depots)
     cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
     filter!(isdir, cachedirs)
