@@ -15,10 +15,6 @@ jobs:
   - os: osx
     julia: nightly
 
-cache:
-    directories:
-     - /home/travis/.julia/
-
 notifications:
   email: false
 
@@ -27,6 +23,3 @@ codecov: true
 branches:
   only:
     - master
-
-before_install:
-  - if [ "$TRAVIS_OS_NAME" = "windows" ]; then choco install python3 --params "PrependPath=1"; fi
