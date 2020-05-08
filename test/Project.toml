@@ -1,6 +1,0 @@
-[deps]
-InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
-LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
-LLVM_jll = "86de99a1-58d6-5da7-8064-bd56ce2e322c"
-Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
