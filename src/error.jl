@@ -3,18 +3,18 @@
 export KernelError, InternalCompilerError
 
 struct KernelError <: Exception
-    job::AbstractCompilerJob
+    job::CompilerJob
     message::String
     help::Union{Nothing,String}
     bt::StackTraces.StackTrace
 
-    KernelError(job::AbstractCompilerJob, message::String, help=nothing;
+    KernelError(job::CompilerJob, message::String, help=nothing;
                 bt=StackTraces.StackTrace()) =
         new(job, message, help, bt)
 end
 
 function Base.showerror(io::IO, err::KernelError)
-    println(io, "GPU compilation of ", source(err.job), " failed")
+    println(io, "GPU compilation of ", err.job.source, " failed")
     println(io, "KernelError: $(err.message)")
     println(io)
     println(io, something(err.help, "Try inspecting the generated code with any of the @device_code_... macros."))
@@ -23,7 +23,7 @@ end
 
 
 struct InternalCompilerError <: Exception
-    job::AbstractCompilerJob
+    job::CompilerJob
     message::String
     meta::Dict
     InternalCompilerError(job, message; kwargs...) = new(job, message, kwargs)

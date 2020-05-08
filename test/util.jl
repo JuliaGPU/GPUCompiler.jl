@@ -43,3 +43,6 @@ module TestRuntime
     # for validation
     sin(x) = Base.sin(x)
 end
+
+struct TestCompilerParams <: AbstractCompilerParams end
+GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
