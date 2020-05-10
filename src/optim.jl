@@ -1,5 +1,11 @@
 # LLVM IR optimization
 
+function add_julia_optimizations!(job::CompilerJob, pm::LLVM.PassManager)
+    ccall(:jl_add_optimization_passes, Cvoid,
+            (LLVM.API.LLVMPassManagerRef, Cint, Cint),
+            LLVM.ref(pm), Base.JLOptions().opt_level, #=lower_intrinsics=# 0)
+end
+
 function optimize!(job::CompilerJob, mod::LLVM.Module, entry::LLVM.Function)
     tm = llvm_machine(job.target)
     entry_fn = LLVM.name(entry)
@@ -19,9 +25,7 @@ function optimize!(job::CompilerJob, mod::LLVM.Module, entry::LLVM.Function)
 
     ModulePassManager() do pm
         initialize!(pm)
-        ccall(:jl_add_optimization_passes, Cvoid,
-                (LLVM.API.LLVMPassManagerRef, Cint, Cint),
-                LLVM.ref(pm), Base.JLOptions().opt_level, #=lower_intrinsics=# 0)
+        add_julia_optimizations!(job, pm)
         run!(pm, mod)
     end
 
