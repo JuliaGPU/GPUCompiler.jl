@@ -57,7 +57,6 @@ runtime_slug(job::CompilerJob{PTXCompilerTarget}) = "ptx-sm_$(job.target.cap.maj
 
 function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     # property annotations
-
     annotations = LLVM.Value[kernel]
 
     ## kernel metadata
@@ -90,6 +89,13 @@ function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, 
     end
 
     push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
+
+
+    # calling convention
+    for fun in functions(mod)
+        callconv!(kernel, LLVM.API.LLVMPTXDeviceCallConv)
+    end
+    callconv!(kernel, LLVM.API.LLVMPTXKernelCallConv)
 end
 
 function add_lowering_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.PassManager)
