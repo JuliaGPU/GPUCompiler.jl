@@ -103,15 +103,15 @@ function codegen(output::Symbol, job::CompilerJob;
             @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
         end
 
-        if optimize
-            kernel = @timeit_debug to "optimization" optimize!(job, ir, kernel)
-        end
-
         if libraries
             undefined_fns = LLVM.name.(decls(ir))
             if any(fn -> fn in runtime_fns, undefined_fns)
                 @timeit_debug to "runtime library" link_library!(ir, runtime)
             end
+        end
+
+        if optimize
+            kernel = @timeit_debug to "optimization" optimize!(job, ir, kernel)
         end
 
         if ccall(:jl_is_debugbuild, Cint, ()) == 1
