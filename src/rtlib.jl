@@ -95,10 +95,13 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, job::CompilerJob, f, types, name)
-    tt = Base.to_tuple_type(types)
+function emit_function!(mod, job::CompilerJob, f, method)
+    tt = Base.to_tuple_type(method.types)
     new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
-                             libraries=false, strict=false)
+                             optimize=false, libraries=false, strict=false)
+    if return_type(eltype(llvmtype(entry))) != method.llvm_return_type
+        error("Invalid return type for runtime function '$(method.name)': expected $(method.llvm_return_type), got $(return_type(eltype(llvmtype(entry))))")
+    end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
     if VERSION >= v"1.5-"
@@ -114,8 +117,10 @@ function emit_function!(mod, job::CompilerJob, f, types, name)
 
     # if a declaration already existed, replace it with the function to avoid aliasing
     # (and getting function names like gpu_signal_exception1)
+    name = method.llvm_name
     if haskey(functions(mod), name)
         decl = functions(mod)[name]
+        @assert llvmtype(decl) == llvmtype(entry)
         replace_uses!(decl, entry)
         unsafe_delete!(mod, decl)
     end
@@ -132,7 +137,7 @@ function build_runtime(job::CompilerJob)
         else
             method.def
         end
-        emit_function!(mod, job, def, method.types, method.llvm_name)
+        emit_function!(mod, job, def, method)
     end
 
     mod
