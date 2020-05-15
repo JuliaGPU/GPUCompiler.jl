@@ -110,6 +110,8 @@ function codegen(output::Symbol, job::CompilerJob;
             end
         end
 
+        finish_module!(job, ir)
+
         if optimize
             kernel = @timeit_debug to "optimization" optimize!(job, ir, kernel)
         end

@@ -122,6 +122,9 @@ process_module!(::CompilerJob, mod::LLVM.Module) = return
 # early processing of the newly identified LLVM kernel function
 process_kernel!(::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return
 
+# late processing of the LLVM IR module, after linking libraries but before optimization
+finish_module!(::CompilerJob, mod::LLVM.Module) = return
+
 add_lowering_passes!(::CompilerJob, pm::LLVM.PassManager) = return
 
 add_optimization_passes!(::CompilerJob, pm::LLVM.PassManager) = return
