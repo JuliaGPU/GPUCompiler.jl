@@ -1,4 +1,5 @@
-using InteractiveUtils, Cthulhu
+using InteractiveUtils, UUIDs
+const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulhu")
 
 
 #
@@ -11,6 +12,10 @@ code_lowered(job::CompilerJob; kwargs...) =
 function code_typed(job::CompilerJob; interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
     if interactive
+        # call Cthulhu without introducing a dependency on Cthulhu
+        mod = get(Base.loaded_modules, Cthulhu, nothing)
+        mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
+        descend_code_typed = getfield(mod, :descend_code_typed)
         descend_code_typed(job.source.f, job.source.tt; kwargs...)
     else
         InteractiveUtils.code_typed(job.source.f, job.source.tt; kwargs...)
@@ -21,6 +26,10 @@ function code_warntype(io::IO, job::CompilerJob; interactive::Bool=false, kwargs
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
     if interactive
         @assert io == stdout
+        # call Cthulhu without introducing a dependency on Cthulhu
+        mod = get(Base.loaded_modules, Cthulhu, nothing)
+        mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
+        descend_code_warntype = getfield(mod, :descend_code_warntype)
         descend_code_warntype(job.source.f, job.source.tt; kwargs...)
     else
         InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; kwargs...)

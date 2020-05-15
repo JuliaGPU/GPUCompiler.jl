@@ -135,7 +135,13 @@ function compile_method_instance(job::CompilerJob, method_instance::Core.MethodI
     llvm_mod = LLVM.Module(llvm_mod_ref)
 
     # get the top-level code
-    code = Core.Compiler.inf_for_methodinstance(method_instance, world, world)
+    code = if VERSION >= v"1.6.0-DEV.12"
+        # TODO: use our own interpreter
+        interpreter = Core.Compiler.NativeInterpreter(world)
+        Core.Compiler.inf_for_methodinstance(interpreter, method_instance, world, world)
+    else
+        Core.Compiler.inf_for_methodinstance(method_instance, world, world)
+    end
 
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)
