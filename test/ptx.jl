@@ -15,8 +15,9 @@ include("definitions/ptx.jl")
     # not a jl_throw referencing a jl_value_t representing the exception
     @test !occursin("jl_throw", ir)
 end
+
 @testset "kernel functions" begin
-@testset "wrapper function aggregate rewriting" begin
+@testset "kernel argument attributes" begin
     kernel(x) = return
 
     @eval struct Aggregate
@@ -31,7 +32,11 @@ end
     end
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}; kernel=true))
-    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\)", ir)
+    if VERSION < v"1.5.0-DEV.802"
+        @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\]) addrspace\(\d+\)?\*.+byval", ir)
+    else
+        @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\*.+byval", ir)
+    end
 end
 
 @testset "property_annotations" begin
