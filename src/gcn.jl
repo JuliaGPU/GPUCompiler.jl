@@ -56,6 +56,7 @@ function lower_throw_extra!(mod::LLVM.Module)
         r"julia___subarray_throw_boundserror.*",
     ]
 
+
     for f in functions(mod)
         f_name = LLVM.name(f)
         for fn in throw_functions
@@ -63,33 +64,16 @@ function lower_throw_extra!(mod::LLVM.Module)
                 for use in uses(f)
                     call = user(use)::LLVM.CallInst
 
-                    # replace the throw with a return
-                    new_insn = nothing
+                    # replace the throw with a trap
                     let builder = Builder(JuliaContext())
                         position!(builder, call)
-                        new_insn = ret!(builder)
+                        emit_exception!(builder, f_name, call)
                         dispose(builder)
                     end
 
-                    # HACK: kill instructions in block at and after the call
-                    bb = LLVM.parent(call)
+                    # remove the call
                     call_args = collect(operands(call))[1:end-1] # last arg is function itself
                     unsafe_delete!(LLVM.parent(call), call)
-                    kill = false
-                    for insn in instructions(bb)
-                        if insn == new_insn
-                            kill = true
-                        elseif kill
-                            if insn isa LLVM.UnreachableInst
-                                break
-                            elseif insn isa LLVM.BrInst
-                                @warn "Killing branch, pass may fail: $insn"
-                            end
-                            unsafe_delete!(bb, insn)
-                        end
-                    end
-
-                    # remove the call
 
                     # HACK: kill the exceptions' unused arguments
                     for arg in call_args
@@ -115,4 +99,32 @@ function lower_throw_extra!(mod::LLVM.Module)
 
     end
     return changed
+end
+
+function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
+    trap = if haskey(functions(mod), "llvm.trap")
+        functions(mod)["llvm.trap"]
+    else
+        LLVM.Function(mod, "llvm.trap", LLVM.FunctionType(LLVM.VoidType(JuliaContext())))
+    end
+    if Base.libllvm_version < v"9"
+        rl_ft = LLVM.FunctionType(LLVM.Int32Type(JuliaContext()),
+                                  [LLVM.Int32Type(JuliaContext())])
+        rl = if haskey(functions(mod), "llvm.amdgcn.readfirstlane")
+            functions(mod)["llvm.amdgcn.readfirstlane"]
+        else
+            LLVM.Function(mod, "llvm.amdgcn.readfirstlane", rl_ft)
+        end
+        # FIXME: Early versions of the AMDGPU target fail to skip machine
+        # blocks with certain side effects when EXEC==0, except when certain
+        # criteria are met within said block. We emit a v_readfirstlane_b32
+        # instruction here, as that is sufficient to trigger a skip. Without
+        # this, the target will only attempt to do a "masked branch", which
+        # only works on vector instructions (trap is a scalar instruction, and
+        # therefore it is executed even when EXEC==0).
+        rl_val = call!(builder, rl, [ConstantInt(Int32(32), JuliaContext())])
+        rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(JuliaContext())))
+        store!(builder, rl_val, rl_bc)
+    end
+    call!(builder, trap)
 end

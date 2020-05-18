@@ -525,6 +525,7 @@ end
 # debug level 1, the exception name will be printed, and on debug level 2 the individual
 # stack frames (as recovered from the LLVM debug information) will be printed as well.
 function emit_exception!(builder, name, inst)
+    job = current_job::CompilerJob
     bb = position(builder)
     fun = LLVM.parent(bb)
     mod = LLVM.parent(fun)
@@ -555,6 +556,10 @@ function emit_exception!(builder, name, inst)
     # signal the exception
     call!(builder, Runtime.get(:signal_exception))
 
+    emit_trap!(job, builder, mod, inst)
+end
+
+function emit_trap!(job::CompilerJob, builder, mod, inst)
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]
     else
