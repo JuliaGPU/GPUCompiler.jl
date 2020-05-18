@@ -21,7 +21,7 @@ if VERSION >= v"1.4"
   Pkg.add(["SPIRV_LLVM_Translator_jll", "SPIRV_Tools_jll"])
   include("spirv.jl")
 end
-#include("gcn.jl")
+include("gcn.jl")
 
 include("examples.jl")
 
