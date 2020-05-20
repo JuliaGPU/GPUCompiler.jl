@@ -23,6 +23,25 @@ end
 
 @testset "assembly" begin
 
+@testset "skip scalar trap" begin
+    workitem_idx_x() = ccall("llvm.amdgcn.workitem.id.x", llvmcall, Int32, Tuple{})
+    trap() = ccall("llvm.trap", llvmcall, Nothing)
+    function kernel()
+        if workitem_idx_x() > 1
+            trap()
+        end
+        return
+    end
+
+    asm = sprint(io->gcn_code_native(io, parent, Tuple{Int64}))
+    print(asm)
+    @test occursin("s_trap 2", asm)
+    @test occursin("s_cbranch_execz", asm)
+    if Base.libllvm_version < v"9"
+        @test occursin("v_readfirstlane", asm)
+    end
+end
+
 @testset "child functions" begin
     # we often test using @noinline child functions, so test whether these survive
     # (despite not having side-effects)
