@@ -50,7 +50,7 @@ The following keyword arguments are supported:
 - `dump_module`: display the entire module instead of just the function
 - `strict`: verify generate code as early as possible
 
-See also: [`@device_code_llvm`](@ref), InteractiveUtils.code_llvm
+See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_llvm(io::IO, job::CompilerJob; optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false, strict::Bool=false)
@@ -75,7 +75,7 @@ The following keyword arguments are supported:
 - `raw`: return the raw code including all metadata
 - `strict`: verify generate code as early as possible
 
-See also: [`@device_code_native`](@ref), InteractiveUtils.code_llvm
+See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, job::CompilerJob; raw::Bool=false, strict::Bool=false)
     asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, strict=strict)
@@ -124,9 +124,9 @@ end
     @device_code_lowered ex
 
 Evaluates the expression `ex` and returns the result of
-InteractiveUtils.code_lowered for every compiled GPU kernel.
+`InteractiveUtils.code_lowered` for every compiled GPU kernel.
 
-See also: InteractiveUtils.@code_lowered
+See also: `InteractiveUtils.@code_lowered`
 """
 macro device_code_lowered(ex...)
     quote
@@ -143,9 +143,9 @@ end
     @device_code_typed ex
 
 Evaluates the expression `ex` and returns the result of
-InteractiveUtils.code_typed for every compiled GPU kernel.
+`InteractiveUtils.code_typed` for every compiled GPU kernel.
 
-See also: InteractiveUtils.@code_typed
+See also: `InteractiveUtils.@code_typed`
 """
 macro device_code_typed(ex...)
     quote
@@ -162,9 +162,9 @@ end
     @device_code_warntype [io::IO=stdout] ex
 
 Evaluates the expression `ex` and prints the result of
-InteractiveUtils.code_warntype to `io` for every compiled GPU kernel.
+`InteractiveUtils.code_warntype` to `io` for every compiled GPU kernel.
 
-See also: InteractiveUtils.@code_warntype
+See also: `InteractiveUtils.@code_warntype`
 """
 macro device_code_warntype(ex...)
     function hook(job::CompilerJob; io::IO=stdout, kwargs...)
