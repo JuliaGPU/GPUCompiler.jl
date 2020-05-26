@@ -583,7 +583,7 @@ function promote_kernel!(job::CompilerJob, mod::LLVM.Module, kernel::LLVM.Functi
     end
 
     # target-specific processing
-    process_kernel!(job, mod, kernel)
+    kernel = process_kernel!(job, mod, kernel)
 
     return kernel
 end
