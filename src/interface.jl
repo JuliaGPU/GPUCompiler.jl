@@ -120,7 +120,7 @@ runtime_slug(::CompilerJob) = error("Not implemented")
 process_module!(::CompilerJob, mod::LLVM.Module) = return
 
 # early processing of the newly identified LLVM kernel function
-process_kernel!(::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return
+process_kernel!(::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return kernel
 
 # late processing of the LLVM IR module, after linking libraries but before optimization
 finish_module!(::CompilerJob, mod::LLVM.Module) = return

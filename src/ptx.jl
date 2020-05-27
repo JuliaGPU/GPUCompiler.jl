@@ -96,6 +96,8 @@ function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, 
         callconv!(kernel, LLVM.API.LLVMPTXDeviceCallConv)
     end
     callconv!(kernel, LLVM.API.LLVMPTXKernelCallConv)
+
+    return kernel
 end
 
 function add_lowering_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.PassManager)
