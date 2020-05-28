@@ -58,6 +58,7 @@
 
         asm_output = native_compile(:asm, undef_gbl, (); strict=false)
         @test length(asm_output[4]) == 1
-        @test asm_output[4][1] == "someglobal"
+        @test asm_output[4][1][1] == "someglobal"
+        @test eltype(asm_output[4][1][2]) isa LLVM.IntegerType
     end
 end

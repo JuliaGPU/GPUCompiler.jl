@@ -208,7 +208,8 @@ function codegen(output::Symbol, job::CompilerJob;
     end
 
     undefined_fns = LLVM.name.(decls(ir))
-    undefined_gbls = LLVM.name.(LLVM.globals(ir))
+    undefined_gbls = map(x->(LLVM.name(x),llvmtype(x)), LLVM.globals(ir))
+
     (output == :asm || output == :obj) && return code, kernel_fn, undefined_fns, undefined_gbls
 
 
