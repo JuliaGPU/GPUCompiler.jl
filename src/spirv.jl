@@ -5,6 +5,7 @@
 # https://github.com/KhronosGroup/SPIRV-LLVM-Translator/blob/master/docs/SPIRVRepresentationInLLVM.rst
 
 using SPIRV_LLVM_Translator_jll
+using SPIRV_Tools_jll
 
 
 ## target
@@ -67,6 +68,27 @@ function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, f::LLVM.
                 read(output_io, String)
             else
                 read(output_io)
+            end
+        end
+    end
+end
+
+# reimplementation that uses `spirv-dis`, giving much more pleasant output
+function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false)
+    obj, _ = codegen(:obj, job; strip=!raw)
+    mktemp() do input_path, input_io
+        write(input_io, obj)
+        flush(input_io)
+
+        spirv_dis() do disassembler
+            if io == stdout
+                run(`$disassembler $input_path`)
+            else
+                mktemp() do output_path, output_io
+                    run(`$disassembler $input_path -o $output_path`)
+                    asm = read(output_io, String)
+                    print(io, asm)
+                end
             end
         end
     end

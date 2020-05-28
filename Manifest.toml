@@ -67,6 +67,12 @@ git-tree-sha1 = "9ff6a3f54f15b678a300d80afef4afc4fb18e8ad"
 uuid = "4a5d46fc-d8cf-5151-a261-86b458210efb"
 version = "9.0.0+1"
 
+[[SPIRV_Tools_jll]]
+deps = ["Libdl", "Pkg"]
+git-tree-sha1 = "f459073ffe7b1247ea784df16b7059ed54bf0734"
+uuid = "6ac6d60f-d740-5983-97d7-a4482c0689f4"
+version = "2020.2.0+1"
+
 [[Serialization]]
 uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 
