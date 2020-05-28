@@ -4,8 +4,8 @@
 # https://github.com/KhronosGroup/LLVM-SPIRV-Backend/blob/master/llvm/docs/SPIR-V-Backend.rst
 # https://github.com/KhronosGroup/SPIRV-LLVM-Translator/blob/master/docs/SPIRVRepresentationInLLVM.rst
 
-using SPIRV_LLVM_Translator_jll
-using SPIRV_Tools_jll
+const SPIRV_LLVM_Translator_jll = LazyModule("SPIRV_LLVM_Translator_jll", UUID("4a5d46fc-d8cf-5151-a261-86b458210efb"))
+const SPIRV_Tools_jll = LazyModule("SPIRV_Tools_jll", UUID("6ac6d60f-d740-5983-97d7-a4482c0689f4"))
 
 
 ## target
@@ -54,7 +54,7 @@ function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, f::LLVM.
 
         # compile to SPIR-V
         mktemp() do output, output_io
-            llvm_spirv() do translator
+            SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
                 cmd = `$translator`
                 if format == LLVM.API.LLVMAssemblyFile
                     cmd = `$cmd -spirv-text`
@@ -80,7 +80,7 @@ function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=fa
         write(input_io, obj)
         flush(input_io)
 
-        spirv_dis() do disassembler
+        SPIRV_Tools_jll.spirv_dis() do disassembler
             if io == stdout
                 run(`$disassembler $input_path`)
             else
