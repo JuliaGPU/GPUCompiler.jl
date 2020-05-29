@@ -100,7 +100,8 @@ function codegen(output::Symbol, job::CompilerJob;
         # target-specific libraries
         if libraries
             undefined_fns = LLVM.name.(decls(ir))
-            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
+            undefined_gbls = map(x->(name=LLVM.name(x),type=llvmtype(x),external=isextinit(x)), LLVM.globals(ir))
+            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns, undefined_gbls)
         end
 
         if libraries
@@ -208,7 +209,7 @@ function codegen(output::Symbol, job::CompilerJob;
     end
 
     undefined_fns = LLVM.name.(decls(ir))
-    undefined_gbls = map(x->(LLVM.name(x),llvmtype(x),isextinit(x)), LLVM.globals(ir))
+    undefined_gbls = map(x->(name=LLVM.name(x),type=llvmtype(x),external=isextinit(x)), LLVM.globals(ir))
 
     (output == :asm || output == :obj) && return code, kernel_fn, undefined_fns, undefined_gbls
 

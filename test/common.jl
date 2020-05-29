@@ -60,12 +60,11 @@
 
         asm_output = native_compile(:asm, undef_gbl, (); strict=false)
         @test length(asm_output[4]) == 2
-        @test length(asm_output[4][1]) == 3
-        @test asm_output[4][1][1] == "someglobal"
-        @test eltype(asm_output[4][1][2]) isa LLVM.IntegerType
-        @test asm_output[4][1][3]
-        @test asm_output[4][2][1] == "otherglobal"
-        @test eltype(asm_output[4][2][2]) isa LLVM.LLVMFloat
-        @test !asm_output[4][2][3]
+        @test asm_output[4][1].name == "someglobal"
+        @test eltype(asm_output[4][1].type) isa LLVM.IntegerType
+        @test asm_output[4][1].external
+        @test asm_output[4][2].name == "otherglobal"
+        @test eltype(asm_output[4][2].type) isa LLVM.LLVMFloat
+        @test !asm_output[4][2].external
     end
 end

@@ -129,4 +129,4 @@ add_lowering_passes!(::CompilerJob, pm::LLVM.PassManager) = return
 
 add_optimization_passes!(::CompilerJob, pm::LLVM.PassManager) = return
 
-link_libraries!(::CompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) = return
+link_libraries!(::CompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}, undefined_gbls::Vector{<:NamedTuple}) = return
