@@ -35,13 +35,13 @@
     end
 
     @testset "Undefined Globals" begin
-        @generated function makegbl()
-            T = Int64
+        @generated function makegbl(::Val{name}, ::Type{T}, ::Val{isext}) where {name,T,isext}
             T_gbl = convert(LLVMType, T)
             T_ptr = convert(LLVMType, Ptr{T})
             llvm_f, _ = create_function(T_ptr)
             mod = LLVM.parent(llvm_f)
-            gvar = GlobalVariable(mod, T_gbl, "someglobal")
+            gvar = GlobalVariable(mod, T_gbl, string(name))
+            isext && extinit!(gvar, true)
             Builder(JuliaContext()) do builder
                 entry = BasicBlock(llvm_f, "entry", JuliaContext())
                 position!(builder, entry)
@@ -51,14 +51,21 @@
             call_function(llvm_f, Ptr{T})
         end
         function undef_gbl()
-            ptr = makegbl()
-            Base.unsafe_store!(ptr, 1)
+            ext_ptr = makegbl(Val(:someglobal), Int64, Val(true))
+            Base.unsafe_store!(ext_ptr, 1)
+            ptr = makegbl(Val(:otherglobal), Float32, Val(false))
+            Base.unsafe_store!(ptr, 2f0)
             nothing
         end
 
         asm_output = native_compile(:asm, undef_gbl, (); strict=false)
-        @test length(asm_output[4]) == 1
+        @test length(asm_output[4]) == 2
+        @test length(asm_output[4][1]) == 3
         @test asm_output[4][1][1] == "someglobal"
         @test eltype(asm_output[4][1][2]) isa LLVM.IntegerType
+        @test asm_output[4][1][3]
+        @test asm_output[4][2][1] == "otherglobal"
+        @test eltype(asm_output[4][2][2]) isa LLVM.LLVMFloat
+        @test !asm_output[4][2][3]
     end
 end
