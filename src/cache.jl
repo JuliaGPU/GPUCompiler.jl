@@ -53,7 +53,7 @@ specialization_counter = 0
     new_ci = copy(ci)
     empty!(new_ci.code)
     empty!(new_ci.codelocs)
-    empty!(new_ci.linetable)
+    resize!(new_ci.linetable, 1)    # codegen assumes at least one entry on <1.5
     empty!(new_ci.ssaflags)
     new_ci.ssavaluetypes = 0
     new_ci.edges = MethodInstance[mi]
