@@ -17,25 +17,28 @@ asserts:1.4:
 # TODO: add 1.5.0 once it has LLVM+asserts artifacts
 
 
-# CUDAnative.jl
+# CUDA.jl
 
-.test_cudanative:
+.test_cuda:
   extends: .test
   variables:
+    JULIA_NUM_THREADS: '2'
+    CI_APT_INSTALL: 'libgomp1'
     NVIDIA_VISIBLE_DEVICES: 'all'
-    NVIDIA_DRIVER_CAPABILITIES: 'all'
+    NVIDIA_DRIVER_CAPABILITIES: 'compute,utility'
+    JULIA_CUDA_USE_BINARYBUILDER: 'false' # reduce CI network traffic
   script:
     - julia -e 'using Pkg;
                 Pkg.develop(PackageSpec(path=pwd()));
                 Pkg.build();'
     - julia -e 'using Pkg;
-                Pkg.add(PackageSpec(name="CUDAnative", rev="master"));
-                Pkg.test("CUDAnative");'
+                Pkg.add(PackageSpec(name="CUDA", rev="master"));
+                Pkg.test("CUDA");'
 
-cudanative:1.4:
+cuda:1.4:
   extends:
     - .julia:1.4
-    - .test_cudanative
+    - .test_cuda
   tags:
     - nvidia
 
