@@ -195,11 +195,13 @@ function codegen(output::Symbol, job::CompilerJob;
         unsafe_delete!(ir, dyn_marker)
     end
 
-    if strip
-        @timeit_debug to "strip debug info" strip_debuginfo!(ir)
-    end
+    if output == :llvm
+        if strip
+            @timeit_debug to "strip debug info" strip_debuginfo!(ir)
+        end
 
-    output == :llvm && return ir, kernel
+        return ir, kernel
+    end
 
 
     ## machine code
@@ -209,6 +211,11 @@ function codegen(output::Symbol, job::CompilerJob;
     @timeit_debug to "validation" begin
         check_invocation(job, kernel)
         check_ir(job, ir)
+    end
+
+    # NOTE: strip after validation to get better errors
+    if strip
+        @timeit_debug to "strip debug info" strip_debuginfo!(ir)
     end
 
     @timeit_debug to "LLVM back-end" begin
