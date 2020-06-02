@@ -103,8 +103,6 @@ function codegen(output::Symbol, job::CompilerJob;
             @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
         end
 
-        finish_module!(job, ir)
-
         if optimize
             @timeit_debug to "optimization" optimize!(job, ir)
 
@@ -205,6 +203,8 @@ function codegen(output::Symbol, job::CompilerJob;
 
 
     ## machine code
+
+    finish_module!(job, ir)
 
     @timeit_debug to "validation" begin
         check_invocation(job, kernel)
