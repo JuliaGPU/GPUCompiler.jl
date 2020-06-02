@@ -170,4 +170,9 @@ function reset_runtime()
     # create an empty cache directory. since we only ever load from the first existing cachedir,
     # this effectively invalidates preexisting caches in lower layers of the depot.
     mkpath(cachedir())
+
+    # wipe the cache so we can use this function at run-time too
+    empty!(libcache)
+
+    return
 end
