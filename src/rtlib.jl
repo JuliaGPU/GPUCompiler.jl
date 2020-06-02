@@ -117,6 +117,8 @@ function build_runtime(job::CompilerJob)
         emit_function!(mod, job, def, method)
     end
 
+    optimize!(job, mod)
+
     mod
 end
 
