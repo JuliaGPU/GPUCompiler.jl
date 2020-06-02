@@ -75,7 +75,7 @@ end
 function emit_function!(mod, job::CompilerJob, f, method)
     tt = Base.to_tuple_type(method.types)
     new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
-                             optimize=false, libraries=false, strict=false)
+                             optimize=false, libraries=false)
     if return_type(eltype(llvmtype(entry))) != method.llvm_return_type
         error("Invalid return type for runtime function '$(method.name)': expected $(method.llvm_return_type), got $(return_type(eltype(llvmtype(entry))))")
     end

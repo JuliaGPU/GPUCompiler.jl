@@ -167,33 +167,33 @@ end
     foobar(i) = (sink(unsafe_trunc(Int,i)); return)
 
     @test_throws_message(KernelError,
-                         native_code_llvm(foobar, Tuple{BigInt}; strict=true)) do msg
+                         native_code_native(foobar, Tuple{BigInt})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("BigInt", msg)
     end
 
     # test that we can handle abstract types
     @test_throws_message(KernelError,
-                         native_code_llvm(foobar, Tuple{Any}; strict=true)) do msg
+                         native_code_native(foobar, Tuple{Any})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("Any", msg)
     end
 
     @test_throws_message(KernelError,
-                         native_code_llvm(foobar, Tuple{Union{Int32, Int64}}; strict=true)) do msg
+                         native_code_native(foobar, Tuple{Union{Int32, Int64}})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("Union{Int32, Int64}", msg)
     end
 
     @test_throws_message(KernelError,
-                         native_code_llvm(foobar, Tuple{Union{Int32, Int64}}; strict=true)) do msg
+                         native_code_native(foobar, Tuple{Union{Int32, Int64}})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("Union{Int32, Int64}", msg)
     end
 
     # test that we get information about fields and reason why something is not isbits
     @test_throws_message(KernelError,
-                         native_code_llvm(foobar, Tuple{CleverType{BigInt}}; strict=true)) do msg
+                         native_code_native(foobar, Tuple{CleverType{BigInt}})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("CleverType", msg) &&
         occursin("BigInt", msg)
@@ -204,7 +204,7 @@ end
     foobar(i) = println(i)
 
     @test_throws_message(InvalidIRError,
-                         native_code_llvm(foobar, Tuple{Int}; strict=true)) do msg
+                         native_code_native(foobar, Tuple{Int})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.RUNTIME_FUNCTION, msg) &&
         occursin("[1] println", msg) &&
@@ -216,7 +216,7 @@ end
     foobar(p) = (unsafe_store!(p, ccall(:time, Cint, ())); nothing)
 
     @test_throws_message(InvalidIRError,
-                         native_code_llvm(foobar, Tuple{Ptr{Int}}; strict=true)) do msg
+                         native_code_native(foobar, Tuple{Ptr{Int}})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
         occursin(r"\[1\] .+foobar", msg)
@@ -227,7 +227,7 @@ end
     kernel() = (undefined; return)
 
     @test_throws_message(InvalidIRError,
-                         native_code_llvm(kernel, Tuple{}; strict=true)) do msg
+                         native_code_native(kernel, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DELAYED_BINDING, msg) &&
         occursin("use of 'undefined'", msg) &&
@@ -240,7 +240,7 @@ end
     kernel(a, b) = (unsafe_store!(b, nospecialize_child(a)); return)
 
     @test_throws_message(InvalidIRError,
-                         native_code_llvm(kernel, Tuple{Int,Ptr{Int}}; strict=true)) do msg
+                         native_code_native(kernel, Tuple{Int,Ptr{Int}})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to nospecialize_child", msg) &&
@@ -252,7 +252,7 @@ end
     func() = pointer(1)
 
     @test_throws_message(InvalidIRError,
-                         native_code_llvm(func, Tuple{}; strict=true)) do msg
+                         native_code_native(func, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to pointer", msg) &&

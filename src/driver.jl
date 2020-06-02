@@ -11,7 +11,7 @@ const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 """
     compile(target::Symbol, job::CompilerJob;
             libraries=true, deferred_codegen=true,
-            optimize=true, strip=false, strict=true, ...)
+            optimize=true, strip=false, ...)
 
 Compile a function `f` invoked with types `tt` for device capability `cap` to one of the
 following formats as specified by the `target` argument: `:julia` for Julia IR, `:llvm` for
@@ -22,20 +22,19 @@ The following keyword arguments are supported:
 - `deferred_codegen`: resolve deferred compiler invocations (if required)
 - `optimize`: optimize the code (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
-- `strict`: perform code validation either as early or as late as possible
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
 function compile(target::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true,
-                 optimize::Bool=true, strip::Bool=false, strict::Bool=true)
+                 optimize::Bool=true, strip::Bool=false)
     if compile_hook[] != nothing
         compile_hook[](job)
     end
 
     return codegen(target, job;
                    libraries=libraries, deferred_codegen=deferred_codegen,
-                   optimize=optimize, strip=strip, strict=strict)
+                   optimize=optimize, strip=strip)
 end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
@@ -54,7 +53,7 @@ end
 
 function codegen(output::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                 strip::Bool=false, strict::Bool=true)
+                 strip::Bool=false)
     ## Julia IR
 
     @timeit_debug to "validation" check_method(job)
@@ -172,7 +171,7 @@ function codegen(output::Symbol, job::CompilerJob;
                 dyn_kernel_fn = get!(cache, dyn_job) do
                     dyn_ir, dyn_kernel = codegen(:llvm, dyn_job;
                                                  optimize=optimize, strip=strip,
-                                                 deferred_codegen=false, strict=false)
+                                                 deferred_codegen=false)
                     dyn_kernel_fn = LLVM.name(dyn_kernel)
                     link!(ir, dyn_ir)
                     changed = true
@@ -198,14 +197,6 @@ function codegen(output::Symbol, job::CompilerJob;
         unsafe_delete!(ir, dyn_marker)
     end
 
-    if strict
-        # NOTE: keep in sync with non-strict check below
-        @timeit_debug to "validation" begin
-            check_invocation(job, kernel)
-            check_ir(job, ir)
-        end
-    end
-
     if strip
         @timeit_debug to "strip debug info" strip_debuginfo!(ir)
     end
@@ -214,6 +205,11 @@ function codegen(output::Symbol, job::CompilerJob;
 
 
     ## machine code
+
+    @timeit_debug to "validation" begin
+        check_invocation(job, kernel)
+        check_ir(job, ir)
+    end
 
     @timeit_debug to "LLVM back-end" begin
         @timeit_debug to "preparation" prepare_execution!(job, ir)
