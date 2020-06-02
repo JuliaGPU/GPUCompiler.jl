@@ -5,31 +5,8 @@ function link_library!(mod::LLVM.Module, libs::Vector{LLVM.Module})
     # linking is destructive, so copy the libraries
     libs = [LLVM.Module(lib) for lib in libs]
 
-    # save list of external functions
-    exports = String[]
-    for f in functions(mod)
-        fn = LLVM.name(f)
-        for lib in libs
-            if !haskey(functions(lib), fn)
-                push!(exports, fn)
-            end
-        end
-    end
-
     for lib in libs
         link!(mod, lib)
-    end
-
-    ModulePassManager() do pm
-        # internalize all functions that aren't exports
-        internalize!(pm, exports)
-
-        # eliminate all unused internal functions
-        global_optimizer!(pm)
-        global_dce!(pm)
-        strip_dead_prototypes!(pm)
-
-        run!(pm, mod)
     end
 end
 

@@ -124,6 +124,21 @@ function codegen(output::Symbol, job::CompilerJob;
             @timeit_debug to "verification" verify(ir)
         end
 
+        # strip everything except for the kernel
+        @timeit_debug to "clean-up" begin
+            exports = String[kernel_fn]
+            ModulePassManager() do pm
+                # internalize all functions that aren't exports
+                internalize!(pm, exports)
+
+                # eliminate all unused internal functions
+                global_optimizer!(pm)
+                global_dce!(pm)
+                strip_dead_prototypes!(pm)
+
+                run!(pm, ir)
+            end
+        end
     end
 
     # deferred code generation
