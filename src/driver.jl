@@ -96,6 +96,7 @@ function codegen(output::Symbol, job::CompilerJob;
 
     @timeit_debug to "LLVM middle-end" begin
         ir, kernel = @timeit_debug to "IR generation" irgen(job, method_instance, world)
+        kernel_fn = LLVM.name(kernel)
 
         # target-specific libraries
         if libraries
@@ -113,14 +114,16 @@ function codegen(output::Symbol, job::CompilerJob;
         finish_module!(job, ir)
 
         if optimize
-            kernel = @timeit_debug to "optimization" optimize!(job, ir, kernel)
+            @timeit_debug to "optimization" optimize!(job, ir)
+
+            # optimization may have replaced functions, so look the entry point up again
+            kernel = functions(ir)[kernel_fn]
         end
 
         if ccall(:jl_is_debugbuild, Cint, ()) == 1
             @timeit_debug to "verification" verify(ir)
         end
 
-        kernel_fn = LLVM.name(kernel)
     end
 
     # deferred code generation
