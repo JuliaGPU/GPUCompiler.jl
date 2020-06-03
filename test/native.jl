@@ -9,8 +9,8 @@ include("definitions/native.jl")
 
     output = native_code_execution(kernel, (); validate=false)
     @test occursin("kernel", output[2])
-    @test length(output[3]) == 0
-    @test length(output[4]) == 0
+    @test isempty(output[3])
+    @test isempty(output[4])
 
     @testset "Undefined Functions" begin
         function undef_fn()
