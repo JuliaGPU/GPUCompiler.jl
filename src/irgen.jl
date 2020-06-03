@@ -332,20 +332,33 @@ function irgen(job::CompilerJob, method_instance::Core.MethodInstance, world)
     entry, mod = @timeit_debug to "emission" compile_method_instance(job, method_instance, world)
 
     # clean up incompatibilities
-    @timeit_debug to "clean-up" for llvmf in functions(mod)
-        # only occurs in debug builds
-        delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0, JuliaContext()))
+    @timeit_debug to "clean-up" begin
+        for llvmf in functions(mod)
+            # only occurs in debug builds
+            delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0, JuliaContext()))
 
-        if VERSION < v"1.5.0-DEV.393"
-            # make function names safe for ptxas
-            llvmfn = LLVM.name(llvmf)
-            if !isdeclaration(llvmf)
-                llvmfn′ = safe_name(llvmfn)
-                if llvmfn != llvmfn′
-                    LLVM.name!(llvmf, llvmfn′)
-                    llvmfn = llvmfn′
+            if VERSION < v"1.5.0-DEV.393"
+                # make function names safe for ptxas
+                llvmfn = LLVM.name(llvmf)
+                if !isdeclaration(llvmf)
+                    llvmfn′ = safe_name(llvmfn)
+                    if llvmfn != llvmfn′
+                        LLVM.name!(llvmf, llvmfn′)
+                        llvmfn = llvmfn′
+                    end
                 end
             end
+
+            if Sys.iswindows()
+                personality!(llvmf, nothing)
+            end
+        end
+
+        # remove the exception-handling personality function
+        if Sys.iswindows() && "__julia_personality" in functions(mod)
+            llvmf = functions(mod)["__julia_personality"]
+            @compiler_assert isempty(uses(llvmf)) job
+            unsafe_delete!(mod, llvmf)
         end
     end
 

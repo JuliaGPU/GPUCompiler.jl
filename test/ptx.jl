@@ -74,7 +74,7 @@ end
     @test occursin("maxnreg\", i32 42", ir)
 end
 
-@testset "calling convention" begin
+LLVM.version() >= v"8" && @testset "calling convention" begin
     kernel() = return
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}; dump_module=true))
