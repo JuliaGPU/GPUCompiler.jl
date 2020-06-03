@@ -45,6 +45,7 @@ function __init__()
     InitializeAllTargets()
     InitializeAllTargetInfos()
     InitializeAllAsmPrinters()
+    InitializeAllAsmParsers()
     InitializeAllTargetMCs()
 
     return
