@@ -54,7 +54,7 @@ See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 function code_llvm(io::IO, job::CompilerJob; optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
-    ir, entry = GPUCompiler.codegen(:llvm, job; optimize=optimize, strip=false)
+    ir, entry = GPUCompiler.codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
     str = ccall(:jl_dump_function_ir, Ref{String},
                 (Ptr{Cvoid}, Bool, Bool, Ptr{UInt8}),
                 LLVM.ref(entry), !raw, dump_module, debuginfo)
@@ -76,7 +76,7 @@ The following keyword arguments are supported:
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, job::CompilerJob; raw::Bool=false)
-    asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw)
+    asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, validate=false)
     print(io, asm)
 end
 code_native(job::CompilerJob; kwargs...) =

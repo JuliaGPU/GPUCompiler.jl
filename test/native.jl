@@ -4,6 +4,62 @@ include("definitions/native.jl")
 
 ############################################################################################
 
+@testset "Compilation" begin
+    kernel() = nothing
+
+    output = native_code_execution(kernel, (); validate=false)
+    @test occursin("kernel", output[2])
+    @test length(output[3]) == 0
+    @test length(output[4]) == 0
+
+    @testset "Undefined Functions" begin
+        function undef_fn()
+            ccall("extern somefunc", llvmcall, Cvoid, ())
+            nothing
+        end
+
+        output = native_code_execution(undef_fn, (); validate=false)
+        @test length(output[3]) == 1
+        @test output[3][1] == "somefunc"
+    end
+
+    @testset "Undefined Globals" begin
+        @generated function makegbl(::Val{name}, ::Type{T}, ::Val{isext}) where {name,T,isext}
+            T_gbl = convert(LLVMType, T)
+            T_ptr = convert(LLVMType, Ptr{T})
+            llvm_f, _ = create_function(T_ptr)
+            mod = LLVM.parent(llvm_f)
+            gvar = GlobalVariable(mod, T_gbl, string(name))
+            isext && extinit!(gvar, true)
+            Builder(JuliaContext()) do builder
+                entry = BasicBlock(llvm_f, "entry", JuliaContext())
+                position!(builder, entry)
+                result = ptrtoint!(builder, gvar, T_ptr)
+                ret!(builder, result)
+            end
+            call_function(llvm_f, Ptr{T})
+        end
+        function undef_gbl()
+            ext_ptr = makegbl(Val(:someglobal), Int64, Val(true))
+            Base.unsafe_store!(ext_ptr, 1)
+            ptr = makegbl(Val(:otherglobal), Float32, Val(false))
+            Base.unsafe_store!(ptr, 2f0)
+            nothing
+        end
+
+        output = native_code_execution(undef_gbl, ())
+        @test length(output[4]) == 2
+        @test output[4][1].name == "someglobal"
+        @test eltype(output[4][1].type) isa LLVM.IntegerType
+        @test output[4][1].external
+        @test output[4][2].name == "otherglobal"
+        @test eltype(output[4][2].type) isa LLVM.LLVMFloat
+        @test !output[4][2].external
+    end
+end
+
+############################################################################################
+
 @testset "IR" begin
 
 @testset "basic reflection" begin
@@ -167,33 +223,33 @@ end
     foobar(i) = (sink(unsafe_trunc(Int,i)); return)
 
     @test_throws_message(KernelError,
-                         native_code_native(foobar, Tuple{BigInt})) do msg
+                         native_code_execution(foobar, Tuple{BigInt})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("BigInt", msg)
     end
 
     # test that we can handle abstract types
     @test_throws_message(KernelError,
-                         native_code_native(foobar, Tuple{Any})) do msg
+                         native_code_execution(foobar, Tuple{Any})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("Any", msg)
     end
 
     @test_throws_message(KernelError,
-                         native_code_native(foobar, Tuple{Union{Int32, Int64}})) do msg
+                         native_code_execution(foobar, Tuple{Union{Int32, Int64}})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("Union{Int32, Int64}", msg)
     end
 
     @test_throws_message(KernelError,
-                         native_code_native(foobar, Tuple{Union{Int32, Int64}})) do msg
+                         native_code_execution(foobar, Tuple{Union{Int32, Int64}})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("Union{Int32, Int64}", msg)
     end
 
     # test that we get information about fields and reason why something is not isbits
     @test_throws_message(KernelError,
-                         native_code_native(foobar, Tuple{CleverType{BigInt}})) do msg
+                         native_code_execution(foobar, Tuple{CleverType{BigInt}})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("CleverType", msg) &&
         occursin("BigInt", msg)
@@ -204,7 +260,7 @@ end
     foobar(i) = println(i)
 
     @test_throws_message(InvalidIRError,
-                         native_code_native(foobar, Tuple{Int})) do msg
+                         native_code_execution(foobar, Tuple{Int})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.RUNTIME_FUNCTION, msg) &&
         occursin("[1] println", msg) &&
@@ -216,7 +272,7 @@ end
     foobar(p) = (unsafe_store!(p, ccall(:time, Cint, ())); nothing)
 
     @test_throws_message(InvalidIRError,
-                         native_code_native(foobar, Tuple{Ptr{Int}})) do msg
+                         native_code_execution(foobar, Tuple{Ptr{Int}})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
         occursin(r"\[1\] .+foobar", msg)
@@ -227,7 +283,7 @@ end
     kernel() = (undefined; return)
 
     @test_throws_message(InvalidIRError,
-                         native_code_native(kernel, Tuple{})) do msg
+                         native_code_execution(kernel, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DELAYED_BINDING, msg) &&
         occursin("use of 'undefined'", msg) &&
@@ -240,7 +296,7 @@ end
     kernel(a, b) = (unsafe_store!(b, nospecialize_child(a)); return)
 
     @test_throws_message(InvalidIRError,
-                         native_code_native(kernel, Tuple{Int,Ptr{Int}})) do msg
+                         native_code_execution(kernel, Tuple{Int,Ptr{Int}})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to nospecialize_child", msg) &&
@@ -249,14 +305,14 @@ end
 end
 
 @testset "dynamic call (apply)" begin
-    func() = pointer(1)
+    func() = println(1)
 
     @test_throws_message(InvalidIRError,
-                         native_code_native(func, Tuple{})) do msg
+                         native_code_execution(func, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
-        occursin("call to pointer", msg) &&
-        occursin("[1] func", msg)
+        occursin("call to println", msg) &&
+        occursin("[2] func", msg)
     end
 end
 

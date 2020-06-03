@@ -22,19 +22,20 @@ The following keyword arguments are supported:
 - `deferred_codegen`: resolve deferred compiler invocations (if required)
 - `optimize`: optimize the code (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
+- `validate`: validate the generated IR before emitting machine code (default: true)
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
 function compile(target::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true,
-                 optimize::Bool=true, strip::Bool=false)
+                 optimize::Bool=true, strip::Bool=false, validate::Bool=true)
     if compile_hook[] != nothing
         compile_hook[](job)
     end
 
     return codegen(target, job;
                    libraries=libraries, deferred_codegen=deferred_codegen,
-                   optimize=optimize, strip=strip)
+                   optimize=optimize, strip=strip, validate=validate)
 end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
@@ -53,7 +54,7 @@ end
 
 function codegen(output::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                 strip::Bool=false)
+                 strip::Bool=false, validate::Bool=true)
     ## Julia IR
 
     @timeit_debug to "validation" check_method(job)
@@ -121,7 +122,7 @@ function codegen(output::Symbol, job::CompilerJob;
             @timeit_debug to "verification" verify(ir)
         end
 
-        # strip everything except for the kernel
+        # remove everything except for the kernel
         @timeit_debug to "clean-up" begin
             exports = String[kernel_fn]
             ModulePassManager() do pm
@@ -167,8 +168,8 @@ function codegen(output::Symbol, job::CompilerJob;
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_kernel_fn = get!(cache, dyn_job) do
-                    dyn_ir, dyn_kernel = codegen(:llvm, dyn_job;
-                                                 optimize=optimize, strip=strip,
+                    dyn_ir, dyn_kernel = codegen(:llvm, dyn_job; optimize=optimize,
+                                                 strip=strip, validate=validate,
                                                  deferred_codegen=false)
                     dyn_kernel_fn = LLVM.name(dyn_kernel)
                     link!(ir, dyn_ir)
@@ -208,9 +209,11 @@ function codegen(output::Symbol, job::CompilerJob;
 
     finish_module!(job, ir)
 
-    @timeit_debug to "validation" begin
-        check_invocation(job, kernel)
-        check_ir(job, ir)
+    if validate
+        @timeit_debug to "validation" begin
+            check_invocation(job, kernel)
+            check_ir(job, ir)
+        end
     end
 
     # NOTE: strip after validation to get better errors

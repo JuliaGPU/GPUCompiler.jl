@@ -54,23 +54,23 @@ end
     @test !occursin("maxnreg", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
-                                         dump_module=true, kernel=true, maxthreads=42))
+                                  dump_module=true, kernel=true, maxthreads=42))
     @test occursin("maxntidx\", i32 42", ir)
     @test occursin("maxntidy\", i32 1", ir)
     @test occursin("maxntidz\", i32 1", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
-                                         dump_module=true, kernel=true, minthreads=42))
+                                  dump_module=true, kernel=true, minthreads=42))
     @test occursin("reqntidx\", i32 42", ir)
     @test occursin("reqntidy\", i32 1", ir)
     @test occursin("reqntidz\", i32 1", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
-                                         dump_module=true, kernel=true, blocks_per_sm=42))
+                                  dump_module=true, kernel=true, blocks_per_sm=42))
     @test occursin("minctasm\", i32 42", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
-                                         dump_module=true, kernel=true, maxregs=42))
+                                  dump_module=true, kernel=true, maxregs=42))
     @test occursin("maxnreg\", i32 42", ir)
 end
 
@@ -81,7 +81,7 @@ end
     @test !occursin("ptx_kernel", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
-                                         dump_module=true, kernel=true))
+                                  dump_module=true, kernel=true))
     @test occursin("ptx_kernel", ir)
 end
 end
