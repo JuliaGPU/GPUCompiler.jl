@@ -91,11 +91,13 @@ function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, 
     push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
 
 
-    # calling convention
-    for fun in functions(mod)
-        callconv!(kernel, LLVM.API.LLVMPTXDeviceCallConv)
+    if LLVM.version() >= v"8"
+        # calling convention
+        for fun in functions(mod)
+            callconv!(kernel, LLVM.API.LLVMPTXDeviceCallConv)
+        end
+        callconv!(kernel, LLVM.API.LLVMPTXKernelCallConv)
     end
-    callconv!(kernel, LLVM.API.LLVMPTXKernelCallConv)
 
     return kernel
 end
