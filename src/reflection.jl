@@ -38,7 +38,7 @@ end
 code_warntype(job::CompilerJob; kwargs...) = code_warntype(stdout, job; kwargs...)
 
 """
-    code_llvm([io], job; optimize=true, raw=false, dump_module=false, strict=false)
+    code_llvm([io], job; optimize=true, raw=false, dump_module=false)
 
 Prints the device LLVM IR generated for the given compiler job to `io` (default `stdout`).
 
@@ -48,14 +48,13 @@ The following keyword arguments are supported:
   optimizations if `kernel` is true
 - `raw`: return the raw IR including all metadata
 - `dump_module`: display the entire module instead of just the function
-- `strict`: verify generate code as early as possible
 
 See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_llvm(io::IO, job::CompilerJob; optimize::Bool=true, raw::Bool=false,
-                   debuginfo::Symbol=:default, dump_module::Bool=false, strict::Bool=false)
+                   debuginfo::Symbol=:default, dump_module::Bool=false)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
-    ir, entry = GPUCompiler.codegen(:llvm, job; optimize=optimize, strip=false, strict=strict)
+    ir, entry = GPUCompiler.codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
     str = ccall(:jl_dump_function_ir, Ref{String},
                 (Ptr{Cvoid}, Bool, Bool, Ptr{UInt8}),
                 LLVM.ref(entry), !raw, dump_module, debuginfo)
@@ -64,7 +63,7 @@ end
 code_llvm(job::CompilerJob; kwargs...) = code_llvm(stdout, job; kwargs...)
 
 """
-    code_native([io], f, types; cap::VersionNumber, kernel=false, raw=false, strict=false)
+    code_native([io], f, types; cap::VersionNumber, kernel=false, raw=false)
 
 Prints the native assembly generated for the given compiler job to `io` (default `stdout`).
 
@@ -73,12 +72,11 @@ The following keyword arguments are supported:
 - `cap` which device to generate code for
 - `kernel`: treat the function as an entry-point kernel
 - `raw`: return the raw code including all metadata
-- `strict`: verify generate code as early as possible
 
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_native(io::IO, job::CompilerJob; raw::Bool=false, strict::Bool=false)
-    asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, strict=strict)
+function code_native(io::IO, job::CompilerJob; raw::Bool=false)
+    asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, validate=false)
     print(io, asm)
 end
 code_native(job::CompilerJob; kwargs...) =

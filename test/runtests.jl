@@ -13,7 +13,6 @@ GPUCompiler.reset_runtime()
 
 GPUCompiler.enable_timings()
 
-include("common.jl")
 include("native.jl")
 include("ptx.jl")
 if !parse(Bool, get(ENV, "CI_ASSERTS", "false")) && VERSION < v"1.4"

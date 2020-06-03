@@ -1,8 +1,7 @@
 # LLVM IR optimization
 
-function optimize!(job::CompilerJob, mod::LLVM.Module, entry::LLVM.Function)
+function optimize!(job::CompilerJob, mod::LLVM.Module)
     tm = llvm_machine(job.target)
-    entry_fn = LLVM.name(entry)
 
     function initialize!(pm)
         add_library_info!(pm, triple(mod))
@@ -68,8 +67,7 @@ function optimize!(job::CompilerJob, mod::LLVM.Module, entry::LLVM.Function)
         run!(pm, mod)
     end
 
-    # optimization may have replaced functions, so look the entry point up again
-    return functions(mod)[entry_fn]
+    return
 end
 
 

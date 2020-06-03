@@ -37,13 +37,13 @@ function Base.getproperty(rt::RuntimeMethodInstance, field::Symbol)
     value = getfield(rt, field)
     if field == :llvm_types
         if value == nothing
-            LLVMType[convert.(LLVMType, typ) for typ in rt.types]
+            LLVMType[convert.(LLVMType, typ, true) for typ in rt.types]
         else
             value()
         end
     elseif field == :llvm_return_type
         if value == nothing
-            convert.(LLVMType, rt.return_type)
+            convert(LLVMType, rt.return_type, true)
         else
             value()
         end
@@ -115,20 +115,6 @@ compile(:report_exception_name, Nothing, (Ptr{Cchar},))
 
 ## GC
 
-@enum AddressSpace begin
-    Generic         = 1
-    Tracked         = 10
-    Derived         = 11
-    CalleeRooted    = 12
-    Loaded          = 13
-end
-
-# LLVM type of a tracked pointer
-function T_prjlvalue()
-    T_pjlvalue = convert(LLVMType, Any, true)
-    LLVM.PointerType(eltype(T_pjlvalue), Tracked)
-end
-
 function gc_pool_alloc(sz::Csize_t)
     ptr = malloc(sz)
     if ptr == C_NULL
@@ -138,7 +124,7 @@ function gc_pool_alloc(sz::Csize_t)
     return unsafe_pointer_to_objref(ptr)
 end
 
-compile(gc_pool_alloc, Any, (Csize_t,), T_prjlvalue)
+compile(gc_pool_alloc, Any, (Csize_t,))
 
 # expected functions for GC support
 compile(:malloc, Ptr{Nothing}, (Csize_t,))
@@ -226,7 +212,7 @@ for (T, t) in [Int8   => :int8,  Int16  => :int16,  Int32  => :int32,  Int64  =>
         $box_fn(val)   = box($T(val), Val($(QuoteNode(t))))
         $unbox_fn(obj) = unbox(obj, $T)
 
-        compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name=$"jl_$box_fn")
+        compile($box_fn, Any, ($T,); llvm_name=$"jl_$box_fn")
         compile($unbox_fn, $T, (Any,); llvm_name=$"jl_$unbox_fn")
     end
 end

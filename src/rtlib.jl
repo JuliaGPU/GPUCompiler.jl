@@ -5,31 +5,8 @@ function link_library!(mod::LLVM.Module, libs::Vector{LLVM.Module})
     # linking is destructive, so copy the libraries
     libs = [LLVM.Module(lib) for lib in libs]
 
-    # save list of external functions
-    exports = String[]
-    for f in functions(mod)
-        fn = LLVM.name(f)
-        for lib in libs
-            if !haskey(functions(lib), fn)
-                push!(exports, fn)
-            end
-        end
-    end
-
     for lib in libs
         link!(mod, lib)
-    end
-
-    ModulePassManager() do pm
-        # internalize all functions that aren't exports
-        internalize!(pm, exports)
-
-        # eliminate all unused internal functions
-        global_optimizer!(pm)
-        global_dce!(pm)
-        strip_dead_prototypes!(pm)
-
-        run!(pm, mod)
     end
 end
 
@@ -98,7 +75,7 @@ end
 function emit_function!(mod, job::CompilerJob, f, method)
     tt = Base.to_tuple_type(method.types)
     new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
-                             optimize=false, libraries=false, strict=false)
+                             optimize=false, libraries=false)
     if return_type(eltype(llvmtype(entry))) != method.llvm_return_type
         error("Invalid return type for runtime function '$(method.name)': expected $(method.llvm_return_type), got $(return_type(eltype(llvmtype(entry))))")
     end
@@ -139,6 +116,8 @@ function build_runtime(job::CompilerJob)
         end
         emit_function!(mod, job, def, method)
     end
+
+    optimize!(job, mod)
 
     mod
 end
@@ -193,4 +172,9 @@ function reset_runtime()
     # create an empty cache directory. since we only ever load from the first existing cachedir,
     # this effectively invalidates preexisting caches in lower layers of the depot.
     mkpath(cachedir())
+
+    # wipe the cache so we can use this function at run-time too
+    empty!(libcache)
+
+    return
 end
