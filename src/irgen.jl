@@ -587,10 +587,17 @@ end
 # promote a function to a kernel
 function promote_kernel!(job::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function)
     # pass non-opaque pointer arguments by value (this improves performance,
-    # and is mandated by certain back-ends like SPIR-V).
+    # and is mandated by certain back-ends like SPIR-V). only do so for values
+    # that aren't a Julia pointer, so we ca still pass those directly.
     kernel_ft = eltype(llvmtype(kernel)::LLVM.PointerType)::LLVM.FunctionType
-    for (i, param_ft) in enumerate(parameters(kernel_ft))
-        if param_ft isa LLVM.PointerType && issized(eltype(param_ft))
+    kernel_sig = Base.signature_type(job.source.f, job.source.tt)::Type
+    kernel_types = filter(dt->!isghosttype(dt) &&
+                              (VERSION < v"1.5.0-DEV.581" || !Core.Compiler.isconstType(dt)),
+                          [kernel_sig.parameters...])
+    @compiler_assert length(kernel_types) == length(parameters(kernel_ft)) job
+    for (i, (param_ft,arg_typ)) in enumerate(zip(parameters(kernel_ft), kernel_types))
+        if param_ft isa LLVM.PointerType && issized(eltype(param_ft)) &&
+           !(arg_typ <: Ptr) && !(VERSION >= v"1.5" && arg_typ <: Core.LLVMPtr)
             push!(parameter_attributes(kernel, i), EnumAttribute("byval"))
         end
     end
