@@ -164,9 +164,9 @@ function compile_method_instance(job::CompilerJob, method_instance::Core.MethodI
     llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
     # configure the module
-    triple!(llvm_mod, llvm_triple(job.target))
+    triple!(llvm_mod, llvm_triple(NativeCompilerTarget()))
     if llvm_datalayout(job.target) !== nothing
-        datalayout!(llvm_mod, llvm_datalayout(job.target))
+        datalayout!(llvm_mod, llvm_datalayout(NativeCompilerTarget()))
     end
 
     return llvm_specfunc, llvm_mod

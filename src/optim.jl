@@ -1,11 +1,12 @@
 # LLVM IR optimization
 
 function optimize!(job::CompilerJob, mod::LLVM.Module)
-    tm = llvm_machine(job.target)
+    # FIXME: Workaround for GCN
+    tm = Ref{TargetMachine}(llvm_machine(NativeCompilerTarget()))
 
     function initialize!(pm)
         add_library_info!(pm, triple(mod))
-        add_transform_info!(pm, tm)
+        add_transform_info!(pm, tm[])
     end
 
     global current_job
@@ -38,6 +39,12 @@ function optimize!(job::CompilerJob, mod::LLVM.Module)
         remove_julia_addrspaces!(pm)
 
         run!(pm, mod)
+    end
+
+    tm[] = llvm_machine(job.target)
+    triple!(mod, llvm_triple(job.target))
+    if llvm_datalayout(job.target) !== nothing
+        datalayout!(mod, llvm_datalayout(job.target))
     end
 
     # target-specific optimizations
