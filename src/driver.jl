@@ -23,19 +23,22 @@ The following keyword arguments are supported:
 - `optimize`: optimize the code (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
 - `validate`: validate the generated IR before emitting machine code (default: true)
+- `only_entry`: only keep the entry function, remove all others (default: false).
+  This option is only for internal use, to implement reflection's `dump_module`.
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
 function compile(target::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true,
-                 optimize::Bool=true, strip::Bool=false, validate::Bool=true)
+                 optimize::Bool=true, strip::Bool=false, validate::Bool=true,
+                 only_entry::Bool=false)
     if compile_hook[] != nothing
         compile_hook[](job)
     end
 
     return codegen(target, job;
                    libraries=libraries, deferred_codegen=deferred_codegen,
-                   optimize=optimize, strip=strip, validate=validate)
+                   optimize=optimize, strip=strip, validate=validate, only_entry=only_entry)
 end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
@@ -54,7 +57,7 @@ end
 
 function codegen(output::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                 strip::Bool=false, validate::Bool=true)
+                 strip::Bool=false, validate::Bool=true, only_entry::Bool=false)
     ## Julia IR
 
     @timeit_debug to "validation" check_method(job)
@@ -122,6 +125,29 @@ function codegen(output::Symbol, job::CompilerJob;
             @timeit_debug to "verification" verify(ir)
         end
 
+        if only_entry
+            # replace non-entry function definitions with a declaration
+            for f in functions(ir)
+                f == kernel && continue
+                isdeclaration(f) && continue
+                intrinsic_id(f) != 0 && continue
+                # FIXME: expose llvm::Function::deleteBody with a C API
+                fn = LLVM.name(f)
+                LLVM.name!(f, "")
+                f′ = LLVM.Function(ir, fn, eltype(llvmtype(f)))
+                for attr in collect(function_attributes(f))
+                    push!(function_attributes(f′), attr)
+                end
+                for attr in collect(return_attributes(f))
+                    push!(return_attributes(f′), attr)
+                end
+                for i in 1:length(parameters(f)), attr in collect(parameter_attributes(f, i))
+                    push!(parameter_attributes(f′, i), attr)
+                end
+                replace_uses!(f, f′)
+            end
+        end
+
         # remove everything except for the kernel
         @timeit_debug to "clean-up" begin
             exports = String[kernel_fn]
@@ -140,7 +166,7 @@ function codegen(output::Symbol, job::CompilerJob;
     end
 
     # deferred code generation
-    if deferred_codegen && haskey(functions(ir), "deferred_codegen")
+    if !only_entry && deferred_codegen && haskey(functions(ir), "deferred_codegen")
         dyn_marker = functions(ir)["deferred_codegen"]
 
         cache = Dict{CompilerJob, String}(job => kernel_fn)

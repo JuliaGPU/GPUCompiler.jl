@@ -75,8 +75,8 @@ The following keyword arguments are supported:
 
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_native(io::IO, job::CompilerJob; raw::Bool=false)
-    asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, validate=false)
+function code_native(io::IO, job::CompilerJob; raw::Bool=false, dump_module::Bool=false)
+    asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
     print(io, asm)
 end
 code_native(job::CompilerJob; kwargs...) =
