@@ -50,7 +50,7 @@ end
         return
     end
 
-    asm = sprint(io->gcn_code_native(io, parent, Tuple{Int64}))
+    asm = sprint(io->gcn_code_native(io, parent, Tuple{Int64}; dump_module=true))
     @test occursin(r"s_add_u32.*julia_child_.*@rel32@lo\+4", asm)
     @test occursin(r"s_addc_u32.*julia_child_.*@rel32@hi\+4", asm)
 end
@@ -62,7 +62,7 @@ end
         return
     end
 
-    asm = sprint(io->gcn_code_native(io, entry, Tuple{Int64}; kernel=true))
+    asm = sprint(io->gcn_code_native(io, entry, Tuple{Int64}; dump_module=true, kernel=true))
     @test occursin(r"\.amdgpu_hsa_kernel .*julia_entry", asm)
     @test !occursin(r"\.amdgpu_hsa_kernel .*julia_nonentry", asm)
     @test occursin(r"\.type.*julia_nonentry_\d*,@function", asm)
@@ -78,7 +78,7 @@ end
         return
     end
 
-    asm = sprint(io->gcn_code_native(io, parent1, Tuple{Int}))
+    asm = sprint(io->gcn_code_native(io, parent1, Tuple{Int}; dump_module=true))
     @test occursin(r"\.type.*julia__\d*_child_\d*,@function", asm)
 
     function parent2(i)
@@ -86,7 +86,7 @@ end
         return
     end
 
-    asm = sprint(io->gcn_code_native(io, parent2, Tuple{Int}))
+    asm = sprint(io->gcn_code_native(io, parent2, Tuple{Int}; dump_module=true))
     @test occursin(r"\.type.*julia__\d*_child_\d*,@function", asm)
 end
 
