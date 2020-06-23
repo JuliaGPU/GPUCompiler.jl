@@ -131,9 +131,19 @@ function codegen(output::Symbol, job::CompilerJob;
                 f == kernel && continue
                 isdeclaration(f) && continue
                 intrinsic_id(f) != 0 && continue
+                # FIXME: expose llvm::Function::deleteBody with a C API
                 fn = LLVM.name(f)
                 LLVM.name!(f, "")
                 f′ = LLVM.Function(ir, fn, eltype(llvmtype(f)))
+                for attr in collect(function_attributes(f))
+                    push!(function_attributes(f′), attr)
+                end
+                for attr in collect(return_attributes(f))
+                    push!(return_attributes(f′), attr)
+                end
+                for i in 1:length(parameters(f)), attr in collect(parameter_attributes(f, i))
+                    push!(parameter_attributes(f′, i), attr)
+                end
                 replace_uses!(f, f′)
             end
         end
