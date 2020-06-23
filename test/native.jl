@@ -140,6 +140,12 @@ end
     native_code_llvm(devnull, D32593, Tuple{Ptr{D32593_struct}})
 end
 
+@testset "Julia-level throw lowering" begin
+    kernel(ptr) = (unsafe_store!(ptr, sqrt(unsafe_load(ptr))); nothing)
+
+    native_code_execution(kernel, Tuple{Ptr{Float32}})
+end
+
 end
 
 ############################################################################################

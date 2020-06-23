@@ -472,7 +472,8 @@ function lower_throw!(mod::LLVM.Module)
     changed = false
     @timeit_debug to "lower throw" begin
 
-    throw_functions = Dict{String,String}(
+    throw_functions = [
+        # unsupported runtime functions that are used to throw specific exceptions
         "jl_throw"                      => "exception",
         "jl_error"                      => "error",
         "jl_too_few_args"               => "too few arguments exception",
@@ -486,12 +487,16 @@ function lower_throw!(mod::LLVM.Module)
         "jl_bounds_error_tuple_int"     => "bounds error",
         "jl_bounds_error_unboxed_int"   => "bounds error",
         "jl_bounds_error_ints"          => "bounds error",
-        "jl_eof_error"                  => "EOF error"
-    )
+        "jl_eof_error"                  => "EOF error",
+        # Julia-level exceptions that use unsupported inputs like interpolated strings
+        r"julia_throw_exp_domainerror_\d+"      => "DomainError",
+        r"julia_throw_complex_domainerror_\d+"  => "DomainError"
+    ]
 
-    for (fn, name) in throw_functions
-        if haskey(functions(mod), fn)
-            f = functions(mod)[fn]
+    for f in functions(mod)
+        fn = LLVM.name(f)
+        for (throw_fn, name) in throw_functions
+            occursin(throw_fn, fn) || continue
 
             for use in uses(f)
                 call = user(use)::LLVM.CallInst
@@ -525,6 +530,7 @@ function lower_throw!(mod::LLVM.Module)
             end
 
             @compiler_assert isempty(uses(f)) job
+            break
          end
      end
 
