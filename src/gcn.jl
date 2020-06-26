@@ -12,7 +12,7 @@ llvm_triple(::GCNCompilerTarget) = "amdgcn-amd-amdhsa"
 
 function llvm_machine(target::GCNCompilerTarget)
     triple = llvm_triple(target)
-    t = Target(triple)
+    t = Target(triple=triple)
 
     cpu = target.dev_isa
     feat = ""

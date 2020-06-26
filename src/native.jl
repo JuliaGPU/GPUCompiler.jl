@@ -14,7 +14,7 @@ llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
 function llvm_machine(target::NativeCompilerTarget)
     triple = llvm_triple(target)
 
-    t = Target(triple)
+    t = Target(triple=triple)
 
     tm = TargetMachine(t, triple, target.cpu, target.features)
     asm_verbosity!(tm, true)
