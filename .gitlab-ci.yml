@@ -1,5 +1,5 @@
 include:
-  - 'https://raw.githubusercontent.com/JuliaGPU/gitlab-ci/master/templates/v6.yml'
+  - 'https://raw.githubusercontent.com/JuliaGPU/gitlab-ci/6dea22e/templates/v6.yml'
 
 
 # LLVM with assertions

@@ -24,7 +24,7 @@ llvm_triple(::AbstractCompilerTarget) = error("Not implemented")
 function llvm_machine(target::AbstractCompilerTarget)
     triple = llvm_triple(target)
 
-    t = Target(triple)
+    t = Target(triple=triple)
 
     tm = TargetMachine(t, triple)
     asm_verbosity!(tm, true)
