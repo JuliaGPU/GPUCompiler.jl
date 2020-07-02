@@ -15,6 +15,7 @@ GPUCompiler.enable_timings()
 
 include("native.jl")
 include("ptx.jl")
+include("spirv.jl")
 if !parse(Bool, get(ENV, "CI_ASSERTS", "false")) && VERSION < v"1.4"
   include("gcn.jl")
 end
