@@ -20,7 +20,7 @@ function optimize!(job::CompilerJob, mod::LLVM.Module)
         initialize!(pm)
         ccall(:jl_add_optimization_passes, Cvoid,
                 (LLVM.API.LLVMPassManagerRef, Cint, Cint),
-                LLVM.ref(pm), Base.JLOptions().opt_level, #=lower_intrinsics=# 0)
+                pm, Base.JLOptions().opt_level, #=lower_intrinsics=# 0)
         run!(pm, mod)
     end
 

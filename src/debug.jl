@@ -13,7 +13,7 @@ function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
 
     # look up the debug information from the current instruction
     depth = 0
-    while LLVM.API.LLVMGetSourceLocation(LLVM.ref(inst), depth, name, filename, line, col) == 1
+    while LLVM.API.LLVMGetSourceLocation(inst, depth, name, filename, line, col) == 1
         frame = StackTraces.StackFrame(replace(unsafe_string(name[]), r";$"=>""),
                                        unsafe_string(filename[]), line[])
         push!(bt, frame)

@@ -35,7 +35,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
 
     for f in functions(mod)
         fn = LLVM.name(f)
-        if isdeclaration(f) && intrinsic_id(f) == 0 && startswith(fn, "jl_")
+        if isdeclaration(f) && !LLVM.isintrinsic(f) && startswith(fn, "jl_")
             # eagerly resolve the address of the binding
             address = ccall(:jl_cglobal, Any, (Any, Any), fn, UInt)
             dereferenced = unsafe_load(address)
