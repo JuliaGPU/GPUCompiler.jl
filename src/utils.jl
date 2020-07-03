@@ -17,7 +17,7 @@ end
 
 
 defs(mod::LLVM.Module)  = filter(f -> !isdeclaration(f), collect(functions(mod)))
-decls(mod::LLVM.Module) = filter(f ->  isdeclaration(f) && intrinsic_id(f) == 0,
+decls(mod::LLVM.Module) = filter(f ->  isdeclaration(f) && !LLVM.isintrinsic(f),
                                  collect(functions(mod)))
 
 

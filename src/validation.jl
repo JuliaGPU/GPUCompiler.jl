@@ -214,7 +214,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             end
 
         # detect calls to undefined functions
-        elseif isdeclaration(dest) && intrinsic_id(dest) == 0 && !isintrinsic(job, fn)
+        elseif isdeclaration(dest) && !LLVM.isintrinsic(dest) && !isintrinsic(job, fn)
             # figure out if the function lives in the Julia runtime library
             if libjulia[] == C_NULL
                 paths = filter(Libdl.dllist()) do path

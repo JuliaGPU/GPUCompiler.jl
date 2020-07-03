@@ -56,8 +56,8 @@ function code_llvm(io::IO, job::CompilerJob; optimize::Bool=true, raw::Bool=fals
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     ir, entry = GPUCompiler.codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
     str = ccall(:jl_dump_function_ir, Ref{String},
-                (Ptr{Cvoid}, Bool, Bool, Ptr{UInt8}),
-                LLVM.ref(entry), !raw, dump_module, debuginfo)
+                (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
+                entry, !raw, dump_module, debuginfo)
     print(io, str)
 end
 code_llvm(job::CompilerJob; kwargs...) = code_llvm(stdout, job; kwargs...)
