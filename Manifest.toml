@@ -20,11 +20,9 @@ uuid = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 
 [[LLVM]]
 deps = ["CEnum", "Libdl", "Printf", "Unicode"]
-git-tree-sha1 = "6be2c549b81c740975ede8c8ba2b553ef21ca1f1"
-repo-rev = "d4ccd45578428c289055cb9eeaa56f1da053c50f"
-repo-url = "https://github.com/maleadt/LLVM.jl.git"
+git-tree-sha1 = "a662366a5d485dee882077e8da3e1a95a86d097f"
 uuid = "929cbde3-209d-540e-8aea-75f648917ca0"
-version = "1.7.0"
+version = "2.0.0"
 
 [[Libdl]]
 uuid = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
