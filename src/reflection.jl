@@ -1,4 +1,6 @@
-using InteractiveUtils, UUIDs
+import InteractiveUtils
+
+using UUIDs
 const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulhu")
 
 
