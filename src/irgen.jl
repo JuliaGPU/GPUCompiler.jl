@@ -603,7 +603,7 @@ function promote_kernel!(job::CompilerJob, mod::LLVM.Module, kernel::LLVM.Functi
     @compiler_assert length(kernel_types) == length(parameters(kernel_ft)) job
     for (i, (param_ft,arg_typ)) in enumerate(zip(parameters(kernel_ft), kernel_types))
         if param_ft isa LLVM.PointerType && issized(eltype(param_ft)) &&
-           !(arg_typ <: Ptr) && !(VERSION >= v"1.5" && arg_typ <: Core.LLVMPtr)
+           !(arg_typ <: Ptr) && !(VERSION >= v"1.5-" && arg_typ <: Core.LLVMPtr)
             push!(parameter_attributes(kernel, i), EnumAttribute("byval"))
         end
     end
