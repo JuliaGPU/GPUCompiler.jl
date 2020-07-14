@@ -5,6 +5,40 @@ const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulh
 
 
 #
+# syntax highlighting
+#
+
+const has_pygmentize = Ref{Union{Bool,Nothing}}(nothing)
+function pygmentize()
+    if has_pygmentize[] === nothing
+        has_pygmentize[] = success(`pygmentize -V`)
+    end
+
+    return has_pygmentize[] ? `pygmentize` : nothing
+end
+
+function highlight(io::Base.TTY, code, lexer)
+    highlighter = pygmentize()
+    if highlighter === nothing
+        print(io, code)
+        return code
+    else
+        custom_lexer = joinpath(dirname(@__DIR__), "res", "pygments", "$lexer.py")
+        if isfile(custom_lexer)
+            lexer = `$custom_lexer -x`
+        end
+
+        pipe = open(`$highlighter -f terminal -P bg=dark -l $lexer`, "r+")
+        print(pipe, code)
+        close(pipe.in)
+        print(io, read(pipe, String))
+    end
+end
+
+highlight(io, code, lexer) = print(io, code)
+
+
+#
 # code_* replacements
 #
 
@@ -60,7 +94,7 @@ function code_llvm(io::IO, job::CompilerJob; optimize::Bool=true, raw::Bool=fals
     str = ccall(:jl_dump_function_ir, Ref{String},
                 (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
                 entry, !raw, dump_module, debuginfo)
-    print(io, str)
+    highlight(io, str, "llvm")
 end
 code_llvm(job::CompilerJob; kwargs...) = code_llvm(stdout, job; kwargs...)
 
