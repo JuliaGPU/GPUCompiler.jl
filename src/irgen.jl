@@ -416,17 +416,28 @@ end
 # we generate function names that look like C++ functions, because many NVIDIA tools
 # support them, e.g., grouping different instantiations of the same kernel together.
 
-function mangle_param(t)
+function mangle_param(t, substitutions)
     t == Nothing && return "v"
 
     if isa(t, DataType) || isa(t, Core.Function)
         tn = safe_name(t)
-        str = "$(length(tn))$tn"
 
+        # handle substitutions
+        sub = findfirst(isequal(tn), substitutions)
+        if sub === nothing
+            str = "$(length(tn))$tn"
+            push!(substitutions, tn)
+        elseif sub == 1
+            str = "S_"
+        else
+            str = "S$(sub-2)_"
+        end
+
+        # encode typevars as template parameters
         if !isempty(t.parameters)
             str *= "I"
             for t in t.parameters
-                str *= mangle_param(t)
+                str *= mangle_param(t, substitutions)
             end
             str *= "E"
         end
@@ -444,8 +455,9 @@ function mangle_call(f, tt)
     fn = safe_name(f)
     str = "_Z$(length(fn))$fn"
 
+    substitutions = String[]
     for t in tt.parameters
-        str *= mangle_param(t)
+        str *= mangle_param(t, substitutions)
     end
 
     return str
