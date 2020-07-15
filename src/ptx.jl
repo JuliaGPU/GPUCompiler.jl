@@ -14,6 +14,8 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     maxregs::Union{Nothing,Int} = nothing
 end
 
+source_code(::PTXCompilerTarget) = "ptx"
+
 llvm_triple(::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
 function llvm_machine(target::PTXCompilerTarget)

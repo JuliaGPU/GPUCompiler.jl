@@ -113,7 +113,7 @@ See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, job::CompilerJob; raw::Bool=false, dump_module::Bool=false)
     asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
-    print(io, asm)
+    highlight(io, asm, source_code(job.target))
 end
 code_native(job::CompilerJob; kwargs...) =
     code_native(stdout, func, types; kwargs...)

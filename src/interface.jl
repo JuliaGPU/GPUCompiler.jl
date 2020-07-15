@@ -19,6 +19,8 @@ export AbstractCompilerTarget
 
 abstract type AbstractCompilerTarget end
 
+source_code(::AbstractCompilerTarget) = "text"
+
 llvm_triple(::AbstractCompilerTarget) = error("Not implemented")
 
 function llvm_machine(target::AbstractCompilerTarget)

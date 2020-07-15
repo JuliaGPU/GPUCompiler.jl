@@ -130,7 +130,7 @@ function codegen(output::Symbol, job::CompilerJob;
             for f in functions(ir)
                 f == kernel && continue
                 isdeclaration(f) && continue
-                !LLVM.isintrinsic(f) && continue
+                LLVM.isintrinsic(f) && continue
                 # FIXME: expose llvm::Function::deleteBody with a C API
                 fn = LLVM.name(f)
                 LLVM.name!(f, "")
