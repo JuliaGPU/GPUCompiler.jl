@@ -19,7 +19,8 @@ end
 
 function highlight(io::Base.TTY, code, lexer)
     highlighter = pygmentize()
-    if highlighter === nothing
+    have_color = get(io, :color, false)
+    if highlighter === nothing || !have_color
         print(io, code)
         return code
     else
