@@ -16,10 +16,17 @@ const compilelock = ReentrantLock()
         key = hash(getfield(spec.f, nf), key)
     end
 
-    Base.@lock compilelock begin
-        get!(compilecache, key) do
-            driver(spec; kwargs...)
+    # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
+    lock(compilelock)
+    try
+        entry = get(compilecache, key, nothing)
+        if entry === nothing
+            entry = driver(spec; kwargs...)
+            compilecache[key] = entry
         end
+        entry
+    finally
+        unlock(compilelock)
     end
 end
 
