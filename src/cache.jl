@@ -16,10 +16,17 @@ const compilelock = ReentrantLock()
         key = hash(getfield(spec.f, nf), key)
     end
 
-    Base.@lock compilelock begin
-        get!(compilecache, key) do
-            driver(spec; kwargs...)
+    # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
+    lock(compilelock)
+    try
+        entry = get(compilecache, key, nothing)
+        if entry === nothing
+            entry = driver(spec; kwargs...)
+            compilecache[key] = entry
         end
+        entry
+    finally
+        unlock(compilelock)
     end
 end
 
@@ -53,7 +60,7 @@ specialization_counter = 0
     new_ci = copy(ci)
     empty!(new_ci.code)
     empty!(new_ci.codelocs)
-    resize!(new_ci.linetable, 1)    # codegen assumes at least one entry on <1.5
+    resize!(new_ci.linetable, 1)                # see note below
     empty!(new_ci.ssaflags)
     new_ci.ssavaluetypes = 0
     new_ci.edges = MethodInstance[mi]
@@ -76,8 +83,13 @@ specialization_counter = 0
                           Expr(:call, hash, env, id),
                           Expr(:call, SSAValue(1), SSAValue(2), check_cache, driver, spec, SSAValue(3)),
                           Expr(:return, SSAValue(4))])
-    append!(new_ci.codelocs, [0, 0, 0, 0, 0])
+    append!(new_ci.codelocs, [1, 1, 1, 1, 1])   # see note below
     new_ci.ssavaluetypes += 5
+
+    # NOTE: we keep the first entry of the original linetable, and use it for location info
+    #       on the call to check_cache. we can't not have a codeloc (using 0 causes
+    #       corruption of the back trace), and reusing the target function's info
+    #       has as advantage that we see the name of the kernel in the backtraces.
 
     return new_ci
 end
