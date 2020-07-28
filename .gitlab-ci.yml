@@ -21,9 +21,6 @@ asserts:1.4:
 
 .test_cuda:
   extends: .test
-  variables:
-    JULIA_NUM_THREADS: '2'
-    JULIA_CUDA_USE_BINARYBUILDER: 'false' # reduce CI network traffic
   script:
     - julia -e 'using Pkg;
                 Pkg.develop(PackageSpec(path=pwd()));
