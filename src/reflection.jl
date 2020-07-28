@@ -8,13 +8,12 @@ const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulh
 # syntax highlighting
 #
 
-const has_pygmentize = Ref{Union{Bool,Nothing}}(nothing)
+const _pygmentize = Ref{Union{String,Nothing}}()
 function pygmentize()
-    if has_pygmentize[] === nothing
-        has_pygmentize[] = success(`pygmentize -V`)
+    if !isassigned(_pygmentize)
+        _pygmentize[] = Sys.which("pygmentize")
     end
-
-    return has_pygmentize[] ? `pygmentize` : nothing
+    return _pygmentize[]
 end
 
 function highlight(io::Base.TTY, code, lexer)
