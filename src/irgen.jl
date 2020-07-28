@@ -365,14 +365,23 @@ function irgen(job::CompilerJob, method_instance::Core.MethodInstance, world)
     # target-specific processing
     process_module!(job, mod)
 
+    # sanitize function names
+    # FIXME: Julia should do this, but apparently fails (see maleadt/LLVM.jl#201)
+    for f in functions(mod)
+        LLVM.isintrinsic(f) && continue
+        llvmfn = LLVM.name(f)
+        startswith(llvmfn, "julia.") && continue # Julia intrinsics
+        llvmfn′ = safe_name(llvmfn)
+        if llvmfn != llvmfn′
+            @assert !haskey(functions(mod), llvmfn′)
+            LLVM.name!(f, llvmfn′)
+        end
+    end
+
     # rename the entry point
     if job.source.name !== nothing
-        llvmfn = safe_name(string("julia_", job.source.name))
-    else
-        # strip the globalUnique counter
-        llvmfn = LLVM.name(entry)
+        LLVM.name!(entry, safe_name(string("julia_", job.source.name)))
     end
-    LLVM.name!(entry, llvmfn)
 
     # promote entry-points to kernels and mangle its name
     if job.source.kernel
