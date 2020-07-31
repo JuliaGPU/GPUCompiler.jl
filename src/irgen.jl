@@ -108,8 +108,8 @@ function compile_method_instance(job::CompilerJob, method_instance::Core.MethodI
         end
 
         # LLVM's debug info crashes older CUDA assemblers
-        if job.target isa PTXCompilerTarget # && driver_version(job.target) < v"10.2"
-            # FIXME: this was supposed to be fixed on 10.2
+        # NOTE: I'm not sure exactly when this got fixed, but it works on LLVM 9 / CUDA 11
+        if job.target isa PTXCompilerTarget && (LLVM.version() < v"8.0" || job.target.cuda < v"11")
             @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
             debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
         end

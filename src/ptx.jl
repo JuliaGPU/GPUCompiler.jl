@@ -6,6 +6,7 @@ export PTXCompilerTarget
 
 Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     cap::VersionNumber
+    cuda::VersionNumber
 
     # optional properties
     minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
@@ -43,6 +44,7 @@ llvm_datalayout(::PTXCompilerTarget) = Int===Int64 ?
 function Base.show(io::IO, job::CompilerJob{PTXCompilerTarget})
     print(io, "PTX CompilerJob of ", job.source)
     print(io, " for sm_$(job.target.cap.major)$(job.target.cap.minor)")
+    print(io, " on CUDA $(job.cuda.major).$(job.cuda.minor)")
 
     job.target.minthreads !== nothing && print(io, ", minthreads=$(job.target.minthreads)")
     job.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.target.maxthreads)")
@@ -55,7 +57,9 @@ isintrinsic(::CompilerJob{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsic
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{PTXCompilerTarget}) = "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)"
+runtime_slug(job::CompilerJob{PTXCompilerTarget}) =
+    "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)" *
+       "-cuda$(job.target.cuda.major).$(job.target.cuda.minor)"
 
 function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     # property annotations
