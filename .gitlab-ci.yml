@@ -51,13 +51,13 @@ cuda:1.4:
                 Pkg.add(PackageSpec(name="AMDGPUnative", rev="jps/gpucompiler"));
                 Pkg.test("AMDGPUnative");'
 
-amdgpunative:1.4:
-  extends:
-    - .julia:1.4
-    - .test_amdgpunative
-  tags:
-    - rocm
-  allow_failure: true
+# amdgpunative:1.4:
+#   extends:
+#     - .julia:1.4
+#     - .test_amdgpunative
+#   tags:
+#     - rocm
+#   allow_failure: true
 
 
 # other tasks
