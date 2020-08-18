@@ -371,6 +371,7 @@ function irgen(job::CompilerJob, method_instance::Core.MethodInstance, world)
         LLVM.isintrinsic(f) && continue
         llvmfn = LLVM.name(f)
         startswith(llvmfn, "julia.") && continue # Julia intrinsics
+        startswith(llvmfn, "llvm.") && continue # unofficial LLVM intrinsics
         llvmfn′ = safe_name(llvmfn)
         if llvmfn != llvmfn′
             @assert !haskey(functions(mod), llvmfn′)
