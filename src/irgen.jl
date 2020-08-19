@@ -46,14 +46,6 @@ end
 function Base.push!(tracer::MethodCompileTracer, method_instance)
     push!(tracer.call_stack, method_instance)
 
-    if VERSION < v"1.5.0-DEV.393"
-        # check for recursion
-        if method_instance in tracer.call_stack[1:end-1]
-            throw(KernelError(tracer.job, "recursion is currently not supported";
-                              bt=backtrace(tracer.job, tracer.call_stack)))
-        end
-    end
-
     # check for Base functions that exist in the GPU package
     # FIXME: this might be too coarse
     method = method_instance.def
@@ -81,53 +73,154 @@ Base.last(tracer::MethodCompileTracer) = tracer.last_method_instance
 
 ## Julia compiler integration
 
-if VERSION >= v"1.5.0-DEV.393"
+### cache
 
-# JuliaLang/julia#25984 significantly restructured the compiler
+using Core.Compiler: CodeInstance, MethodInstance
+
+struct GPUCodeCache
+    dict::Dict{MethodInstance,Vector{CodeInstance}}
+    GPUCodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
+end
+
+function Core.Compiler.setindex!(cache::GPUCodeCache, ci::CodeInstance, mi::MethodInstance)
+    cis = get!(cache.dict, mi, CodeInstance[])
+    push!(cis, ci)
+end
+
+const GPU_CI_CACHE = GPUCodeCache()
+
+### interpreter
+
+using Core.Compiler: AbstractInterpreter, InferenceResult, InferenceParams, InferenceState, OptimizationParams
+
+struct GPUInterpreter <: AbstractInterpreter
+    # Cache of inference results for this particular interpreter
+    cache::Vector{InferenceResult}
+    # The world age we're working inside of
+    world::UInt
+
+    # Parameters for inference and optimization
+    inf_params::InferenceParams
+    opt_params::OptimizationParams
+
+    function GPUInterpreter(world::UInt)
+        @assert world <= Base.get_world_counter()
+
+        return new(
+            # Initially empty cache
+            Vector{InferenceResult}(),
+
+            # world age counter
+            world,
+
+            # parameters for inference and optimization
+            InferenceParams(),
+            OptimizationParams(),
+        )
+    end
+end
+
+# Quickly and easily satisfy the AbstractInterpreter API contract
+Core.Compiler.get_world_counter(ni::GPUInterpreter) = ni.world
+Core.Compiler.get_inference_cache(ni::GPUInterpreter) = ni.cache
+Core.Compiler.InferenceParams(ni::GPUInterpreter) = ni.inf_params
+Core.Compiler.OptimizationParams(ni::GPUInterpreter) = ni.opt_params
+Core.Compiler.may_optimize(ni::GPUInterpreter) = true
+Core.Compiler.may_compress(ni::GPUInterpreter) = true
+Core.Compiler.may_discard_trees(ni::GPUInterpreter) = true
+Core.Compiler.add_remark!(ni::GPUInterpreter, sv::InferenceState, msg) = nothing # TODO
+
+### world view of the cache
+
+using Core.Compiler: WorldView
+
+function Core.Compiler.haskey(wvc::WorldView{GPUCodeCache}, mi::MethodInstance)
+    Core.Compiler.get(wvc, mi, nothing) !== nothing
+end
+
+function Core.Compiler.get(wvc::WorldView{GPUCodeCache}, mi::MethodInstance, default)
+    cache = wvc.cache
+    for ci in get!(cache.dict, mi, CodeInstance[])
+        if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
+            # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
+            return ci
+        end
+    end
+
+    return default
+end
+
+function Core.Compiler.getindex(wvc::WorldView{GPUCodeCache}, mi::MethodInstance)
+    r = Core.Compiler.get(wvc, mi, nothing)
+    r === nothing && throw(KeyError(mi))
+    return r::CodeInstance
+end
+
+Core.Compiler.setindex!(wvc::WorldView{GPUCodeCache}, ci::CodeInstance, mi::MethodInstance) =
+    Core.Compiler.setindex!(wvc.cache, ci, mi)
+
+### codegen/interence integration
+
+Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(GPU_CI_CACHE, ni.world)
+
+# No need to do any locking since we're not putting our results into the runtime cache
+Core.Compiler.lock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
+Core.Compiler.unlock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
+
+function gpu_ci_cache_lookup(mi, min_world, max_world)
+    wvc = WorldView(GPU_CI_CACHE, min_world, max_world)
+    if !Core.Compiler.haskey(wvc, mi)
+        interp = GPUInterpreter(min_world)
+        src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
+        # inference populates the cache, so we don't need to jl_get_method_inferred
+        @assert Core.Compiler.haskey(wvc, mi)
+
+        # if src is rettyp_const, the codeinfo won't cache ci.inferred
+        # (because it is normally not supposed to be used ever again).
+        # to avoid the need to re-infer, set that field here.
+        ci = Core.Compiler.getindex(wvc, mi)
+        if ci !== nothing && ci.inferred === nothing
+            ci.inferred = src
+        end
+    end
+    return Core.Compiler.getindex(wvc, mi)
+end
+
+### external interface
 
 function compile_method_instance(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance, world)
     # set-up the compiler interface
     tracer = MethodCompileTracer(job, method_instance)
     hook_emit_function(method_instance, code) = push!(tracer, method_instance)
     hook_emitted_function(method_instance, code) = pop!(tracer, method_instance)
-    param_kwargs = [:track_allocations  => false,
-                    :code_coverage      => false,
-                    :static_alloc       => false,
-                    :prefer_specsig     => true,
-                    :emit_function      => hook_emit_function,
-                    :emitted_function   => hook_emitted_function]
-    if LLVM.version() >= v"8.0" && VERSION >= v"1.3.0-DEV.547"
-        push!(param_kwargs, :gnu_pubnames => false)
-
-        debug_info_kind = if Base.JLOptions().debug_level == 0
-            LLVM.API.LLVMDebugEmissionKindNoDebug
-        elseif Base.JLOptions().debug_level == 1
-            LLVM.API.LLVMDebugEmissionKindLineTablesOnly
-        elseif Base.JLOptions().debug_level >= 2
-            LLVM.API.LLVMDebugEmissionKindFullDebug
-        end
-
-        # LLVM's debug info crashes older CUDA assemblers
-        if job.target isa PTXCompilerTarget # && driver_version(job.target) < v"10.2"
-            # FIXME: this was supposed to be fixed on 10.2
-            @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
-            debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
-        end
-
-        push!(param_kwargs, :debug_info_kind => Cint(debug_info_kind))
+    debug_info_kind = if Base.JLOptions().debug_level == 0
+        LLVM.API.LLVMDebugEmissionKindNoDebug
+    elseif Base.JLOptions().debug_level == 1
+        LLVM.API.LLVMDebugEmissionKindLineTablesOnly
+    elseif Base.JLOptions().debug_level >= 2
+        LLVM.API.LLVMDebugEmissionKindFullDebug
     end
-    params = Base.CodegenParams(;param_kwargs...)
+    if job.target isa PTXCompilerTarget # && driver_version(job.target) < v"10.2"
+        # LLVM's debug info crashes older CUDA assemblers
+        # FIXME: this was supposed to be fixed on 10.2
+        @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
+        debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
+    end
+    params = Base.CodegenParams(;
+                    track_allocations  = false,
+                    code_coverage      = false,
+                    static_alloc       = false,
+                    prefer_specsig     = true,
+                    emit_function      = hook_emit_function,
+                    emitted_function   = hook_emitted_function,
+                    gnu_pubnames       = false,
+                    debug_info_kind    = Cint(debug_info_kind),
+                    lookup             = @cfunction(gpu_ci_cache_lookup, Any, (Any, UInt, UInt)))
 
     # generate IR
-    if VERSION >= v"1.5.0-DEV.851"
-        native_code = ccall(:jl_create_native, Ptr{Cvoid},
-                            (Vector{Core.MethodInstance}, Base.CodegenParams, Cint),
-                            [method_instance], params, #=extern policy=# 1)
-    else
-        native_code = ccall(:jl_create_native, Ptr{Cvoid},
-                            (Vector{Core.MethodInstance}, Base.CodegenParams),
-                            [method_instance], params)
-    end
+    native_code = ccall(:jl_create_native, Ptr{Cvoid},
+                        (Vector{Core.MethodInstance}, Base.CodegenParams, Cint),
+                        [method_instance], params, #=extern policy=# 1)
     @assert native_code != C_NULL
     llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
                          (Ptr{Cvoid},), native_code)
@@ -135,13 +228,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     llvm_mod = LLVM.Module(llvm_mod_ref)
 
     # get the top-level code
-    code = if VERSION >= v"1.6.0-DEV.12"
-        # TODO: use our own interpreter
-        interpreter = Core.Compiler.NativeInterpreter(world)
-        Core.Compiler.inf_for_methodinstance(interpreter, method_instance, world, world)
-    else
-        Core.Compiler.inf_for_methodinstance(method_instance, world, world)
-    end
+    code = gpu_ci_cache_lookup(method_instance, world, world)
 
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)
@@ -170,164 +257,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     end
 
     return llvm_specfunc, llvm_mod
-end
-
-else
-
-function module_setup(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    ctx = context(mod)
-
-    # configure the module
-    triple!(mod, llvm_triple(job.target))
-    datalayout!(mod, llvm_datalayout(job.target))
-
-    # add debug info metadata
-    if LLVM.version() >= v"8.0"
-        # Set Dwarf Version to 2, the DI printer will downgrade to v2 automatically,
-        # but this is technically correct and the only version supported by NVPTX
-        LLVM.flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
-            Metadata(ConstantInt(Int32(2), ctx))
-        LLVM.flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorError] =
-            Metadata(ConstantInt(DEBUG_METADATA_VERSION(), ctx))
-    else
-        push!(metadata(mod), "llvm.module.flags",
-             MDNode([ConstantInt(Int32(1), ctx),    # llvm::Module::Error
-                     MDString("Debug Info Version"),
-                     ConstantInt(DEBUG_METADATA_VERSION(), ctx)]))
-    end
-end
-
-function compile_method_instance(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance, world)
-    function postprocess(ir)
-        # get rid of jfptr wrappers
-        for llvmf in functions(ir)
-            startswith(LLVM.name(llvmf), "jfptr_") && unsafe_delete!(ir, llvmf)
-        end
-
-        return
-    end
-
-    # set-up the compiler interface
-    tracer = MethodCompileTracer(job)
-    hook_emit_function(method_instance, code, world) = push!(tracer, method_instance)
-    hook_emitted_function(method_instance, code, world) = pop!(tracer, method_instance)
-    dependencies = MultiDict{Core.MethodInstance,LLVM.Function}()
-    function hook_module_setup(ref::Ptr{Cvoid})
-        ref = convert(LLVM.API.LLVMModuleRef, ref)
-        ir = LLVM.Module(ref)
-        module_setup(job, ir)
-    end
-    function hook_module_activation(ref::Ptr{Cvoid})
-        ref = convert(LLVM.API.LLVMModuleRef, ref)
-        ir = LLVM.Module(ref)
-        postprocess(ir)
-
-        # find the function that this module defines
-        llvmfs = filter(llvmf -> !isdeclaration(llvmf) &&
-                                 linkage(llvmf) == LLVM.API.LLVMExternalLinkage,
-                        collect(functions(ir)))
-
-        llvmf = nothing
-        if length(llvmfs) == 1
-            llvmf = first(llvmfs)
-        elseif length(llvmfs) > 1
-            llvmfs = filter!(llvmf -> startswith(LLVM.name(llvmf), "julia_"), llvmfs)
-            if length(llvmfs) == 1
-                llvmf = first(llvmfs)
-            end
-        end
-
-        @compiler_assert llvmf !== nothing job
-
-        insert!(dependencies, last(tracer), llvmf)
-    end
-    param_kwargs = [:cached             => false,
-                    :track_allocations  => false,
-                    :code_coverage      => false,
-                    :static_alloc       => false,
-                    :prefer_specsig     => true,
-                    :module_setup       => hook_module_setup,
-                    :module_activation  => hook_module_activation,
-                    :emit_function      => hook_emit_function,
-                    :emitted_function   => hook_emitted_function]
-    if LLVM.version() >= v"8.0" && VERSION >= v"1.3.0-DEV.547"
-        push!(param_kwargs, :gnu_pubnames => false)
-
-        debug_info_kind = if Base.JLOptions().debug_level == 0
-            LLVM.API.LLVMDebugEmissionKindNoDebug
-        elseif Base.JLOptions().debug_level == 1
-            LLVM.API.LLVMDebugEmissionKindLineTablesOnly
-        elseif Base.JLOptions().debug_level >= 2
-            LLVM.API.LLVMDebugEmissionKindFullDebug
-        end
-
-        # LLVM's debug info crashes older CUDA assemblers
-        if job.target isa PTXCompilerTarget # && driver_version(job.target) < v"10.2"
-            # FIXME: this was supposed to be fixed on 10.2
-            @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
-            debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
-        end
-
-        push!(param_kwargs, :debug_info_kind => Cint(debug_info_kind))
-    end
-    params = Base.CodegenParams(;param_kwargs...)
-
-    # get the code
-    ref = ccall(:jl_get_llvmf_defn, LLVM.API.LLVMValueRef,
-                (Any, UInt, Bool, Bool, Base.CodegenParams),
-                method_instance, world, #=wrapper=#false, #=optimize=#false, params)
-    if ref == C_NULL
-        throw(InternalCompilerError(job, "the Julia compiler could not generate LLVM IR"))
-    end
-    llvmf = LLVM.Function(ref)
-    ir = LLVM.parent(llvmf)
-    postprocess(ir)
-
-    # link in dependent modules
-    entry = llvmf
-    mod = LLVM.parent(entry)
-    @timeit_debug to "linking" begin
-        # we disable Julia's compilation cache not to poison it with GPU-specific code.
-        # as a result, we might get multiple modules for a single method instance.
-        cache = Dict{String,String}()
-
-        for called_method_instance in keys(dependencies)
-            llvmfs = dependencies[called_method_instance]
-
-            # link the first module
-            llvmf = popfirst!(llvmfs)
-            llvmfn = LLVM.name(llvmf)
-            link!(mod, LLVM.parent(llvmf))
-
-            # process subsequent duplicate modules
-            for dup_llvmf in llvmfs
-                if Base.JLOptions().debug_level >= 2
-                    # link them too, to ensure accurate backtrace reconstruction
-                    link!(mod, LLVM.parent(dup_llvmf))
-                else
-                    # don't link them, but note the called function name in a cache
-                    dup_llvmfn = LLVM.name(dup_llvmf)
-                    cache[dup_llvmfn] = llvmfn
-                end
-            end
-        end
-
-        # resolve function declarations with cached entries
-        for llvmf in filter(isdeclaration, collect(functions(mod)))
-            llvmfn = LLVM.name(llvmf)
-            if haskey(cache, llvmfn)
-                def_llvmfn = cache[llvmfn]
-                replace_uses!(llvmf, functions(mod)[def_llvmfn])
-
-                @compiler_assert isempty(uses(llvmf)) job
-                unsafe_delete!(LLVM.parent(llvmf), llvmf)
-            end
-        end
-    end
-
-    return entry, mod
-end
-
 end
 
 function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance, world)

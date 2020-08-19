@@ -5,8 +5,6 @@ using GPUCompiler
 
 using LLVM, LLVM.Interop
 
-using Pkg
-
 include("util.jl")
 
 @testset "GPUCompiler" begin
