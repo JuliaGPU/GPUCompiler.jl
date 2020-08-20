@@ -144,9 +144,9 @@ function codegen(output::Symbol, job::CompilerJob;
                 for attr in collect(return_attributes(f))
                     push!(return_attributes(f′), attr)
                 end
-                for i in 1:length(parameters(f)), attr in collect(parameter_attributes(f, i))
-                    push!(parameter_attributes(f′, i), attr)
-                end
+                # copying function parameters is broken due to maleadt/LLVM.jl#186,
+                # but that doesn't matter because `only_entry` is only used for reflection,
+                # and the emitted code has already been optimized at this point.
                 replace_uses!(f, f′)
             end
         end
