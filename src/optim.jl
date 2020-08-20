@@ -84,6 +84,7 @@ end
 function lower_gc_frame!(fun::LLVM.Function)
     job = current_job::CompilerJob
     mod = LLVM.parent(fun)
+    ctx = context(fun)
     changed = false
 
     # plain alloc
@@ -91,7 +92,7 @@ function lower_gc_frame!(fun::LLVM.Function)
         alloc_obj = functions(mod)["julia.gc_alloc_obj"]
         alloc_obj_ft = eltype(llvmtype(alloc_obj))
         T_prjlvalue = return_type(alloc_obj_ft)
-        T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
+        T_pjlvalue = convert(LLVMType, Any, ctx; allow_boxed=true)
 
         for use in uses(alloc_obj)
             call = user(use)::LLVM.CallInst
@@ -101,7 +102,7 @@ function lower_gc_frame!(fun::LLVM.Function)
             sz = ops[2]
 
             # replace with PTX alloc_obj
-            let builder = Builder(JuliaContext())
+            let builder = Builder(ctx)
                 position!(builder, call)
                 ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz])
                 replace_uses!(call, ptr)

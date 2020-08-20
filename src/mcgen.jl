@@ -31,6 +31,7 @@ end
 # this pass performs that resolution at link time.
 function resolve_cpu_references!(mod::LLVM.Module)
     job = current_job::CompilerJob
+    ctx = context(mod)
     changed = false
 
     for f in functions(mod)
@@ -39,7 +40,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
             # eagerly resolve the address of the binding
             address = ccall(:jl_cglobal, Any, (Any, Any), fn, UInt)
             dereferenced = unsafe_load(address)
-            dereferenced = LLVM.ConstantInt(dereferenced, JuliaContext())
+            dereferenced = LLVM.ConstantInt(dereferenced, ctx)
 
             function replace_bindings!(value)
                 changed = false

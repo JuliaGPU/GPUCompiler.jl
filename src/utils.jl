@@ -1,6 +1,8 @@
 export tbaa_make_child
 
-function tbaa_make_child(name::String, constant::Bool=false; ctx::LLVM.Context=JuliaContext())
+@deprecate tbaa_make_child(name::String, constant::Bool) tbaa_make_child(name; constant=constant)
+
+function tbaa_make_child(name::String, ctx::LLVM.Context=JuliaContext(); constant::Bool=false)
     tbaa_root = MDNode([MDString("gputbaa", ctx)], ctx)
     tbaa_struct_type =
         MDNode([MDString("gputbaa_$name", ctx),
@@ -14,7 +16,6 @@ function tbaa_make_child(name::String, constant::Bool=false; ctx::LLVM.Context=J
 
     return tbaa_access_tag
 end
-
 
 defs(mod::LLVM.Module)  = filter(f -> !isdeclaration(f), collect(functions(mod)))
 decls(mod::LLVM.Module) = filter(f ->  isdeclaration(f) && !LLVM.isintrinsic(f),

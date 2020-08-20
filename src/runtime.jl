@@ -33,23 +33,20 @@ struct RuntimeMethodInstance
     llvm_name::String
 end
 
-function Base.getproperty(rt::RuntimeMethodInstance, field::Symbol)
-    value = getfield(rt, field)
-    if field == :llvm_types
-        if value == nothing
-            LLVMType[convert.(LLVMType, typ) for typ in rt.types]
-        else
-            value()
-        end
-    elseif field == :llvm_return_type
-        if value == nothing
-            convert(LLVMType, rt.return_type)
-        else
-            value()
-        end
+function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance, ctx::LLVM.Context)
+    types = if rt.llvm_types === nothing
+        LLVMType[convert(LLVMType, typ, ctx; allow_boxed=true) for typ in rt.types]
     else
-        return value
+        rt.llvm_types(ctx)
     end
+
+    return_type = if rt.llvm_return_type === nothing
+        convert(LLVMType, rt.return_type, ctx; allow_boxed=true)
+    else
+        rt.llvm_return_type(ctx)
+    end
+
+    LLVM.FunctionType(return_type, types)
 end
 
 const methods = Dict{Symbol,RuntimeMethodInstance}()
@@ -126,15 +123,15 @@ if VERSION < v"1.4"
 end
 
 # LLVM type of a tracked pointer
-function T_prjlvalue()
-    T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
+function T_prjlvalue(ctx)
+    T_pjlvalue = convert(LLVMType, Any, ctx; allow_boxed=true)
     LLVM.PointerType(eltype(T_pjlvalue), Tracked)
 end
 
 else
 
 # FIXME: once we only support 1.4, get rid of this and allow boxed types
-T_prjlvalue() = convert(LLVMType, Any; allow_boxed=true)
+T_prjlvalue(ctx) = convert(LLVMType, Any, ctx; allow_boxed=true)
 
 end
 
@@ -162,32 +159,34 @@ const gc_bits = 0x3 # FIXME
 
 # get the type tag of a type at run-time
 @generated function type_tag(::Val{type_name}) where type_name
-    T_tag = convert(LLVMType, tag_type)
-    T_ptag = LLVM.PointerType(T_tag)
+    JuliaContext() do ctx
+        T_tag = convert(LLVMType, tag_type, ctx)
+        T_ptag = LLVM.PointerType(T_tag)
 
-    T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
+        T_pjlvalue = convert(LLVMType, Any, ctx; allow_boxed=true)
 
-    # create function
-    llvm_f, _ = create_function(T_tag)
-    mod = LLVM.parent(llvm_f)
+        # create function
+        llvm_f, _ = create_function(T_tag)
+        mod = LLVM.parent(llvm_f)
 
-    # this isn't really a function, but we abuse it to get the JIT to resolve the address
-    typ = LLVM.Function(mod, "jl_" * String(type_name) * "_type",
-                        LLVM.FunctionType(T_pjlvalue))
+        # this isn't really a function, but we abuse it to get the JIT to resolve the address
+        typ = LLVM.Function(mod, "jl_" * String(type_name) * "_type",
+                            LLVM.FunctionType(T_pjlvalue))
 
-    # generate IR
-    Builder(JuliaContext()) do builder
-        entry = BasicBlock(llvm_f, "entry", JuliaContext())
-        position!(builder, entry)
+        # generate IR
+        Builder(ctx) do builder
+            entry = BasicBlock(llvm_f, "entry", ctx)
+            position!(builder, entry)
 
-        typ_var = bitcast!(builder, typ, T_ptag)
+            typ_var = bitcast!(builder, typ, T_ptag)
 
-        tag = load!(builder, typ_var)
+            tag = load!(builder, typ_var)
 
-        ret!(builder, tag)
+            ret!(builder, tag)
+        end
+
+        call_function(llvm_f, tag_type)
     end
-
-    call_function(llvm_f, tag_type)
 end
 
 # we use `jl_value_ptr`, a Julia pseudo-intrinsic that can be used to box and unbox values
