@@ -138,13 +138,7 @@ function codegen(output::Symbol, job::CompilerJob;
                 fn = LLVM.name(f)
                 LLVM.name!(f, "")
                 f′ = LLVM.Function(ir, fn, eltype(llvmtype(f)))
-                for attr in collect(function_attributes(f))
-                    push!(function_attributes(f′), attr)
-                end
-                for attr in collect(return_attributes(f))
-                    push!(return_attributes(f′), attr)
-                end
-                # copying function parameters is broken due to maleadt/LLVM.jl#186,
+                # copying attributes is broken due to maleadt/LLVM.jl#186,
                 # but that doesn't matter because `only_entry` is only used for reflection,
                 # and the emitted code has already been optimized at this point.
                 replace_uses!(f, f′)
