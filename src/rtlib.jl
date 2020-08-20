@@ -42,13 +42,14 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     bb = position(builder)
     f = LLVM.parent(bb)
     mod = LLVM.parent(f)
+    ctx = context(mod)
 
     # get or create a function prototype
     if haskey(functions(mod), rt.llvm_name)
         f = functions(mod)[rt.llvm_name]
         ft = eltype(llvmtype(f))
     else
-        ft = LLVM.FunctionType(rt.llvm_return_type, rt.llvm_types)
+        ft = convert(LLVM.FunctionType, rt, ctx)
         f = LLVM.Function(mod, rt.llvm_name, ft)
     end
 
@@ -76,8 +77,10 @@ function emit_function!(mod, job::CompilerJob, f, method)
     tt = Base.to_tuple_type(method.types)
     new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
                              optimize=false, libraries=false)
-    if return_type(eltype(llvmtype(entry))) != method.llvm_return_type
-        error("Invalid return type for runtime function '$(method.name)': expected $(method.llvm_return_type), got $(return_type(eltype(llvmtype(entry))))")
+    ft = eltype(llvmtype(entry))
+    expected_ft = convert(LLVM.FunctionType, method, context(new_mod))
+    if return_type(ft) != return_type(expected_ft)
+        error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
@@ -88,6 +91,7 @@ function emit_function!(mod, job::CompilerJob, f, method)
         dispose(pm)
     end
 
+    @assert context(mod) == context(new_mod)
     temp_name = LLVM.name(entry)
     link!(mod, new_mod)
     entry = functions(mod)[temp_name]
@@ -104,8 +108,8 @@ function emit_function!(mod, job::CompilerJob, f, method)
     LLVM.name!(entry, name)
 end
 
-function build_runtime(job::CompilerJob)
-    mod = LLVM.Module("GPUCompiler run-time library", JuliaContext())
+function build_runtime(job::CompilerJob, ctx)
+    mod = LLVM.Module("GPUCompiler run-time library", ctx)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
@@ -122,7 +126,7 @@ function build_runtime(job::CompilerJob)
     mod
 end
 
-function load_runtime(job::CompilerJob)
+function load_runtime(job::CompilerJob, ctx)
     # find the first existing cache directory (for when dealing with layered depots)
     cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
     filter!(isdir, cachedirs)
@@ -151,12 +155,12 @@ function load_runtime(job::CompilerJob)
     get!(libcache, path) do
         if ispath(path)
             open(path) do io
-                parse(LLVM.Module, read(io), JuliaContext())
+                parse(LLVM.Module, read(io), ctx)
             end
         else
             @debug "Building the GPU runtime library at $path"
             mkpath(output_dir)
-            lib = build_runtime(job)
+            lib = build_runtime(job, ctx)
             open(path, "w") do io
                 write(io, lib)
             end

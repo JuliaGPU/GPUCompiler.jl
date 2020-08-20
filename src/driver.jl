@@ -90,17 +90,20 @@ function codegen(output::Symbol, job::CompilerJob;
 
     ## LLVM IR
 
+    @timeit_debug to "IR generation" begin
+        ir, kernel = irgen(job, method_instance, world)
+        ctx = context(ir)
+        kernel_fn = LLVM.name(kernel)
+    end
+
     # always preload the runtime, and do so early; it cannot be part of any timing block
     # because it recurses into the compiler
     if libraries
-        runtime = load_runtime(job)
+        runtime = load_runtime(job, ctx)
         runtime_fns = LLVM.name.(defs(runtime))
     end
 
     @timeit_debug to "LLVM middle-end" begin
-        ir, kernel = @timeit_debug to "IR generation" irgen(job, method_instance, world)
-        kernel_fn = LLVM.name(kernel)
-
         # target-specific libraries
         if libraries
             undefined_fns = LLVM.name.(decls(ir))
@@ -198,6 +201,7 @@ function codegen(output::Symbol, job::CompilerJob;
                                                  strip=strip, validate=validate,
                                                  deferred_codegen=false)
                     dyn_kernel_fn = LLVM.name(dyn_kernel)
+                    @assert context(dyn_ir) == ctx
                     link!(ir, dyn_ir)
                     changed = true
                     dyn_kernel_fn
@@ -205,9 +209,9 @@ function codegen(output::Symbol, job::CompilerJob;
                 dyn_kernel = functions(ir)[dyn_kernel_fn]
 
                 # insert a pointer to the function everywhere the kernel is used
-                T_ptr = convert(LLVMType, Ptr{Cvoid})
+                T_ptr = convert(LLVMType, Ptr{Cvoid}, ctx)
                 for call in worklist[dyn_job]
-                    Builder(JuliaContext()) do builder
+                    Builder(ctx) do builder
                         position!(builder, call)
                         fptr = ptrtoint!(builder, dyn_kernel, T_ptr)
                         replace_uses!(call, fptr)

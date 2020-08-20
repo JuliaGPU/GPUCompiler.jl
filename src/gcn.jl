@@ -47,6 +47,7 @@ end
 
 function lower_throw_extra!(mod::LLVM.Module)
     job = current_job::CompilerJob
+    ctx = context(mod)
     changed = false
     @timeit_debug to "lower throw (extra)" begin
 
@@ -67,7 +68,7 @@ function lower_throw_extra!(mod::LLVM.Module)
                     call = user(use)::LLVM.CallInst
 
                     # replace the throw with a trap
-                    let builder = Builder(JuliaContext())
+                    let builder = Builder(ctx)
                         position!(builder, call)
                         emit_exception!(builder, f_name, call)
                         dispose(builder)
@@ -104,14 +105,15 @@ function lower_throw_extra!(mod::LLVM.Module)
 end
 
 function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
+    ctx = context(mod)
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]
     else
-        LLVM.Function(mod, "llvm.trap", LLVM.FunctionType(LLVM.VoidType(JuliaContext())))
+        LLVM.Function(mod, "llvm.trap", LLVM.FunctionType(LLVM.VoidType(ctx)))
     end
     if Base.libllvm_version < v"9"
-        rl_ft = LLVM.FunctionType(LLVM.Int32Type(JuliaContext()),
-                                  [LLVM.Int32Type(JuliaContext())])
+        rl_ft = LLVM.FunctionType(LLVM.Int32Type(ctx),
+                                  [LLVM.Int32Type(ctx)])
         rl = if haskey(functions(mod), "llvm.amdgcn.readfirstlane")
             functions(mod)["llvm.amdgcn.readfirstlane"]
         else
@@ -124,8 +126,8 @@ function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
         # this, the target will only attempt to do a "masked branch", which
         # only works on vector instructions (trap is a scalar instruction, and
         # therefore it is executed even when EXEC==0).
-        rl_val = call!(builder, rl, [ConstantInt(Int32(32), JuliaContext())])
-        rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(JuliaContext())))
+        rl_val = call!(builder, rl, [ConstantInt(Int32(32), ctx)])
+        rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(ctx)))
         store!(builder, rl_val, rl_bc)
     end
     call!(builder, trap)
@@ -147,8 +149,9 @@ function wrapper_type(julia_t::Type, codegen_t::LLVMType)::LLVMType
 end
 # generate a kernel wrapper to fix & improve argument passing
 function wrap_entry!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
+    ctx = context(mod)
     entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
-    @compiler_assert return_type(entry_ft) == LLVM.VoidType(JuliaContext()) job
+    @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job
 
     # filter out types which don't occur in the LLVM function signatures
     sig = Base.signature_type(job.source.f, job.source.tt)::Type
@@ -165,12 +168,12 @@ function wrap_entry!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
                                   in zip(julia_types, parameters(entry_ft))]
     wrapper_fn = LLVM.name(entry_f)
     LLVM.name!(entry_f, wrapper_fn * ".inner")
-    wrapper_ft = LLVM.FunctionType(LLVM.VoidType(JuliaContext()), wrapper_types)
+    wrapper_ft = LLVM.FunctionType(LLVM.VoidType(ctx), wrapper_types)
     wrapper_f = LLVM.Function(mod, wrapper_fn, wrapper_ft)
 
     # emit IR performing the "conversions"
-    let builder = Builder(JuliaContext())
-        entry = BasicBlock(wrapper_f, "entry", JuliaContext())
+    let builder = Builder(ctx)
+        entry = BasicBlock(wrapper_f, "entry", ctx)
         position!(builder, entry)
 
         wrapper_args = Vector{LLVM.Value}()
@@ -211,7 +214,7 @@ function wrap_entry!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
     end
 
     # early-inline the original entry function into the wrapper
-    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, JuliaContext()))
+    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, ctx))
     linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
 
     fixup_metadata!(entry_f)

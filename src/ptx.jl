@@ -58,36 +58,38 @@ isintrinsic(::CompilerJob{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsic
 runtime_slug(job::CompilerJob{PTXCompilerTarget}) = "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)"
 
 function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
+    ctx = context(mod)
+
     # property annotations
     annotations = LLVM.Value[kernel]
 
     ## kernel metadata
-    append!(annotations, [MDString("kernel"), ConstantInt(Int32(1), JuliaContext())])
+    append!(annotations, [MDString("kernel"), ConstantInt(Int32(1), ctx)])
 
     ## expected CTA sizes
     if job.target.minthreads != nothing
         for (dim, name) in enumerate([:x, :y, :z])
             bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
             append!(annotations, [MDString("reqntid$name"),
-                                  ConstantInt(Int32(bound), JuliaContext())])
+                                  ConstantInt(Int32(bound), ctx)])
         end
     end
     if job.target.maxthreads != nothing
         for (dim, name) in enumerate([:x, :y, :z])
             bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
             append!(annotations, [MDString("maxntid$name"),
-                                  ConstantInt(Int32(bound), JuliaContext())])
+                                  ConstantInt(Int32(bound), ctx)])
         end
     end
 
     if job.target.blocks_per_sm != nothing
         append!(annotations, [MDString("minctasm"),
-                              ConstantInt(Int32(job.target.blocks_per_sm), JuliaContext())])
+                              ConstantInt(Int32(job.target.blocks_per_sm), ctx)])
     end
 
     if job.target.maxregs != nothing
         append!(annotations, [MDString("maxnreg"),
-                              ConstantInt(Int32(job.target.maxregs), JuliaContext())])
+                              ConstantInt(Int32(job.target.maxregs), ctx)])
     end
 
     push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
@@ -145,6 +147,7 @@ end
 #       is still responsible for generating structured control flow).
 function hide_unreachable!(fun::LLVM.Function)
     job = current_job::CompilerJob
+    ctx = context(fun)
     changed = false
     @timeit_debug to "hide unreachable" begin
 
@@ -153,7 +156,7 @@ function hide_unreachable!(fun::LLVM.Function)
     # when calling a `noreturn` function, LLVM places an `unreachable` after the call.
     # this leads to an early `ret` from the function.
     attrs = function_attributes(fun)
-    delete!(attrs, EnumAttribute("noreturn", 0, JuliaContext()))
+    delete!(attrs, EnumAttribute("noreturn", 0, ctx))
 
     # build a map of basic block predecessors
     predecessors = Dict(bb => Set{LLVM.BasicBlock}() for bb in blocks(fun))
@@ -184,7 +187,7 @@ function hide_unreachable!(fun::LLVM.Function)
                 # TODO: `unreachable; unreachable`
             catch ex
                 isa(ex, UndefRefError) || rethrow(ex)
-                let builder = Builder(JuliaContext())
+                let builder = Builder(ctx)
                     position!(builder, bb)
 
                     # find the strict predecessors to this block
@@ -220,7 +223,7 @@ function hide_unreachable!(fun::LLVM.Function)
 
     # apply the pending terminator rewrites
     @timeit_debug to "replace" if !isempty(worklist)
-        let builder = Builder(JuliaContext())
+        let builder = Builder(ctx)
             for (bb, fallthrough) in worklist
                 position!(builder, bb)
                 if fallthrough !== nothing
@@ -229,7 +232,7 @@ function hide_unreachable!(fun::LLVM.Function)
                     # couldn't find any other successor. this happens with functions
                     # that only contain a single block, or when the block is dead.
                     ft = eltype(llvmtype(fun))
-                    if return_type(ft) == LLVM.VoidType(JuliaContext())
+                    if return_type(ft) == LLVM.VoidType(ctx)
                         # even though returning can lead to invalid control flow,
                         # it mostly happens with functions that just throw,
                         # and leaving the unreachable there would make the optimizer
@@ -252,11 +255,12 @@ end
 # if LLVM knows we're trapping, code is marked `unreachable` (see `hide_unreachable!`).
 function hide_trap!(mod::LLVM.Module)
     job = current_job::CompilerJob
+    ctx = context(mod)
     changed = false
     @timeit_debug to "hide trap" begin
 
     # inline assembly to exit a thread, hiding control flow from LLVM
-    exit_ft = LLVM.FunctionType(LLVM.VoidType(JuliaContext()))
+    exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
     exit = if job.target.cap < v"7"
         # ptxas for old compute capabilities has a bug where it messes up the
         # synchronization stack in the presence of shared memory and thread-divergend exit.
@@ -271,7 +275,7 @@ function hide_trap!(mod::LLVM.Module)
         for use in uses(trap)
             val = user(use)
             if isa(val, LLVM.CallInst)
-                let builder = Builder(JuliaContext())
+                let builder = Builder(ctx)
                     position!(builder, val)
                     call!(builder, exit)
                     dispose(builder)

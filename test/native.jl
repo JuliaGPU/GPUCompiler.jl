@@ -25,19 +25,21 @@ include("definitions/native.jl")
 
     @testset "Undefined Globals" begin
         @generated function makegbl(::Val{name}, ::Type{T}, ::Val{isext}) where {name,T,isext}
-            T_gbl = convert(LLVMType, T)
-            T_ptr = convert(LLVMType, Ptr{T})
-            llvm_f, _ = create_function(T_ptr)
-            mod = LLVM.parent(llvm_f)
-            gvar = GlobalVariable(mod, T_gbl, string(name))
-            isext && extinit!(gvar, true)
-            Builder(JuliaContext()) do builder
-                entry = BasicBlock(llvm_f, "entry", JuliaContext())
-                position!(builder, entry)
-                result = ptrtoint!(builder, gvar, T_ptr)
-                ret!(builder, result)
+            JuliaContext() do ctx
+                T_gbl = convert(LLVMType, T, ctx)
+                T_ptr = convert(LLVMType, Ptr{T}, ctx)
+                llvm_f, _ = create_function(T_ptr)
+                mod = LLVM.parent(llvm_f)
+                gvar = GlobalVariable(mod, T_gbl, string(name))
+                isext && extinit!(gvar, true)
+                Builder(ctx) do builder
+                    entry = BasicBlock(llvm_f, "entry", ctx)
+                    position!(builder, entry)
+                    result = ptrtoint!(builder, gvar, T_ptr)
+                    ret!(builder, result)
+                end
+                call_function(llvm_f, Ptr{T})
             end
-            call_function(llvm_f, Ptr{T})
         end
         function undef_gbl()
             ext_ptr = makegbl(Val(:someglobal), Int64, Val(true))

@@ -175,6 +175,8 @@ end
 else
 
 function module_setup(job::CompilerJob, mod::LLVM.Module)
+    ctx = context(mod)
+
     # configure the module
     triple!(mod, llvm_triple(job.target))
     datalayout!(mod, llvm_datalayout(job.target))
@@ -184,14 +186,14 @@ function module_setup(job::CompilerJob, mod::LLVM.Module)
         # Set Dwarf Version to 2, the DI printer will downgrade to v2 automatically,
         # but this is technically correct and the only version supported by NVPTX
         LLVM.flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
-            Metadata(ConstantInt(Int32(2), JuliaContext()))
+            Metadata(ConstantInt(Int32(2), ctx))
         LLVM.flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorError] =
-            Metadata(ConstantInt(DEBUG_METADATA_VERSION(), JuliaContext()))
+            Metadata(ConstantInt(DEBUG_METADATA_VERSION(), ctx))
     else
         push!(metadata(mod), "llvm.module.flags",
-             MDNode([ConstantInt(Int32(1), JuliaContext()),    # llvm::Module::Error
+             MDNode([ConstantInt(Int32(1), ctx),    # llvm::Module::Error
                      MDString("Debug Info Version"),
-                     ConstantInt(DEBUG_METADATA_VERSION(), JuliaContext())]))
+                     ConstantInt(DEBUG_METADATA_VERSION(), ctx)]))
     end
 end
 
@@ -330,12 +332,13 @@ end
 
 function irgen(job::CompilerJob, method_instance::Core.MethodInstance, world)
     entry, mod = @timeit_debug to "emission" compile_method_instance(job, method_instance, world)
+    ctx = context(mod)
 
     # clean up incompatibilities
     @timeit_debug to "clean-up" begin
         for llvmf in functions(mod)
             # only occurs in debug builds
-            delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0, JuliaContext()))
+            delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0, ctx))
 
             if VERSION < v"1.5.0-DEV.393"
                 # make function names safe for ptxas
@@ -491,6 +494,7 @@ safe_name(x) = safe_name(repr(x))
 # exception arguments) and proper debug info to unwind the stack, this pass can go.
 function lower_throw!(mod::LLVM.Module)
     job = current_job::CompilerJob
+    ctx = context(mod)
     changed = false
     @timeit_debug to "lower throw" begin
 
@@ -524,7 +528,7 @@ function lower_throw!(mod::LLVM.Module)
                 call = user(use)::LLVM.CallInst
 
                 # replace the throw with a PTX-compatible exception
-                let builder = Builder(JuliaContext())
+                let builder = Builder(ctx)
                     position!(builder, call)
                     emit_exception!(builder, name, call)
                     dispose(builder)
@@ -570,6 +574,7 @@ function emit_exception!(builder, name, inst)
     bb = position(builder)
     fun = LLVM.parent(bb)
     mod = LLVM.parent(fun)
+    ctx = context(mod)
 
     # report the exception
     if Base.JLOptions().debug_level >= 1
@@ -584,12 +589,13 @@ function emit_exception!(builder, name, inst)
     # report each frame
     if Base.JLOptions().debug_level >= 2
         rt = Runtime.get(:report_exception_frame)
+        ft = convert(LLVM.FunctionType, rt, ctx)
         bt = backtrace(inst)
         for (i,frame) in enumerate(bt)
-            idx = ConstantInt(rt.llvm_types[1], i)
+            idx = ConstantInt(parameters(ft)[1], i)
             func = globalstring_ptr!(builder, String(frame.func), "di_func")
             file = globalstring_ptr!(builder, String(frame.file), "di_file")
-            line = ConstantInt(rt.llvm_types[4], frame.line)
+            line = ConstantInt(parameters(ft)[4], frame.line)
             call!(builder, rt, [idx, func, file, line])
         end
     end
@@ -601,10 +607,11 @@ function emit_exception!(builder, name, inst)
 end
 
 function emit_trap!(job::CompilerJob, builder, mod, inst)
+    ctx = context(mod)
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]
     else
-        LLVM.Function(mod, "llvm.trap", LLVM.FunctionType(LLVM.VoidType(JuliaContext())))
+        LLVM.Function(mod, "llvm.trap", LLVM.FunctionType(LLVM.VoidType(ctx)))
     end
     call!(builder, trap)
 end
