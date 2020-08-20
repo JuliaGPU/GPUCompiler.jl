@@ -127,14 +127,14 @@ end
 
 # LLVM type of a tracked pointer
 function T_prjlvalue()
-    T_pjlvalue = convert(LLVMType, Any, true)
+    T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
     LLVM.PointerType(eltype(T_pjlvalue), Tracked)
 end
 
 else
 
 # FIXME: once we only support 1.4, get rid of this and allow boxed types
-T_prjlvalue() = convert(LLVMType, Any, true)
+T_prjlvalue() = convert(LLVMType, Any; allow_boxed=true)
 
 end
 
@@ -165,7 +165,7 @@ const gc_bits = 0x3 # FIXME
     T_tag = convert(LLVMType, tag_type)
     T_ptag = LLVM.PointerType(T_tag)
 
-    T_pjlvalue = convert(LLVMType, Any, true)
+    T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
 
     # create function
     llvm_f, _ = create_function(T_tag)
