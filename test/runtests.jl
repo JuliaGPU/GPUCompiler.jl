@@ -23,6 +23,8 @@ if VERSION >= v"1.4"
 end
 #include("gcn.jl")
 
+include("examples.jl")
+
 haskey(ENV, "CI") && GPUCompiler.timings()
 
 end
