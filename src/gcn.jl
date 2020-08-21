@@ -43,6 +43,7 @@ end
 
 function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
+    add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
 end
 
 function lower_throw_extra!(mod::LLVM.Module)
@@ -103,6 +104,33 @@ function lower_throw_extra!(mod::LLVM.Module)
     end
     return changed
 end
+function fix_alloca_addrspace!(fn::LLVM.Function)
+    changed = false
+    alloca_as = 5
+    ctx = context(fn)
+
+    for bb in blocks(fn)
+        for insn in instructions(bb)
+            if isa(insn, LLVM.AllocaInst)
+                ty = llvmtype(insn)
+                ety = eltype(ty)
+                addrspace(ty) == alloca_as && continue
+
+                new_insn = nothing
+                Builder(ctx) do builder
+                    position!(builder, insn)
+                    _alloca = alloca!(builder, ety, name(insn))
+                    new_insn = addrspacecast!(builder, _alloca, ty)
+                end
+                replace_uses!(insn, new_insn)
+                unsafe_delete!(LLVM.parent(insn), insn)
+            end
+        end
+    end
+
+    return changed
+end
+
 
 function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
     ctx = context(mod)

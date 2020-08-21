@@ -17,6 +17,17 @@ include("definitions/gcn.jl")
     @test occursin("amdgpu_kernel", ir)
 end
 
+@testset "alloca addrspace" begin
+    function kernel(i)
+        sink(i) # sink provides an alloca in addrspace 0
+        return
+    end
+
+    ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{Int64}; dump_module=true))
+    @test occursin("alloca i64, addrspace(5)", ir)
+    @test !occursin("alloca i64\n", ir)
+end
+
 end
 
 ############################################################################################
