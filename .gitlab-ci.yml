@@ -38,9 +38,9 @@ cuda:1.4:
   allow_failure: true
 
 
-# AMDGPUnative.jl
+# AMDGPU.jl
 
-.test_amdgpunative:
+.test_amdgpu:
   extends: .test
   image: rocm/dev-ubuntu-18.04
   script:
@@ -48,16 +48,16 @@ cuda:1.4:
                 Pkg.develop(PackageSpec(path=pwd()));
                 Pkg.build();'
     - julia -e 'using Pkg;
-                Pkg.add(PackageSpec(name="AMDGPUnative", rev="jps/gpucompiler"));
-                Pkg.test("AMDGPUnative");'
+                Pkg.add(PackageSpec(name="AMDGPU", rev="master"));
+                Pkg.test("AMDGPU");'
 
-# amdgpunative:1.4:
-#   extends:
-#     - .julia:1.4
-#     - .test_amdgpunative
-#   tags:
-#     - rocm
-#   allow_failure: true
+amdgpu:1.4:
+  extends:
+    - .julia:1.4
+    - .test_amdgpu
+  tags:
+    - rocm
+  allow_failure: true
 
 
 # other tasks

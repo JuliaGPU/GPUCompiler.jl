@@ -46,7 +46,7 @@ end
 
     asm = sprint(io->gcn_code_native(io, kernel, Tuple{}))
     @test occursin("s_trap 2", asm)
-    @test_broken occursin("s_cbranch_execz", asm)
+    @test_skip occursin("s_cbranch_execz", asm)
     if Base.libllvm_version < v"9"
         @test_broken occursin("v_readfirstlane", asm)
     end
@@ -74,8 +74,8 @@ end
     end
 
     asm = sprint(io->gcn_code_native(io, entry, Tuple{Int64}; dump_module=true, kernel=true))
-    @test occursin(r"\.amdgpu_hsa_kernel .*julia_entry", asm)
-    @test !occursin(r"\.amdgpu_hsa_kernel .*julia_nonentry", asm)
+    @test occursin(r"\.amdhsa_kernel _Z\d*julia_entry", asm)
+    @test !occursin(r"\.amdhsa_kernel _Z\d*julia_nonentry", asm)
     @test occursin(r"\.type.*julia_nonentry_\d*,@function", asm)
 end
 
@@ -90,7 +90,7 @@ end
     end
 
     asm = sprint(io->gcn_code_native(io, parent1, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*julia__\d*_child_\d*,@function", asm)
+    @test occursin(r"\.type.*julia_[[:alnum:]_.]*child_\d*,@function", asm)
 
     function parent2(i)
         child(i+1)
@@ -98,7 +98,7 @@ end
     end
 
     asm = sprint(io->gcn_code_native(io, parent2, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*julia__\d*_child_\d*,@function", asm)
+    @test occursin(r"\.type.*julia_[[:alnum:]_.]*child_\d*,@function", asm)
 end
 
 @testset "child function reuse bis" begin
