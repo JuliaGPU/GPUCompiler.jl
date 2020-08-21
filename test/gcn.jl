@@ -46,7 +46,7 @@ end
 
     asm = sprint(io->gcn_code_native(io, kernel, Tuple{}))
     @test occursin("s_trap 2", asm)
-    @test_broken occursin("s_cbranch_execz", asm)
+    @test_skip occursin("s_cbranch_execz", asm)
     if Base.libllvm_version < v"9"
         @test_broken occursin("v_readfirstlane", asm)
     end
