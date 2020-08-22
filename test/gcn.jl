@@ -24,8 +24,8 @@ end
     end
 
     ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{Int64}; dump_module=true))
-    @test occursin("alloca i64, addrspace(5)", ir)
-    @test !occursin("alloca i64\n", ir)
+    @test occursin(r"alloca i64, (align 8,)? addrspace\(5\)$"m, ir)
+    @test !occursin(r"alloca i64(, align \d)?$"m, ir)
 end
 
 end
