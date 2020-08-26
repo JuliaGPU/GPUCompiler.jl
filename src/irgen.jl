@@ -1,76 +1,6 @@
 # LLVM IR generation
 
 
-## method compilation tracer
-
-# this functionality is used to detect recursion, and functions that shouldn't be called.
-# it is a hack, and should disappear over time. don't add new features to it.
-
-# generate a pseudo-backtrace from a stack of methods being emitted
-function backtrace(@nospecialize(job::CompilerJob), call_stack::Vector{Core.MethodInstance})
-    bt = StackTraces.StackFrame[]
-    for method_instance in call_stack
-        method = method_instance.def
-        if method.name === :overdub && isdefined(method, :generator)
-            # The inline frames are maintained by the dwarf based backtrace, but here we only have the
-            # calls to overdub directly, the backtrace therefore is collapsed and we have to
-            # lookup the overdubbed function, but only if we likely are using the generated variant.
-            actual_sig = Tuple{method_instance.specTypes.parameters[3:end]...}
-            m = ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), actual_sig, typemax(UInt))
-            method = m.func::Method
-        end
-        frame = StackTraces.StackFrame(method.name, method.file, method.line)
-        pushfirst!(bt, frame)
-    end
-    bt
-end
-
-# NOTE: we use an exception to be able to display a stack trace using the logging framework
-struct MethodSubstitutionWarning <: Exception
-    original::Method
-    substitute::Method
-end
-Base.showerror(io::IO, err::MethodSubstitutionWarning) =
-    print(io, "You called $(err.original), maybe you intended to call $(err.substitute) instead?")
-const method_substitution_whitelist = [:hypot, :exp]
-
-mutable struct MethodCompileTracer
-    job::CompilerJob
-    call_stack::Vector{Core.MethodInstance}
-    last_method_instance::Union{Nothing,Core.MethodInstance}
-
-    MethodCompileTracer(job, start) = new(job, Core.MethodInstance[start])
-    MethodCompileTracer(job) = new(job, Core.MethodInstance[])
-end
-
-function Base.push!(tracer::MethodCompileTracer, method_instance)
-    push!(tracer.call_stack, method_instance)
-
-    # check for Base functions that exist in the GPU package
-    # FIXME: this might be too coarse
-    method = method_instance.def
-    if Base.moduleroot(method.module) == Base &&
-        isdefined(runtime_module(tracer.job), method_instance.def.name) &&
-        !in(method_instance.def.name, method_substitution_whitelist)
-        substitute_function = getfield(runtime_module(tracer.job), method.name)
-        tt = Tuple{method_instance.specTypes.parameters[2:end]...}
-        if hasmethod(substitute_function, tt)
-            method′ = which(substitute_function, tt)
-            if method′.module == runtime_module(tracer.job)
-                @warn "calls to Base intrinsics might be GPU incompatible" exception=(MethodSubstitutionWarning(method, method′), backtrace(tracer.job, tracer.call_stack))
-            end
-        end
-    end
-end
-
-function Base.pop!(tracer::MethodCompileTracer, method_instance)
-    @compiler_assert last(tracer.call_stack) == method_instance tracer.job
-    tracer.last_method_instance = pop!(tracer.call_stack)
-end
-
-Base.last(tracer::MethodCompileTracer) = tracer.last_method_instance
-
-
 ## Julia compiler integration
 
 ### cache
@@ -190,9 +120,6 @@ end
 
 function compile_method_instance(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance, world)
     # set-up the compiler interface
-    tracer = MethodCompileTracer(job, method_instance)
-    hook_emit_function(method_instance, code) = push!(tracer, method_instance)
-    hook_emitted_function(method_instance, code) = pop!(tracer, method_instance)
     debug_info_kind = if Base.JLOptions().debug_level == 0
         LLVM.API.LLVMDebugEmissionKindNoDebug
     elseif Base.JLOptions().debug_level == 1
@@ -211,8 +138,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
                     code_coverage      = false,
                     static_alloc       = false,
                     prefer_specsig     = true,
-                    emit_function      = hook_emit_function,
-                    emitted_function   = hook_emitted_function,
                     gnu_pubnames       = false,
                     debug_info_kind    = Cint(debug_info_kind),
                     lookup             = @cfunction(gpu_ci_cache_lookup, Any, (Any, UInt, UInt)))
