@@ -44,8 +44,8 @@ struct GPUInterpreter <: AbstractInterpreter
             world,
 
             # parameters for inference and optimization
-            InferenceParams(),
-            OptimizationParams(),
+            InferenceParams(unoptimize_throw_blocks=false),
+            OptimizationParams(unoptimize_throw_blocks=false),
         )
     end
 end
@@ -136,7 +136,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     params = Base.CodegenParams(;
                     track_allocations  = false,
                     code_coverage      = false,
-                    static_alloc       = false,
                     prefer_specsig     = true,
                     gnu_pubnames       = false,
                     debug_info_kind    = Cint(debug_info_kind),
