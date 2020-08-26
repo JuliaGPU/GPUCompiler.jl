@@ -42,67 +42,7 @@ function process_kernel!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, 
 end
 
 function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
-    add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
     add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
-end
-
-function lower_throw_extra!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    ctx = context(mod)
-    changed = false
-    @timeit_debug to "lower throw (extra)" begin
-
-    throw_functions = [
-        r"julia_bounds_error.*",
-        r"julia_throw_boundserror.*",
-        r"julia_error_if_canonical_getindex.*",
-        r"julia_error_if_canonical_setindex.*",
-        r"julia___subarray_throw_boundserror.*",
-    ]
-
-
-    for f in functions(mod)
-        f_name = LLVM.name(f)
-        for fn in throw_functions
-            if occursin(fn, f_name)
-                for use in uses(f)
-                    call = user(use)::LLVM.CallInst
-
-                    # replace the throw with a trap
-                    let builder = Builder(ctx)
-                        position!(builder, call)
-                        emit_exception!(builder, f_name, call)
-                        dispose(builder)
-                    end
-
-                    # remove the call
-                    call_args = collect(operands(call))[1:end-1] # last arg is function itself
-                    unsafe_delete!(LLVM.parent(call), call)
-
-                    # HACK: kill the exceptions' unused arguments
-                    for arg in call_args
-                        # peek through casts
-                        if isa(arg, LLVM.AddrSpaceCastInst)
-                            cast = arg
-                            arg = first(operands(cast))
-                            isempty(uses(cast)) && unsafe_delete!(LLVM.parent(cast), cast)
-                        end
-
-                        if isa(arg, LLVM.Instruction) && isempty(uses(arg))
-                            unsafe_delete!(LLVM.parent(arg), arg)
-                        end
-                    end
-
-                    changed = true
-                end
-
-                @compiler_assert isempty(uses(f)) job
-            end
-        end
-    end
-
-    end
-    return changed
 end
 function fix_alloca_addrspace!(fn::LLVM.Function)
     changed = false
