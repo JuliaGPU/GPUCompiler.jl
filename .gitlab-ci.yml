@@ -26,7 +26,7 @@ asserts:1.4:
                 Pkg.develop(PackageSpec(path=pwd()));
                 Pkg.build();'
     - julia -e 'using Pkg;
-                Pkg.add(PackageSpec(name="CUDA", rev="master"));
+                Pkg.add(PackageSpec(name="CUDA", rev="stable"));
                 Pkg.test("CUDA");'
 
 cuda:1.4:
