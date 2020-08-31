@@ -176,7 +176,7 @@ function wrapper_type(julia_t::Type, codegen_t::LLVMType)::LLVMType
     end
 end
 # generate a kernel wrapper to fix & improve argument passing
-function wrap_entry!(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
+function wrap_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
     ctx = context(mod)
     entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
     @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job

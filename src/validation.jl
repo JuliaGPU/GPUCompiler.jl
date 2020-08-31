@@ -2,7 +2,7 @@
 
 export InvalidIRError
 
-function check_method(job::CompilerJob)
+function check_method(@nospecialize(job::CompilerJob))
     isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
@@ -54,7 +54,7 @@ function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
     return msg
 end
 
-function check_invocation(job::CompilerJob, entry::LLVM.Function)
+function check_invocation(@nospecialize(job::CompilerJob), entry::LLVM.Function)
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
     sig = Base.signature_type(job.source.f, job.source.tt)::Type

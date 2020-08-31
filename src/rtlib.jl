@@ -73,7 +73,7 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, job::CompilerJob, f, method)
+function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     tt = Base.to_tuple_type(method.types)
     new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
                              optimize=false, libraries=false)
@@ -108,7 +108,7 @@ function emit_function!(mod, job::CompilerJob, f, method)
     LLVM.name!(entry, name)
 end
 
-function build_runtime(job::CompilerJob, ctx)
+function build_runtime(@nospecialize(job::CompilerJob), ctx)
     mod = LLVM.Module("GPUCompiler run-time library", ctx)
 
     for method in values(Runtime.methods)
@@ -126,7 +126,7 @@ function build_runtime(job::CompilerJob, ctx)
     mod
 end
 
-function load_runtime(job::CompilerJob, ctx)
+function load_runtime(@nospecialize(job::CompilerJob), ctx)
     # find the first existing cache directory (for when dealing with layered depots)
     cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
     filter!(isdir, cachedirs)

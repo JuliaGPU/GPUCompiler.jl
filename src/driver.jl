@@ -28,7 +28,7 @@ The following keyword arguments are supported:
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
-function compile(target::Symbol, job::CompilerJob;
+function compile(target::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true,
                  optimize::Bool=true, strip::Bool=false, validate::Bool=true,
                  only_entry::Bool=false)
@@ -55,7 +55,7 @@ const deferred_codegen_jobs = Vector{Tuple{Core.Function,Type}}()
     end
 end
 
-function codegen(output::Symbol, job::CompilerJob;
+function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                  strip::Bool=false, validate::Bool=true, only_entry::Bool=false)
     ## Julia IR

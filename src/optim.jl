@@ -1,6 +1,6 @@
 # LLVM IR optimization
 
-function optimize!(job::CompilerJob, mod::LLVM.Module)
+function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     tm = llvm_machine(job.target)
 
     function initialize!(pm)
