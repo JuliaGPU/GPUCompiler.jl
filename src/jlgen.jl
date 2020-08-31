@@ -183,3 +183,5 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
 
     return llvm_specfunc, llvm_mod
 end
+
+Base.empty!(cache::GPUCodeCache) = empty!(cache.dict)
