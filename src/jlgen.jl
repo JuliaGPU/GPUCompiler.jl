@@ -135,12 +135,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
         debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
     end
     params = Base.CodegenParams(;
-                    track_allocations  = false,
-                    code_coverage      = false,
-                    prefer_specsig     = true,
-                    gnu_pubnames       = false,
-                    debug_info_kind    = Cint(debug_info_kind),
-                    lookup             = @cfunction(gpu_ci_cache_lookup, Any, (Any, UInt, UInt)))
+        track_allocations  = false,
+        code_coverage      = false,
+        prefer_specsig     = true,
+        gnu_pubnames       = false,
+        debug_info_kind    = Cint(debug_info_kind),
+        lookup             = @cfunction(gpu_ci_cache_lookup, Any, (Any, UInt, UInt)))
 
     # generate IR
     native_code = ccall(:jl_create_native, Ptr{Cvoid},
@@ -167,11 +167,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
 
     # get the top-level function)
     llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                     (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
+                          (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
     @assert llvm_func_ref != C_NULL
     llvm_func = LLVM.Function(llvm_func_ref)
     llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                         (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
+                              (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
     @assert llvm_specfunc_ref != C_NULL
     llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
