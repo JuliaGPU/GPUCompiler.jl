@@ -7,7 +7,7 @@
 # it is a hack, and should disappear over time. don't add new features to it.
 
 # generate a pseudo-backtrace from a stack of methods being emitted
-function backtrace(job::CompilerJob, call_stack::Vector{Core.MethodInstance})
+function backtrace(@nospecialize(job::CompilerJob), call_stack::Vector{Core.MethodInstance})
     bt = StackTraces.StackFrame[]
     for method_instance in call_stack
         method = method_instance.def
@@ -85,7 +85,7 @@ if VERSION >= v"1.5.0-DEV.393"
 
 # JuliaLang/julia#25984 significantly restructured the compiler
 
-function compile_method_instance(job::CompilerJob, method_instance::Core.MethodInstance, world)
+function compile_method_instance(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance, world)
     # set-up the compiler interface
     tracer = MethodCompileTracer(job, method_instance)
     hook_emit_function(method_instance, code) = push!(tracer, method_instance)
@@ -174,7 +174,7 @@ end
 
 else
 
-function module_setup(job::CompilerJob, mod::LLVM.Module)
+function module_setup(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     ctx = context(mod)
 
     # configure the module
@@ -197,7 +197,7 @@ function module_setup(job::CompilerJob, mod::LLVM.Module)
     end
 end
 
-function compile_method_instance(job::CompilerJob, method_instance::Core.MethodInstance, world)
+function compile_method_instance(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance, world)
     function postprocess(ir)
         # get rid of jfptr wrappers
         for llvmf in functions(ir)
@@ -330,7 +330,7 @@ end
 
 end
 
-function irgen(job::CompilerJob, method_instance::Core.MethodInstance, world)
+function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance, world)
     entry, mod = @timeit_debug to "emission" compile_method_instance(job, method_instance, world)
     ctx = context(mod)
 
@@ -606,7 +606,7 @@ function emit_exception!(builder, name, inst)
     emit_trap!(job, builder, mod, inst)
 end
 
-function emit_trap!(job::CompilerJob, builder, mod, inst)
+function emit_trap!(@nospecialize(job::CompilerJob), builder, mod, inst)
     ctx = context(mod)
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]
@@ -620,7 +620,7 @@ end
 ## kernel promotion
 
 # promote a function to a kernel
-function promote_kernel!(job::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function)
+function promote_kernel!(@nospecialize(job::CompilerJob), mod::LLVM.Module, kernel::LLVM.Function)
     # pass non-opaque pointer arguments by value (this improves performance,
     # and is mandated by certain back-ends like SPIR-V). only do so for values
     # that aren't a Julia pointer, so we ca still pass those directly.

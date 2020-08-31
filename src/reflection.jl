@@ -42,10 +42,10 @@ highlight(io, code, lexer) = print(io, code)
 # code_* replacements
 #
 
-code_lowered(job::CompilerJob; kwargs...) =
+code_lowered(@nospecialize(job::CompilerJob); kwargs...) =
     InteractiveUtils.code_lowered(job.source.f, job.source.tt; kwargs...)
 
-function code_typed(job::CompilerJob; interactive::Bool=false, kwargs...)
+function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
     if interactive
         # call Cthulhu without introducing a dependency on Cthulhu
@@ -58,7 +58,7 @@ function code_typed(job::CompilerJob; interactive::Bool=false, kwargs...)
     end
 end
 
-function code_warntype(io::IO, job::CompilerJob; interactive::Bool=false, kwargs...)
+function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
     if interactive
         @assert io == stdout
@@ -71,7 +71,7 @@ function code_warntype(io::IO, job::CompilerJob; interactive::Bool=false, kwargs
         InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; kwargs...)
     end
 end
-code_warntype(job::CompilerJob; kwargs...) = code_warntype(stdout, job; kwargs...)
+code_warntype(@nospecialize(job::CompilerJob); kwargs...) = code_warntype(stdout, job; kwargs...)
 
 """
     code_llvm([io], job; optimize=true, raw=false, dump_module=false)
@@ -87,7 +87,7 @@ The following keyword arguments are supported:
 
 See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_llvm(io::IO, job::CompilerJob; optimize::Bool=true, raw::Bool=false,
+function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     ir, entry = GPUCompiler.codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
@@ -96,7 +96,7 @@ function code_llvm(io::IO, job::CompilerJob; optimize::Bool=true, raw::Bool=fals
                 entry, !raw, dump_module, debuginfo)
     highlight(io, str, "llvm")
 end
-code_llvm(job::CompilerJob; kwargs...) = code_llvm(stdout, job; kwargs...)
+code_llvm(@nospecialize(job::CompilerJob); kwargs...) = code_llvm(stdout, job; kwargs...)
 
 """
     code_native([io], f, types; cap::VersionNumber, kernel=false, raw=false)
@@ -111,11 +111,11 @@ The following keyword arguments are supported:
 
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_native(io::IO, job::CompilerJob; raw::Bool=false, dump_module::Bool=false)
+function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, dump_module::Bool=false)
     asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
     highlight(io, asm, source_code(job.target))
 end
-code_native(job::CompilerJob; kwargs...) =
+code_native(@nospecialize(job::CompilerJob); kwargs...) =
     code_native(stdout, func, types; kwargs...)
 
 
@@ -165,7 +165,7 @@ See also: `InteractiveUtils.@code_lowered`
 macro device_code_lowered(ex...)
     quote
         buf = Any[]
-        function hook(job::CompilerJob)
+        function hook(@nospecialize(job::CompilerJob))
             append!(buf, code_lowered(job))
         end
         $(emit_hooked_compilation(:hook, ex...))
@@ -184,7 +184,7 @@ See also: `InteractiveUtils.@code_typed`
 macro device_code_typed(ex...)
     quote
         output = Dict{CompilerJob,Any}()
-        function hook(job::CompilerJob)
+        function hook(@nospecialize(job::CompilerJob))
             output[job] = code_typed(job)
         end
         $(emit_hooked_compilation(:hook, ex...))
@@ -201,7 +201,7 @@ Evaluates the expression `ex` and prints the result of
 See also: `InteractiveUtils.@code_warntype`
 """
 macro device_code_warntype(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(@nospecialize(job::CompilerJob); io::IO=stdout, kwargs...)
         println(io, "$job")
         println(io)
         code_warntype(io, job; kwargs...)
@@ -219,7 +219,7 @@ to `io` for every compiled GPU kernel. For other supported keywords, see
 See also: InteractiveUtils.@code_llvm
 """
 macro device_code_llvm(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(@nospecialize(job::CompilerJob); io::IO=stdout, kwargs...)
         println(io, "; $job")
         code_llvm(io, job; kwargs...)
     end
@@ -234,7 +234,7 @@ for every compiled GPU kernel. For other supported keywords, see
 [`GPUCompiler.code_native`](@ref).
 """
 macro device_code_native(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(@nospecialize(job::CompilerJob); io::IO=stdout, kwargs...)
         println(io, "// $job")
         println(io)
         code_native(io, job; kwargs...)
@@ -251,7 +251,7 @@ Evaluates the expression `ex` and dumps all intermediate forms of code to the di
 macro device_code(ex...)
     only(xs) = (@assert length(xs) == 1; first(xs))
     localUnique = 1
-    function hook(job::CompilerJob; dir::AbstractString)
+    function hook(@nospecialize(job::CompilerJob); dir::AbstractString)
         name = something(job.source.name, nameof(job.source.f))
         fn = "$(name)_$(localUnique)"
         mkpath(dir)

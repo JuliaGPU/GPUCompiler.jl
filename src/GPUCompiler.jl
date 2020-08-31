@@ -52,4 +52,7 @@ function __init__()
     return
 end
 
+include("precompile.jl")
+_precompile_()
+
 end # module

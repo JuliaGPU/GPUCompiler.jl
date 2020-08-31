@@ -91,7 +91,7 @@ Base.@kwdef struct CompilerJob{T,P}
         new{typeof(target), typeof(params)}(target, source, params)
 end
 
-Base.similar(job::CompilerJob, source::FunctionSpec) =
+Base.similar(@nospecialize(job::CompilerJob), source::FunctionSpec) =
     CompilerJob(target=job.target, source=source, params=job.params)
 
 function Base.show(io::IO, job::CompilerJob{T}) where {T}

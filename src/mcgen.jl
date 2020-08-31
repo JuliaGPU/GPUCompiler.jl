@@ -2,7 +2,7 @@
 
 # final preparations for the module to be compiled to PTX
 # these passes should not be run when e.g. compiling to write to disk.
-function prepare_execution!(job::CompilerJob, mod::LLVM.Module)
+function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     let pm = ModulePassManager()
         global current_job
         current_job = job
@@ -68,7 +68,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
 end
 
 
-function mcgen(job::CompilerJob, mod::LLVM.Module, f::LLVM.Function, format=LLVM.API.LLVMAssemblyFile)
+function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function, format=LLVM.API.LLVMAssemblyFile)
     tm = llvm_machine(job.target)
 
     return String(emit(tm, mod, format))
