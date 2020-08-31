@@ -165,7 +165,7 @@ See also: `InteractiveUtils.@code_lowered`
 macro device_code_lowered(ex...)
     quote
         buf = Any[]
-        function hook(@nospecialize(job::CompilerJob))
+        function hook(job::CompilerJob)
             append!(buf, code_lowered(job))
         end
         $(emit_hooked_compilation(:hook, ex...))
@@ -184,7 +184,7 @@ See also: `InteractiveUtils.@code_typed`
 macro device_code_typed(ex...)
     quote
         output = Dict{CompilerJob,Any}()
-        function hook(@nospecialize(job::CompilerJob))
+        function hook(job::CompilerJob)
             output[job] = code_typed(job)
         end
         $(emit_hooked_compilation(:hook, ex...))
@@ -201,7 +201,7 @@ Evaluates the expression `ex` and prints the result of
 See also: `InteractiveUtils.@code_warntype`
 """
 macro device_code_warntype(ex...)
-    function hook(@nospecialize(job::CompilerJob); io::IO=stdout, kwargs...)
+    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
         println(io, "$job")
         println(io)
         code_warntype(io, job; kwargs...)
@@ -219,7 +219,7 @@ to `io` for every compiled GPU kernel. For other supported keywords, see
 See also: InteractiveUtils.@code_llvm
 """
 macro device_code_llvm(ex...)
-    function hook(@nospecialize(job::CompilerJob); io::IO=stdout, kwargs...)
+    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
         println(io, "; $job")
         code_llvm(io, job; kwargs...)
     end
@@ -234,7 +234,7 @@ for every compiled GPU kernel. For other supported keywords, see
 [`GPUCompiler.code_native`](@ref).
 """
 macro device_code_native(ex...)
-    function hook(@nospecialize(job::CompilerJob); io::IO=stdout, kwargs...)
+    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
         println(io, "// $job")
         println(io)
         code_native(io, job; kwargs...)
@@ -251,7 +251,7 @@ Evaluates the expression `ex` and dumps all intermediate forms of code to the di
 macro device_code(ex...)
     only(xs) = (@assert length(xs) == 1; first(xs))
     localUnique = 1
-    function hook(@nospecialize(job::CompilerJob); dir::AbstractString)
+    function hook(job::CompilerJob; dir::AbstractString)
         name = something(job.source.name, nameof(job.source.f))
         fn = "$(name)_$(localUnique)"
         mkpath(dir)
