@@ -51,15 +51,15 @@ end
 
 function _precompile_()
     ccall(:jl_generating_output, Cint, ()) == 1 || return nothing
-    Base.precompile(Tuple{typeof(GPUCompiler.assign_args!),Expr,Vector{Any}})
-    Base.precompile(Tuple{typeof(GPUCompiler.hide_trap!),LLVM.Module})
-    Base.precompile(Tuple{typeof(GPUCompiler.hide_unreachable!),LLVM.Function})
-    Base.precompile(Tuple{typeof(GPUCompiler.lower_gc_frame!),LLVM.Function})
-    Base.precompile(Tuple{typeof(GPUCompiler.lower_throw!),LLVM.Module})
-    Base.precompile(Tuple{typeof(GPUCompiler.split_kwargs),Tuple{},Vector{Symbol},Vararg{Vector{Symbol}, N} where N})
-    let fbody = try __lookup_kwbody__(which(GPUCompiler.compile, (Symbol,GPUCompiler.CompilerJob{GPUCompiler.PTXCompilerTarget, GPUCompiler.AbstractCompilerParams},))) catch missing end
+    @assert precompile(Tuple{typeof(GPUCompiler.assign_args!),Expr,Vector{Any}})
+    @assert precompile(Tuple{typeof(GPUCompiler.hide_trap!),LLVM.Module})
+    @assert precompile(Tuple{typeof(GPUCompiler.hide_unreachable!),LLVM.Function})
+    @assert precompile(Tuple{typeof(GPUCompiler.lower_gc_frame!),LLVM.Function})
+    @assert precompile(Tuple{typeof(GPUCompiler.lower_throw!),LLVM.Module})
+    @assert precompile(Tuple{typeof(GPUCompiler.split_kwargs),Tuple{},Vector{Symbol},Vararg{Vector{Symbol}, N} where N})
+    let fbody = try __lookup_kwbody__(which(GPUCompiler.compile, (Symbol,GPUCompiler.CompilerJob,))) catch missing end
         if !ismissing(fbody)
-            precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob{GPUCompiler.PTXCompilerTarget, GPUCompiler.AbstractCompilerParams},))
+            @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
         end
     end
 end
