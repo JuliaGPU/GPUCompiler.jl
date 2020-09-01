@@ -17,6 +17,7 @@ include("native.jl")
 include("ptx.jl")
 include("spirv.jl")
 include("gcn.jl")
+include("bpf.jl")
 
 include("examples.jl")
 

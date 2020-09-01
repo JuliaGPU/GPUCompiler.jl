@@ -24,6 +24,7 @@ include("native.jl")
 include("ptx.jl")
 include("gcn.jl")
 include("spirv.jl")
+include("bpf.jl")
 
 include("runtime.jl")
 
