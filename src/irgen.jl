@@ -516,7 +516,10 @@ function lower_throw!(mod::LLVM.Module)
         "jl_eof_error"                  => "EOF error",
         # Julia-level exceptions that use unsupported inputs like interpolated strings
         r"julia_throw_exp_domainerror_\d+"      => "DomainError",
-        r"julia_throw_complex_domainerror_\d+"  => "DomainError"
+        r"julia_throw_complex_domainerror_\d+"  => "DomainError",
+        r"julia_throw_domerr_powbysq_\d+"       => "DomainError",
+        r"julia_throw_overflowerr_binaryop_\d+" => "OverflowError",
+        r"julia_throw_overflowerr_negation_\d+" => "OverflowError"
     ]
 
     for f in functions(mod)
