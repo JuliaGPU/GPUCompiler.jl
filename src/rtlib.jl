@@ -170,7 +170,7 @@ function load_runtime(@nospecialize(job::CompilerJob), ctx)
             lib = build_runtime(job, ctx)
 
             # atomic write to disk
-            temp_path, io = mktemp(; cleanup=false)
+            temp_path, io = mktemp(dirname(path); cleanup=false)
             write(io, lib)
             close(io)
             mv(temp_path, path; force=true)
