@@ -161,9 +161,13 @@ function load_runtime(@nospecialize(job::CompilerJob), ctx)
             @debug "Building the GPU runtime library at $path"
             mkpath(output_dir)
             lib = build_runtime(job, ctx)
-            open(path, "w") do io
-                write(io, lib)
-            end
+
+            # atomic write to disk
+            temp_path, io = mktemp(; cleanup=false)
+            write(io, lib)
+            close(io)
+            mv(temp_path, path; force=true)
+
             lib
         end
     end
