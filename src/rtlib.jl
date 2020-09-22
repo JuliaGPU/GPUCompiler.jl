@@ -153,11 +153,18 @@ function load_runtime(@nospecialize(job::CompilerJob), ctx)
     path = joinpath(output_dir, name)
 
     get!(libcache, path) do
-        if ispath(path)
-            open(path) do io
-                parse(LLVM.Module, read(io), ctx)
+        lib = try
+            if ispath(path)
+                open(path) do io
+                    parse(LLVM.Module, read(io), ctx)
+                end
             end
-        else
+        catch ex
+            @warn "Failed to load GPU runtime library at $path" exception=(ex, catch_backtrace())
+            nothing
+        end
+
+        if lib === nothing
             @debug "Building the GPU runtime library at $path"
             mkpath(output_dir)
             lib = build_runtime(job, ctx)
@@ -167,9 +174,9 @@ function load_runtime(@nospecialize(job::CompilerJob), ctx)
             write(io, lib)
             close(io)
             mv(temp_path, path; force=true)
-
-            lib
         end
+
+        lib
     end
 end
 
