@@ -34,7 +34,7 @@ runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) = "spirv"
 function process_kernel!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     # calling convention
     for fun in functions(mod)
-        callconv!(kernel, LLVM.API.LLVMSPIRFUNCCallConv)
+        callconv!(fun, LLVM.API.LLVMSPIRFUNCCallConv)
     end
     callconv!(kernel, LLVM.API.LLVMSPIRKERNELCallConv)
 
