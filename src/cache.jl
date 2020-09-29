@@ -10,28 +10,44 @@ const compilelock = ReentrantLock()
 # whether to cache compiled kernels on disk or not
 const disk_cache = Ref(false)
 
-@inline function check_cache(cache, compiler, linker, spec, prekey; kwargs...)
+@inline function check_cache(cache, @nospecialize(compiler), @nospecialize(linker),
+                             spec, prekey; kwargs...)
     key = hash((spec, kwargs), prekey)
+    force_compilation = compile_hook[] !== nothing
 
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(compilelock)
     try
         obj = get(cache, key, nothing)
-        if obj === nothing
-            if !disk_cache[] || compile_hook[] !== nothing
-                asm = compiler(spec; kwargs...)
-            else
+        if obj === nothing || force_compilation
+            asm = nothing
+
+            # can we load from the disk cache?
+            if disk_cache[] && !force_compilation
                 path = joinpath(@get_scratch!("kernels"), "$key.jls")
                 if isfile(path)
-                    @debug "Loading compiled kernel for $spec from $path"
-                    asm = deserialize(path)
-                else
-                    asm = compiler(spec; kwargs...)
+                    try
+                        asm = deserialize(path)
+                        @debug "Loading compiled kernel for $spec from $path"
+                    catch ex
+                        @warn "Failed to load compiled kernel at $path" exception=(ex, catch_backtrace())
+                    end
+                end
+            end
+
+            # compile
+            if asm === nothing
+                asm = compiler(spec; kwargs...)
+                if disk_cache[] && !isfile(path)
                     serialize(path, asm)
                 end
             end
-            obj = linker(spec, asm)
-            cache[key] = obj
+
+            # link (but not if we got here because of forced compilation)
+            if obj === nothing
+                obj = linker(spec, asm)
+                cache[key] = obj
+            end
         end
         obj
     finally
