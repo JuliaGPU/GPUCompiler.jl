@@ -7,7 +7,8 @@ using Serialization, Scratch
 
 const compilelock = ReentrantLock()
 
-const freeze_kernels = Ref(false)
+# whether to cache compiled kernels on disk or not
+const disk_cache = Ref(false)
 
 @inline function check_cache(cache, compiler, linker, spec, prekey; kwargs...)
     key = hash((spec, kwargs), prekey)
@@ -17,7 +18,7 @@ const freeze_kernels = Ref(false)
     try
         obj = get(cache, key, nothing)
         if obj === nothing
-            if !freeze_kernels[] || compile_hook[] !== nothing
+            if !disk_cache[] || compile_hook[] !== nothing
                 asm = compiler(spec; kwargs...)
             else
                 path = joinpath(@get_scratch!("kernels"), "$key.jls")

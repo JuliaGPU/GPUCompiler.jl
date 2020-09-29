@@ -49,7 +49,7 @@ function __init__()
     InitializeAllAsmParsers()
     InitializeAllTargetMCs()
 
-    freeze_kernels[] = parse(Bool, get(ENV, "JULIA_GPUCOMPILER_FROZEN", "false"))
+    disk_cache[] = parse(Bool, get(ENV, "JULIA_GPUCOMPILER_DISKCACHE", "false"))
 
     return
 end
