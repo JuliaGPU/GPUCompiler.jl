@@ -46,14 +46,18 @@ const frozen = Ref(false)
                                        spec::FunctionSpec{f,tt}, env::UInt=zero(UInt);
                                        kwargs...) where {f,tt}
     frozen[] && return quote
-        path = joinpath(@get_scratch!("kernels"), "$(hash(spec)).jls")
-        asm = if isfile(path)
-            @debug "Loading compiled kernel for $spec from $path"
-            deserialize(path)
-        else
-            asm = compiler(spec; kwargs...)
-            serialize(path, asm)
-            asm
+        key = hash(spec)
+        asm = get(compilecache, key, nothing)
+        if asm === nothing
+            path = joinpath(@get_scratch!("kernels"), "$(hash(spec)).jls")
+            asm = if isfile(path)
+                @debug "Loading compiled kernel for $spec from $path"
+                deserialize(path)
+            else
+                asm = compiler(spec; kwargs...)
+                serialize(path, asm)
+                asm
+            end
         end
         obj = linker(spec, asm)
     end
