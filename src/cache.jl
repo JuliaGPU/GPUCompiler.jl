@@ -3,10 +3,12 @@
 using Core.Compiler: retrieve_code_info, CodeInfo, MethodInstance, SSAValue, SlotNumber
 using Base: _methods_by_ftype
 
+using Serialization
+
 const compilecache = Dict{UInt, Any}()
 const compilelock = ReentrantLock()
 
-@inline function check_cache(driver, spec, id; kwargs...)
+@inline function check_cache(compiler, linker, spec, id; kwargs...)
     # generate a key for indexing the compilation cache
     key = hash(kwargs, id)
     key = hash(spec.name, key)      # fields f and tt are already covered by the id
@@ -19,12 +21,13 @@ const compilelock = ReentrantLock()
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(compilelock)
     try
-        entry = get(compilecache, key, nothing)
-        if entry === nothing
-            entry = driver(spec; kwargs...)
-            compilecache[key] = entry
+        obj = get(compilecache, key, nothing)
+        if obj === nothing
+            asm = compiler(spec; kwargs...)
+            obj = linker(spec, asm)
+            compilecache[key] = obj
         end
-        entry
+        obj
     finally
         unlock(compilelock)
     end
@@ -37,8 +40,9 @@ end
 
 specialization_counter = 0
 
-@generated function cached_compilation(driver::Core.Function, spec::FunctionSpec{f,tt},
-                                       env::UInt=zero(UInt); kwargs...) where {f,tt}
+@generated function cached_compilation(compiler::Core.Function, linker::Core.Function,
+                                       spec::FunctionSpec{f,tt}, env::UInt=zero(UInt);
+                                       kwargs...) where {f,tt}
 
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
@@ -70,18 +74,19 @@ specialization_counter = 0
     #      underlying C methods -- which GPUCompiler does, so everything Just Works.
 
     # prepare the slots
-    new_ci.slotnames = Symbol[:kwfunc, :kwargs, Symbol("#self#"), :driver, :spec, :id]
-    new_ci.slotflags = UInt8[0x00 for i = 1:6]
+    new_ci.slotnames = Symbol[:kwfunc, :kwargs, Symbol("#self#"), :compiler, :linker, :spec, :id]
+    new_ci.slotflags = UInt8[0x00 for i = 1:7]
     kwargs = SlotNumber(2)
-    driver = SlotNumber(4)
-    spec = SlotNumber(5)
-    env = SlotNumber(6)
+    compiler = SlotNumber(4)
+    linker = SlotNumber(5)
+    spec = SlotNumber(6)
+    env = SlotNumber(7)
 
     # call the compiler
     append!(new_ci.code, [Expr(:call, Core.kwfunc, check_cache),
                           Expr(:call, merge, NamedTuple(), kwargs),
                           Expr(:call, hash, env, id),
-                          Expr(:call, SSAValue(1), SSAValue(2), check_cache, driver, spec, SSAValue(3)),
+                          Expr(:call, SSAValue(1), SSAValue(2), check_cache, compiler, linker, spec, SSAValue(3)),
                           Expr(:return, SSAValue(4))])
     append!(new_ci.codelocs, [1, 1, 1, 1, 1])   # see note below
     new_ci.ssavaluetypes += 5
