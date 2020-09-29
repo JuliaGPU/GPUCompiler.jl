@@ -4,17 +4,14 @@ include:
 
 # LLVM with assertions
 
-# TODO: upgrade to 1.4.1 once it has LLVM+asserts artifacts
-asserts:1.4:
-  extends:
-    - .julia:source
-    - .test
-  variables:
-    CI_CLONE_ARGS: '-b v1.4.0'
-    CI_BUILD_ARGS: 'BINARYBUILDER_LLVM_ASSERTS=1'
-    CI_ASSERTS: 'true'
-
-# TODO: add 1.5.0 once it has LLVM+asserts artifacts
+# asserts:1.5:
+#   extends:
+#     - .julia:source
+#     - .test
+#   variables:
+#     CI_CLONE_ARGS: '-b v1.5.0'
+#     CI_BUILD_ARGS: 'BINARYBUILDER_LLVM_ASSERTS=1'
+#     CI_ASSERTS: 'true'
 
 
 # CUDA.jl
@@ -50,9 +47,9 @@ cuda:1.5:
                 Pkg.add(PackageSpec(name="AMDGPU", rev="master"));
                 Pkg.test("AMDGPU");'
 
-amdgpu:1.4:
+amdgpu:1.5:
   extends:
-    - .julia:1.4
+    - .julia:1.5
     - .test_amdgpu
   tags:
     - rocm
@@ -63,5 +60,5 @@ amdgpu:1.4:
 
 coverage:
   extends:
-    - .julia:1.4
+    - .julia:1.5
     - .coverage
