@@ -7,39 +7,27 @@ using Serialization, Scratch
 
 const compilelock = ReentrantLock()
 
-@inline function get_interactive(cache, compiler, linker, spec, id; kwargs...)
-    key = hash((spec, kwargs), id)
+const freeze_kernels = Ref(false)
 
-    # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
-    lock(compilelock)
-    try
-        obj = get(cache, key, nothing)
-        if obj === nothing || compile_hook[] != nothing
-            asm = compiler(spec; kwargs...)
-            obj = linker(spec, asm)
-            cache[key] = obj
-        end
-        obj
-    finally
-        unlock(compilelock)
-    end
-end
-
-@inline function get_frozen(cache, compiler, linker, spec; kwargs...)
-    key = hash((spec, kwargs))
+@inline function check_cache(cache, compiler, linker, spec, prekey; kwargs...)
+    key = hash((spec, kwargs), prekey)
 
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(compilelock)
     try
         obj = get(cache, key, nothing)
         if obj === nothing
-            path = joinpath(@get_scratch!("kernels"), "$key.jls")
-            if isfile(path)
-                @debug "Loading compiled kernel for $spec from $path"
-                asm = deserialize(path)
-            else
+            if !freeze_kernels[] || compile_hook[] !== nothing
                 asm = compiler(spec; kwargs...)
-                serialize(path, asm)
+            else
+                path = joinpath(@get_scratch!("kernels"), "$key.jls")
+                if isfile(path)
+                    @debug "Loading compiled kernel for $spec from $path"
+                    asm = deserialize(path)
+                else
+                    asm = compiler(spec; kwargs...)
+                    serialize(path, asm)
+                end
             end
             obj = linker(spec, asm)
             cache[key] = obj
@@ -57,14 +45,8 @@ end
 
 const specialization_counter = Ref{UInt}(0)
 
-const freeze_kernels = Ref(false)
-
 @generated function cached_compilation(cache::Dict, compiler::Function, linker::Function,
                                        spec::FunctionSpec{f,tt}; kwargs...) where {f,tt}
-    freeze_kernels[] && return quote
-        get_frozen(cache, compiler, linker, spec; kwargs...)
-    end
-
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
     mthds = _methods_by_ftype(sig, -1, typemax(UInt))
@@ -104,9 +86,9 @@ const freeze_kernels = Ref(false)
     spec = SlotNumber(7)
 
     # call the compiler
-    append!(new_ci.code, [Expr(:call, Core.kwfunc, get_interactive),
+    append!(new_ci.code, [Expr(:call, Core.kwfunc, check_cache),
                           Expr(:call, merge, NamedTuple(), kwargs),
-                          Expr(:call, SSAValue(1), SSAValue(2), get_interactive,
+                          Expr(:call, SSAValue(1), SSAValue(2), check_cache,
                                       cache, compiler, linker, spec, id),
                           Expr(:return, SSAValue(3))])
     append!(new_ci.codelocs, [1, 1, 1, 1])   # see note below
