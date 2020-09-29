@@ -8,7 +8,7 @@ using Serialization, Scratch
 const compilecache = Dict{UInt, Any}()
 const compilelock = ReentrantLock()
 
-@inline function check_cache(compiler, linker, spec, id; kwargs...)
+@inline function get_interactive(compiler, linker, spec, id; kwargs...)
     # generate a key for indexing the compilation cache
     key = hash(kwargs, id)
     key = hash(spec.name, key)      # fields f and tt are already covered by the id
@@ -33,6 +33,33 @@ const compilelock = ReentrantLock()
     end
 end
 
+@inline function get_frozen(compiler, linker, spec; kwargs...)
+    # generate a key for indexing the compilation cache
+    key = hash(kwargs)
+    key = hash(spec, key)
+
+    # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
+    lock(compilelock)
+    try
+        obj = get(compilecache, key, nothing)
+        if obj === nothing
+            path = joinpath(@get_scratch!("kernels"), "$key.jls")
+            if isfile(path)
+                @debug "Loading compiled kernel for $spec from $path"
+                asm = deserialize(path)
+            else
+                asm = compiler(spec; kwargs...)
+                serialize(path, asm)
+            end
+            obj = linker(spec, asm)
+            compilecache[key] = obj
+        end
+        obj
+    finally
+        unlock(compilelock)
+    end
+end
+
 # generated function that crafts a custom code info to call the actual cufunction impl.
 # this gives us the flexibility to insert manual back edges for automatic recompilation.
 #
@@ -40,26 +67,12 @@ end
 
 specialization_counter = 0
 
-const frozen = Ref(false)
+const freeze_kernels = Ref(false)
 
-@generated function cached_compilation(compiler::Core.Function, linker::Core.Function,
-                                       spec::FunctionSpec{f,tt}, env::UInt=zero(UInt);
-                                       kwargs...) where {f,tt}
-    frozen[] && return quote
-        key = hash(spec)
-        asm = get(compilecache, key, nothing)
-        if asm === nothing
-            path = joinpath(@get_scratch!("kernels"), "$(hash(spec)).jls")
-            asm = if isfile(path)
-                @debug "Loading compiled kernel for $spec from $path"
-                deserialize(path)
-            else
-                asm = compiler(spec; kwargs...)
-                serialize(path, asm)
-                asm
-            end
-        end
-        obj = linker(spec, asm)
+@generated function cached_compilation(cache::Dict, compiler::Function, linker::Function,
+                                       spec::FunctionSpec{f,tt}; kwargs...) where {f,tt}
+    freeze_kernels[] && return quote
+        get_frozen(cache, compiler, linker, spec; kwargs...)
     end
 
     # get a hold of the method and code info of the kernel function
@@ -101,7 +114,7 @@ const frozen = Ref(false)
     env = SlotNumber(7)
 
     # call the compiler
-    append!(new_ci.code, [Expr(:call, Core.kwfunc, check_cache),
+    append!(new_ci.code, [Expr(:call, Core.kwfunc, get_interactive),
                           Expr(:call, merge, NamedTuple(), kwargs),
                           Expr(:call, hash, env, id),
                           Expr(:call, SSAValue(1), SSAValue(2), check_cache, compiler, linker, spec, SSAValue(3)),
