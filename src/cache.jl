@@ -8,14 +8,7 @@ using Serialization, Scratch
 const compilelock = ReentrantLock()
 
 @inline function get_interactive(cache, compiler, linker, spec, id; kwargs...)
-    # generate a key for indexing the compilation cache
-    key = hash(kwargs, id)
-    key = hash(spec.name, key)      # fields f and tt are already covered by the id
-    key = hash(spec.kernel, key)    # as `cached_compilation` specializes on them.
-    for nf in 1:nfields(spec.f)
-        # mix in the values of any captured variable
-        key = hash(getfield(spec.f, nf), key)
-    end
+    key = hash((spec, kwargs), id)
 
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(compilelock)
@@ -33,9 +26,7 @@ const compilelock = ReentrantLock()
 end
 
 @inline function get_frozen(cache, compiler, linker, spec; kwargs...)
-    # generate a key for indexing the compilation cache
-    key = hash(kwargs)
-    key = hash(spec, key)
+    key = hash((spec, kwargs))
 
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(compilelock)
