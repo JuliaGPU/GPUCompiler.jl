@@ -45,7 +45,7 @@ const disk_cache = Ref(false)
 
             # link (but not if we got here because of forced compilation)
             if obj === nothing
-                obj = linker(spec, asm)
+                obj = linker(spec, asm; kwargs...)
                 cache[key] = obj
             end
         end
