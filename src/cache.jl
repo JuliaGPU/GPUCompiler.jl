@@ -50,12 +50,12 @@ end
     end
 end
 
-# generated function that crafts a custom code info to call the actual cufunction impl.
+# generated function that crafts a custom code info to call the actual compiler.
 # this gives us the flexibility to insert manual back edges for automatic recompilation.
 #
 # we also increment a global specialization counter and pass it along to index the cache.
 
-specialization_counter = 0
+const specialization_counter = Ref{UInt}(0)
 
 const freeze_kernels = Ref(false)
 
@@ -76,9 +76,8 @@ const freeze_kernels = Ref(false)
     @assert isa(ci, CodeInfo)
 
     # generate a unique id to represent this specialization
-    global specialization_counter
-    id = UInt(specialization_counter += 1)
-    # TODO: save the mi/ci here (or embed it in the AST to pass to cufunction)
+    id = (specialization_counter[] += 1)
+    # TODO: save the mi/ci here (or embed it in the AST to pass to the compiler)
     #       and use that to drive compilation
 
     # prepare a new code info
