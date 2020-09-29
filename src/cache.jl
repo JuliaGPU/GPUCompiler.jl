@@ -3,7 +3,7 @@
 using Core.Compiler: retrieve_code_info, CodeInfo, MethodInstance, SSAValue, SlotNumber
 using Base: _methods_by_ftype
 
-using Serialization
+using Serialization, Scratch
 
 const compilecache = Dict{UInt, Any}()
 const compilelock = ReentrantLock()
@@ -40,9 +40,23 @@ end
 
 specialization_counter = 0
 
+const frozen = Ref(false)
+
 @generated function cached_compilation(compiler::Core.Function, linker::Core.Function,
                                        spec::FunctionSpec{f,tt}, env::UInt=zero(UInt);
                                        kwargs...) where {f,tt}
+    frozen[] && return quote
+        path = joinpath(@get_scratch!("kernels"), "$(hash(spec)).jls")
+        asm = if isfile(path)
+            @debug "Loading compiled kernel for $spec from $path"
+            deserialize(path)
+        else
+            asm = compiler(spec; kwargs...)
+            serialize(path, asm)
+            asm
+        end
+        obj = linker(spec, asm)
+    end
 
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
