@@ -127,9 +127,6 @@ function emit_hooked_compilation(inner_hook, ex...)
     user_code = ex[end]
     user_kwargs = ex[1:end-1]
     quote
-        # wipe the compile cache to force recompilation
-        empty!(GPUCompiler.compilecache)
-
         local kernels = 0
         function outer_hook(job)
             kernels += 1

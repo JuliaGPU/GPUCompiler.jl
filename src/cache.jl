@@ -5,10 +5,9 @@ using Base: _methods_by_ftype
 
 using Serialization, Scratch
 
-const compilecache = Dict{UInt, Any}()
 const compilelock = ReentrantLock()
 
-@inline function get_interactive(compiler, linker, spec, id; kwargs...)
+@inline function get_interactive(cache, compiler, linker, spec, id; kwargs...)
     # generate a key for indexing the compilation cache
     key = hash(kwargs, id)
     key = hash(spec.name, key)      # fields f and tt are already covered by the id
@@ -21,11 +20,11 @@ const compilelock = ReentrantLock()
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(compilelock)
     try
-        obj = get(compilecache, key, nothing)
-        if obj === nothing
+        obj = get(cache, key, nothing)
+        if obj === nothing || compile_hook[] != nothing
             asm = compiler(spec; kwargs...)
             obj = linker(spec, asm)
-            compilecache[key] = obj
+            cache[key] = obj
         end
         obj
     finally
@@ -33,7 +32,7 @@ const compilelock = ReentrantLock()
     end
 end
 
-@inline function get_frozen(compiler, linker, spec; kwargs...)
+@inline function get_frozen(cache, compiler, linker, spec; kwargs...)
     # generate a key for indexing the compilation cache
     key = hash(kwargs)
     key = hash(spec, key)
@@ -41,7 +40,7 @@ end
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(compilelock)
     try
-        obj = get(compilecache, key, nothing)
+        obj = get(cache, key, nothing)
         if obj === nothing
             path = joinpath(@get_scratch!("kernels"), "$key.jls")
             if isfile(path)
@@ -52,7 +51,7 @@ end
                 serialize(path, asm)
             end
             obj = linker(spec, asm)
-            compilecache[key] = obj
+            cache[key] = obj
         end
         obj
     finally
@@ -105,22 +104,23 @@ const freeze_kernels = Ref(false)
     #      underlying C methods -- which GPUCompiler does, so everything Just Works.
 
     # prepare the slots
-    new_ci.slotnames = Symbol[:kwfunc, :kwargs, Symbol("#self#"), :compiler, :linker, :spec, :id]
+    new_ci.slotnames = Symbol[:kwfunc, :kwargs, Symbol("#self#"),
+                              :cache, :compiler, :linker, :spec]
     new_ci.slotflags = UInt8[0x00 for i = 1:7]
     kwargs = SlotNumber(2)
-    compiler = SlotNumber(4)
-    linker = SlotNumber(5)
-    spec = SlotNumber(6)
-    env = SlotNumber(7)
+    cache = SlotNumber(4)
+    compiler = SlotNumber(5)
+    linker = SlotNumber(6)
+    spec = SlotNumber(7)
 
     # call the compiler
     append!(new_ci.code, [Expr(:call, Core.kwfunc, get_interactive),
                           Expr(:call, merge, NamedTuple(), kwargs),
-                          Expr(:call, hash, env, id),
-                          Expr(:call, SSAValue(1), SSAValue(2), check_cache, compiler, linker, spec, SSAValue(3)),
-                          Expr(:return, SSAValue(4))])
-    append!(new_ci.codelocs, [1, 1, 1, 1, 1])   # see note below
-    new_ci.ssavaluetypes += 5
+                          Expr(:call, SSAValue(1), SSAValue(2), get_interactive,
+                                      cache, compiler, linker, spec, id),
+                          Expr(:return, SSAValue(3))])
+    append!(new_ci.codelocs, [1, 1, 1, 1])   # see note below
+    new_ci.ssavaluetypes += 4
 
     # NOTE: we keep the first entry of the original linetable, and use it for location info
     #       on the call to check_cache. we can't not have a codeloc (using 0 causes
