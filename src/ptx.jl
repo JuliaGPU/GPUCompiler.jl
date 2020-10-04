@@ -127,9 +127,6 @@ function add_optimization_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.
     constant_merge!(pm)
 
     cfgsimplification!(pm)
-
-    # get rid of the internalized functions; now possible unused
-    global_dce!(pm)
 end
 
 
