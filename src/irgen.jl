@@ -622,21 +622,55 @@ end
 
 ## kernel promotion
 
+@enum ArgumentCC begin
+    BITS_VALUE  # bitstype, passed as value
+    BITS_REF    # bitstype, passed as pointer
+    MUT_REF     # jl_value_t*, or the anonymous equivalent
+    GHOST       # not passed
+end
+
+function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Function)
+    codegen_ft = eltype(llvmtype(codegen_f)::LLVM.PointerType)::LLVM.FunctionType
+    source_sig = Base.signature_type(job.source.f, job.source.tt)::Type
+
+    codegen_types = parameters(codegen_ft)
+    source_types = [source_sig.parameters...]
+
+    args = []
+    codegen_i = 1
+    for (source_i, source_typ) in enumerate(source_types)
+        if isghosttype(source_typ) ||
+           (VERSION >= v"1.5.0-DEV.581" && Core.Compiler.isconstType(source_typ))
+            push!(args, (cc=GHOST, typ=source_typ))
+            continue
+        end
+
+        codegen_typ = codegen_types[codegen_i]
+        if codegen_typ isa LLVM.PointerType && !issized(eltype(codegen_typ))
+            push!(args, (cc=MUT_REF, typ=source_typ,
+                         codegen=(typ=codegen_typ, i=codegen_i)))
+        elseif codegen_typ isa LLVM.PointerType && issized(eltype(codegen_typ)) &&
+               !(source_typ <: Ptr) && !(VERSION >= v"1.5-" && source_typ <: Core.LLVMPtr)
+            push!(args, (cc=BITS_REF, typ=source_typ,
+                         codegen=(typ=codegen_typ, i=codegen_i)))
+        else
+            push!(args, (cc=BITS_VALUE, typ=source_typ,
+                         codegen=(typ=codegen_typ, i=codegen_i)))
+        end
+        codegen_i += 1
+    end
+
+    return args
+end
+
 # promote a function to a kernel
 function promote_kernel!(@nospecialize(job::CompilerJob), mod::LLVM.Module, kernel::LLVM.Function)
-    # pass non-opaque pointer arguments by value (this improves performance,
-    # and is mandated by certain back-ends like SPIR-V). only do so for values
-    # that aren't a Julia pointer, so we ca still pass those directly.
-    kernel_ft = eltype(llvmtype(kernel)::LLVM.PointerType)::LLVM.FunctionType
-    kernel_sig = Base.signature_type(job.source.f, job.source.tt)::Type
-    kernel_types = filter(dt->!isghosttype(dt) &&
-                              (VERSION < v"1.5.0-DEV.581" || !Core.Compiler.isconstType(dt)),
-                          [kernel_sig.parameters...])
-    @compiler_assert length(kernel_types) == length(parameters(kernel_ft)) job
-    for (i, (param_ft,arg_typ)) in enumerate(zip(parameters(kernel_ft), kernel_types))
-        if param_ft isa LLVM.PointerType && issized(eltype(param_ft)) &&
-           !(arg_typ <: Ptr) && !(VERSION >= v"1.5-" && arg_typ <: Core.LLVMPtr)
-            push!(parameter_attributes(kernel, i), EnumAttribute("byval"))
+    # pass all bitstypes by value; by default Julia passes aggregates by reference
+    # (this improves performance, and is mandated by certain back-ends like SPIR-V).
+    args = classify_arguments(job, kernel)
+    for arg in args
+        if arg.cc == BITS_REF
+            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval"))
         end
     end
 
@@ -644,4 +678,116 @@ function promote_kernel!(@nospecialize(job::CompilerJob), mod::LLVM.Module, kern
     kernel = process_kernel!(job, mod, kernel)
 
     return kernel
+end
+
+
+## byval lowering
+
+# some back-ends don't support byval, or support it badly
+# https://reviews.llvm.org/D79744
+
+# generate a kernel wrapper to fix & improve argument passing
+function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
+    ctx = context(mod)
+    entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
+    @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job
+
+    args = classify_arguments(job, entry_f)
+    filter!(args) do arg
+        arg.cc != GHOST
+    end
+
+    # generate the wrapper function type & definition
+    wrapper_types = LLVM.LLVMType[]
+    for arg in args
+        typ = if arg.cc == BITS_REF
+            eltype(arg.codegen.typ)
+        else
+            arg.typ
+        end
+        push!(wrapper_types, typ)
+    end
+    wrapper_fn = LLVM.name(entry_f)
+    LLVM.name!(entry_f, wrapper_fn * ".inner")
+    wrapper_ft = LLVM.FunctionType(LLVM.VoidType(ctx), wrapper_types)
+    wrapper_f = LLVM.Function(mod, wrapper_fn, wrapper_ft)
+
+    # emit IR performing the "conversions"
+    let builder = Builder(ctx)
+        entry = BasicBlock(wrapper_f, "entry", ctx)
+        position!(builder, entry)
+
+        wrapper_args = Vector{LLVM.Value}()
+
+        # perform argument conversions
+        for arg in args
+            if arg.cc == BITS_REF
+                # copy the argument value to a stack slot, and reference it.
+                ptr = alloca!(builder, eltype(arg.codegen.typ))
+                if LLVM.addrspace(arg.codegen.typ) != 0
+                    ptr = addrspacecast!(builder, ptr, arg.codegen.typ)
+                end
+                store!(builder, parameters(wrapper_f)[arg.codegen.i], ptr)
+                push!(wrapper_args, ptr)
+            else
+                push!(wrapper_args, parameters(wrapper_f)[arg.codegen.i])
+                for attr in collect(parameter_attributes(entry_f, arg.codegen.i))
+                    push!(parameter_attributes(wrapper_f, arg.codegen.i), attr)
+                end
+            end
+        end
+
+        call!(builder, entry_f, wrapper_args)
+
+        ret!(builder)
+
+        dispose(builder)
+    end
+
+    # early-inline the original entry function into the wrapper
+    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, ctx))
+    linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
+
+    fixup_metadata!(entry_f)
+    ModulePassManager() do pm
+        always_inliner!(pm)
+        run!(pm, mod)
+    end
+
+    return wrapper_f
+end
+
+# HACK: get rid of invariant.load and const TBAA metadata on loads from pointer args,
+#       since storing to a stack slot violates the semantics of those attributes.
+# TODO: can we emit a wrapper that doesn't violate Julia's metadata?
+function fixup_metadata!(f::LLVM.Function)
+    for param in parameters(f)
+        if isa(llvmtype(param), LLVM.PointerType)
+            # collect all uses of the pointer
+            worklist = Vector{LLVM.Instruction}(user.(collect(uses(param))))
+            while !isempty(worklist)
+                value = popfirst!(worklist)
+
+                # remove the invariant.load attribute
+                md = metadata(value)
+                if haskey(md, LLVM.MD_invariant_load)
+                    delete!(md, LLVM.MD_invariant_load)
+                end
+                if haskey(md, LLVM.MD_tbaa)
+                    delete!(md, LLVM.MD_tbaa)
+                end
+
+                # recurse on the output of some instructions
+                if isa(value, LLVM.BitCastInst) ||
+                   isa(value, LLVM.GetElementPtrInst) ||
+                   isa(value, LLVM.AddrSpaceCastInst)
+                    append!(worklist, user.(collect(uses(value))))
+                end
+
+                # IMPORTANT NOTE: if we ever want to inline functions at the LLVM level,
+                # we need to recurse into call instructions here, and strip metadata from
+                # called functions (see CUDAnative.jl#238).
+            end
+        end
+    end
 end
