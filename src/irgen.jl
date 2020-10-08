@@ -622,21 +622,55 @@ end
 
 ## kernel promotion
 
+@enum ArgumentCC begin
+    BITS_VALUE  # bitstype, passed as value
+    BITS_REF    # bitstype, passed as pointer
+    MUT_REF     # jl_value_t*, or the anonymous equivalent
+    GHOST       # not passed
+end
+
+function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Function)
+    codegen_ft = eltype(llvmtype(codegen_f)::LLVM.PointerType)::LLVM.FunctionType
+    source_sig = Base.signature_type(job.source.f, job.source.tt)::Type
+
+    codegen_types = parameters(codegen_ft)
+    source_types = [source_sig.parameters...]
+
+    args = []
+    codegen_i = 1
+    for (source_i, source_typ) in enumerate(source_types)
+        if isghosttype(source_typ) ||
+           (VERSION >= v"1.5.0-DEV.581" && Core.Compiler.isconstType(source_typ))
+            push!(args, (cc=GHOST, typ=source_typ))
+            continue
+        end
+
+        codegen_typ = codegen_types[codegen_i]
+        if codegen_typ isa LLVM.PointerType && !issized(eltype(codegen_typ))
+            push!(args, (cc=MUT_REF, typ=source_typ,
+                         codegen=(typ=codegen_typ, i=codegen_i)))
+        elseif codegen_typ isa LLVM.PointerType && issized(eltype(codegen_typ)) &&
+               !(source_typ <: Ptr) && !(VERSION >= v"1.5-" && source_typ <: Core.LLVMPtr)
+            push!(args, (cc=BITS_REF, typ=source_typ,
+                         codegen=(typ=codegen_typ, i=codegen_i)))
+        else
+            push!(args, (cc=BITS_VALUE, typ=source_typ,
+                         codegen=(typ=codegen_typ, i=codegen_i)))
+        end
+        codegen_i += 1
+    end
+
+    return args
+end
+
 # promote a function to a kernel
 function promote_kernel!(@nospecialize(job::CompilerJob), mod::LLVM.Module, kernel::LLVM.Function)
-    # pass non-opaque pointer arguments by value (this improves performance,
-    # and is mandated by certain back-ends like SPIR-V). only do so for values
-    # that aren't a Julia pointer, so we ca still pass those directly.
-    kernel_ft = eltype(llvmtype(kernel)::LLVM.PointerType)::LLVM.FunctionType
-    kernel_sig = Base.signature_type(job.source.f, job.source.tt)::Type
-    kernel_types = filter(dt->!isghosttype(dt) &&
-                              (VERSION < v"1.5.0-DEV.581" || !Core.Compiler.isconstType(dt)),
-                          [kernel_sig.parameters...])
-    @compiler_assert length(kernel_types) == length(parameters(kernel_ft)) job
-    for (i, (param_ft,arg_typ)) in enumerate(zip(parameters(kernel_ft), kernel_types))
-        if param_ft isa LLVM.PointerType && issized(eltype(param_ft)) &&
-           !(arg_typ <: Ptr) && !(VERSION >= v"1.5-" && arg_typ <: Core.LLVMPtr)
-            push!(parameter_attributes(kernel, i), EnumAttribute("byval"))
+    # pass all bitstypes by value; by default Julia passes aggregates by reference
+    # (this improves performance, and is mandated by certain back-ends like SPIR-V).
+    args = classify_arguments(job, kernel)
+    for arg in args
+        if arg.cc == BITS_REF
+            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval"))
         end
     end
 
@@ -652,40 +686,27 @@ end
 # some back-ends don't support byval, or support it badly
 # https://reviews.llvm.org/D79744
 
-# FIXME: don't duplicate this logic from promote_kernel!, scan for byval instead
-#        (blocked on maleadt/LLVM.jl#186)
-function wrapper_type(julia_t::Type, codegen_t::LLVMType)::LLVMType
-    if !isbitstype(julia_t)
-        # don't pass jl_value_t by value; it's an opaque structure
-        return codegen_t
-    elseif isa(codegen_t, LLVM.PointerType) && !(julia_t <: Ptr)
-        # we didn't specify a pointer, but codegen passes one anyway.
-        # make the wrapper accept the underlying value instead.
-        return eltype(codegen_t)
-    else
-        return codegen_t
-    end
-end
-
 # generate a kernel wrapper to fix & improve argument passing
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
     ctx = context(mod)
     entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
     @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job
 
-    # filter out types which don't occur in the LLVM function signatures
-    sig = Base.signature_type(job.source.f, job.source.tt)::Type
-    julia_types = Type[]
-    for dt::Type in sig.parameters
-        if !isghosttype(dt) && (VERSION < v"1.5.0-DEV.581" || !Core.Compiler.isconstType(dt))
-            push!(julia_types, dt)
-        end
+    args = classify_arguments(job, entry_f)
+    filter!(args) do arg
+        arg.cc != GHOST
     end
 
     # generate the wrapper function type & definition
-    wrapper_types = LLVM.LLVMType[wrapper_type(julia_t, codegen_t)
-                                  for (julia_t, codegen_t)
-                                  in zip(julia_types, parameters(entry_ft))]
+    wrapper_types = LLVM.LLVMType[]
+    for arg in args
+        typ = if arg.cc == BITS_REF
+            eltype(arg.codegen.typ)
+        else
+            arg.typ
+        end
+        push!(wrapper_types, typ)
+    end
     wrapper_fn = LLVM.name(entry_f)
     LLVM.name!(entry_f, wrapper_fn * ".inner")
     wrapper_ft = LLVM.FunctionType(LLVM.VoidType(ctx), wrapper_types)
@@ -699,29 +720,19 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f:
         wrapper_args = Vector{LLVM.Value}()
 
         # perform argument conversions
-        codegen_types = parameters(entry_ft)
-        wrapper_params = parameters(wrapper_f)
-        param_index = 0
-        for (julia_t, codegen_t, wrapper_t, wrapper_param) in
-            zip(julia_types, codegen_types, wrapper_types, wrapper_params)
-            param_index += 1
-            if codegen_t != wrapper_t
-                # the wrapper argument doesn't match the kernel parameter type.
-                # this only happens when codegen wants to pass a pointer.
-                @compiler_assert isa(codegen_t, LLVM.PointerType) job
-                @compiler_assert eltype(codegen_t) == wrapper_t job
-
+        for arg in args
+            if arg.cc == BITS_REF
                 # copy the argument value to a stack slot, and reference it.
-                ptr = alloca!(builder, wrapper_t)
-                if LLVM.addrspace(codegen_t) != 0
-                    ptr = addrspacecast!(builder, ptr, codegen_t)
+                ptr = alloca!(builder, eltype(arg.codegen.typ))
+                if LLVM.addrspace(arg.codegen.typ) != 0
+                    ptr = addrspacecast!(builder, ptr, arg.codegen.typ)
                 end
-                store!(builder, wrapper_param, ptr)
+                store!(builder, parameters(wrapper_f)[arg.codegen.i], ptr)
                 push!(wrapper_args, ptr)
             else
-                push!(wrapper_args, wrapper_param)
-                for attr in collect(parameter_attributes(entry_f, param_index))
-                    push!(parameter_attributes(wrapper_f, param_index), attr)
+                push!(wrapper_args, parameters(wrapper_f)[arg.codegen.i])
+                for attr in collect(parameter_attributes(entry_f, arg.codegen.i))
+                    push!(parameter_attributes(wrapper_f, arg.codegen.i), attr)
                 end
             end
         end
