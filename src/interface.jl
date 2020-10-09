@@ -125,7 +125,7 @@ process_module!(::CompilerJob, mod::LLVM.Module) = return
 process_kernel!(::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return kernel
 
 # final processing of the IR module, right before validation and machine-code generation
-finish_module!(::CompilerJob, mod::LLVM.Module) = return
+finish_module!(::CompilerJob, mod::LLVM.Module, entry::LLVM.Function) = return
 
 add_lowering_passes!(::CompilerJob, pm::LLVM.PassManager) = return
 

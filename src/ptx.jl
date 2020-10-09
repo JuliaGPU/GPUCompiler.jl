@@ -97,9 +97,6 @@ function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, 
 
     if LLVM.version() >= v"8"
         # calling convention
-        for fun in functions(mod)
-            callconv!(kernel, LLVM.API.LLVMPTXDeviceCallConv)
-        end
         callconv!(kernel, LLVM.API.LLVMPTXKernelCallConv)
     end
 
@@ -130,6 +127,17 @@ function add_optimization_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.
 
     # get rid of the internalized functions; now possible unused
     global_dce!(pm)
+end
+
+function finish_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    # calling convention
+    if LLVM.version() >= v"8"
+        for f in functions(mod)
+            if callconv(f) == LLVM.API.LLVMCCallConv
+                callconv!(f, LLVM.API.LLVMPTXDeviceCallConv)
+            end
+        end
+    end
 end
 
 

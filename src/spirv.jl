@@ -37,9 +37,6 @@ function process_kernel!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module
     kernel = wrap_byval(job, mod, kernel)
 
     # calling convention
-    for fun in functions(mod)
-        callconv!(fun, LLVM.API.LLVMSPIRFUNCCallConv)
-    end
     callconv!(kernel, LLVM.API.LLVMSPIRKERNELCallConv)
 
     return kernel
@@ -112,12 +109,19 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     return wrapper_f
 end
 
-function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     # SPIR-V does not support trap, and has no mechanism to abort compute kernels
     # (OpKill is only available in fragment execution mode)
     ModulePassManager() do pm
         add!(pm, ModulePass("RemoveTrap", rm_trap!))
         run!(pm, mod)
+    end
+
+    # calling convention
+    for f in functions(mod)
+        if callconv(f) == LLVM.API.LLVMCCallConv
+            callconv!(f, LLVM.API.LLVMSPIRFUNCCallConv)
+        end
     end
 end
 
