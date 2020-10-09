@@ -31,6 +31,14 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) = "spirv"
 
+function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+    # calling convention
+    for f in functions(mod)
+        # JuliaGPU/GPUCompiler.jl#97
+        #callconv!(f, LLVM.API.LLVMSPIRFUNCCallConv)
+    end
+end
+
 function process_kernel!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
     #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
@@ -42,86 +50,12 @@ function process_kernel!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module
     return kernel
 end
 
-# wrap byval pointers in a single-value struct
-function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
-    ctx = context(mod)
-    entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
-    @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job
-
-    args = classify_arguments(job, entry_f)
-    filter!(args) do arg
-        arg.cc != GHOST
-    end
-
-    # generate the wrapper function type & definition
-    wrapper_types = LLVM.LLVMType[]
-    for arg in args
-        typ = if arg.cc == BITS_REF
-            st = LLVM.StructType([eltype(arg.codegen.typ)])
-            LLVM.PointerType(st)
-        else
-            arg.typ
-        end
-        push!(wrapper_types, typ)
-    end
-    wrapper_fn = LLVM.name(entry_f)
-    LLVM.name!(entry_f, wrapper_fn * ".inner")
-    wrapper_ft = LLVM.FunctionType(LLVM.VoidType(ctx), wrapper_types)
-    wrapper_f = LLVM.Function(mod, wrapper_fn, wrapper_ft)
-
-    # emit IR performing the "conversions"
-    let builder = Builder(ctx)
-        entry = BasicBlock(wrapper_f, "entry", ctx)
-        position!(builder, entry)
-
-        wrapper_args = Vector{LLVM.Value}()
-
-        # perform argument conversions
-        for arg in args
-            if arg.cc == BITS_REF
-                push!(parameter_attributes(wrapper_f, arg.codegen.i), EnumAttribute("byval"))
-                ptr = struct_gep!(builder, parameters(wrapper_f)[arg.codegen.i], 0)
-                push!(wrapper_args, ptr)
-            else
-                push!(wrapper_args, parameters(wrapper_f)[arg.codegen.i])
-                for attr in collect(parameter_attributes(entry_f, arg.codegen.i))
-                    push!(parameter_attributes(wrapper_f, arg.codegen.i), attr)
-                end
-            end
-        end
-
-        call!(builder, entry_f, wrapper_args)
-
-        ret!(builder)
-
-        dispose(builder)
-    end
-
-    # early-inline the original entry function into the wrapper
-    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, ctx))
-    linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
-
-    ModulePassManager() do pm
-        always_inliner!(pm)
-        run!(pm, mod)
-    end
-
-    return wrapper_f
-end
-
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     # SPIR-V does not support trap, and has no mechanism to abort compute kernels
     # (OpKill is only available in fragment execution mode)
     ModulePassManager() do pm
         add!(pm, ModulePass("RemoveTrap", rm_trap!))
         run!(pm, mod)
-    end
-
-    # calling convention
-    for f in functions(mod)
-        if callconv(f) == LLVM.API.LLVMCCallConv
-            callconv!(f, LLVM.API.LLVMSPIRFUNCCallConv)
-        end
     end
 end
 
@@ -200,4 +134,71 @@ function rm_trap!(mod::LLVM.Module)
 
     end
     return changed
+end
+
+# wrap byval pointers in a single-value struct
+function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
+    ctx = context(mod)
+    entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
+    @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job
+
+    args = classify_arguments(job, entry_f)
+    filter!(args) do arg
+        arg.cc != GHOST
+    end
+
+    # generate the wrapper function type & definition
+    wrapper_types = LLVM.LLVMType[]
+    for arg in args
+        typ = if arg.cc == BITS_REF
+            st = LLVM.StructType([eltype(arg.codegen.typ)])
+            LLVM.PointerType(st)
+        else
+            arg.typ
+        end
+        push!(wrapper_types, typ)
+    end
+    wrapper_fn = LLVM.name(entry_f)
+    LLVM.name!(entry_f, wrapper_fn * ".inner")
+    wrapper_ft = LLVM.FunctionType(LLVM.VoidType(ctx), wrapper_types)
+    wrapper_f = LLVM.Function(mod, wrapper_fn, wrapper_ft)
+
+    # emit IR performing the "conversions"
+    let builder = Builder(ctx)
+        entry = BasicBlock(wrapper_f, "entry", ctx)
+        position!(builder, entry)
+
+        wrapper_args = Vector{LLVM.Value}()
+
+        # perform argument conversions
+        for arg in args
+            if arg.cc == BITS_REF
+                push!(parameter_attributes(wrapper_f, arg.codegen.i), EnumAttribute("byval"))
+                ptr = struct_gep!(builder, parameters(wrapper_f)[arg.codegen.i], 0)
+                push!(wrapper_args, ptr)
+            else
+                push!(wrapper_args, parameters(wrapper_f)[arg.codegen.i])
+                for attr in collect(parameter_attributes(entry_f, arg.codegen.i))
+                    push!(parameter_attributes(wrapper_f, arg.codegen.i), attr)
+                end
+            end
+        end
+
+        call!(builder, entry_f, wrapper_args)
+
+        ret!(builder)
+
+        dispose(builder)
+    end
+
+    # early-inline the original entry function into the wrapper
+    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, ctx))
+    linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
+
+    ModulePassManager() do pm
+        always_inliner!(pm)
+        run!(pm, mod)
+    end
+
+    return wrapper_f
 end

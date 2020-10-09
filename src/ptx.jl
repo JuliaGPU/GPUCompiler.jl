@@ -57,6 +57,16 @@ isintrinsic(::CompilerJob{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsic
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::CompilerJob{PTXCompilerTarget}) = "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)"
 
+function process_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
+    # calling convention
+    if LLVM.version() >= v"8"
+        for f in functions(mod)
+            # JuliaGPU/GPUCompiler.jl#97
+            #callconv!(f, LLVM.API.LLVMPTXDeviceCallConv)
+        end
+    end
+end
+
 function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     ctx = context(mod)
 
@@ -127,17 +137,6 @@ function add_optimization_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.
 
     # get rid of the internalized functions; now possible unused
     global_dce!(pm)
-end
-
-function finish_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
-    # calling convention
-    if LLVM.version() >= v"8"
-        for f in functions(mod)
-            if callconv(f) == LLVM.API.LLVMCCallConv
-                callconv!(f, LLVM.API.LLVMPTXDeviceCallConv)
-            end
-        end
-    end
 end
 
 
