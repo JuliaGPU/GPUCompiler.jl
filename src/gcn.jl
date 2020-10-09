@@ -36,8 +36,10 @@ isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsic
 
 function process_kernel!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     kernel = lower_byval(job, mod, kernel)
-    # AMDGPU kernel calling convention
-    callconv!(kernel, LLVM.API.LLVMCallConv(91))
+
+    # calling convention
+    callconv!(kernel, LLVM.API.LLVMAMDGPUKERNELCallConv)
+
     kernel
 end
 

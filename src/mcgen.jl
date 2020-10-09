@@ -1,6 +1,6 @@
 # machine code generation
 
-# final preparations for the module to be compiled to PTX
+# final preparations for the module to be compiled to machine code
 # these passes should not be run when e.g. compiling to write to disk.
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     let pm = ModulePassManager()

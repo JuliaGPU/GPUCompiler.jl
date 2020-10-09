@@ -31,18 +31,109 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) = "spirv"
 
+function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+    # calling convention
+    for f in functions(mod)
+        # JuliaGPU/GPUCompiler.jl#97
+        #callconv!(f, LLVM.API.LLVMSPIRFUNCCallConv)
+    end
+end
+
 function process_kernel!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
     #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
     kernel = wrap_byval(job, mod, kernel)
 
     # calling convention
-    for fun in functions(mod)
-        callconv!(fun, LLVM.API.LLVMSPIRFUNCCallConv)
-    end
     callconv!(kernel, LLVM.API.LLVMSPIRKERNELCallConv)
 
     return kernel
+end
+
+function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+    # SPIR-V does not support trap, and has no mechanism to abort compute kernels
+    # (OpKill is only available in fragment execution mode)
+    ModulePassManager() do pm
+        add!(pm, ModulePass("RemoveTrap", rm_trap!))
+        run!(pm, mod)
+    end
+end
+
+function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, f::LLVM.Function,
+               format=LLVM.API.LLVMAssemblyFile)
+    # write the bitcode to a temporary file (the SPIRV Translator library doesn't have a C API)
+    mktemp() do input, input_io
+        write(input_io, mod)
+        flush(input_io)
+
+        # compile to SPIR-V
+        mktemp() do output, output_io
+            SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
+                cmd = `$translator`
+                if format == LLVM.API.LLVMAssemblyFile
+                    cmd = `$cmd -spirv-text`
+                end
+                cmd = `$cmd -o $output $input`
+                run(cmd)
+            end
+
+            # read back the file
+            if format == LLVM.API.LLVMAssemblyFile
+                read(output_io, String)
+            else
+                read(output_io)
+            end
+        end
+    end
+end
+
+# reimplementation that uses `spirv-dis`, giving much more pleasant output
+function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
+    obj, _ = codegen(:obj, job; strip=!raw, only_entry=!dump_module, validate=false)
+    mktemp() do input_path, input_io
+        write(input_io, obj)
+        flush(input_io)
+
+        SPIRV_Tools_jll.spirv_dis() do disassembler
+            if io == stdout
+                run(`$disassembler $input_path`)
+            else
+                mktemp() do output_path, output_io
+                    run(`$disassembler $input_path -o $output_path`)
+                    asm = read(output_io, String)
+                    print(io, asm)
+                end
+            end
+        end
+    end
+end
+
+
+## LLVM passes
+
+# remove llvm.trap and its uses from a module
+function rm_trap!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    changed = false
+    @timeit_debug to "remove trap" begin
+
+    if haskey(functions(mod), "llvm.trap")
+        trap = functions(mod)["llvm.trap"]
+
+        for use in uses(trap)
+            val = user(use)
+            if isa(val, LLVM.CallInst)
+                unsafe_delete!(LLVM.parent(val), val)
+                changed = true
+            end
+        end
+
+        @compiler_assert isempty(uses(trap)) job
+        unsafe_delete!(mod, trap)
+    end
+
+    end
+    return changed
 end
 
 # wrap byval pointers in a single-value struct
@@ -110,83 +201,4 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     end
 
     return wrapper_f
-end
-
-function add_lowering_passes!(job::CompilerJob{SPIRVCompilerTarget}, pm::LLVM.PassManager)
-    add!(pm, ModulePass("RemoveTrap", rm_trap!))
-end
-
-function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, f::LLVM.Function,
-               format=LLVM.API.LLVMAssemblyFile)
-    # write the bitcode to a temporary file (the SPIRV Translator library doesn't have a C API)
-    mktemp() do input, input_io
-        write(input_io, mod)
-        flush(input_io)
-
-        # compile to SPIR-V
-        mktemp() do output, output_io
-            SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
-                cmd = `$translator`
-                if format == LLVM.API.LLVMAssemblyFile
-                    cmd = `$cmd -spirv-text`
-                end
-                cmd = `$cmd -o $output $input`
-                run(cmd)
-            end
-
-            # read back the file
-            if format == LLVM.API.LLVMAssemblyFile
-                read(output_io, String)
-            else
-                read(output_io)
-            end
-        end
-    end
-end
-
-# reimplementation that uses `spirv-dis`, giving much more pleasant output
-function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false)
-    obj, _ = codegen(:obj, job; strip=!raw)
-    mktemp() do input_path, input_io
-        write(input_io, obj)
-        flush(input_io)
-
-        SPIRV_Tools_jll.spirv_dis() do disassembler
-            if io == stdout
-                run(`$disassembler $input_path`)
-            else
-                mktemp() do output_path, output_io
-                    run(`$disassembler $input_path -o $output_path`)
-                    asm = read(output_io, String)
-                    print(io, asm)
-                end
-            end
-        end
-    end
-end
-
-
-## LLVM passes
-
-# SPIR-V does not support trap, and has no mechanism to abort compute kernels
-# (OpKill is only available in fragment execution mode)
-function rm_trap!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    changed = false
-    @timeit_debug to "hide trap" begin
-
-    if haskey(functions(mod), "llvm.trap")
-        trap = functions(mod)["llvm.trap"]
-
-        for use in uses(trap)
-            val = user(use)
-            if isa(val, LLVM.CallInst)
-                unsafe_delete!(LLVM.parent(val), val)
-                changed = true
-            end
-        end
-    end
-
-    end
-    return changed
 end
