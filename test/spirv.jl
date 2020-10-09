@@ -33,4 +33,20 @@ end
 
 ############################################################################################
 
+@testset "asm" begin
+
+@testset "trap removal" begin
+    function kernel(x)
+        x && error()
+        return
+    end
+
+    spirv_code_native(devnull, kernel, Tuple{Bool}; kernel=true)
+    # TODO: test for error reporting once we've implemented that
+end
+
+end
+
+############################################################################################
+
 end

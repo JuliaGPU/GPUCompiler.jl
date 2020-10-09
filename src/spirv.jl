@@ -112,8 +112,13 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     return wrapper_f
 end
 
-function add_lowering_passes!(job::CompilerJob{SPIRVCompilerTarget}, pm::LLVM.PassManager)
-    add!(pm, ModulePass("RemoveTrap", rm_trap!))
+function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+    # SPIR-V does not support trap, and has no mechanism to abort compute kernels
+    # (OpKill is only available in fragment execution mode)
+    ModulePassManager() do pm
+        add!(pm, ModulePass("RemoveTrap", rm_trap!))
+        run!(pm, mod)
+    end
 end
 
 function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, f::LLVM.Function,
@@ -168,12 +173,11 @@ end
 
 ## LLVM passes
 
-# SPIR-V does not support trap, and has no mechanism to abort compute kernels
-# (OpKill is only available in fragment execution mode)
+# remove llvm.trap and its uses from a module
 function rm_trap!(mod::LLVM.Module)
     job = current_job::CompilerJob
     changed = false
-    @timeit_debug to "hide trap" begin
+    @timeit_debug to "remove trap" begin
 
     if haskey(functions(mod), "llvm.trap")
         trap = functions(mod)["llvm.trap"]
@@ -185,6 +189,9 @@ function rm_trap!(mod::LLVM.Module)
                 changed = true
             end
         end
+
+        @compiler_assert isempty(uses(trap)) job
+        unsafe_delete!(mod, trap)
     end
 
     end
