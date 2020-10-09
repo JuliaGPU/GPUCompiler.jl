@@ -220,7 +220,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
         unsafe_delete!(ir, dyn_marker)
     end
 
-    finish_module!(job, ir, kernel)
+    finish_module!(job, ir)
 
     if output == :llvm
         if strip

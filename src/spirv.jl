@@ -109,7 +109,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     return wrapper_f
 end
 
-function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     # SPIR-V does not support trap, and has no mechanism to abort compute kernels
     # (OpKill is only available in fragment execution mode)
     ModulePassManager() do pm

@@ -129,7 +129,7 @@ function add_optimization_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.
     global_dce!(pm)
 end
 
-function finish_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+function finish_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
     # calling convention
     if LLVM.version() >= v"8"
         for f in functions(mod)
