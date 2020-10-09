@@ -1,3 +1,5 @@
+using SPIRV_LLVM_Translator_jll, SPIRV_Tools_jll
+
 @testset "SPIR-V" begin
 
 include("definitions/spirv.jl")
