@@ -43,8 +43,8 @@ end
         return
     end
 
-    spirv_code_native(devnull, kernel, Tuple{Bool}; kernel=true)
-    # TODO: test for error reporting once we've implemented that
+    asm = sprint(io->spirv_code_native(io, kernel, Tuple{Bool}; kernel=true))
+    @test occursin(r"OpFunctionCall %void %julia_error", asm)
 end
 
 end
