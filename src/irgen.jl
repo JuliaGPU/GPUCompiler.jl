@@ -389,7 +389,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
 
     # promote entry-points to kernels and mangle its name
     if job.source.kernel
-        entry = promote_kernel!(job, mod, entry)
+        entry = process_kernel!(job, mod, entry)
         LLVM.name!(entry, mangle_call(entry, job.source.tt))
     end
 
@@ -661,23 +661,6 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Fun
     end
 
     return args
-end
-
-# promote a function to a kernel
-function promote_kernel!(@nospecialize(job::CompilerJob), mod::LLVM.Module, kernel::LLVM.Function)
-    # pass all bitstypes by value; by default Julia passes aggregates by reference
-    # (this improves performance, and is mandated by certain back-ends like SPIR-V).
-    args = classify_arguments(job, kernel)
-    for arg in args
-        if arg.cc == BITS_REF
-            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval"))
-        end
-    end
-
-    # target-specific processing
-    kernel = process_kernel!(job, mod, kernel)
-
-    return kernel
 end
 
 

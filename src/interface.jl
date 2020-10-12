@@ -122,7 +122,18 @@ runtime_slug(::CompilerJob) = error("Not implemented")
 process_module!(::CompilerJob, mod::LLVM.Module) = return
 
 # early processing of the newly identified LLVM kernel function
-process_kernel!(::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function) = return kernel
+function process_kernel!(job::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function)
+    # pass all bitstypes by value; by default Julia passes aggregates by reference
+    # (this improves performance, and is mandated by certain back-ends like SPIR-V).
+    args = classify_arguments(job, kernel)
+    for arg in args
+        if arg.cc == BITS_REF
+            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval"))
+        end
+    end
+
+    return kernel
+end
 
 # final processing of the IR module, right before validation and machine-code generation
 finish_module!(::CompilerJob, mod::LLVM.Module) = return

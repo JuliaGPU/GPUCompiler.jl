@@ -70,6 +70,14 @@ end
 function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     ctx = context(mod)
 
+    # pass all bitstypes by value
+    args = classify_arguments(job, kernel)
+    for arg in args
+        if arg.cc == BITS_REF
+            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval"))
+        end
+    end
+
     # property annotations
     annotations = LLVM.Value[kernel]
 
