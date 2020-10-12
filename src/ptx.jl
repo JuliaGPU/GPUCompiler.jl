@@ -74,7 +74,7 @@ function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, 
     args = classify_arguments(job, kernel)
     for arg in args
         if arg.cc == BITS_REF
-            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval"))
+            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval", 0, ctx))
         end
     end
 
