@@ -32,7 +32,7 @@ function compile(target::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true,
                  optimize::Bool=true, strip::Bool=false, validate::Bool=true,
                  only_entry::Bool=false)
-    if compile_hook[] != nothing
+    if compile_hook[] !== nothing
         compile_hook[](job)
     end
 

@@ -85,14 +85,14 @@ function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, 
     append!(annotations, [MDString("kernel"), ConstantInt(Int32(1), ctx)])
 
     ## expected CTA sizes
-    if job.target.minthreads != nothing
+    if job.target.minthreads !== nothing
         for (dim, name) in enumerate([:x, :y, :z])
             bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
             append!(annotations, [MDString("reqntid$name"),
                                   ConstantInt(Int32(bound), ctx)])
         end
     end
-    if job.target.maxthreads != nothing
+    if job.target.maxthreads !== nothing
         for (dim, name) in enumerate([:x, :y, :z])
             bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
             append!(annotations, [MDString("maxntid$name"),
@@ -100,12 +100,12 @@ function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, 
         end
     end
 
-    if job.target.blocks_per_sm != nothing
+    if job.target.blocks_per_sm !== nothing
         append!(annotations, [MDString("minctasm"),
                               ConstantInt(Int32(job.target.blocks_per_sm), ctx)])
     end
 
-    if job.target.maxregs != nothing
+    if job.target.maxregs !== nothing
         append!(annotations, [MDString("maxnreg"),
                               ConstantInt(Int32(job.target.maxregs), ctx)])
     end

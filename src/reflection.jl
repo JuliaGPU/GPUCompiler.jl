@@ -133,7 +133,7 @@ function emit_hooked_compilation(inner_hook, ex...)
             $inner_hook(job; $(map(esc, user_kwargs)...))
         end
 
-        if GPUCompiler.compile_hook[] != nothing
+        if GPUCompiler.compile_hook[] !== nothing
             error("Chaining multiple @device_code calls is unsupported")
         end
         try
