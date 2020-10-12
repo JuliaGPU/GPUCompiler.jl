@@ -71,13 +71,8 @@ function process_entry!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, e
     ctx = context(mod)
 
     if job.source.kernel
-        # pass all bitstypes by value
-        args = classify_arguments(job, entry)
-        for arg in args
-            if arg.cc == BITS_REF
-                push!(parameter_attributes(entry, arg.codegen.i), EnumAttribute("byval", 0, ctx))
-            end
-        end
+        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
+        entry = lower_byval(job, mod, entry)
 
         # property annotations
         annotations = LLVM.Value[entry]

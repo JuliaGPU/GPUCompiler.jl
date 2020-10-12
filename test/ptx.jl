@@ -32,11 +32,7 @@ end
     end
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}; kernel=true))
-    if VERSION < v"1.5.0-DEV.802"
-        @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\]) addrspace\(\d+\)?\*.+byval", ir)
-    else
-        @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\*.+byval", ir)
-    end
+    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])", ir)
 end
 
 @testset "property_annotations" begin
