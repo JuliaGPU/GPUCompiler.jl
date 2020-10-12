@@ -104,7 +104,7 @@ function Base.showerror(io::IO, err::InvalidIRError)
     print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
     for (kind, bt, meta) in err.errors
         print(io, "\nReason: unsupported $kind")
-        if meta != nothing
+        if meta !== nothing
             if kind == RUNTIME_FUNCTION || kind == UNKNOWN_FUNCTION || kind == POINTER_FUNCTION || kind == DYNAMIC_CALL
                 print(io, " (call to ", meta, ")")
             elseif kind == DELAYED_BINDING
