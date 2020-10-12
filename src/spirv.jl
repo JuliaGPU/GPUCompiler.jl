@@ -152,7 +152,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     for arg in args
         typ = if arg.cc == BITS_REF
             st = LLVM.StructType([eltype(arg.codegen.typ)])
-            LLVM.PointerType(st)
+            LLVM.PointerType(st, addrspace(arg.codegen.typ))
         else
             arg.typ
         end
