@@ -151,7 +151,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     wrapper_types = LLVM.LLVMType[]
     for arg in args
         typ = if arg.cc == BITS_REF
-            st = LLVM.StructType([eltype(arg.codegen.typ)])
+            st = LLVM.StructType([eltype(arg.codegen.typ)], ctx)
             LLVM.PointerType(st, addrspace(arg.codegen.typ))
         else
             arg.typ
@@ -175,7 +175,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
             param = parameters(wrapper_f)[arg.codegen.i]
             attrs = parameter_attributes(wrapper_f, arg.codegen.i)
             if arg.cc == BITS_REF
-                push!(attrs, EnumAttribute("byval"))
+                push!(attrs, EnumAttribute("byval", 0, ctx))
                 ptr = struct_gep!(builder, param, 0)
                 push!(wrapper_args, ptr)
             else

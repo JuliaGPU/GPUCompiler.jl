@@ -123,12 +123,14 @@ process_module!(::CompilerJob, mod::LLVM.Module) = return
 
 # early processing of the newly identified LLVM kernel function
 function process_kernel!(job::CompilerJob, mod::LLVM.Module, kernel::LLVM.Function)
+    ctx = context(mod)
+
     # pass all bitstypes by value; by default Julia passes aggregates by reference
     # (this improves performance, and is mandated by certain back-ends like SPIR-V).
     args = classify_arguments(job, kernel)
     for arg in args
         if arg.cc == BITS_REF
-            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval"))
+            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval", 0, ctx))
         end
     end
 
