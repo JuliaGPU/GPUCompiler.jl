@@ -34,6 +34,16 @@ runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.target.dev_isa)"
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
 
+function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+    triple!(mod, llvm_triple(NativeCompilerTarget()))
+    datalayout!(mod, llvm_datalayout(NativeCompilerTarget()))
+end
+
+function finish_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+    triple!(mod, llvm_triple(job.target))
+    datalayout!(mod, llvm_datalayout(job.target))
+end
+
 function process_kernel!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     kernel = lower_byval(job, mod, kernel)
 
@@ -45,6 +55,8 @@ end
 
 function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
+end
+function add_optimization_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
 end
 
