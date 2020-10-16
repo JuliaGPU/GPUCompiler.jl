@@ -41,10 +41,6 @@ function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
     triple!(mod, llvm_triple(NativeCompilerTarget()))
     datalayout!(mod, llvm_datalayout(NativeCompilerTarget()))
 end
-function finish_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
-    triple!(mod, llvm_triple(job.target))
-    datalayout!(mod, llvm_datalayout(job.target))
-end
 
 function process_kernel!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
     kernel = lower_byval(job, mod, kernel)
@@ -58,14 +54,17 @@ end
 function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
 end
-# we're ok with doing the alloca rewrite before resetting our target because it's
-# acceptable to addrspacecast from AS 5 (Private) to 0 (Generic), because the
-# Generic pointer can represent Private pointers with a minimal lookup cost
-# (and the Native backend doesn't seem to care). we do this after Julia's
-# optimization passes because of two reasons:
-# 1. Debug builds call the target verifier, which could trip on this change
-# 2. We don't want any chance of messing with Julia's optimizations
+# We need to do alloca rewriting (from 0 to 5) after Julia's optimization
+# passes because of two reasons:
+# 1. Debug builds call the target verifier first, which would trip if AMDGPU
+#    was the target at that time
+# 2. We don't want any chance of messing with Julia's optimizations, since they
+#    eliminate target-unsafe IR patterns
 function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+    # revert back to the AMDGPU target
+    triple!(mod, llvm_triple(job.target))
+    datalayout!(mod, llvm_datalayout(job.target))
+
     tm = llvm_machine(job.target)
     ModulePassManager() do pm
         add_library_info!(pm, triple(mod))
