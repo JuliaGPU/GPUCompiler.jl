@@ -34,11 +34,13 @@ runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.target.dev_isa)"
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
 
+# we have to fake our target early in the pipeline because Julia's optimization passes
+# weren't designed for a non-0 stack addrspace, and the AMDGPU target is very strict
+# about which addrspaces are permitted for various code patterns
 function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
     triple!(mod, llvm_triple(NativeCompilerTarget()))
     datalayout!(mod, llvm_datalayout(NativeCompilerTarget()))
 end
-
 function finish_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
     triple!(mod, llvm_triple(job.target))
     datalayout!(mod, llvm_datalayout(job.target))
@@ -56,6 +58,13 @@ end
 function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
 end
+# we're ok with doing the alloca rewrite before resetting our target because it's
+# acceptable to addrspacecast from AS 5 (Private) to 0 (Generic), because the
+# Generic pointer can represent Private pointers with a minimal lookup cost
+# (and the Native backend doesn't seem to care). we do this after Julia's
+# optimization passes because of two reasons:
+# 1. Debug builds call the target verifier, which could trip on this change
+# 2. We don't want any chance of messing with Julia's optimizations
 function add_optimization_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
 end
