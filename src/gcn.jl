@@ -65,8 +65,16 @@ end
 # optimization passes because of two reasons:
 # 1. Debug builds call the target verifier, which could trip on this change
 # 2. We don't want any chance of messing with Julia's optimizations
-function add_optimization_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
-    add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
+function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+    tm = llvm_machine(job.target)
+    ModulePassManager() do pm
+        add_library_info!(pm, triple(mod))
+        add_transform_info!(pm, tm)
+
+        add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
+
+        run!(pm, mod)
+    end
 end
 
 function lower_throw_extra!(mod::LLVM.Module)

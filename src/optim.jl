@@ -37,21 +37,15 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
         remove_julia_addrspaces!(pm)
 
-        run!(pm, mod)
-    end
-
-    # target-specific optimizations
-    ModulePassManager() do pm
-        initialize!(pm)
-
         # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
         # FIXME: we should fix the inliner so that inlined code gets optimized early-on
         always_inliner!(pm)
 
-        add_optimization_passes!(job, pm)
-
         run!(pm, mod)
     end
+
+    # target-specific optimizations
+    optimize_module!(job, mod)
 
     # we compile a module containing the entire call graph,
     # so perform some interprocedural optimizations.
