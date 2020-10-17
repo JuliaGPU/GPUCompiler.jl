@@ -137,11 +137,12 @@ function process_kernel!(job::CompilerJob, mod::LLVM.Module, kernel::LLVM.Functi
     return kernel
 end
 
+# post-Julia optimization processing of the module
+optimize_module!(::CompilerJob, mod::LLVM.Module) = return
+
 # final processing of the IR module, right before validation and machine-code generation
 finish_module!(::CompilerJob, mod::LLVM.Module) = return
 
 add_lowering_passes!(::CompilerJob, pm::LLVM.PassManager) = return
-
-add_optimization_passes!(::CompilerJob, pm::LLVM.PassManager) = return
 
 link_libraries!(::CompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) = return
