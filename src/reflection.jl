@@ -127,10 +127,12 @@ function emit_hooked_compilation(inner_hook, ex...)
     user_code = ex[end]
     user_kwargs = ex[1:end-1]
     quote
-        local kernels = 0
+        local kernels = Set()
         function outer_hook(job)
-            kernels += 1
-            $inner_hook(job; $(map(esc, user_kwargs)...))
+            if !in(job, kernels)
+                $inner_hook(job; $(map(esc, user_kwargs)...))
+                push!(kernels, job)
+            end
         end
 
         if GPUCompiler.compile_hook[] !== nothing
@@ -143,7 +145,7 @@ function emit_hooked_compilation(inner_hook, ex...)
             GPUCompiler.compile_hook[] = nothing
         end
 
-        if kernels == 0
+        if isempty(kernels)
             error("no kernels executed while evaluating the given expression")
         end
 
