@@ -519,7 +519,8 @@ function lower_throw!(mod::LLVM.Module)
         r"julia_throw_complex_domainerror_\d+"  => "DomainError",
         r"julia_throw_domerr_powbysq_\d+"       => "DomainError",
         r"julia_throw_overflowerr_binaryop_\d+" => "OverflowError",
-        r"julia_throw_overflowerr_negation_\d+" => "OverflowError"
+        r"julia_throw_overflowerr_negation_\d+" => "OverflowError",
+        r"julia_throw_inexacterror_\d+"         => "InexactError",
     ]
 
     for f in functions(mod)
