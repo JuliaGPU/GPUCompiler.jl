@@ -45,15 +45,18 @@ function Base.showerror(io::IO, err::InternalCompilerError)
         end
     end
 
-    let Pkg = Base.require(Base.PkgId(Base.UUID((0x44cfe95a1eb252ea, 0xb672e2afdf69b78f)), "Pkg"))
+    let Pkg = Base.require(Base.PkgId(Base.UUID("44cfe95a-1eb2-52ea-b672-e2afdf69b78f"), "Pkg"))
         println(io, "\nInstalled packages:")
-        for (pkg,ver) in Pkg.installed()
-            println(io, " - $pkg = $(repr(ver))")
+        for (uuid, pkg) in Pkg.dependencies()
+            println(io, " - $(pkg.name) = $(repr(pkg.version))")
         end
     end
 
     println(io)
-    versioninfo(io)
+
+    let InteractiveUtils = Base.require(Base.PkgId(Base.UUID("b77e0a4c-d291-57a0-90e8-8db25a27a240"), "InteractiveUtils"))
+        InteractiveUtils.versioninfo(io)
+    end
 end
 
 macro compiler_assert(ex, job, kwargs...)

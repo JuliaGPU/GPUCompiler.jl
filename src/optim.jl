@@ -143,14 +143,13 @@ function lower_ptls!(mod::LLVM.Module)
 
         for use in uses(ptls_getter)
             val = user(use)
-            if !isempty(uses(val))
-                error("Thread local storage is not implemented")
+            if isempty(uses(val))
+                unsafe_delete!(LLVM.parent(val), val)
+                changed = true
+            else
+                # the validator will detect this
             end
-            unsafe_delete!(LLVM.parent(val), val)
-            changed = true
         end
-
-        @compiler_assert isempty(uses(ptls_getter)) job
      end
 
     return changed
