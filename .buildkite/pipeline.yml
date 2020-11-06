@@ -1,0 +1,25 @@
+env:
+  SECRET_CODECOV_TOKEN: "XwlijFm5NXx0pdOhwX0v/ZWaMNwUxoQ9SB4ih47ccaBsIoKBIkZ9m6C5lr05nG+/K6/mYIZYnltRKiTKjKNtgdpGpOBXFEPDUz14i639RzDelyDpCC28Ec3bGpzRm8cbnvU3Kll+aGX/oAm7xcafR+Z411vmoLG3WveAFOdRmczGuoxGXwW1DKo1YYwRdGm+l2Gj/Bihb6n2EYW4qOnlutoWkk4BEGGlxDI2RaU4z2JEddf6RzjAlLF6B1svWRf8FxeZ0kBK+887Ng+872MLIzRe6tw+AAuw6DD8zBqeJwlKvUu6U4fRCEjwB6Bv4C5hZgz//dbwXMB4BB3T5dyyZA=="
+
+steps:
+  # CUDA.jl
+
+  - label: "Julia 1.5"
+    plugins:
+      - maleadt/julia:
+          version: 1.5
+      - maleadt/julia-coverage:
+          codecov: true
+    command: |
+      julia -e 'using Pkg;
+
+                println("--- :julia: Instantiating project");
+                Pkg.develop(PackageSpec(path=pwd()));
+                Pkg.add(PackageSpec(name="CUDA", rev="master"));
+                Pkg.build();
+
+                println("+++ :julia: Running tests");
+                Pkg.test("CUDA"; coverage=true);'
+    agents:
+      queue: "juliagpu"
+      cuda: "*"
