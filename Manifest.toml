@@ -38,9 +38,9 @@ uuid = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 
 [[LLVM]]
 deps = ["CEnum", "Libdl", "Printf", "Unicode"]
-git-tree-sha1 = "70070a0131f17fcffc5fc004f5f73f037bd217c5"
+git-tree-sha1 = "4eb5a1e702fee0d81c15ab673d7c77ef9023d509"
 uuid = "929cbde3-209d-540e-8aea-75f648917ca0"
-version = "3.2.0"
+version = "3.3.0"
 
 [[LibGit2]]
 deps = ["Printf"]
