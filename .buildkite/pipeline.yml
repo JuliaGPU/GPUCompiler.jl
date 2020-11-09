@@ -6,9 +6,9 @@ steps:
 
   - label: "Julia 1.5"
     plugins:
-      - maleadt/julia:
+      - JuliaCI/julia#0.1:
           version: 1.5
-      - maleadt/julia-coverage:
+      - JuliaCI/julia-coverage#0.1:
           codecov: true
     command: |
       julia -e 'using Pkg;
