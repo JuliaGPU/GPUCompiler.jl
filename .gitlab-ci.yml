@@ -14,26 +14,6 @@ include:
 #     CI_ASSERTS: 'true'
 
 
-# CUDA.jl
-
-.test_cuda:
-  extends: .test
-  script:
-    - julia -e 'using Pkg;
-                Pkg.develop(PackageSpec(path=pwd()));
-                Pkg.build();'
-    - julia -e 'using Pkg;
-                Pkg.add(PackageSpec(name="CUDA", rev="master"));
-                Pkg.test("CUDA");'
-
-cuda:1.5:
-  extends:
-    - .julia:1.5
-    - .test_cuda
-  tags:
-    - nvidia
-
-
 # AMDGPU.jl
 
 .test_amdgpu:
@@ -42,10 +22,10 @@ cuda:1.5:
   script:
     - julia -e 'using Pkg;
                 Pkg.develop(PackageSpec(path=pwd()));
+                Pkg.add(PackageSpec(name="AMDGPU", rev="master"));
                 Pkg.build();'
     - julia -e 'using Pkg;
-                Pkg.add(PackageSpec(name="AMDGPU", rev="master"));
-                Pkg.test("AMDGPU");'
+                Pkg.test("AMDGPU"; coverage=true);'
 
 amdgpu:1.5:
   extends:
