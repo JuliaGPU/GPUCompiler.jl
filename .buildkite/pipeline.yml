@@ -1,14 +1,14 @@
 env:
-  SECRET_CODECOV_TOKEN: "XwlijFm5NXx0pdOhwX0v/ZWaMNwUxoQ9SB4ih47ccaBsIoKBIkZ9m6C5lr05nG+/K6/mYIZYnltRKiTKjKNtgdpGpOBXFEPDUz14i639RzDelyDpCC28Ec3bGpzRm8cbnvU3Kll+aGX/oAm7xcafR+Z411vmoLG3WveAFOdRmczGuoxGXwW1DKo1YYwRdGm+l2Gj/Bihb6n2EYW4qOnlutoWkk4BEGGlxDI2RaU4z2JEddf6RzjAlLF6B1svWRf8FxeZ0kBK+887Ng+872MLIzRe6tw+AAuw6DD8zBqeJwlKvUu6U4fRCEjwB6Bv4C5hZgz//dbwXMB4BB3T5dyyZA=="
+  SECRET_CODECOV_TOKEN: "ya+qhtTvHdnO/U1KSoTcdCRB4WCCFU7Or2wt7YlzSZJWqITbLxidDfvqxTMG0mPo6M9I2XW6GULCleA9okq06reF5//14WSmxiF8qPwBONj6m+ImdkLpju2FfLCAtISFJYRM5OJRdDuQ5hKz+FyNoDG/jWBm/vrHoXzrVOHpcHGOPvrEtSwkdo8ew0prFq5RTi6c0Pe+Vj+xRMH7o8QhIPisYUd4RWsA/BL3ukxqSSzpU1+ZJ4F5v6eZILSaKSPb04FzpotkbH+UUCvJSn28Cif+JQANJ9HDLgaa1BbSlOAcu7syktS2fJOyOTfE67er9Lu8utqz6973Evnqjfbclw==;U2FsdGVkX19sIzsESyU7ZuRndlTrQy67iOsrPzevxn+W/dWZBd3ds5Soh1ig5ivoUi4tLZrqUv/ZyPIHohVy0A=="
 
 steps:
   # CUDA.jl
 
   - label: "Julia 1.5"
     plugins:
-      - JuliaCI/julia#0.1:
+      - JuliaCI/julia#v0.2:
           version: 1.5
-      - JuliaCI/julia-coverage#0.1:
+      - JuliaCI/julia-coverage#v0.2:
           codecov: true
     command: |
       julia -e 'using Pkg;
