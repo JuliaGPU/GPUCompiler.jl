@@ -91,8 +91,15 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
         dispose(pm)
     end
 
-    @assert context(mod) == context(new_mod)
     temp_name = LLVM.name(entry)
+    if VERSION >= v"1.6.0-DEV.674"
+        # FIXME: on 1.6, there's no single global LLVM context anymore,
+        #        but there's no API yet to pass a context to codegen.
+        # round-trip the module through serialization to get it in the proper context.
+        buf = convert(MemoryBuffer, new_mod)
+        new_mod = parse(LLVM.Module, buf, context(mod))
+    end
+    @assert context(mod) == context(new_mod)
     link!(mod, new_mod)
     entry = functions(mod)[temp_name]
 
