@@ -58,6 +58,14 @@ include("definitions/native.jl")
         @test eltype(output[4][2].type) isa LLVM.LLVMFloat
         @test !output[4][2].external
     end
+
+    @testset "Callable structs" begin
+        struct MyCallable end
+        (::MyCallable)(a, b) = a+b
+
+        (CI, rt) = native_code_typed(MyCallable(), (Int, Int), kernel=false)[1]
+        @test CI.slottypes[1] == Core.Compiler.Const(MyCallable())
+    end
 end
 
 ############################################################################################
