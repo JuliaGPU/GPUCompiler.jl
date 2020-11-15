@@ -53,7 +53,7 @@ export FunctionSpec
 # what we'll be compiling
 
 struct FunctionSpec{F,TT}
-    f::Base.Callable
+    f::F
     tt::DataType
     kernel::Bool
     name::Union{Nothing,String}
