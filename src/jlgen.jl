@@ -158,7 +158,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)
     llvm_specfunc_idx = Ref{Int32}(-1)
-    ccall(:jl_breakpoint, Nothing, ())
     ccall(:jl_get_function_id, Nothing,
           (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
           native_code, code, llvm_func_idx, llvm_specfunc_idx)
