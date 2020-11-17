@@ -85,8 +85,9 @@ function Core.Compiler.getindex(wvc::WorldView{GPUCodeCache}, mi::MethodInstance
     return r::CodeInstance
 end
 
-Core.Compiler.setindex!(wvc::WorldView{GPUCodeCache}, ci::CodeInstance, mi::MethodInstance) =
+function Core.Compiler.setindex!(wvc::WorldView{GPUCodeCache}, ci::CodeInstance, mi::MethodInstance)
     Core.Compiler.setindex!(wvc.cache, ci, mi)
+end
 
 
 ## codegen/inference integration
@@ -97,23 +98,28 @@ Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(GPU_CI_CACHE, ni.world)
 Core.Compiler.lock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
 Core.Compiler.unlock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
 
+function gpu_ci_cache_populate(mi, min_world, max_world)
+    interp = GPUInterpreter(min_world)
+    src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
+
+    # inference populates the cache, so we don't need to jl_get_method_inferred
+    wvc = WorldView(GPU_CI_CACHE, min_world, max_world)
+    @assert Core.Compiler.haskey(wvc, mi)
+
+    # if src is rettyp_const, the codeinfo won't cache ci.inferred
+    # (because it is normally not supposed to be used ever again).
+    # to avoid the need to re-infer, set that field here.
+    ci = Core.Compiler.getindex(wvc, mi)
+    if ci !== nothing && ci.inferred === nothing
+        ci.inferred = src
+    end
+
+    return
+end
+
 function gpu_ci_cache_lookup(mi, min_world, max_world)
     wvc = WorldView(GPU_CI_CACHE, min_world, max_world)
-    if !Core.Compiler.haskey(wvc, mi)
-        interp = GPUInterpreter(min_world)
-        src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
-        # inference populates the cache, so we don't need to jl_get_method_inferred
-        @assert Core.Compiler.haskey(wvc, mi)
-
-        # if src is rettyp_const, the codeinfo won't cache ci.inferred
-        # (because it is normally not supposed to be used ever again).
-        # to avoid the need to re-infer, set that field here.
-        ci = Core.Compiler.getindex(wvc, mi)
-        if ci !== nothing && ci.inferred === nothing
-            ci.inferred = src
-        end
-    end
-    return Core.Compiler.getindex(wvc, mi)
+    return Core.Compiler.get(wvc, mi, nothing)
 end
 
 
@@ -141,6 +147,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
         gnu_pubnames       = false,
         debug_info_kind    = Cint(debug_info_kind),
         lookup             = @cfunction(gpu_ci_cache_lookup, Any, (Any, UInt, UInt)))
+
+    # popoulate the cache
+    if gpu_ci_cache_lookup(method_instance, world, world) === nothing
+        gpu_ci_cache_populate(method_instance, world, world)
+    end
 
     # generate IR
     native_code = ccall(:jl_create_native, Ptr{Cvoid},
