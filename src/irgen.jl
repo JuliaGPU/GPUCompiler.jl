@@ -360,7 +360,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f:
         else
             arg.typ
         end
-        push!(wrapper_types, typ)
+        push!(wrapper_types, convert(LLVMType, typ, ctx))
     end
     wrapper_fn = LLVM.name(entry_f)
     LLVM.name!(entry_f, wrapper_fn * ".inner")

@@ -162,7 +162,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
             st = LLVM.StructType([eltype(arg.codegen.typ)], ctx)
             LLVM.PointerType(st, addrspace(arg.codegen.typ))
         else
-            arg.typ
+            convert(LLVMType, arg.typ, ctx)
         end
         push!(wrapper_types, typ)
     end
