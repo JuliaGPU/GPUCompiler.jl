@@ -135,14 +135,14 @@ function emit_hooked_compilation(inner_hook, ex...)
             end
         end
 
-        if compile_hook[] !== nothing
+        if $compile_hook[] !== nothing
             error("Chaining multiple @device_code calls is unsupported")
         end
         try
-            compile_hook[] = outer_hook
+            $compile_hook[] = outer_hook
             $(esc(user_code))
         finally
-            compile_hook[] = nothing
+            $compile_hook[] = nothing
         end
 
         if isempty(kernels)

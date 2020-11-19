@@ -521,6 +521,7 @@ function lower_throw!(mod::LLVM.Module)
         r"julia_throw_overflowerr_binaryop_\d+" => "OverflowError",
         r"julia_throw_overflowerr_negation_\d+" => "OverflowError",
         r"julia_throw_inexacterror_\d+"         => "InexactError",
+        r"julia_throw_boundserror_\d+"          => "BoundsError",
     ]
 
     for f in functions(mod)
