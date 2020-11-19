@@ -202,6 +202,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     end
 
     # early-inline the original entry function into the wrapper
+    delete!(function_attributes(entry_f), EnumAttribute("noinline", 0, ctx))
     push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, ctx))
     linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
 
