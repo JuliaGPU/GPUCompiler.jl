@@ -15,8 +15,6 @@ end
 # GPU run-time library
 #
 
-const libcache = Dict{String, LLVM.Module}()
-
 # get the path to a directory where we can put cache files (machine-specific, ephemeral)
 # NOTE: maybe we should use XDG_CACHE_PATH/%LOCALAPPDATA%, but other Julia cache files
 #       are put in .julia anyway so let's just follow suit for now.
@@ -159,32 +157,30 @@ function load_runtime(@nospecialize(job::CompilerJob), ctx)
     name = "runtime_$(slug).bc"
     path = joinpath(output_dir, name)
 
-    get!(libcache, path) do
-        lib = try
-            if ispath(path)
-                open(path) do io
-                    parse(LLVM.Module, read(io), ctx)
-                end
+    lib = try
+        if ispath(path)
+            open(path) do io
+                parse(LLVM.Module, read(io), ctx)
             end
-        catch ex
-            @warn "Failed to load GPU runtime library at $path" exception=(ex, catch_backtrace())
-            nothing
         end
-
-        if lib === nothing
-            @debug "Building the GPU runtime library at $path"
-            mkpath(output_dir)
-            lib = build_runtime(job, ctx)
-
-            # atomic write to disk
-            temp_path, io = mktemp(dirname(path); cleanup=false)
-            write(io, lib)
-            close(io)
-            mv(temp_path, path; force=true)
-        end
-
-        lib
+    catch ex
+        @warn "Failed to load GPU runtime library at $path" exception=(ex, catch_backtrace())
+        nothing
     end
+
+    if lib === nothing
+        @debug "Building the GPU runtime library at $path"
+        mkpath(output_dir)
+        lib = build_runtime(job, ctx)
+
+        # atomic write to disk
+        temp_path, io = mktemp(dirname(path); cleanup=false)
+        write(io, lib)
+        close(io)
+        mv(temp_path, path; force=true)
+    end
+
+    return lib
 end
 
 # remove the existing cache
@@ -194,9 +190,6 @@ function reset_runtime()
     # create an empty cache directory. since we only ever load from the first existing cachedir,
     # this effectively invalidates preexisting caches in lower layers of the depot.
     mkpath(cachedir())
-
-    # wipe the cache so we can use this function at run-time too
-    empty!(libcache)
 
     return
 end
