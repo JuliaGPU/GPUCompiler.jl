@@ -73,7 +73,7 @@ function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, f::LLVM.
                 if format == LLVM.API.LLVMAssemblyFile
                     cmd = `$cmd -spirv-text`
                 end
-                cmd = `$cmd -o $output $input`
+                cmd = `$cmd --spirv-debug-info-version=ocl-100 -o $output $input`
                 run(cmd)
             end
 
