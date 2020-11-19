@@ -90,7 +90,7 @@ See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
-    ir, entry = GPUCompiler.codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
+    ir, entry = codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
     str = ccall(:jl_dump_function_ir, Ref{String},
                 (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
                 entry, !raw, dump_module, debuginfo)
@@ -112,7 +112,7 @@ The following keyword arguments are supported:
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, dump_module::Bool=false)
-    asm, _ = GPUCompiler.codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
+    asm, _ = codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
     highlight(io, asm, source_code(job.target))
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =
@@ -135,14 +135,14 @@ function emit_hooked_compilation(inner_hook, ex...)
             end
         end
 
-        if GPUCompiler.compile_hook[] !== nothing
+        if compile_hook[] !== nothing
             error("Chaining multiple @device_code calls is unsupported")
         end
         try
-            GPUCompiler.compile_hook[] = outer_hook
+            compile_hook[] = outer_hook
             $(esc(user_code))
         finally
-            GPUCompiler.compile_hook[] = nothing
+            compile_hook[] = nothing
         end
 
         if isempty(kernels)
