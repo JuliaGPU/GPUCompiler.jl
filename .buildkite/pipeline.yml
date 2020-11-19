@@ -2,9 +2,7 @@ env:
   SECRET_CODECOV_TOKEN: "ya+qhtTvHdnO/U1KSoTcdCRB4WCCFU7Or2wt7YlzSZJWqITbLxidDfvqxTMG0mPo6M9I2XW6GULCleA9okq06reF5//14WSmxiF8qPwBONj6m+ImdkLpju2FfLCAtISFJYRM5OJRdDuQ5hKz+FyNoDG/jWBm/vrHoXzrVOHpcHGOPvrEtSwkdo8ew0prFq5RTi6c0Pe+Vj+xRMH7o8QhIPisYUd4RWsA/BL3ukxqSSzpU1+ZJ4F5v6eZILSaKSPb04FzpotkbH+UUCvJSn28Cif+JQANJ9HDLgaa1BbSlOAcu7syktS2fJOyOTfE67er9Lu8utqz6973Evnqjfbclw==;U2FsdGVkX19sIzsESyU7ZuRndlTrQy67iOsrPzevxn+W/dWZBd3ds5Soh1ig5ivoUi4tLZrqUv/ZyPIHohVy0A=="
 
 steps:
-  # CUDA.jl
-
-  - label: "Julia 1.5"
+  - label: "CUDA.jl"
     plugins:
       - JuliaCI/julia#v0.2:
           version: 1.5
@@ -23,3 +21,23 @@ steps:
     agents:
       queue: "juliagpu"
       cuda: "*"
+
+  - label: "oneAPI.jl"
+    plugins:
+      - JuliaCI/julia#v0.2:
+          version: 1.5
+      - JuliaCI/julia-coverage#v0.2:
+          codecov: true
+    command: |
+      julia -e 'using Pkg;
+
+                println("--- :julia: Instantiating project");
+                Pkg.develop(PackageSpec(path=pwd()));
+                Pkg.add(PackageSpec(name="oneAPI", rev="master"));
+                Pkg.build();
+
+                println("+++ :julia: Running tests");
+                Pkg.test("oneAPI"; coverage=true);'
+    agents:
+      queue: "juliagpu"
+      intel: "*"
