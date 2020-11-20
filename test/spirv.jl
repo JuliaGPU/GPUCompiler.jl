@@ -29,6 +29,12 @@ end
     ir = sprint(io->spirv_code_llvm(io, kernel, Tuple{Tuple{Int}}; kernel=true))
     @test occursin(r"@.*julia_.+_kernel.+\({ ({ i64 }|\[1 x i64\]) }\*.+byval", ir)
 end
+
+@testset "byval bug" begin
+    # byval added alwaysinline, which could conflict with noinline and fail verification
+    @noinline kernel() = return
+    spirv_code_llvm(kernel, Tuple{}; kernel=true)
+end
 end
 
 end
