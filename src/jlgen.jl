@@ -34,8 +34,44 @@ function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
 end
 
 function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
+    # make sure the invalidation callback is attached to the method instance
+    callback(mi, max_world) = invalidate(cache, mi, max_world)
+    if !isdefined(mi, :callbacks)
+        mi.callbacks = Any[callback]
+    else
+        if all(cb -> cb !== callback, mi.callbacks)
+            push!(mi.callbacks, callback)
+        end
+    end
+
     cis = get!(cache.dict, mi, CodeInstance[])
     push!(cis, ci)
+end
+
+# invalidation (like invalidate_method_instance, but for our cache)
+function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, depth=0)
+    cis = get(cache.dict, replaced, nothing)
+    if cis === nothing
+        return
+    end
+    for ci in cis
+        if ci.max_world == ~0 % Csize_t
+            @assert ci.min_world - 1 <= max_world "attempting to set illogical constraints"
+            ci.max_world = max_world
+        end
+        @assert ci.max_world <= max_world
+    end
+
+    # recurse to all backedges to update their valid range also
+    if isdefined(replaced, :backedges)
+        backedges = replaced.backedges
+        # Don't touch/empty backedges `invalidate_method_instance` in C will do that later
+        # replaced.backedges = Any[]
+
+        for mi in backedges
+            invalidate(cache, mi, max_world, depth + 1)
+        end
+    end
 end
 
 const CI_CACHE = CodeCache()
