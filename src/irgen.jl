@@ -358,9 +358,9 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f:
         typ = if arg.cc == BITS_REF
             eltype(arg.codegen.typ)
         else
-            arg.typ
+            convert(LLVMType, arg.typ, ctx)
         end
-        push!(wrapper_types, convert(LLVMType, typ, ctx))
+        push!(wrapper_types, typ)
     end
     wrapper_fn = LLVM.name(entry_f)
     LLVM.name!(entry_f, wrapper_fn * ".inner")
