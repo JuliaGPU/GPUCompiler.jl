@@ -4,17 +4,17 @@
 
 using Core.Compiler: CodeInstance, MethodInstance
 
-struct GPUCodeCache
+struct CodeCache
     dict::Dict{MethodInstance,Vector{CodeInstance}}
-    GPUCodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
+    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
 end
 
-function Core.Compiler.setindex!(cache::GPUCodeCache, ci::CodeInstance, mi::MethodInstance)
+function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
     cis = get!(cache.dict, mi, CodeInstance[])
     push!(cis, ci)
 end
 
-const GPU_CI_CACHE = GPUCodeCache()
+const CI_CACHE = CodeCache()
 
 
 ## interpreter
@@ -63,11 +63,11 @@ Core.Compiler.add_remark!(ni::GPUInterpreter, sv::InferenceState, msg) = nothing
 
 using Core.Compiler: WorldView
 
-function Core.Compiler.haskey(wvc::WorldView{GPUCodeCache}, mi::MethodInstance)
+function Core.Compiler.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
     Core.Compiler.get(wvc, mi, nothing) !== nothing
 end
 
-function Core.Compiler.get(wvc::WorldView{GPUCodeCache}, mi::MethodInstance, default)
+function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
     cache = wvc.cache
     for ci in get!(cache.dict, mi, CodeInstance[])
         if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
@@ -79,31 +79,31 @@ function Core.Compiler.get(wvc::WorldView{GPUCodeCache}, mi::MethodInstance, def
     return default
 end
 
-function Core.Compiler.getindex(wvc::WorldView{GPUCodeCache}, mi::MethodInstance)
+function Core.Compiler.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
     r = Core.Compiler.get(wvc, mi, nothing)
     r === nothing && throw(KeyError(mi))
     return r::CodeInstance
 end
 
-function Core.Compiler.setindex!(wvc::WorldView{GPUCodeCache}, ci::CodeInstance, mi::MethodInstance)
+function Core.Compiler.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
     Core.Compiler.setindex!(wvc.cache, ci, mi)
 end
 
 
 ## codegen/inference integration
 
-Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(GPU_CI_CACHE, ni.world)
+Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(CI_CACHE, ni.world)
 
 # No need to do any locking since we're not putting our results into the runtime cache
 Core.Compiler.lock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
 Core.Compiler.unlock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
 
-function gpu_ci_cache_populate(mi, min_world, max_world)
+function ci_cache_populate(mi, min_world, max_world)
     interp = GPUInterpreter(min_world)
     src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
 
     # inference populates the cache, so we don't need to jl_get_method_inferred
-    wvc = WorldView(GPU_CI_CACHE, min_world, max_world)
+    wvc = WorldView(CI_CACHE, min_world, max_world)
     @assert Core.Compiler.haskey(wvc, mi)
 
     # if src is rettyp_const, the codeinfo won't cache ci.inferred
@@ -117,8 +117,8 @@ function gpu_ci_cache_populate(mi, min_world, max_world)
     return
 end
 
-function gpu_ci_cache_lookup(mi, min_world, max_world)
-    wvc = WorldView(GPU_CI_CACHE, min_world, max_world)
+function ci_cache_lookup(mi, min_world, max_world)
+    wvc = WorldView(CI_CACHE, min_world, max_world)
     return Core.Compiler.get(wvc, mi, nothing)
 end
 
@@ -146,11 +146,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
         prefer_specsig     = true,
         gnu_pubnames       = false,
         debug_info_kind    = Cint(debug_info_kind),
-        lookup             = @cfunction(gpu_ci_cache_lookup, Any, (Any, UInt, UInt)))
+        lookup             = @cfunction(ci_cache_lookup, Any, (Any, UInt, UInt)))
 
     # popoulate the cache
-    if gpu_ci_cache_lookup(method_instance, world, world) === nothing
-        gpu_ci_cache_populate(method_instance, world, world)
+    if ci_cache_lookup(method_instance, world, world) === nothing
+        ci_cache_populate(method_instance, world, world)
     end
 
     # generate IR
@@ -164,7 +164,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     llvm_mod = LLVM.Module(llvm_mod_ref)
 
     # get the top-level code
-    code = gpu_ci_cache_lookup(method_instance, world, world)
+    code = ci_cache_lookup(method_instance, world, world)
 
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)
@@ -194,4 +194,4 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     return llvm_specfunc, llvm_mod
 end
 
-Base.empty!(cache::GPUCodeCache) = empty!(cache.dict)
+Base.empty!(cache::CodeCache) = empty!(cache.dict)
