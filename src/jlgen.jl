@@ -9,6 +9,30 @@ struct CodeCache
     CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
 end
 
+function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
+    print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries: ")
+    for (mi, cis) in cc.dict
+        println(io)
+        print(io, "  ")
+        show(io, mi)
+
+        function worldstr(min_world, max_world)
+            if min_world == typemax(UInt)
+                "empty world range"
+            elseif max_world == typemax(UInt)
+                "worlds $(Int(min_world))+"
+            else
+                "worlds $(Int(min_world)) to $(Int(max_world))"
+            end
+        end
+
+        for (i,ci) in enumerate(cis)
+            println(io)
+            print(io, "    CodeInstance for ", worldstr(ci.min_world, ci.max_world))
+        end
+    end
+end
+
 function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
     cis = get!(cache.dict, mi, CodeInstance[])
     push!(cis, ci)
