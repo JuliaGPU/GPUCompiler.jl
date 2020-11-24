@@ -20,3 +20,26 @@ function Base.getproperty(lazy_mod::LazyModule, sym::Symbol)
     end
     getfield(mod, sym)
 end
+
+
+## safe logging
+
+using Logging
+
+# define safe loggers for use in generated functions (where task switches are not allowed)
+for level in [:debug, :info, :warn, :error]
+    @eval begin
+        macro $(Symbol("safe_$level"))(ex...)
+            macrocall = :(@placeholder $(ex...))
+            # NOTE: `@placeholder` in order to avoid hard-coding @__LINE__ etc
+            macrocall.args[1] = Symbol($"@$level")
+            quote
+                old_logger = global_logger()
+                global_logger(Logging.ConsoleLogger(Core.stderr, old_logger.min_level))
+                ret = $(esc(macrocall))
+                global_logger(old_logger)
+                ret
+            end
+        end
+    end
+end

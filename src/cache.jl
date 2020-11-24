@@ -1,6 +1,6 @@
 # compilation cache
 
-using Core.Compiler: retrieve_code_info, CodeInfo, MethodInstance, SSAValue, SlotNumber
+using Core.Compiler: retrieve_code_info, CodeInfo, MethodInstance, SSAValue, SlotNumber, ReturnNode
 using Base: _methods_by_ftype
 
 using Serialization, Scratch
@@ -107,7 +107,7 @@ const specialization_counter = Ref{UInt}(0)
                           Expr(:call, merge, NamedTuple(), kwargs),
                           Expr(:call, SSAValue(1), SSAValue(2), check_cache,
                                       cache, compiler, linker, spec, id),
-                          Expr(:return, SSAValue(3))])
+                          ReturnNode(SSAValue(3))])
     append!(new_ci.codelocs, [1, 1, 1, 1])   # see note below
     new_ci.ssavaluetypes += 4
 

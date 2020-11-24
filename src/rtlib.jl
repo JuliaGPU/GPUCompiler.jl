@@ -15,8 +15,6 @@ end
 # GPU run-time library
 #
 
-const libcache = Dict{String, LLVM.Module}()
-
 # get the path to a directory where we can put cache files (machine-specific, ephemeral)
 # NOTE: maybe we should use XDG_CACHE_PATH/%LOCALAPPDATA%, but other Julia cache files
 #       are put in .julia anyway so let's just follow suit for now.
@@ -91,8 +89,15 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
         dispose(pm)
     end
 
-    @assert context(mod) == context(new_mod)
     temp_name = LLVM.name(entry)
+    if VERSION >= v"1.6.0-DEV.674"
+        # FIXME: on 1.6, there's no single global LLVM context anymore,
+        #        but there's no API yet to pass a context to codegen.
+        # round-trip the module through serialization to get it in the proper context.
+        buf = convert(MemoryBuffer, new_mod)
+        new_mod = parse(LLVM.Module, buf, context(mod))
+    end
+    @assert context(mod) == context(new_mod)
     link!(mod, new_mod)
     entry = functions(mod)[temp_name]
 
@@ -152,32 +157,30 @@ function load_runtime(@nospecialize(job::CompilerJob), ctx)
     name = "runtime_$(slug).bc"
     path = joinpath(output_dir, name)
 
-    get!(libcache, path) do
-        lib = try
-            if ispath(path)
-                open(path) do io
-                    parse(LLVM.Module, read(io), ctx)
-                end
+    lib = try
+        if ispath(path)
+            open(path) do io
+                parse(LLVM.Module, read(io), ctx)
             end
-        catch ex
-            @warn "Failed to load GPU runtime library at $path" exception=(ex, catch_backtrace())
-            nothing
         end
-
-        if lib === nothing
-            @debug "Building the GPU runtime library at $path"
-            mkpath(output_dir)
-            lib = build_runtime(job, ctx)
-
-            # atomic write to disk
-            temp_path, io = mktemp(dirname(path); cleanup=false)
-            write(io, lib)
-            close(io)
-            mv(temp_path, path; force=true)
-        end
-
-        lib
+    catch ex
+        @warn "Failed to load GPU runtime library at $path" exception=(ex, catch_backtrace())
+        nothing
     end
+
+    if lib === nothing
+        @debug "Building the GPU runtime library at $path"
+        mkpath(output_dir)
+        lib = build_runtime(job, ctx)
+
+        # atomic write to disk
+        temp_path, io = mktemp(dirname(path); cleanup=false)
+        write(io, lib)
+        close(io)
+        mv(temp_path, path; force=true)
+    end
+
+    return lib
 end
 
 # remove the existing cache
@@ -187,9 +190,6 @@ function reset_runtime()
     # create an empty cache directory. since we only ever load from the first existing cachedir,
     # this effectively invalidates preexisting caches in lower layers of the depot.
     mkpath(cachedir())
-
-    # wipe the cache so we can use this function at run-time too
-    empty!(libcache)
 
     return
 end

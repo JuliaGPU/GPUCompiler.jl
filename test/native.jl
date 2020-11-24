@@ -202,32 +202,6 @@ end
 
 @testset "errors" begin
 
-# some validation happens in the emit_function hook, which is called by code_llvm
-
-@testset "base intrinsics" begin
-    foobar(i) = sin(i)
-
-    # NOTE: we don't use test_logs in order to test all of the warning (exception, backtrace)
-    logs, _ = Test.collect_test_logs(min_level=Info) do
-        withenv("JULIA_DEBUG" => nothing) do
-            native_code_llvm(devnull, foobar, Tuple{Int})
-        end
-    end
-    @test length(logs) == 1
-    record = logs[1]
-    @test record.level == Base.CoreLogging.Warn
-    @test record.message == "calls to Base intrinsics might be GPU incompatible"
-    @test haskey(record.kwargs, :exception)
-    err,bt = record.kwargs[:exception]
-    err_msg = sprint(showerror, err)
-    @test occursin(Regex("You called sin(.+) in Base.Math .+, maybe you intended to call sin(.+) in $TestRuntime .+ instead?"), err_msg)
-    bt_msg = sprint(Base.show_backtrace, bt)
-    @test occursin("[1] sin", bt_msg)
-    @test occursin(r"\[2\] .+foobar", bt_msg)
-end
-
-# some validation happens in `compile`
-
 @eval Main begin
 struct CleverType{T}
     x::T

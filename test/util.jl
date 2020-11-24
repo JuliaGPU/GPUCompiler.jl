@@ -11,7 +11,8 @@ macro test_throws_message(f, typ, ex...)
 
         if !$(esc(f))(msg)
             # @test should return its result, but doesn't
-            @error "Failed to validate error message\n$msg"
+            errmsg = "Failed to validate error message\n" * msg
+            @error errmsg
         end
         @test $(esc(f))(msg)
     end

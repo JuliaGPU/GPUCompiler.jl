@@ -28,6 +28,7 @@ include("spirv.jl")
 include("runtime.jl")
 
 # compiler implementation
+include("jlgen.jl")
 include("irgen.jl")
 include("optim.jl")
 include("validation.jl")
