@@ -177,7 +177,7 @@ function load_runtime(@nospecialize(job::CompilerJob), ctx)
         temp_path, io = mktemp(dirname(path); cleanup=false)
         write(io, lib)
         close(io)
-        mv(temp_path, path; force=true)
+        Base.rename(temp_path, path; force=true)
     end
 
     return lib
