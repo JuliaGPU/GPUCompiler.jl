@@ -6,29 +6,34 @@ using Core.Compiler: CodeInstance, MethodInstance
 
 struct CodeCache
     dict::Dict{MethodInstance,Vector{CodeInstance}}
-    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
+    overrides::Dict{Type,Vector{Type}}
+    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}(),
+                      Dict{Type,Vector{Type}}())
 end
 
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
-    print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries: ")
-    for (mi, cis) in cc.dict
-        println(io)
-        print(io, "  ")
-        show(io, mi)
-
-        function worldstr(min_world, max_world)
-            if min_world == typemax(UInt)
-                "empty world range"
-            elseif max_world == typemax(UInt)
-                "worlds $(Int(min_world))+"
-            else
-                "worlds $(Int(min_world)) to $(Int(max_world))"
-            end
-        end
-
-        for (i,ci) in enumerate(cis)
+    print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries")
+    if !isempty(cc.dict)
+        print(io, ": ")
+        for (mi, cis) in cc.dict
             println(io)
-            print(io, "    CodeInstance for ", worldstr(ci.min_world, ci.max_world))
+            print(io, "  ")
+            show(io, mi)
+
+            function worldstr(min_world, max_world)
+                if min_world == typemax(UInt)
+                    "empty world range"
+                elseif max_world == typemax(UInt)
+                    "worlds $(Int(min_world))+"
+                else
+                    "worlds $(Int(min_world)) to $(Int(max_world))"
+                end
+            end
+
+            for (i,ci) in enumerate(cis)
+                println(io)
+                print(io, "    CodeInstance for ", worldstr(ci.min_world, ci.max_world))
+            end
         end
     end
 end
@@ -128,12 +133,46 @@ function Core.Compiler.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
 end
 
 function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
+    sig = Base.unwrap_unionall(mi.specTypes)
+    ft, t... = [sig.parameters...]
+
+    # check if we have any overrides for this method instance's function type
+    actual_mi = mi
+    if haskey(wvc.cache.overrides, ft)
+        for ft′ in wvc.cache.overrides[ft]
+            # hasmethod with function type
+            sig′ = Tuple{ft′, t...}
+            ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig′, wvc.worlds.min_world) !== nothing || continue
+
+            meth = which(sig′)
+            (ti, env) = ccall(:jl_type_intersection_with_env, Any,
+                              (Any, Any), sig′, meth.sig)::Core.SimpleVector
+            meth = Base.func_for_method_checked(meth, ti, env)
+            actual_mi = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
+                (Any, Any, Any, UInt), meth, ti, env, wvc.worlds.min_world)
+            break
+        end
+    end
+
+    # check the cache
     cache = wvc.cache
-    for ci in get!(cache.dict, mi, CodeInstance[])
+    for ci in get!(cache.dict, actual_mi, CodeInstance[])
         if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
             # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
             return ci
         end
+    end
+
+    # if we want to override a method instance, eagerly put its replacement in the cache.
+    # this is necessary, because we generally don't populate the cache, inference does,
+    # and it won't put the replacement method instance in the cache by itself.
+    if mi !== actual_mi
+        # XXX: is this OK to do? shouldn't we _inform_ the compiler about the replacement
+        # method instead of just spoofing the code instance? I tried to do so using a
+        # MethodTableView, but the fact that the resulting MethodMatch referred the
+        # replacement function, while there was still a GlobalRef in the IR pointing to
+        # the original function, resulted in optimizer confusion.
+        return ci_cache_populate(actual_mi, wvc.worlds.min_world, wvc.worlds.max_world)
     end
 
     return default
@@ -174,7 +213,7 @@ function ci_cache_populate(mi, min_world, max_world)
         ci.inferred = src
     end
 
-    return
+    return ci
 end
 
 function ci_cache_lookup(mi, min_world, max_world)
@@ -205,7 +244,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
         debug_info_kind    = Cint(debug_info_kind),
         lookup             = @cfunction(ci_cache_lookup, Any, (Any, UInt, UInt)))
 
-    # popoulate the cache
+    # populate the cache
     if ci_cache_lookup(method_instance, world, world) === nothing
         ci_cache_populate(method_instance, world, world)
     end
