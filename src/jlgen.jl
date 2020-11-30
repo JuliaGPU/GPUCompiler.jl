@@ -6,7 +6,9 @@ using Core.Compiler: CodeInstance, MethodInstance
 
 struct CodeCache
     dict::Dict{MethodInstance,Vector{CodeInstance}}
-    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
+    overrides::Dict{Type,Vector{Type}}
+    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}(),
+                      Dict{Type,Vector{Type}}())
 end
 
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
@@ -150,6 +152,47 @@ function Core.Compiler.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi
 end
 
 
+## overlay method table
+
+struct OverlayMethodTable <: Core.Compiler.MethodTableView
+    interp::GPUInterpreter
+    inner::Core.Compiler.MethodTableView
+end
+
+Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
+    OverlayMethodTable(interp, sv.method_table)
+
+function Core.Compiler.findall(@nospecialize(sig::Type{<:Tuple}), table::OverlayMethodTable;
+                               limit::Int=typemax(Int))
+    @safe_info "OverlayMethodTable lookup for $sig"
+    Base.show_backtrace(IOContext(Core.stderr, :color=>stderr[:color]), Base.backtrace())
+    println(Core.stdout)
+    ft = first(sig.parameters)
+    if haskey(CI_CACHE.overrides, ft)
+        tt = Tuple{sig.parameters[2:end]...}
+        for ft′ in CI_CACHE.overrides[ft]
+            sig′ = Tuple{ft′, tt.parameters...}
+            ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig′, table.interp.world) !== nothing || continue
+            @safe_warn "Replacing with $(ft′)"
+            sig = sig′
+            break
+        end
+    end
+    match = Core.Compiler.findall(sig, table.inner; limit)
+    @safe_info "OverlayMethodTable returning $match"
+    match
+end
+
+# debug
+# > If the old method is still referenced, something is wrong or the use in base of the
+# > method table abstraction is incomplete
+function Core.Compiler.transform_result_for_cache(interp::GPUInterpreter, linfo::MethodInstance,
+                                    @nospecialize(inferred_result))
+    @safe_info "prepare for cache" linfo inferred_result
+    invoke(Core.Compiler.transform_result_for_cache, Tuple{AbstractInterpreter, typeof(linfo), typeof(inferred_result)}, interp, linfo, inferred_result)
+end
+
+
 ## codegen/inference integration
 
 Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(CI_CACHE, ni.world)
@@ -174,7 +217,7 @@ function ci_cache_populate(mi, min_world, max_world)
         ci.inferred = src
     end
 
-    return
+    return ci
 end
 
 function ci_cache_lookup(mi, min_world, max_world)
