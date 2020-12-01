@@ -197,3 +197,6 @@ function llvm_debug_info(@nospecialize(job::CompilerJob))
         LLVM.API.LLVMDebugEmissionKindFullDebug
     end
 end
+
+# whether we should compile in imaging mode
+extern_policy(::CompilerJob) = false

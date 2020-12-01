@@ -311,6 +311,70 @@ end
     @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
 end
 
+using Libdl
+
+function generate_shlib_fptr(f, tt, name=GPUCompiler.safe_name(repr(f)))
+    mktemp() do path, io
+        source = FunctionSpec(f, Base.to_tuple_type(tt), false, name)
+        target = NativeCompilerTarget(;reloc=LLVM.API.LLVMRelocPIC, extern=true)
+        params = TestCompilerParams()
+        job = CompilerJob(target, source, params)
+        obj, _ = GPUCompiler.codegen(:obj, job; strip=true, only_entry=false, validate=false)
+        write(io, obj)
+        flush(io)
+        # FIXME: Be more portable
+        run(`ld -shared -o $path.$dlext $path`)
+        ptr = dlopen("$path.$dlext", Libdl.RTLD_LOCAL)
+        fptr = dlsym(ptr, "julia_$name")
+        @assert fptr != C_NULL
+        atexit(()->rm("$path.$dlext"))
+        fptr
+    end
+end
+
+@static if VERSION >= v"1.7.0-DEV.600"
+@testset "shared library emission" begin
+    f1(x) = x+1
+    @test ccall(generate_shlib_fptr(f1, (Int,)), Int, (Int,), 1) == 2
+    f2(x,y) = x+y
+    @test ccall(generate_shlib_fptr(f2, (Int,Int)), Int, (Int,Int), 1, 2) == 3
+    f3(str) = str*"!"
+    @test_skip ccall(generate_shlib_fptr(f3, (String,)), String, (String,), "Hello") == "Hello!"
+    function f4()
+        # Something reasonably complicated
+        if isdir(homedir())
+            true
+        else
+            false
+        end
+    end
+    @test ccall(generate_shlib_fptr(f4, ()), Bool, ())
+    f5() = :asymbol
+    @test_skip ccall(generate_shlib_fptr(f5, ()), Symbol, ()) == :asymbol
+    f6(x) = x == :asymbol ? true : false
+    @test_skip ccall(generate_shlib_fptr(f6, (Symbol,)), Bool, (Symbol,), :asymbol)
+    @test_skip !ccall(generate_shlib_fptr(f6, (Symbol,)), Bool, (Symbol,), :bsymbol)
+    #= FIXME
+    function f7(A, sym)
+        if sym != :asymbol
+            A[] = true
+        else
+            A[] = false
+        end
+        return nothing
+    end
+    A = Ref(false)
+    ccall(generate_shlib_fptr(f7, (Base.RefValue{Bool}, Symbol)), Nothing, (Base.RefValue{Bool}, Symbol), A, :asymbol); @test A[]
+    ccall(generate_shlib_fptr(f7, (Base.RefValue{Bool}, Symbol)), Nothing, (Base.RefValue{Bool}, Symbol), A, :bsymbol); @test !A[]
+    =#
+    y = [42.0]
+    function cf1(x)
+        x + y[1]
+    end
+    @test ccall(generate_shlib_fptr(cf1, (Float64,)), Float64, (Any, Float64,), cf1, 1.0) == 43.0
+end
+end
+
 end
 
 ############################################################################################
