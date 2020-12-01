@@ -35,7 +35,9 @@ for level in [:debug, :info, :warn, :error]
             macrocall.args[1] = Symbol($"@$level")
             quote
                 old_logger = global_logger()
-                global_logger(Logging.ConsoleLogger(Core.stderr, old_logger.min_level))
+                # FIXME: Core.stderr supports colors
+                io = IOContext(Core.stderr, :color=>stderr[:color])
+                global_logger(Logging.ConsoleLogger(io, old_logger.min_level))
                 ret = $(esc(macrocall))
                 global_logger(old_logger)
                 ret
