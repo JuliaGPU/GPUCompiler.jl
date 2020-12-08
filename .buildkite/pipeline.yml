@@ -21,6 +21,7 @@ steps:
     agents:
       queue: "juliagpu"
       cuda: "*"
+    timeout_in_minutes: 60
 
   - label: "oneAPI.jl"
     plugins:
@@ -41,3 +42,4 @@ steps:
     agents:
       queue: "juliagpu"
       intel: "*"
+    timeout_in_minutes: 60
