@@ -1,6 +1,3 @@
-env:
-  SECRET_CODECOV_TOKEN: "ya+qhtTvHdnO/U1KSoTcdCRB4WCCFU7Or2wt7YlzSZJWqITbLxidDfvqxTMG0mPo6M9I2XW6GULCleA9okq06reF5//14WSmxiF8qPwBONj6m+ImdkLpju2FfLCAtISFJYRM5OJRdDuQ5hKz+FyNoDG/jWBm/vrHoXzrVOHpcHGOPvrEtSwkdo8ew0prFq5RTi6c0Pe+Vj+xRMH7o8QhIPisYUd4RWsA/BL3ukxqSSzpU1+ZJ4F5v6eZILSaKSPb04FzpotkbH+UUCvJSn28Cif+JQANJ9HDLgaa1BbSlOAcu7syktS2fJOyOTfE67er9Lu8utqz6973Evnqjfbclw==;U2FsdGVkX19sIzsESyU7ZuRndlTrQy67iOsrPzevxn+W/dWZBd3ds5Soh1ig5ivoUi4tLZrqUv/ZyPIHohVy0A=="
-
 steps:
   - label: "CUDA.jl"
     plugins:
@@ -43,3 +40,7 @@ steps:
       queue: "juliagpu"
       intel: "*"
     timeout_in_minutes: 60
+
+env:
+  JULIA_PKG_SERVER: "" # it often struggles with our large artifacts
+  SECRET_CODECOV_TOKEN: "ya+qhtTvHdnO/U1KSoTcdCRB4WCCFU7Or2wt7YlzSZJWqITbLxidDfvqxTMG0mPo6M9I2XW6GULCleA9okq06reF5//14WSmxiF8qPwBONj6m+ImdkLpju2FfLCAtISFJYRM5OJRdDuQ5hKz+FyNoDG/jWBm/vrHoXzrVOHpcHGOPvrEtSwkdo8ew0prFq5RTi6c0Pe+Vj+xRMH7o8QhIPisYUd4RWsA/BL3ukxqSSzpU1+ZJ4F5v6eZILSaKSPb04FzpotkbH+UUCvJSn28Cif+JQANJ9HDLgaa1BbSlOAcu7syktS2fJOyOTfE67er9Lu8utqz6973Evnqjfbclw==;U2FsdGVkX19sIzsESyU7ZuRndlTrQy67iOsrPzevxn+W/dWZBd3ds5Soh1ig5ivoUi4tLZrqUv/ZyPIHohVy0A=="
