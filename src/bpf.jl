@@ -7,6 +7,7 @@ export BPFCompilerTarget
 Base.@kwdef struct BPFCompilerTarget <: AbstractCompilerTarget
     prog_section::String="prog" # section for kernel to be placed in
     license::String=""          # license for kernel and source code
+    function_pointers::UnitRange{Int}=1:1000 # set of valid function "pointers"
 end
 
 llvm_triple(::BPFCompilerTarget) = "bpf-bpf-bpf"
@@ -55,3 +56,6 @@ function finish_module!(job::CompilerJob{BPFCompilerTarget}, mod::LLVM.Module)
         linkage!(gv, LLVM.API.LLVMExternalLinkage)
     end
 end
+
+valid_function_pointer(job::CompilerJob{BPFCompilerTarget}, ptr::Ptr{Cvoid}) =
+    reinterpret(UInt, ptr) in job.target.function_pointers
