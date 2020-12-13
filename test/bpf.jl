@@ -22,6 +22,11 @@ end
     output = bpf_code_native(kernel, (UInt64,); strip=true)[1]
     @test occursin("\tr0 = r1\n\tr0 += 1\n\texit", output)
 end
+@testset "Errors" begin
+    kernel(x) = fakefunc(x)
+
+    @test_throws GPUCompiler.KernelError bpf_code_native(kernel, (UInt64,); strip=true)[1]
+end
 @testset "Function Pointers" begin
     @testset "valid" begin
         goodcall(x) = Base.llvmcall("%2 = call i64 inttoptr (i64 3 to i64 (i64)*)(i64 %0)\nret i64 %2", Int, Tuple{Int}, x)

@@ -6,7 +6,7 @@ export BPFCompilerTarget
 
 Base.@kwdef struct BPFCompilerTarget <: AbstractCompilerTarget
     prog_section::String="prog" # section for kernel to be placed in
-    license::String=""          # license for kernel and source code
+    license::String="" # license for kernel and source code
     function_pointers::UnitRange{Int}=1:1000 # set of valid function "pointers"
 end
 
@@ -35,6 +35,9 @@ isintrinsic(::CompilerJob{BPFCompilerTarget}, fn::String) = in(fn, bpf_intrinsic
 
 function finish_module!(job::CompilerJob{BPFCompilerTarget}, mod::LLVM.Module)
     for func in LLVM.functions(mod)
+        if LLVM.name(func) == "gpu_signal_exception"
+            throw(KernelError(job, "eBPF does not support exceptions"))
+        end
         # Set entry section for loaders like libbpf
         LLVM.section!(func, job.target.prog_section)
     end
