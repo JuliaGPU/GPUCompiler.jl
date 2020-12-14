@@ -1,6 +1,9 @@
 using Test, Base.CoreLogging
 import Base.CoreLogging: Info
 
+import InteractiveUtils
+InteractiveUtils.versioninfo(verbose=true)
+
 using GPUCompiler
 
 using LLVM, LLVM.Interop
