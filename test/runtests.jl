@@ -1,6 +1,9 @@
 using Test, Base.CoreLogging
 import Base.CoreLogging: Info
 
+import InteractiveUtils
+InteractiveUtils.versioninfo(verbose=true)
+
 using GPUCompiler
 
 using LLVM, LLVM.Interop
@@ -17,6 +20,7 @@ include("native.jl")
 include("ptx.jl")
 include("spirv.jl")
 include("gcn.jl")
+include("bpf.jl")
 
 include("examples.jl")
 

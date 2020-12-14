@@ -146,3 +146,6 @@ finish_module!(::CompilerJob, mod::LLVM.Module) = return
 add_lowering_passes!(::CompilerJob, pm::LLVM.PassManager) = return
 
 link_libraries!(::CompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) = return
+
+# whether pointer is a valid call target
+valid_function_pointer(::CompilerJob, ptr::Ptr{Cvoid}) = false
