@@ -4,10 +4,10 @@
 
 | **Build Status**                                                                                   | **Coverage**                    |
 |:--------------------------------------------------------------------------------------------------:|:-------------------------------:|
-| [![][gitlab-img]][gitlab-url] [![][travis-img]][travis-url] [![PkgEval][pkgeval-img]][pkgeval-url] | [![][codecov-img]][codecov-url] |
+| [![][buildkite-img]][buildkite-url] [![][travis-img]][travis-url] [![PkgEval][pkgeval-img]][pkgeval-url] | [![][codecov-img]][codecov-url] |
 
-[gitlab-img]: https://gitlab.com/JuliaGPU/GPUCompiler.jl/badges/master/pipeline.svg
-[gitlab-url]: https://gitlab.com/JuliaGPU/GPUCompiler.jl/commits/master
+[buildkite-img]: https://badge.buildkite.com/512eb7dd35ca5b427ddf3240e2b4b3022f0c4f9925f1bdafa8.svg?branch=master
+[buildkite-url]: https://buildkite.com/julialang/gpucompiler-dot-jl
 
 [travis-img]: https://api.travis-ci.com/JuliaGPU/GPUCompiler.jl.svg?branch=master
 [travis-url]: https://travis-ci.com/JuliaGPU/GPUCompiler.jl
