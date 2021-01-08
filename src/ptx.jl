@@ -122,7 +122,7 @@ function process_entry!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, e
         # we can't look up device functions using the CUDA APIs, so alias them to a global
         gv = GlobalVariable(mod, llvmtype(entry), LLVM.name(entry) * "_slot")
         initializer!(gv, entry)
-        linkage!(gv, LLVM.API.LLVMExternalLinkage)
+        linkage!(gv, LLVM.API.LLVMLinkOnceODRLinkage)
         set_used!(mod, gv)
     end
 
