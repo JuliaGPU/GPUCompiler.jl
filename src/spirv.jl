@@ -39,15 +39,17 @@ function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module
     end
 end
 
-function process_kernel!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
-    # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
-    #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
-    kernel = wrap_byval(job, mod, kernel)
+function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    if job.source.kernel
+        # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
+        #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
+        entry = wrap_byval(job, mod, entry)
 
-    # calling convention
-    callconv!(kernel, LLVM.API.LLVMSPIRKERNELCallConv)
+        # calling convention
+        callconv!(entry, LLVM.API.LLVMSPIRKERNELCallConv)
+    end
 
-    return kernel
+    return entry
 end
 
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)

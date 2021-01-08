@@ -67,58 +67,66 @@ function process_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
     end
 end
 
-function process_kernel!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
+function process_entry!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
 
-    # pass all bitstypes by value
-    args = classify_arguments(job, kernel)
-    for arg in args
-        if arg.cc == BITS_REF
-            push!(parameter_attributes(kernel, arg.codegen.i), EnumAttribute("byval", 0, ctx))
+    if job.source.kernel
+        # pass all bitstypes by value
+        args = classify_arguments(job, entry)
+        for arg in args
+            if arg.cc == BITS_REF
+                push!(parameter_attributes(entry, arg.codegen.i), EnumAttribute("byval", 0, ctx))
+            end
         end
-    end
 
-    # property annotations
-    annotations = LLVM.Value[kernel]
+        # property annotations
+        annotations = LLVM.Value[entry]
 
-    ## kernel metadata
-    append!(annotations, [MDString("kernel"), ConstantInt(Int32(1), ctx)])
+        ## kernel metadata
+        append!(annotations, [MDString("kernel"), ConstantInt(Int32(1), ctx)])
 
-    ## expected CTA sizes
-    if job.target.minthreads !== nothing
-        for (dim, name) in enumerate([:x, :y, :z])
-            bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
-            append!(annotations, [MDString("reqntid$name"),
-                                  ConstantInt(Int32(bound), ctx)])
+        ## expected CTA sizes
+        if job.target.minthreads !== nothing
+            for (dim, name) in enumerate([:x, :y, :z])
+                bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
+                append!(annotations, [MDString("reqntid$name"),
+                                    ConstantInt(Int32(bound), ctx)])
+            end
         end
-    end
-    if job.target.maxthreads !== nothing
-        for (dim, name) in enumerate([:x, :y, :z])
-            bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
-            append!(annotations, [MDString("maxntid$name"),
-                                  ConstantInt(Int32(bound), ctx)])
+        if job.target.maxthreads !== nothing
+            for (dim, name) in enumerate([:x, :y, :z])
+                bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
+                append!(annotations, [MDString("maxntid$name"),
+                                    ConstantInt(Int32(bound), ctx)])
+            end
         end
+
+        if job.target.blocks_per_sm !== nothing
+            append!(annotations, [MDString("minctasm"),
+                                ConstantInt(Int32(job.target.blocks_per_sm), ctx)])
+        end
+
+        if job.target.maxregs !== nothing
+            append!(annotations, [MDString("maxnreg"),
+                                ConstantInt(Int32(job.target.maxregs), ctx)])
+        end
+
+        push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
+
+
+        if LLVM.version() >= v"8"
+            # calling convention
+            callconv!(entry, LLVM.API.LLVMPTXKernelCallConv)
+        end
+    else
+        # we can't look up device functions using the CUDA APIs, so alias them to a global
+        gv = GlobalVariable(mod, llvmtype(entry), LLVM.name(entry) * "_slot")
+        initializer!(gv, entry)
+        linkage!(gv, LLVM.API.LLVMExternalLinkage)
+        set_used!(mod, gv)
     end
 
-    if job.target.blocks_per_sm !== nothing
-        append!(annotations, [MDString("minctasm"),
-                              ConstantInt(Int32(job.target.blocks_per_sm), ctx)])
-    end
-
-    if job.target.maxregs !== nothing
-        append!(annotations, [MDString("maxnreg"),
-                              ConstantInt(Int32(job.target.maxregs), ctx)])
-    end
-
-    push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
-
-
-    if LLVM.version() >= v"8"
-        # calling convention
-        callconv!(kernel, LLVM.API.LLVMPTXKernelCallConv)
-    end
-
-    return kernel
+    return entry
 end
 
 function add_lowering_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.PassManager)
