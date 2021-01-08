@@ -52,16 +52,14 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         end
     end
 
-    # process and rename the entry point
+    # rename and process the entry point
     if job.source.name !== nothing
         LLVM.name!(entry, safe_name(string("julia_", job.source.name)))
     end
-    entry = process_entry!(job, mod, entry)
-
-    # mangle kernels
     if job.source.kernel
         LLVM.name!(entry, mangle_call(entry, job.source.tt))
     end
+    entry = process_entry!(job, mod, entry)
 
     # minimal required optimization
     @timeit_debug to "rewrite" ModulePassManager() do pm
