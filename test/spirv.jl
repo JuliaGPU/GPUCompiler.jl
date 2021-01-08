@@ -33,7 +33,7 @@ end
 @testset "byval bug" begin
     # byval added alwaysinline, which could conflict with noinline and fail verification
     @noinline kernel() = return
-    spirv_code_llvm(kernel, Tuple{}; kernel=true)
+    spirv_code_llvm(devnull, kernel, Tuple{}; kernel=true)
 end
 end
 

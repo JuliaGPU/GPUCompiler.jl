@@ -251,7 +251,6 @@ end
 
     @test_throws_message(InvalidIRError,
                          native_code_execution(foobar, Tuple{Int})) do msg
-        println(msg)
         occursin("invalid LLVM IR", msg) &&
         (occursin(GPUCompiler.RUNTIME_FUNCTION, msg) ||
          occursin(GPUCompiler.UNKNOWN_FUNCTION, msg)) &&
