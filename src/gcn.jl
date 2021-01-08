@@ -42,13 +42,15 @@ function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
     datalayout!(mod, llvm_datalayout(NativeCompilerTarget()))
 end
 
-function process_kernel!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, kernel::LLVM.Function)
-    kernel = lower_byval(job, mod, kernel)
+function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    if job.source.kernel
+        entry = lower_byval(job, mod, entry)
 
-    # calling convention
-    callconv!(kernel, LLVM.API.LLVMAMDGPUKERNELCallConv)
+        # calling convention
+        callconv!(entry, LLVM.API.LLVMAMDGPUKERNELCallConv)
+    end
 
-    kernel
+    entry
 end
 
 function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
