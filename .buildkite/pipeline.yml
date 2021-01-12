@@ -64,6 +64,8 @@ steps:
       rocm: "*"
     if: build.message !~ /\[skip tests\]/
     timeout_in_minutes: 60
+    soft_fail:
+      - exit_status: 1
 
 env:
   JULIA_PKG_SERVER: "" # it often struggles with our large artifacts
