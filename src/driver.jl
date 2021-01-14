@@ -86,183 +86,190 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
 
     ## LLVM IR
 
-    @timeit_debug to "IR generation" begin
-        ir, kernel = irgen(job, method_instance, world)
-        ctx = context(ir)
-        kernel_fn = LLVM.name(kernel)
-    end
-
-    # always preload the runtime, and do so early; it cannot be part of any timing block
-    # because it recurses into the compiler
-    if libraries
-        runtime = load_runtime(job, ctx)
-        if haskey(globals(runtime), "llvm.used")
-            # the runtime shouldn't link-in stuff that gets preserved in the output. this is
-            # a hack to get rid of the device function slots emitted by the PTX back-end,
-            # but it also makes sense.
-            gv = globals(runtime)["llvm.used"]
-            LLVM.unsafe_delete!(runtime, gv)
+    # Lock codegen to prevent races on the context
+    # the lock is released in a finally block
+    ccall(:jl_typeinf_begin, Cvoid, ())
+    try
+        @timeit_debug to "IR generation" begin
+            ir, kernel = irgen(job, method_instance, world)
+            ctx = context(ir)
+            kernel_fn = LLVM.name(kernel)
         end
-        runtime_fns = LLVM.name.(defs(runtime))
-    end
 
-    @timeit_debug to "LLVM middle-end" begin
-        # target-specific libraries
+        # always preload the runtime, and do so early; it cannot be part of any timing block
+        # because it recurses into the compiler
         if libraries
-            undefined_fns = LLVM.name.(decls(ir))
-            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
-        end
-
-        if optimize
-            @timeit_debug to "optimization" optimize!(job, ir)
-
-            # optimization may have replaced functions, so look the entry point up again
-            kernel = functions(ir)[kernel_fn]
-        end
-
-        if libraries
-            undefined_fns = LLVM.name.(decls(ir))
-            if any(fn -> fn in runtime_fns, undefined_fns)
-                @timeit_debug to "runtime library" link_library!(ir, runtime)
+            runtime = load_runtime(job, ctx)
+            if haskey(globals(runtime), "llvm.used")
+                # the runtime shouldn't link-in stuff that gets preserved in the output. this is
+                # a hack to get rid of the device function slots emitted by the PTX back-end,
+                # but it also makes sense.
+                gv = globals(runtime)["llvm.used"]
+                LLVM.unsafe_delete!(runtime, gv)
             end
+            runtime_fns = LLVM.name.(defs(runtime))
         end
 
-        if ccall(:jl_is_debugbuild, Cint, ()) == 1
-            @timeit_debug to "verification" verify(ir)
-        end
-
-        if only_entry
-            # replace non-entry function definitions with a declaration
-            for f in functions(ir)
-                f == kernel && continue
-                isdeclaration(f) && continue
-                LLVM.isintrinsic(f) && continue
-                # FIXME: expose llvm::Function::deleteBody with a C API
-                fn = LLVM.name(f)
-                LLVM.name!(f, "")
-                f′ = LLVM.Function(ir, fn, eltype(llvmtype(f)))
-                # copying attributes is broken due to maleadt/LLVM.jl#186,
-                # but that doesn't matter because `only_entry` is only used for reflection,
-                # and the emitted code has already been optimized at this point.
-                replace_uses!(f, f′)
-            end
-        end
-
-        # remove everything except for the kernel
-        @timeit_debug to "clean-up" begin
-            exports = String[kernel_fn]
-            ModulePassManager() do pm
-                # internalize all functions that aren't exports
-                internalize!(pm, exports)
-
-                # eliminate all unused internal functions
-                global_optimizer!(pm)
-                global_dce!(pm)
-                strip_dead_prototypes!(pm)
-
-                run!(pm, ir)
-            end
-        end
-    end
-
-    # deferred code generation
-    if !only_entry && deferred_codegen && haskey(functions(ir), "deferred_codegen")
-        dyn_marker = functions(ir)["deferred_codegen"]
-
-        cache = Dict{CompilerJob, String}(job => kernel_fn)
-
-        # iterative compilation (non-recursive)
-        changed = true
-        while changed
-            changed = false
-
-            # find deferred compiler
-            # TODO: recover this information earlier, from the Julia IR
-            worklist = MultiDict{CompilerJob, LLVM.CallInst}()
-            for use in uses(dyn_marker)
-                # decode the call
-                call = user(use)::LLVM.CallInst
-                id = convert(Int, first(operands(call)))
-
-                global deferred_codegen_jobs
-                dyn_f, dyn_tt = deferred_codegen_jobs[id]
-                dyn_job = similar(job, FunctionSpec(dyn_f, dyn_tt, #=kernel=# true))
-                push!(worklist, dyn_job => call)
+        @timeit_debug to "LLVM middle-end" begin
+            # target-specific libraries
+            if libraries
+                undefined_fns = LLVM.name.(decls(ir))
+                @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
             end
 
-            # compile and link
-            for dyn_job in keys(worklist)
-                # cached compilation
-                dyn_kernel_fn = get!(cache, dyn_job) do
-                    dyn_ir, dyn_kernel = codegen(:llvm, dyn_job; optimize=optimize,
-                                                 strip=strip, validate=validate,
-                                                 deferred_codegen=false)
-                    dyn_kernel_fn = LLVM.name(dyn_kernel)
-                    @assert context(dyn_ir) == ctx
-                    link!(ir, dyn_ir)
-                    changed = true
-                    dyn_kernel_fn
+            if optimize
+                @timeit_debug to "optimization" optimize!(job, ir)
+
+                # optimization may have replaced functions, so look the entry point up again
+                kernel = functions(ir)[kernel_fn]
+            end
+
+            if libraries
+                undefined_fns = LLVM.name.(decls(ir))
+                if any(fn -> fn in runtime_fns, undefined_fns)
+                    @timeit_debug to "runtime library" link_library!(ir, runtime)
                 end
-                dyn_kernel = functions(ir)[dyn_kernel_fn]
+            end
 
-                # insert a pointer to the function everywhere the kernel is used
-                T_ptr = convert(LLVMType, Ptr{Cvoid}, ctx)
-                for call in worklist[dyn_job]
-                    Builder(ctx) do builder
-                        position!(builder, call)
-                        fptr = ptrtoint!(builder, dyn_kernel, T_ptr)
-                        replace_uses!(call, fptr)
+            if ccall(:jl_is_debugbuild, Cint, ()) == 1
+                @timeit_debug to "verification" verify(ir)
+            end
+
+            if only_entry
+                # replace non-entry function definitions with a declaration
+                for f in functions(ir)
+                    f == kernel && continue
+                    isdeclaration(f) && continue
+                    LLVM.isintrinsic(f) && continue
+                    # FIXME: expose llvm::Function::deleteBody with a C API
+                    fn = LLVM.name(f)
+                    LLVM.name!(f, "")
+                    f′ = LLVM.Function(ir, fn, eltype(llvmtype(f)))
+                    # copying attributes is broken due to maleadt/LLVM.jl#186,
+                    # but that doesn't matter because `only_entry` is only used for reflection,
+                    # and the emitted code has already been optimized at this point.
+                    replace_uses!(f, f′)
+                end
+            end
+
+            # remove everything except for the kernel
+            @timeit_debug to "clean-up" begin
+                exports = String[kernel_fn]
+                ModulePassManager() do pm
+                    # internalize all functions that aren't exports
+                    internalize!(pm, exports)
+
+                    # eliminate all unused internal functions
+                    global_optimizer!(pm)
+                    global_dce!(pm)
+                    strip_dead_prototypes!(pm)
+
+                    run!(pm, ir)
+                end
+            end
+        end
+
+        # deferred code generation
+        if !only_entry && deferred_codegen && haskey(functions(ir), "deferred_codegen")
+            dyn_marker = functions(ir)["deferred_codegen"]
+
+            cache = Dict{CompilerJob, String}(job => kernel_fn)
+
+            # iterative compilation (non-recursive)
+            changed = true
+            while changed
+                changed = false
+
+                # find deferred compiler
+                # TODO: recover this information earlier, from the Julia IR
+                worklist = MultiDict{CompilerJob, LLVM.CallInst}()
+                for use in uses(dyn_marker)
+                    # decode the call
+                    call = user(use)::LLVM.CallInst
+                    id = convert(Int, first(operands(call)))
+
+                    global deferred_codegen_jobs
+                    dyn_f, dyn_tt = deferred_codegen_jobs[id]
+                    dyn_job = similar(job, FunctionSpec(dyn_f, dyn_tt, #=kernel=# true))
+                    push!(worklist, dyn_job => call)
+                end
+
+                # compile and link
+                for dyn_job in keys(worklist)
+                    # cached compilation
+                    dyn_kernel_fn = get!(cache, dyn_job) do
+                        dyn_ir, dyn_kernel = codegen(:llvm, dyn_job; optimize=optimize,
+                                                     strip=strip, validate=validate,
+                                                     deferred_codegen=false)
+                        dyn_kernel_fn = LLVM.name(dyn_kernel)
+                        @assert context(dyn_ir) == ctx
+                        link!(ir, dyn_ir)
+                        changed = true
+                        dyn_kernel_fn
                     end
-                    unsafe_delete!(LLVM.parent(call), call)
+                    dyn_kernel = functions(ir)[dyn_kernel_fn]
+
+                    # insert a pointer to the function everywhere the kernel is used
+                    T_ptr = convert(LLVMType, Ptr{Cvoid}, ctx)
+                    for call in worklist[dyn_job]
+                        Builder(ctx) do builder
+                            position!(builder, call)
+                            fptr = ptrtoint!(builder, dyn_kernel, T_ptr)
+                            replace_uses!(call, fptr)
+                        end
+                        unsafe_delete!(LLVM.parent(call), call)
+                    end
                 end
+            end
+
+            # all deferred compilations should have been resolved
+            @compiler_assert isempty(uses(dyn_marker)) job
+            unsafe_delete!(ir, dyn_marker)
+        end
+
+        if output == :llvm
+            if strip
+                @timeit_debug to "strip debug info" strip_debuginfo!(ir)
+            end
+
+            return ir, kernel
+        end
+
+
+        ## machine code
+
+        finish_module!(job, ir)
+
+        if validate
+            @timeit_debug to "validation" begin
+                check_invocation(job, kernel)
+                check_ir(job, ir)
             end
         end
 
-        # all deferred compilations should have been resolved
-        @compiler_assert isempty(uses(dyn_marker)) job
-        unsafe_delete!(ir, dyn_marker)
-    end
-
-    if output == :llvm
+        # NOTE: strip after validation to get better errors
         if strip
             @timeit_debug to "strip debug info" strip_debuginfo!(ir)
         end
 
-        return ir, kernel
-    end
+        @timeit_debug to "LLVM back-end" begin
+            @timeit_debug to "preparation" prepare_execution!(job, ir)
 
-
-    ## machine code
-
-    finish_module!(job, ir)
-
-    if validate
-        @timeit_debug to "validation" begin
-            check_invocation(job, kernel)
-            check_ir(job, ir)
+            if output == :asm
+                code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, LLVM.API.LLVMAssemblyFile)
+            elseif output == :obj
+                code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, LLVM.API.LLVMObjectFile)
+            end
         end
+
+        undefined_fns = LLVM.name.(decls(ir))
+        undefined_gbls = map(x->(name=LLVM.name(x),type=llvmtype(x),external=isextinit(x)), LLVM.globals(ir))
+
+        (output == :asm || output == :obj) && return code, kernel_fn, undefined_fns, undefined_gbls
+
+
+        error("Unknown compilation output $output")
+    finally
+        ccall(:jl_typeinf_end, Cvoid, ())
     end
-
-    # NOTE: strip after validation to get better errors
-    if strip
-        @timeit_debug to "strip debug info" strip_debuginfo!(ir)
-    end
-
-    @timeit_debug to "LLVM back-end" begin
-        @timeit_debug to "preparation" prepare_execution!(job, ir)
-
-        if output == :asm
-            code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, LLVM.API.LLVMAssemblyFile)
-        elseif output == :obj
-            code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, LLVM.API.LLVMObjectFile)
-        end
-    end
-
-    undefined_fns = LLVM.name.(decls(ir))
-    undefined_gbls = map(x->(name=LLVM.name(x),type=llvmtype(x),external=isextinit(x)), LLVM.globals(ir))
-
-    (output == :asm || output == :obj) && return code, kernel_fn, undefined_fns, undefined_gbls
-
-
-    error("Unknown compilation output $output")
 end
