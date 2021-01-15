@@ -56,6 +56,8 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     #
     # these might not always be safe, as Julia's IR metadata isn't designed for IPO.
     ModulePassManager() do pm
+        initialize!(pm)
+
         dead_arg_elimination!(pm)   # parent doesn't use return value --> ret void
 
         run!(pm, mod)
