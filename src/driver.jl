@@ -160,6 +160,9 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                 global_dce!(pm)
                 strip_dead_prototypes!(pm)
 
+                # merge constants (such as exception messages) from the runtime
+                constant_merge!(pm)
+
                 run!(pm, ir)
             end
         end
@@ -216,6 +219,13 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                     unsafe_delete!(LLVM.parent(call), call)
                 end
             end
+        end
+
+        # merge constants (such as exception messages) from each kernel
+        ModulePassManager() do pm
+            constant_merge!(pm)
+
+            run!(pm, ir)
         end
 
         # all deferred compilations should have been resolved

@@ -147,8 +147,6 @@ function optimize_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
         early_csemem_ssa!(pm) # TODO: gvn instead? see NVPTXTargetMachine.cpp::addEarlyCSEOrGVNPass
         dead_store_elimination!(pm)
 
-        constant_merge!(pm)
-
         cfgsimplification!(pm)
 
         # get rid of the internalized functions; now possible unused
