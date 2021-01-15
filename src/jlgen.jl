@@ -194,10 +194,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     elseif Base.JLOptions().debug_level >= 2
         LLVM.API.LLVMDebugEmissionKindFullDebug
     end
-    if job.target isa PTXCompilerTarget # && driver_version(job.target) < v"10.2"
-        # LLVM's debug info crashes older CUDA assemblers
-        # FIXME: this was supposed to be fixed on 10.2
-        @debug "Incompatibility detected between CUDA and LLVM 8.0+; disabling debug info emission" maxlog=1
+    if job.target isa PTXCompilerTarget && !job.target.debuginfo
         debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
     end
     params = Base.CodegenParams(;
