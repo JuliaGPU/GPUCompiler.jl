@@ -7,6 +7,12 @@ export PTXCompilerTarget
 Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     cap::VersionNumber
 
+    # codegen quirks
+    ## can we emit debug info in the PTX assembly?
+    debuginfo::Bool = false
+    ## can exceptions use `exit` (which doesn't kill the GPU), or should they use `trap`?
+    exitable::Bool = false
+
     # optional properties
     minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
     maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
@@ -55,7 +61,10 @@ isintrinsic(::CompilerJob{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsic
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{PTXCompilerTarget}) = "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)"
+runtime_slug(job::CompilerJob{PTXCompilerTarget}) =
+    "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)" *
+       "-debuginfo=$(job.target.debuginfo)" *
+       "-exitable=$(job.target.exitable)"
 
 function process_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
     # calling convention
@@ -285,12 +294,10 @@ function hide_trap!(mod::LLVM.Module)
 
     # inline assembly to exit a thread, hiding control flow from LLVM
     exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
-    exit = if job.target.cap < v"7"
-        # ptxas for old compute capabilities has a bug where it messes up the
-        # synchronization stack in the presence of shared memory and thread-divergend exit.
-        InlineAsm(exit_ft, "trap;", "", true)
-    else
+    exit = if job.target.exitable
         InlineAsm(exit_ft, "exit;", "", true)
+    else
+        InlineAsm(exit_ft, "trap;", "", true)
     end
 
     if haskey(functions(mod), "llvm.trap")
