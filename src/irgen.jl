@@ -67,7 +67,13 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         current_job = job
 
         linkage!(entry, LLVM.API.LLVMExternalLinkage)
-        internalize!(pm, [LLVM.name(entry)])
+
+        # internalize all functions, but keep exported global variables
+        exports = String[LLVM.name(entry)]
+        for gvar in globals(mod)
+            push!(exports, LLVM.name(gvar))
+        end
+        internalize!(pm, exports)
 
         can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
 

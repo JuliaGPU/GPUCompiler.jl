@@ -148,11 +148,14 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
             end
         end
 
-        # remove everything except for the kernel
+        # remove everything except for the kernel and any exported global variables
         @timeit_debug to "clean-up" begin
             exports = String[kernel_fn]
+            for gvar in globals(ir)
+                push!(exports, LLVM.name(gvar))
+            end
+
             ModulePassManager() do pm
-                # internalize all functions that aren't exports
                 internalize!(pm, exports)
 
                 # eliminate all unused internal functions
