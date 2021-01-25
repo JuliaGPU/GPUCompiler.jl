@@ -37,22 +37,7 @@ function compile(target::Symbol, @nospecialize(job::CompilerJob);
     end
 
     return codegen(target, job;
-                   libraries=libraries, deferred_codegen=deferred_codegen,
-                   optimize=optimize, strip=strip, validate=validate, only_entry=only_entry)
-end
-
-# primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
-# this could both be generalized (e.g. supporting actual function calls, instead of
-# returning a function pointer), and be integrated with the nonrecursive codegen.
-const deferred_codegen_jobs = Vector{Tuple{Core.Function,Type}}()
-@generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
-    push!(deferred_codegen_jobs, (f,tt))
-    id = length(deferred_codegen_jobs)
-
-    quote
-        # TODO: add an edge to this method instance to support method redefinitions
-        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
-    end
+                   libraries, deferred_codegen, optimize, strip, validate, only_entry)
 end
 
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
@@ -60,6 +45,46 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  strip::Bool=false, validate::Bool=true, only_entry::Bool=false)
     ## Julia IR
 
+    method_instance, world = emit_julia(job)
+
+    output == :julia && return method_instance
+
+
+    ## LLVM IR
+
+    ir, kernel = emit_llvm(job, method_instance, world;
+                           libraries, deferred_codegen, optimize, only_entry)
+
+    if output == :llvm
+        if strip
+            @timeit_debug to "strip debug info" strip_debuginfo!(ir)
+        end
+
+        return ir, kernel
+    end
+
+
+    ## machine code
+
+    format = if output == :asm
+        LLVM.API.LLVMAssemblyFile
+    elseif output == :obj
+        LLVM.API.LLVMObjectFile
+    else
+        error("Unknown assembly format $output")
+    end
+    code = emit_asm(job, ir, kernel; strip, validate, format)
+
+    undefined_fns = LLVM.name.(decls(ir))
+    undefined_gbls = map(x->(name=LLVM.name(x),type=llvmtype(x),external=isextinit(x)), LLVM.globals(ir))
+
+    (output == :asm || output == :obj) && return code, LLVM.name(kernel), undefined_fns, undefined_gbls
+
+
+    error("Unknown compilation output $output")
+end
+
+function emit_julia(@nospecialize(job::CompilerJob))
     @timeit_debug to "validation" check_method(job)
 
     @timeit_debug to "Julia front-end" begin
@@ -81,11 +106,26 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
         end
     end
 
-    output == :julia && return method_instance
+    return method_instance, world
+end
 
+# primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
+# this could both be generalized (e.g. supporting actual function calls, instead of
+# returning a function pointer), and be integrated with the nonrecursive codegen.
+const deferred_codegen_jobs = Vector{Tuple{Core.Function,Type}}()
+@generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
+    push!(deferred_codegen_jobs, (f,tt))
+    id = length(deferred_codegen_jobs)
 
-    ## LLVM IR
+    quote
+        # TODO: add an edge to this method instance to support method redefinitions
+        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
+    end
+end
 
+function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance), world;
+                   libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
+                   only_entry::Bool=false)
     @timeit_debug to "IR generation" begin
         ir, kernel = irgen(job, method_instance, world)
         ctx = context(ir)
@@ -200,8 +240,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_kernel_fn = get!(cache, dyn_job) do
-                    dyn_ir, dyn_kernel = codegen(:llvm, dyn_job; optimize=optimize,
-                                                 strip=strip, validate=validate,
+                    dyn_ir, dyn_kernel = codegen(:llvm, dyn_job; optimize,
                                                  deferred_codegen=false)
                     dyn_kernel_fn = LLVM.name(dyn_kernel)
                     @assert context(dyn_ir) == ctx
@@ -236,17 +275,11 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
         unsafe_delete!(ir, dyn_marker)
     end
 
-    if output == :llvm
-        if strip
-            @timeit_debug to "strip debug info" strip_debuginfo!(ir)
-        end
+    return ir, kernel
+end
 
-        return ir, kernel
-    end
-
-
-    ## machine code
-
+function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, kernel::LLVM.Function;
+                  strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
     finish_module!(job, ir)
 
     if validate
@@ -264,18 +297,8 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     @timeit_debug to "LLVM back-end" begin
         @timeit_debug to "preparation" prepare_execution!(job, ir)
 
-        if output == :asm
-            code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, LLVM.API.LLVMAssemblyFile)
-        elseif output == :obj
-            code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, LLVM.API.LLVMObjectFile)
-        end
+        code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, format)
     end
 
-    undefined_fns = LLVM.name.(decls(ir))
-    undefined_gbls = map(x->(name=LLVM.name(x),type=llvmtype(x),external=isextinit(x)), LLVM.globals(ir))
-
-    (output == :asm || output == :obj) && return code, kernel_fn, undefined_fns, undefined_gbls
-
-
-    error("Unknown compilation output $output")
+    return code
 end
