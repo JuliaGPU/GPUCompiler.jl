@@ -10,9 +10,9 @@ const compilelock = ReentrantLock()
 # whether to cache compiled kernels on disk or not
 const disk_cache = Ref(false)
 
-@inline function check_cache(cache, @nospecialize(compiler), @nospecialize(linker),
-                             job, prekey; kwargs...)
-    key = hash((job, kwargs), prekey)
+@inline function check_cache(cache, job, prekey,
+                             @nospecialize(compiler), @nospecialize(linker))
+    key = hash(job, prekey)
     force_compilation = compile_hook[] !== nothing
 
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
@@ -41,7 +41,7 @@ const disk_cache = Ref(false)
                     compile_hook[](job)
                 end
 
-                asm = compiler(job; kwargs...)
+                asm = compiler(job)
 
                 if disk_cache[] && !isfile(path)
                     serialize(path, asm)
@@ -50,7 +50,7 @@ const disk_cache = Ref(false)
 
             # link (but not if we got here because of forced compilation)
             if obj === nothing
-                obj = linker(job, asm; kwargs...)
+                obj = linker(job, asm)
                 cache[key] = obj
             end
         end
@@ -67,9 +67,9 @@ end
 
 const specialization_counter = Ref{UInt}(0)
 
-@generated function cached_compilation(cache::Dict, compiler::Function, linker::Function,
-                                       job::CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}};
-                                       kwargs...) where {f,tt}
+@generated function cached_compilation(cache::Dict,
+                                       job::CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}},
+                                       compiler::Function, linker::Function) where {f,tt}
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
     mthds = _methods_by_ftype(sig, -1, typemax(UInt))
@@ -99,23 +99,18 @@ const specialization_counter = Ref{UInt}(0)
     #      underlying C methods -- which GPUCompiler does, so everything Just Works.
 
     # prepare the slots
-    new_ci.slotnames = Symbol[:kwfunc, :kwargs, Symbol("#self#"),
-                              :cache, :compiler, :linker, :job]
-    new_ci.slotflags = UInt8[0x00 for i = 1:7]
-    kwargs = SlotNumber(2)
-    cache = SlotNumber(4)
-    compiler = SlotNumber(5)
-    linker = SlotNumber(6)
-    job = SlotNumber(7)
+    new_ci.slotnames = Symbol[Symbol("#self#"), :cache, :job, :compiler, :linker]
+    new_ci.slotflags = UInt8[0x00 for i = 1:5]
+    cache = SlotNumber(2)
+    job = SlotNumber(3)
+    compiler = SlotNumber(4)
+    linker = SlotNumber(5)
 
     # call the compiler
-    append!(new_ci.code, [Expr(:call, Core.kwfunc, check_cache),
-                          Expr(:call, merge, NamedTuple(), kwargs),
-                          Expr(:call, SSAValue(1), SSAValue(2), check_cache,
-                                      cache, compiler, linker, job, id),
-                          ReturnNode(SSAValue(3))])
-    append!(new_ci.codelocs, [1, 1, 1, 1])   # see note below
-    new_ci.ssavaluetypes += 4
+    append!(new_ci.code, [Expr(:call, check_cache, cache, job, id, compiler, linker),
+                          ReturnNode(SSAValue(1))])
+    append!(new_ci.codelocs, [1, 1])   # see note below
+    new_ci.ssavaluetypes += 2
 
     # NOTE: we keep the first entry of the original linetable, and use it for location info
     #       on the call to check_cache. we can't not have a codeloc (using 0 causes
