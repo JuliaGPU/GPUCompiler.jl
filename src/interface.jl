@@ -82,13 +82,13 @@ export CompilerJob
 
 # a specific invocation of the compiler, bundling everything needed to generate code
 
-Base.@kwdef struct CompilerJob{T,P}
+Base.@kwdef struct CompilerJob{T,P,F}
     target::T
-    source::FunctionSpec
+    source::F
     params::P
 
     CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams) =
-        new{typeof(target), typeof(params)}(target, source, params)
+        new{typeof(target), typeof(params), typeof(source)}(target, source, params)
 end
 
 Base.similar(@nospecialize(job::CompilerJob), source::FunctionSpec) =
