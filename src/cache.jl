@@ -37,7 +37,12 @@ const disk_cache = Ref(false)
 
             # compile
             if asm === nothing
+                if compile_hook[] !== nothing
+                    compile_hook[](job)
+                end
+
                 asm = compiler(job; kwargs...)
+
                 if disk_cache[] && !isfile(path)
                     serialize(path, asm)
                 end
