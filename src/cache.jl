@@ -11,8 +11,8 @@ const compilelock = ReentrantLock()
 const disk_cache = Ref(false)
 
 @inline function check_cache(cache, @nospecialize(compiler), @nospecialize(linker),
-                             spec, prekey; kwargs...)
-    key = hash((spec, kwargs), prekey)
+                             job, prekey; kwargs...)
+    key = hash((job, kwargs), prekey)
     force_compilation = compile_hook[] !== nothing
 
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
@@ -37,7 +37,12 @@ const disk_cache = Ref(false)
 
             # compile
             if asm === nothing
-                asm = compiler(spec; kwargs...)
+                if compile_hook[] !== nothing
+                    compile_hook[](job)
+                end
+
+                asm = compiler(job; kwargs...)
+
                 if disk_cache[] && !isfile(path)
                     serialize(path, asm)
                 end
@@ -45,7 +50,7 @@ const disk_cache = Ref(false)
 
             # link (but not if we got here because of forced compilation)
             if obj === nothing
-                obj = linker(spec, asm; kwargs...)
+                obj = linker(job, asm; kwargs...)
                 cache[key] = obj
             end
         end
@@ -63,12 +68,13 @@ end
 const specialization_counter = Ref{UInt}(0)
 
 @generated function cached_compilation(cache::Dict, compiler::Function, linker::Function,
-                                       spec::FunctionSpec{f,tt}; kwargs...) where {f,tt}
+                                       job::CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}};
+                                       kwargs...) where {f,tt}
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
     mthds = _methods_by_ftype(sig, -1, typemax(UInt))
     Base.isdispatchtuple(tt) || return(:(error("$tt is not a dispatch tuple")))
-    length(mthds) == 1 || return (:(throw(MethodError(spec.f,spec.tt))))
+    length(mthds) == 1 || return (:(throw(MethodError(job.source.f,job.source.tt))))
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi)
@@ -94,19 +100,19 @@ const specialization_counter = Ref{UInt}(0)
 
     # prepare the slots
     new_ci.slotnames = Symbol[:kwfunc, :kwargs, Symbol("#self#"),
-                              :cache, :compiler, :linker, :spec]
+                              :cache, :compiler, :linker, :job]
     new_ci.slotflags = UInt8[0x00 for i = 1:7]
     kwargs = SlotNumber(2)
     cache = SlotNumber(4)
     compiler = SlotNumber(5)
     linker = SlotNumber(6)
-    spec = SlotNumber(7)
+    job = SlotNumber(7)
 
     # call the compiler
     append!(new_ci.code, [Expr(:call, Core.kwfunc, check_cache),
                           Expr(:call, merge, NamedTuple(), kwargs),
                           Expr(:call, SSAValue(1), SSAValue(2), check_cache,
-                                      cache, compiler, linker, spec, id),
+                                      cache, compiler, linker, job, id),
                           ReturnNode(SSAValue(3))])
     append!(new_ci.codelocs, [1, 1, 1, 1])   # see note below
     new_ci.ssavaluetypes += 4
