@@ -123,9 +123,9 @@ const deferred_codegen_jobs = Vector{Tuple{Core.Function,Type}}()
     end
 end
 
-function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance), world;
-                   libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                   only_entry::Bool=false)
+@locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance), world;
+                           libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
+                           only_entry::Bool=false)
     @timeit_debug to "IR generation" begin
         ir, kernel = irgen(job, method_instance, world)
         ctx = context(ir)
@@ -278,8 +278,8 @@ function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instanc
     return ir, kernel
 end
 
-function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, kernel::LLVM.Function;
-                  strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
+@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, kernel::LLVM.Function;
+                          strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
     finish_module!(job, ir)
 
     if validate

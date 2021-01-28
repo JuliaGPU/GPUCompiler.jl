@@ -45,3 +45,38 @@ for level in [:debug, :info, :warn, :error]
         end
     end
 end
+
+
+
+## codegen locking
+
+# lock codegen to prevent races on the LLVM context.
+#
+# XXX: it's not allowed to switch tasks while under this lock, can we guarantee that?
+#      its probably easier to start using our own LLVM context when that's possible.
+macro locked(ex)
+    def = splitdef(ex)
+    def[:body] = quote
+        ccall(:jl_typeinf_begin, Cvoid, ())
+        try
+            $(def[:body])
+        finally
+            ccall(:jl_typeinf_end, Cvoid, ())
+        end
+    end
+    esc(combinedef(def))
+end
+
+# HACK: temporarily unlock again to perform a task switch
+macro unlocked(ex)
+    def = splitdef(ex)
+    def[:body] = quote
+        ccall(:jl_typeinf_end, Cvoid, ())
+        try
+            $(def[:body])
+        finally
+            ccall(:jl_typeinf_begin, Cvoid, ())
+        end
+    end
+    esc(combinedef(def))
+end
