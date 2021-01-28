@@ -84,6 +84,20 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     error("Unknown compilation output $output")
 end
 
+# Lock codegen to prevent races on the LLVM context
+macro locked(ex)
+    def = splitdef(ex)
+    def[:body] = quote
+        ccall(:jl_typeinf_begin, Cvoid, ())
+        try
+            $(def[:body])
+        finally
+            ccall(:jl_typeinf_end, Cvoid, ())
+        end
+    end
+    esc(combinedef(def))
+end
+
 function emit_julia(@nospecialize(job::CompilerJob))
     @timeit_debug to "validation" check_method(job)
 
@@ -123,9 +137,9 @@ const deferred_codegen_jobs = Vector{Tuple{Core.Function,Type}}()
     end
 end
 
-function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance), world;
-                   libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                   only_entry::Bool=false)
+@locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance), world;
+                           libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
+                           only_entry::Bool=false)
     @timeit_debug to "IR generation" begin
         ir, kernel = irgen(job, method_instance, world)
         ctx = context(ir)
@@ -278,8 +292,8 @@ function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instanc
     return ir, kernel
 end
 
-function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, kernel::LLVM.Function;
-                  strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
+@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, kernel::LLVM.Function;
+                          strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
     finish_module!(job, ir)
 
     if validate

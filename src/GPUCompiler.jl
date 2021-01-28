@@ -7,6 +7,8 @@ using DataStructures
 
 using TimerOutputs
 
+using ExprTools
+
 using Libdl
 
 const to = TimerOutput()
