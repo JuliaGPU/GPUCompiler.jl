@@ -20,6 +20,7 @@ DataStructures = "0.15, 0.16, 0.17, 0.18"
 LLVM = "3.0"
 Scratch = "1.0"
 TimerOutputs = "0.5"
+ExprTools = "0.1"
 julia = "1.6"
 
 [extras]
