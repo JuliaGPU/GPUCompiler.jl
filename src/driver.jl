@@ -84,20 +84,6 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     error("Unknown compilation output $output")
 end
 
-# Lock codegen to prevent races on the LLVM context
-macro locked(ex)
-    def = splitdef(ex)
-    def[:body] = quote
-        ccall(:jl_typeinf_begin, Cvoid, ())
-        try
-            $(def[:body])
-        finally
-            ccall(:jl_typeinf_end, Cvoid, ())
-        end
-    end
-    esc(combinedef(def))
-end
-
 function emit_julia(@nospecialize(job::CompilerJob))
     @timeit_debug to "validation" check_method(job)
 
