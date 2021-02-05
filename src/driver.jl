@@ -84,7 +84,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     error("Unknown compilation output $output")
 end
 
-function emit_julia(@nospecialize(job::CompilerJob))
+@locked function emit_julia(@nospecialize(job::CompilerJob))
     @timeit_debug to "validation" check_method(job)
 
     @timeit_debug to "Julia front-end" begin
