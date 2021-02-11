@@ -131,7 +131,7 @@ function build_runtime(@nospecialize(job::CompilerJob), ctx)
     mod
 end
 
-function load_runtime(@nospecialize(job::CompilerJob), ctx)
+@locked function load_runtime(@nospecialize(job::CompilerJob), ctx)
     # find the first existing cache directory (for when dealing with layered depots)
     cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
     filter!(isdir, cachedirs)
