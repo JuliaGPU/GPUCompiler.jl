@@ -5,6 +5,8 @@ using Base: _methods_by_ftype
 
 using Serialization, Scratch
 
+const cache_lock = ReentrantLock()
+
 # whether to cache compiled kernels on disk or not
 const disk_cache = Ref(false)
 
@@ -14,7 +16,7 @@ const disk_cache = Ref(false)
     force_compilation = compile_hook[] !== nothing
 
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
-    ccall(:jl_typeinf_begin, Cvoid, ())
+    lock(cache_lock)
     try
         obj = get(cache, key, nothing)
         if obj === nothing || force_compilation
@@ -54,7 +56,7 @@ const disk_cache = Ref(false)
         end
         obj
     finally
-        ccall(:jl_typeinf_end, Cvoid, ())
+        unlock(cache_lock)
     end
 end
 

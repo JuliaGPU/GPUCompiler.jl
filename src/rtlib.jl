@@ -131,65 +131,71 @@ function build_runtime(@nospecialize(job::CompilerJob), ctx)
     mod
 end
 
+const runtime_lock = ReentrantLock()
+
 @locked function load_runtime(@nospecialize(job::CompilerJob), ctx)
-    # find the first existing cache directory (for when dealing with layered depots)
-    cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
-    filter!(isdir, cachedirs)
-    input_dir = if isempty(cachedirs)
-        nothing
-    else
-        first(cachedirs)
-    end
-
-    # we are only guaranteed to be able to write in the current depot
-    output_dir = cachedir()
-
-    # if both aren't equal, copy pregenerated runtime libraries to our depot
-    # NOTE: we don't just lazily read from the one and write to the other, because
-    #       once we generate additional runtimes in the output dir we don't know if
-    #       it's safe to load from other layers (since those could have been invalidated)
-    if input_dir !== nothing && input_dir != output_dir
-        mkpath(dirname(output_dir))
-        cp(input_dir, output_dir)
-    end
-
-    slug = runtime_slug(job)
-    name = "runtime_$(slug).bc"
-    path = joinpath(output_dir, name)
-
-    lib = try
-        if ispath(path)
-            open(path) do io
-                parse(LLVM.Module, read(io), ctx)
-            end
+    lock(runtime_lock) do
+        # find the first existing cache directory (for when dealing with layered depots)
+        cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
+        filter!(isdir, cachedirs)
+        input_dir = if isempty(cachedirs)
+            nothing
+        else
+            first(cachedirs)
         end
-    catch ex
-        @warn "Failed to load GPU runtime library at $path" exception=(ex, catch_backtrace())
-        nothing
+
+        # we are only guaranteed to be able to write in the current depot
+        output_dir = cachedir()
+
+        # if both aren't equal, copy pregenerated runtime libraries to our depot
+        # NOTE: we don't just lazily read from the one and write to the other, because
+        #       once we generate additional runtimes in the output dir we don't know if
+        #       it's safe to load from other layers (since those could have been invalidated)
+        if input_dir !== nothing && input_dir != output_dir
+            mkpath(dirname(output_dir))
+            cp(input_dir, output_dir)
+        end
+
+        slug = runtime_slug(job)
+        name = "runtime_$(slug).bc"
+        path = joinpath(output_dir, name)
+
+        lib = try
+            if ispath(path)
+                open(path) do io
+                    parse(LLVM.Module, read(io), ctx)
+                end
+            end
+        catch ex
+            @warn "Failed to load GPU runtime library at $path" exception=(ex, catch_backtrace())
+            nothing
+        end
+
+        if lib === nothing
+            @debug "Building the GPU runtime library at $path"
+            mkpath(output_dir)
+            lib = build_runtime(job, ctx)
+
+            # atomic write to disk
+            temp_path, io = mktemp(dirname(path); cleanup=false)
+            write(io, lib)
+            close(io)
+            Base.rename(temp_path, path; force=true)
+        end
+
+        return lib
     end
-
-    if lib === nothing
-        @debug "Building the GPU runtime library at $path"
-        mkpath(output_dir)
-        lib = build_runtime(job, ctx)
-
-        # atomic write to disk
-        temp_path, io = mktemp(dirname(path); cleanup=false)
-        write(io, lib)
-        close(io)
-        Base.rename(temp_path, path; force=true)
-    end
-
-    return lib
 end
 
 # remove the existing cache
 # NOTE: call this function from global scope, so any change triggers recompilation.
 function reset_runtime()
-    rm(cachedir(); recursive=true, force=true)
-    # create an empty cache directory. since we only ever load from the first existing cachedir,
-    # this effectively invalidates preexisting caches in lower layers of the depot.
-    mkpath(cachedir())
+    lock(runtime_lock) do
+        rm(cachedir(); recursive=true, force=true)
+        # create an empty cache directory. since we only ever load from the first existing cachedir,
+        # this effectively invalidates preexisting caches in lower layers of the depot.
+        mkpath(cachedir())
+    end
 
     return
 end
