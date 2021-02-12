@@ -6,9 +6,47 @@ using Core.Compiler: CodeInstance, MethodInstance
 
 struct CodeCache
     dict::Dict{MethodInstance,Vector{CodeInstance}}
-    overrides::Dict{Type,Vector{Type}}
+    override_table::Dict{Type,Function}
+    override_aliases::Dict{Method,Type}
     CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}(),
-                      Dict{Type,Vector{Type}}())
+                      Dict{Type,Function}(), Dict{Method,Type}())
+end
+
+jl_method_def(argdata::Core.SimpleVector, ci::Core.CodeInfo, mod::Module) =
+    ccall(:jl_method_def, Any, (Core.SimpleVector, Any, Any), argdata, ci, mod)
+# `argdata` is `Core.svec(Core.svec(types...), Core.svec(typevars...), LineNumberNode)`
+
+argdata(sig, source) = Core.svec(Base.unwrap_unionall(sig).parameters::Core.SimpleVector, Core.svec(typevars(sig)...), source)
+
+"Recursively get the typevars from a `UnionAll` type"
+typevars(T::UnionAll) = (T.var, typevars(T.body)...)
+typevars(T::DataType) = ()
+
+getmodule(F::Type{<:Function}) = F.name.mt.module
+getmodule(f::Function) = getmodule(typeof(f))
+
+# TODO: get source from macro, proposed syntax:
+#       @override sin(::T) where {T<:Float64} CUDA.sin
+function add_override!(cache::CodeCache, f::Function, f′::Function, tt=Tuple{Vararg{Any}}, source=Core.LineNumberNode(0))
+    # NOTE: instead of manually crafting a method table, we use an anonymous function
+    mt = get!(cache.override_table, typeof(f)) do
+        @eval Main function $(gensym()) end
+    end
+
+    # XXX: easier way to get a dummy code-info (can we use `jl_new_code_info_uninit`?)
+    dummy(x) = return
+    ci = InteractiveUtils.code_lowered(dummy)[1]
+    sig = Base.signature_type(mt, tt)
+    meth = jl_method_def(argdata(sig, source), ci, getmodule(mt))
+
+    match = which(mt, tt)
+    if meth !== match
+        @warn "not reachable"
+    end
+
+    cache.override_aliases[meth] = typeof(f′)
+
+    return
 end
 
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
@@ -135,22 +173,24 @@ end
 function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
     sig = Base.unwrap_unionall(mi.specTypes)
     ft, t... = [sig.parameters...]
+    tt = Base.to_tuple_type(t)
 
     # check if we have any overrides for this method instance's function type
     actual_mi = mi
-    if haskey(wvc.cache.overrides, ft)
-        for ft′ in wvc.cache.overrides[ft]
-            # hasmethod with function type
-            sig′ = Tuple{ft′, t...}
-            ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig′, wvc.worlds.min_world) !== nothing || continue
+    if haskey(wvc.cache.override_table, ft)
+        mt = wvc.cache.override_table[ft]
+        if hasmethod(mt, t)
+            match = which(mt, t)
+            ft′ = wvc.cache.override_aliases[match]
 
+            sig′ = Tuple{ft′, t...}
             meth = which(sig′)
+
             (ti, env) = ccall(:jl_type_intersection_with_env, Any,
                               (Any, Any), sig′, meth.sig)::Core.SimpleVector
             meth = Base.func_for_method_checked(meth, ti, env)
             actual_mi = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
                 (Any, Any, Any, UInt), meth, ti, env, wvc.worlds.min_world)
-            break
         end
     end
 
