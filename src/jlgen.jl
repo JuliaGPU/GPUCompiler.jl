@@ -12,43 +12,6 @@ struct CodeCache
                       Dict{Type,Function}(), Dict{Method,Type}())
 end
 
-jl_method_def(argdata::Core.SimpleVector, ci::Core.CodeInfo, mod::Module) =
-    ccall(:jl_method_def, Any, (Core.SimpleVector, Any, Any), argdata, ci, mod)
-# `argdata` is `Core.svec(Core.svec(types...), Core.svec(typevars...), LineNumberNode)`
-
-argdata(sig, source) = Core.svec(Base.unwrap_unionall(sig).parameters::Core.SimpleVector, Core.svec(typevars(sig)...), source)
-
-"Recursively get the typevars from a `UnionAll` type"
-typevars(T::UnionAll) = (T.var, typevars(T.body)...)
-typevars(T::DataType) = ()
-
-getmodule(F::Type{<:Function}) = F.name.mt.module
-getmodule(f::Function) = getmodule(typeof(f))
-
-# TODO: get source from macro, proposed syntax:
-#       @override sin(::T) where {T<:Float64} CUDA.sin
-function add_override!(cache::CodeCache, f::Function, f′::Function, tt=Tuple{Vararg{Any}}, source=Core.LineNumberNode(0))
-    # NOTE: instead of manually crafting a method table, we use an anonymous function
-    mt = get!(cache.override_table, typeof(f)) do
-        @eval Main function $(gensym()) end
-    end
-
-    # XXX: easier way to get a dummy code-info (can we use `jl_new_code_info_uninit`?)
-    dummy(x) = return
-    ci = InteractiveUtils.code_lowered(dummy)[1]
-    sig = Base.signature_type(mt, tt)
-    meth = jl_method_def(argdata(sig, source), ci, getmodule(mt))
-
-    match = which(mt, tt)
-    if meth !== match
-        @warn "not reachable"
-    end
-
-    cache.override_aliases[meth] = typeof(f′)
-
-    return
-end
-
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
     print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries")
     if !isempty(cc.dict)
@@ -75,6 +38,11 @@ function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
         end
     end
 end
+
+Base.empty!(cc::CodeCache) = empty!(cc.dict)
+
+
+## method invalidations
 
 function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
     # make sure the invalidation callback is attached to the method instance
@@ -117,7 +85,110 @@ function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, depth
     end
 end
 
-const CI_CACHE = CodeCache()
+
+## method overrides
+
+# conceptually, for each overridden function `f` the cache has a method table used to find
+# the replacement method using familiar dispatch semantics.
+#
+# practically, the API to construct and query a method table doesn't appear complete
+# (`jl_methtable_lookup` only returns exact matches; `jl_typemap_assoc_by_type` isn't
+# exported), so instead of creating a method table we generate an new anonymous function,
+# stored in `cache.overrides_table`, and instead of directly looking up the replacement
+# function we look up a dummy method and match it to the replacement one using the
+# `cache.overrides_aliases` dictionary.
+
+# `argdata` is `Core.svec(Core.svec(types...), Core.svec(typevars...), LineNumberNode)`
+jl_method_def(argdata::Core.SimpleVector, ci::Core.CodeInfo, mod::Module) =
+    ccall(:jl_method_def, Any, (Core.SimpleVector, Any, Any), argdata, ci, mod)
+
+argdata(sig, source) =
+    Core.svec(Base.unwrap_unionall(sig).parameters::Core.SimpleVector,
+              Core.svec(typevars(sig)...),
+              source)
+
+typevars(T::UnionAll) = (T.var, typevars(T.body)...)
+typevars(T::DataType) = ()
+
+getmodule(F::Type{<:Function}) = F.name.mt.module
+getmodule(f::Function) = getmodule(typeof(f))
+
+function add_override!(cache::CodeCache, f::Function, f′::Function, tt=Tuple{Vararg{Any}},
+                       source=Core.LineNumberNode(0))
+    # create an "overrides function" for this source function,
+    # whose method table we'll abuse to attach overrides to
+    mt = get!(cache.override_table, typeof(f)) do
+        @eval Main function $(gensym()) end
+    end
+
+    # create an "overrides method" corresponding to this override
+    ci = eval(Expr(:lambda, [Symbol("#self#")], Expr(:return, nothing)))
+    sig = Base.signature_type(mt, tt)
+    meth = jl_method_def(argdata(sig, source), ci, getmodule(mt))
+    # HOTE: we use jl_method_def instead of Expr(:method) as we have the signature already,
+    #       and because we need the resulting jl_method_t
+
+    # register the created method so that we can look up the replacement function
+    match = which(mt, tt)
+    if meth !== match
+        @warn "not reachable"
+    end
+    cache.override_aliases[meth] = typeof(f′)
+
+    # adding an override trashes the cache
+    empty!(cache)
+
+    return
+end
+
+# parse a call expression used to point to a method instance into a function and tuple type
+# (e.g., `foo(::Int, ::T...) where T` -> `foo` and `Tuple{Int, Vararg{T}) where T`)
+function parse_override_source(ex)
+    # split the source function expression into the function, list of types, and typevars
+    if Meta.isexpr(ex, :call)
+        f, types... = ex.args
+        tvs = []
+    elseif Meta.isexpr(old, :where)
+        call, tvs... = ex.args
+        f, types... = call.args
+    else
+        error("Unsupported call expression $ex")
+    end
+
+    # convert list of typed arguments (e.g. `(::Float64, ::Int...)` into tuple type components
+    argtypes = []
+    for typ in types
+        if Meta.isexpr(typ, :(::))
+            typex = typ.args[1]
+        elseif Meta.isexpr(typ, :(...)) && Meta.isexpr(typ.args[1], :(::))
+            typex = :(Vararg{$(typ.args[1].args[1])})
+        else
+            error("Unsupported call expression $ex, containing invalid type assertion $typ")
+        end
+        push!(argtypes, typex)
+    end
+
+    # create the tuple type expression
+    tt = if isempty(tvs)
+        :(Tuple{$(argtypes...)})
+    else
+        :(Tuple{$(argtypes...)} where {$(tvs...)})
+    end
+
+    return f, tt
+end
+
+"""
+    @override cache source_function(::ArgTyp...) replacement_function
+"""
+macro override(cache, old, new_f)
+    old_f, tt = parse_override_source(old)
+
+    quote
+        GPUCompiler.add_override!($(esc(cache)), $(esc(old_f)), $(esc(new_f)), $(esc(tt)),
+                                  LineNumberNode($(__source__.line), $(QuoteNode(__source__.file))))
+    end
+end
 
 
 ## interpreter
@@ -231,6 +302,8 @@ end
 
 ## codegen/inference integration
 
+const CI_CACHE = CodeCache()
+
 Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(CI_CACHE, ni.world)
 
 # No need to do any locking since we're not putting our results into the runtime cache
@@ -329,5 +402,3 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
 
     return llvm_specfunc, llvm_mod
 end
-
-Base.empty!(cache::CodeCache) = empty!(cache.dict)
