@@ -94,9 +94,9 @@ end
 # practically, the API to construct and query a method table doesn't appear complete
 # (`jl_methtable_lookup` only returns exact matches; `jl_typemap_assoc_by_type` isn't
 # exported), so instead of creating a method table we generate an new anonymous function,
-# stored in `cache.overrides_table`, and instead of directly looking up the replacement
+# stored in `cache.override_table`, and instead of directly looking up the replacement
 # function we look up a dummy method and match it to the replacement one using the
-# `cache.overrides_aliases` dictionary.
+# `cache.override_aliases` dictionary.
 
 # `argdata` is `Core.svec(Core.svec(types...), Core.svec(typevars...), LineNumberNode)`
 jl_method_def(argdata::Core.SimpleVector, ci::Core.CodeInfo, mod::Module) =
@@ -113,7 +113,9 @@ typevars(T::DataType) = ()
 getmodule(F::Type{<:Function}) = F.name.mt.module
 getmodule(f::Function) = getmodule(typeof(f))
 
-function add_override!(cache::CodeCache, f::Function, f′::Function, tt=Tuple{Vararg{Any}},
+function add_override!(cache::CodeCache,
+                       @nospecialize(f::Function), @nospecialize(f′::Function),
+                       @nospecialize(tt::Type=Tuple{Vararg{Any}}),
                        source=Core.LineNumberNode(0))
     # create an "overrides function" for this source function,
     # whose method table we'll abuse to attach overrides to
@@ -190,6 +192,21 @@ macro override(cache, old, new_f)
     end
 end
 
+# get the replacement function type for a signature, or nothing
+function get_override(cache, @nospecialize(sig); world=typemax(UInt))
+    ft, t... = [sig.parameters...]
+
+    # do we have overrides for this function?
+    haskey(cache.override_table, ft) || return nothing
+    mt = cache.override_table[ft]
+
+    # do we have an override for these argument types?
+    hasmethod(mt, t) || return nothing
+    match = which(mt, t)
+
+    return cache.override_aliases[match]
+end
+
 
 ## interpreter
 
@@ -243,31 +260,23 @@ end
 
 function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
     sig = Base.unwrap_unionall(mi.specTypes)
-    ft, t... = [sig.parameters...]
-    tt = Base.to_tuple_type(t)
 
     # check if we have any overrides for this method instance's function type
     actual_mi = mi
-    if haskey(wvc.cache.override_table, ft)
-        mt = wvc.cache.override_table[ft]
-        if hasmethod(mt, t)
-            match = which(mt, t)
-            ft′ = wvc.cache.override_aliases[match]
+    ft′ = get_override(wvc.cache, sig; world=wvc.worlds.min_world)
+    if ft′ !== nothing
+        sig′ = Tuple{ft′, sig.parameters[2:end]...}
+        meth = which(sig′)
 
-            sig′ = Tuple{ft′, t...}
-            meth = which(sig′)
-
-            (ti, env) = ccall(:jl_type_intersection_with_env, Any,
-                              (Any, Any), sig′, meth.sig)::Core.SimpleVector
-            meth = Base.func_for_method_checked(meth, ti, env)
-            actual_mi = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
-                (Any, Any, Any, UInt), meth, ti, env, wvc.worlds.min_world)
-        end
+        (ti, env) = ccall(:jl_type_intersection_with_env, Any,
+                            (Any, Any), sig′, meth.sig)::Core.SimpleVector
+        meth = Base.func_for_method_checked(meth, ti, env)
+        actual_mi = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
+            (Any, Any, Any, UInt), meth, ti, env, wvc.worlds.min_world)
     end
 
     # check the cache
-    cache = wvc.cache
-    for ci in get!(cache.dict, actual_mi, CodeInstance[])
+    for ci in get!(wvc.cache.dict, actual_mi, CodeInstance[])
         if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
             # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
             return ci
