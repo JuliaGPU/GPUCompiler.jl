@@ -41,6 +41,8 @@ end
 
 Base.empty!(cc::CodeCache) = empty!(cc.dict)
 
+const GLOBAL_CI_CACHE = CodeCache()
+
 
 ## method invalidations
 
@@ -316,8 +318,6 @@ end
 
 ## codegen/inference integration
 
-const CI_CACHE = CodeCache()
-
 # No need to do any locking since we're not putting our results into the runtime cache
 Core.Compiler.lock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
 Core.Compiler.unlock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
@@ -352,7 +352,7 @@ end
 function compile_method_instance(@nospecialize(job::CompilerJob),
                                  method_instance::MethodInstance, world)
     # populate the cache
-    cache = CI_CACHE
+    cache = ci_cache(job)
     if ci_cache_lookup(cache, method_instance, world, world) === nothing
         ci_cache_populate(cache, method_instance, world, world)
     end
