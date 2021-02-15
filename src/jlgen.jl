@@ -213,8 +213,10 @@ end
 using Core.Compiler: AbstractInterpreter, InferenceResult, InferenceParams, InferenceState, OptimizationParams
 
 struct GPUInterpreter <: AbstractInterpreter
+    global_cache::CodeCache
+
     # Cache of inference results for this particular interpreter
-    cache::Vector{InferenceResult}
+    local_cache::Vector{InferenceResult}
     # The world age we're working inside of
     world::UInt
 
@@ -222,10 +224,12 @@ struct GPUInterpreter <: AbstractInterpreter
     inf_params::InferenceParams
     opt_params::OptimizationParams
 
-    function GPUInterpreter(world::UInt)
+    function GPUInterpreter(cache::CodeCache, world::UInt)
         @assert world <= Base.get_world_counter()
 
         return new(
+            cache,
+
             # Initially empty cache
             Vector{InferenceResult}(),
 
@@ -241,13 +245,14 @@ end
 
 # Quickly and easily satisfy the AbstractInterpreter API contract
 Core.Compiler.get_world_counter(ni::GPUInterpreter) = ni.world
-Core.Compiler.get_inference_cache(ni::GPUInterpreter) = ni.cache
+Core.Compiler.get_inference_cache(ni::GPUInterpreter) = ni.local_cache
 Core.Compiler.InferenceParams(ni::GPUInterpreter) = ni.inf_params
 Core.Compiler.OptimizationParams(ni::GPUInterpreter) = ni.opt_params
 Core.Compiler.may_optimize(ni::GPUInterpreter) = true
 Core.Compiler.may_compress(ni::GPUInterpreter) = true
 Core.Compiler.may_discard_trees(ni::GPUInterpreter) = true
 Core.Compiler.add_remark!(ni::GPUInterpreter, sv::InferenceState, msg) = nothing # TODO
+Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(ni.global_cache, ni.world)
 
 
 ## world view of the cache
@@ -292,7 +297,7 @@ function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, defaul
         # MethodTableView, but the fact that the resulting MethodMatch referred the
         # replacement function, while there was still a GlobalRef in the IR pointing to
         # the original function, resulted in optimizer confusion.
-        return ci_cache_populate(actual_mi, wvc.worlds.min_world, wvc.worlds.max_world)
+        return ci_cache_populate(wvc.cache, actual_mi, wvc.worlds.min_world, wvc.worlds.max_world)
     end
 
     return default
@@ -313,18 +318,16 @@ end
 
 const CI_CACHE = CodeCache()
 
-Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(CI_CACHE, ni.world)
-
 # No need to do any locking since we're not putting our results into the runtime cache
 Core.Compiler.lock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
 Core.Compiler.unlock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
 
-function ci_cache_populate(mi, min_world, max_world)
-    interp = GPUInterpreter(min_world)
+function ci_cache_populate(cache, mi, min_world, max_world)
+    interp = GPUInterpreter(cache, min_world)
     src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
 
     # inference populates the cache, so we don't need to jl_get_method_inferred
-    wvc = WorldView(CI_CACHE, min_world, max_world)
+    wvc = WorldView(cache, min_world, max_world)
     @assert Core.Compiler.haskey(wvc, mi)
 
     # if src is rettyp_const, the codeinfo won't cache ci.inferred
@@ -338,15 +341,22 @@ function ci_cache_populate(mi, min_world, max_world)
     return ci
 end
 
-function ci_cache_lookup(mi, min_world, max_world)
-    wvc = WorldView(CI_CACHE, min_world, max_world)
+function ci_cache_lookup(cache, mi, min_world, max_world)
+    wvc = WorldView(cache, min_world, max_world)
     return Core.Compiler.get(wvc, mi, nothing)
 end
 
 
 ## interface
 
-function compile_method_instance(@nospecialize(job::CompilerJob), method_instance::MethodInstance, world)
+function compile_method_instance(@nospecialize(job::CompilerJob),
+                                 method_instance::MethodInstance, world)
+    # populate the cache
+    cache = CI_CACHE
+    if ci_cache_lookup(cache, method_instance, world, world) === nothing
+        ci_cache_populate(cache, method_instance, world, world)
+    end
+
     # set-up the compiler interface
     debug_info_kind = if Base.JLOptions().debug_level == 0
         LLVM.API.LLVMDebugEmissionKindNoDebug
@@ -358,31 +368,30 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     if job.target isa PTXCompilerTarget && !job.target.debuginfo
         debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
     end
+    lookup_fun = (mi, min_world, max_world) -> ci_cache_lookup(cache, mi, min_world, max_world)
+    lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     params = Base.CodegenParams(;
         track_allocations  = false,
         code_coverage      = false,
         prefer_specsig     = true,
         gnu_pubnames       = false,
         debug_info_kind    = Cint(debug_info_kind),
-        lookup             = @cfunction(ci_cache_lookup, Any, (Any, UInt, UInt)))
-
-    # populate the cache
-    if ci_cache_lookup(method_instance, world, world) === nothing
-        ci_cache_populate(method_instance, world, world)
-    end
+        lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
 
     # generate IR
-    native_code = ccall(:jl_create_native, Ptr{Cvoid},
-                        (Vector{MethodInstance}, Base.CodegenParams, Cint),
-                        [method_instance], params, #=extern policy=# 1)
-    @assert native_code != C_NULL
-    llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
-                         (Ptr{Cvoid},), native_code)
-    @assert llvm_mod_ref != C_NULL
-    llvm_mod = LLVM.Module(llvm_mod_ref)
+    GC.@preserve lookup_cb begin
+        native_code = ccall(:jl_create_native, Ptr{Cvoid},
+                            (Vector{MethodInstance}, Base.CodegenParams, Cint),
+                            [method_instance], params, #=extern policy=# 1)
+        @assert native_code != C_NULL
+        llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
+                            (Ptr{Cvoid},), native_code)
+        @assert llvm_mod_ref != C_NULL
+        llvm_mod = LLVM.Module(llvm_mod_ref)
+    end
 
     # get the top-level code
-    code = ci_cache_lookup(method_instance, world, world)
+    code = ci_cache_lookup(cache, method_instance, world, world)
 
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)
