@@ -266,6 +266,14 @@ function Core.Compiler.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
 end
 
 function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
+    # check the cache
+    for ci in get!(wvc.cache.dict, mi, CodeInstance[])
+        if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
+            # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
+            return ci
+        end
+    end
+
     sig = Base.unwrap_unionall(mi.specTypes)
 
     # check if we have any overrides for this method instance's function type
@@ -282,14 +290,6 @@ function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, defaul
             (Any, Any, Any, UInt), meth, ti, env, wvc.worlds.min_world)
     end
 
-    # check the cache
-    for ci in get!(wvc.cache.dict, actual_mi, CodeInstance[])
-        if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
-            # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
-            return ci
-        end
-    end
-
     # if we want to override a method instance, eagerly put its replacement in the cache.
     # this is necessary, because we generally don't populate the cache, inference does,
     # and it won't put the replacement method instance in the cache by itself.
@@ -299,7 +299,33 @@ function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, defaul
         # MethodTableView, but the fact that the resulting MethodMatch referred the
         # replacement function, while there was still a GlobalRef in the IR pointing to
         # the original function, resulted in optimizer confusion.
-        return ci_cache_populate(wvc.cache, actual_mi, wvc.worlds.min_world, wvc.worlds.max_world)
+        ci = ci_cache_populate(wvc.cache, actual_mi, wvc.worlds.min_world, wvc.worlds.max_world)
+
+        # make sure to uncompress any IR in the CodeInstance we'll be spoofing,
+        # as the process uses both the CodeInstance and its parent Method
+        # (values are encoded as indices into the method->roots array).
+        src = if ci.inferred isa Vector{UInt8}
+            ccall(:jl_uncompress_ir, Any,
+                  (Any, Ptr{Cvoid}, Any),
+                  actual_mi.def, C_NULL, ci.inferred)
+        else
+            ci.inferred
+        end
+
+        # copy the CodeInstance we'll be spoofing to ensure no cross-method effects
+        # (such as IR compression) end up in the cache of the original method.
+        if isdefined(ci, :rettype_const)
+            const_flags = 0x2
+            inferred_const = ci.rettype_const
+        else
+            const_flags = 0x0
+            inferred_const = nothing
+        end
+        ci′ = Core.CodeInstance(mi, ci.rettype, inferred_const, src,
+                               Int32(const_flags), ci.min_world, ci.max_world)
+
+        Core.Compiler.setindex!(wvc.cache, ci′, mi)
+        return ci′
     end
 
     return default
