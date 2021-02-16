@@ -301,15 +301,15 @@ function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, defaul
         # the original function, resulted in optimizer confusion.
         ci = ci_cache_populate(wvc.cache, actual_mi, wvc.worlds.min_world, wvc.worlds.max_world)
 
-        # make sure to uncompress any IR in the CodeInstance we'll be spoofing,
+        # make sure to recompress any IR in the CodeInstance we'll be spoofing,
         # as the process uses both the CodeInstance and its parent Method
         # (values are encoded as indices into the method->roots array).
         src = if ci.inferred isa Vector{UInt8}
-            ccall(:jl_uncompress_ir, Any,
-                  (Any, Ptr{Cvoid}, Any),
-                  actual_mi.def, C_NULL, ci.inferred)
+            temp = ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
+                         actual_mi.def, C_NULL, ci.inferred)
+            ccall(:jl_compress_ir, Any, (Any, Any), mi.def, temp)
         else
-            ci.inferred
+            copy(ci.inferred)
         end
 
         # copy the CodeInstance we'll be spoofing to ensure no cross-method effects
