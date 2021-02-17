@@ -102,7 +102,7 @@ end
 
 # `argdata` is `Core.svec(Core.svec(types...), Core.svec(typevars...), LineNumberNode)`
 jl_method_def(argdata::Core.SimpleVector, ci::Core.CodeInfo, mod::Module) =
-    ccall(:jl_method_def, Any, (Core.SimpleVector, Any, Any), argdata, ci, mod)
+    ccall(:jl_method_def, Nothing, (Core.SimpleVector, Any, Any), argdata, ci, mod)
 
 argdata(sig, source) =
     Core.svec(Base.unwrap_unionall(sig).parameters::Core.SimpleVector,
@@ -128,15 +128,12 @@ function add_override!(cache::CodeCache,
     # create an "overrides method" corresponding to this override
     ci = eval(Expr(:lambda, [Symbol("#self#")], Expr(:return, nothing)))
     sig = Base.signature_type(mt, tt)
-    meth = jl_method_def(argdata(sig, source), ci, getmodule(mt))
-    # HOTE: we use jl_method_def instead of Expr(:method) as we have the signature already,
-    #       and because we need the resulting jl_method_t
+    jl_method_def(argdata(sig, source), ci, getmodule(mt))
+    # NOTE: we use jl_method_def instead of Expr(:method) as we have the signature already
 
-    # register the created method so that we can look up the replacement function
-    match = which(mt, tt)
-    if meth !== match
-        @warn "not reachable"
-    end
+    # FIXME: on 1.7, jl_method_def returns the actual method
+    meth = which(mt, tt)
+    @assert meth.sig === sig
     cache.override_aliases[meth] = typeof(f′)
 
     # adding an override trashes the cache
