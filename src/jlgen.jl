@@ -244,8 +244,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
 
     # configure the module
     triple!(llvm_mod, llvm_triple(job.target))
-    if llvm_datalayout(job.target) !== nothing
-        datalayout!(llvm_mod, llvm_datalayout(job.target))
+    if julia_datalayout(job.target) !== nothing
+        datalayout!(llvm_mod, julia_datalayout(job.target))
     end
 
     return llvm_specfunc, llvm_mod
