@@ -39,7 +39,7 @@ isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsic
 # about which addrspaces are permitted for various code patterns
 function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
     triple!(mod, llvm_triple(NativeCompilerTarget()))
-    datalayout!(mod, llvm_datalayout(NativeCompilerTarget()))
+    datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
 end
 
 function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
@@ -65,7 +65,7 @@ end
 function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
     # revert back to the AMDGPU target
     triple!(mod, llvm_triple(job.target))
-    datalayout!(mod, llvm_datalayout(job.target))
+    datalayout!(mod, julia_datalayout(job.target))
 
     tm = llvm_machine(job.target)
     ModulePassManager() do pm

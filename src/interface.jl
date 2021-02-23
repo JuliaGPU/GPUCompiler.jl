@@ -36,6 +36,13 @@ end
 
 llvm_datalayout(target::AbstractCompilerTarget) = DataLayout(llvm_machine(target))
 
+# the target's datalayout, with Julia's non-integral address spaces added to it
+function julia_datalayout(target::AbstractCompilerTarget)
+    dl = llvm_datalayout(target)
+    dl === nothing && return nothing
+    DataLayout(string(dl) * "-ni:10:11:12:13")
+end
+
 
 ## params
 
