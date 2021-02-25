@@ -2,12 +2,16 @@ using GPUCompiler
 
 include("test/definitions/native.jl")
 
-original() = :original_value
+original() = 1
+
+using Base.Experimental: @overlay
+
+# TODO: short function def
+@overlay GPUCompiler.mt function original()
+    2
+end
 
 kernel() = original()
-
-replaced() = :replaced_value
-GPUCompiler.CI_CACHE.overrides[typeof(original)] = [typeof(replaced)]
 
 function main()
     @show kernel()
