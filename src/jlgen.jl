@@ -253,20 +253,30 @@ struct GPUInterpreter <: AbstractInterpreter
     end
 end
 
-# Quickly and easily satisfy the AbstractInterpreter API contract
-Core.Compiler.get_world_counter(ni::GPUInterpreter) = ni.world
-Core.Compiler.get_inference_cache(ni::GPUInterpreter) = ni.local_cache
-Core.Compiler.InferenceParams(ni::GPUInterpreter) = ni.inf_params
-Core.Compiler.OptimizationParams(ni::GPUInterpreter) = ni.opt_params
-Core.Compiler.may_optimize(ni::GPUInterpreter) = true
-Core.Compiler.may_compress(ni::GPUInterpreter) = true
-Core.Compiler.may_discard_trees(ni::GPUInterpreter) = true
-Core.Compiler.add_remark!(ni::GPUInterpreter, sv::InferenceState, msg) = nothing # TODO
-Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(ni.global_cache, ni.world)
+Core.Compiler.InferenceParams(interp::GPUInterpreter) = interp.inf_params
+Core.Compiler.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
+Core.Compiler.get_world_counter(interp::GPUInterpreter) = interp.world
+Core.Compiler.get_inference_cache(interp::GPUInterpreter) = interp.local_cache
+Core.Compiler.code_cache(interp::GPUInterpreter) = WorldView(interp.global_cache, interp.world)
+
+# No need to do any locking since we're not putting our results into the runtime cache
+Core.Compiler.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
+Core.Compiler.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
+
+function Core.Compiler.add_remark!(interp::GPUInterpreter, sv::InferenceState, msg)
+    @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
+end
+
+Core.Compiler.may_optimize(interp::GPUInterpreter) = true
+Core.Compiler.may_compress(interp::GPUInterpreter) = true
+Core.Compiler.may_discard_trees(interp::GPUInterpreter) = true
+if VERSION >= v"1.7.0-DEV.577"
+Core.Compiler.verbose_stmt_info(interp::GPUInterpreter) = false
+end
 
 if VERSION >= v"1.7-"
-Core.Compiler.method_table(ni::GPUInterpreter, sv::InferenceState) =
-    Core.Compiler.OverlayMethodTable(ni.world, ni.method_table)
+Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
+    Core.Compiler.OverlayMethodTable(interp.world, interp.method_table)
 end
 
 
@@ -358,10 +368,6 @@ end
 
 
 ## codegen/inference integration
-
-# No need to do any locking since we're not putting our results into the runtime cache
-Core.Compiler.lock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
-Core.Compiler.unlock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
 
 function ci_cache_populate(cache, mt, mi, min_world, max_world)
     interp = GPUInterpreter(cache, mt, min_world)
