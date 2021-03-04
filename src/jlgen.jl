@@ -141,28 +141,28 @@ typevars(T::DataType) = ()
 getmodule(F::Type{<:Function}) = F.name.mt.module
 getmodule(f::Function) = getmodule(typeof(f))
 
-function add_override!(cache::CodeCache,
-                       @nospecialize(f::Function), @nospecialize(f′::Function),
-                       @nospecialize(tt::Type=Tuple{Vararg{Any}}),
-                       source=Core.LineNumberNode(0))
+function add_override!(cache::CodeCache, @nospecialize(f::Function),
+                       @nospecialize(f′::Function), @nospecialize(tt::Type),
+                       source::Core.LineNumberNode, mod::Module)
     # create an "overrides function" for this source function,
     # whose method table we'll abuse to attach overrides to
     mt = get!(cache.override_table, typeof(f)) do
-        @eval Main function $(gensym()) end
+        mod.eval(quote
+            function $(gensym())
+            end
+        end)
     end
 
     # create an "overrides method" corresponding to this override
-    ci = eval(Expr(:lambda, [Symbol("#self#")], Expr(:return, nothing)))
+    ci = mod.eval(Expr(:lambda, [Symbol("#self#"); fill(Symbol("#unused#"), length(tt.parameters))],
+                                Expr(:return, nothing)))
     sig = Base.signature_type(mt, tt)
-    jl_method_def(argdata(sig, source), ci, getmodule(mt))
+    jl_method_def(argdata(sig, source), ci, mod)
     # NOTE: we use jl_method_def instead of Expr(:method) as we have the signature already
 
     meth = which(mt, tt)
     @assert meth.sig === sig
     cache.override_aliases[meth] = typeof(f′)
-
-    # adding an override trashes the cache
-    empty!(cache)
 
     return
 end
@@ -210,7 +210,8 @@ macro override(cache, mt, ex)
 
             GPUCompiler.add_override!($(esc(cache)), $(esc(f)), $(esc(new_f)), tt,
                                       LineNumberNode($(__source__.line),
-                                      $(QuoteNode(__source__.file))))
+                                                     $(QuoteNode(__source__.file))),
+                                      $__module__)
         end
     end
 end
