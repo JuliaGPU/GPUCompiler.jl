@@ -17,11 +17,10 @@ else
 struct CodeCache
     dict::Dict{MethodInstance,Vector{CodeInstance}}
 
-    override_table::Dict{Type,Function}
-    override_aliases::Dict{Method,Type}
+    overrides::Dict{Type,Function}
 
     CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}(),
-                      Dict{Type,Function}(), Dict{Method,Type}())
+                      Dict{Type,Function}())
 end
 
 end
@@ -116,55 +115,20 @@ else
 
 const GLOBAL_METHOD_TABLE = nothing
 
-# conceptually, for each overridden function `f` the cache has a method table used to find
-# the replacement method using familiar dispatch semantics.
-#
-# practically, the API to construct and query a method table doesn't appear complete
-# (`jl_methtable_lookup` only returns exact matches; `jl_typemap_assoc_by_type` isn't
-# exported), so instead of creating a method table we generate an new anonymous function,
-# stored in `cache.override_table`, and instead of directly looking up the replacement
-# function we look up a dummy method and match it to the replacement one using the
-# `cache.override_aliases` dictionary.
-
-# `argdata` is `Core.svec(Core.svec(types...), Core.svec(typevars...), LineNumberNode)`
-jl_method_def(argdata::Core.SimpleVector, ci::Core.CodeInfo, mod::Module) =
-    ccall(:jl_method_def, Nothing, (Core.SimpleVector, Any, Any), argdata, ci, mod)
-
-argdata(sig, source) =
-    Core.svec(Base.unwrap_unionall(sig).parameters::Core.SimpleVector,
-              Core.svec(typevars(sig)...),
-              source)
-
-typevars(T::UnionAll) = (T.var, typevars(T.body)...)
-typevars(T::DataType) = ()
-
-getmodule(F::Type{<:Function}) = F.name.mt.module
-getmodule(f::Function) = getmodule(typeof(f))
-
-function add_override!(cache::CodeCache, @nospecialize(f::Function),
-                       @nospecialize(f′::Function), @nospecialize(tt::Type),
-                       source::Core.LineNumberNode, mod::Module)
-    # create an "overrides function" for this source function,
-    # whose method table we'll abuse to attach overrides to
-    mt = get!(cache.override_table, typeof(f)) do
+function add_override!(cache::CodeCache, @nospecialize(f::Function), def::Dict, mod::Module)
+    # get or create an anonymous function for all the overrides of this function
+    f′ = get!(cache.overrides, typeof(f)) do
         mod.eval(quote
-            function $(gensym())
+            function $(gensym(String(nameof(f)) * "_overrides"))
             end
         end)
     end
 
-    # create an "overrides method" corresponding to this override
-    ci = mod.eval(Expr(:lambda, [Symbol("#self#"); fill(Symbol("#unused#"), length(tt.parameters))],
-                                Expr(:return, nothing)))
-    sig = Base.signature_type(mt, tt)
-    jl_method_def(argdata(sig, source), ci, mod)
-    # NOTE: we use jl_method_def instead of Expr(:method) as we have the signature already
-
-    meth = which(mt, tt)
-    @assert meth.sig === sig
-    cache.override_aliases[meth] = typeof(f′)
-
-    return
+    # put the override in the replacement function
+    def[:name] = nameof(f′)
+    mod.eval(quote
+        $(combinedef(def))
+    end)
 end
 
 # get the replacement function type for a signature, or nothing
@@ -172,20 +136,18 @@ function get_override(cache::CodeCache, @nospecialize(sig); world=typemax(UInt))
     ft, t... = [sig.parameters...]
 
     # do we have overrides for this function?
-    haskey(cache.override_table, ft) || return nothing
-    mt = cache.override_table[ft]
+    haskey(cache.overrides, ft) || return nothing
+    f′ = cache.overrides[ft]
 
     # do we have an override for these argument types?
-    hasmethod(mt, t) || return nothing
-    match = which(mt, t)
-
-    return cache.override_aliases[match]
+    hasmethod(f′, t) || return nothing
+    return typeof(f′)
 end
 
 end
 
 """
-    @override cache mt source_function(::ArgTyp...) replacement_function
+    @override cache mt def
 """
 macro override(cache, mt, ex)
     if VERSION >= v"1.7-"
@@ -195,23 +157,8 @@ macro override(cache, mt, ex)
     else
         def = splitdef(ex)
         f = def[:name]
-
-        # recombine into a replacement function
-        new_f = gensym()
-        def[:name] = new_f
-        new_ex = combinedef(def)
-
         quote
-            $(esc(new_ex))
-
-            # use the newly-defined method to find the tuple type (without parsing `ex`)
-            new_method = first(methods($(esc(new_f))))
-            tt = Tuple{new_method.sig.parameters[2:end]...}
-
-            GPUCompiler.add_override!($(esc(cache)), $(esc(f)), $(esc(new_f)), tt,
-                                      LineNumberNode($(__source__.line),
-                                                     $(QuoteNode(__source__.file))),
-                                      $__module__)
+            add_override!($(esc(cache)), $(esc(f)), $def, $__module__)
         end
     end
 end
