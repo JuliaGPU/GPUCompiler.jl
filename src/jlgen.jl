@@ -4,25 +4,10 @@
 
 using Core.Compiler: CodeInstance, MethodInstance
 
-if VERSION >= v"1.7-"
-
 struct CodeCache
     dict::Dict{MethodInstance,Vector{CodeInstance}}
 
     CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
-end
-
-else
-
-struct CodeCache
-    dict::Dict{MethodInstance,Vector{CodeInstance}}
-
-    overrides::Dict{Type,Function}
-
-    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}(),
-                      Dict{Type,Function}())
-end
-
 end
 
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
@@ -111,54 +96,69 @@ Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
 
 else
 
-# spoof the codeinstance cache
+# use an overlay world -- a special world that contains all method overrides
 
 const GLOBAL_METHOD_TABLE = nothing
 
-function add_override!(cache::CodeCache, @nospecialize(f::Function), def::Dict, mod::Module)
-    # get or create an anonymous function for all the overrides of this function
-    f′ = get!(cache.overrides, typeof(f)) do
-        mod.eval(quote
-            function $(gensym(String(nameof(f)) * "_overrides"))
-            end
-        end)
+const override_world = typemax(Csize_t) - 1
+
+struct WorldOverlayMethodTable <: Core.Compiler.MethodTableView
+    world::UInt
+end
+
+function Core.Compiler.findall(@nospecialize(sig::Type{<:Tuple}), table::WorldOverlayMethodTable; limit::Int=typemax(Int))
+    _min_val = Ref{UInt}(typemin(UInt))
+    _max_val = Ref{UInt}(typemax(UInt))
+    _ambig = Ref{Int32}(0)
+    ms = Base._methods_by_ftype(sig, limit, override_world, false, _min_val, _max_val, _ambig)
+    if ms === false
+        return Core.Compiler.missing
+    elseif isempty(ms)
+        # no override, so look in the regular world
+        _min_val[] = typemin(UInt)
+        _max_val[] = typemax(UInt)
+        ms = Base._methods_by_ftype(sig, limit, table.world, false, _min_val, _max_val, _ambig)
+    else
+        # HACK: inference doesn't like our override world
+        _min_val[] = table.world
     end
-
-    # put the override in the replacement function
-    def[:name] = nameof(f′)
-    mod.eval(quote
-        $(combinedef(def))
-    end)
-end
-
-# get the replacement function type for a signature, or nothing
-function get_override(cache::CodeCache, @nospecialize(sig); world=typemax(UInt))
-    ft, t... = [sig.parameters...]
-
-    # do we have overrides for this function?
-    haskey(cache.overrides, ft) || return nothing
-    f′ = cache.overrides[ft]
-
-    # do we have an override for these argument types?
-    hasmethod(f′, t) || return nothing
-    return typeof(f′)
+    if ms === false
+        return Core.Compiler.missing
+    end
+    return Core.Compiler.MethodLookupResult(ms::Vector{Any}, Core.Compiler.WorldRange(_min_val[], _max_val[]), _ambig[] != 0)
 end
 
 end
 
 """
-    @override cache mt def
+    @override mt def
+
+!!! warning
+
+    On Julia 1.6, evaluation of the expression returned by this macro should be postponed
+    until run time (i.e. don't just call this macro or return its returned value, but
+    save it in a global expression and `eval` it during `__init__`, additionally guarded
+    by a check to `ccall(:jl_generating_output, Cint, ()) != 0`).
 """
-macro override(cache, mt, ex)
+macro override(mt, ex)
     if VERSION >= v"1.7-"
         esc(quote
             Base.Experimental.@overlay $mt $ex
         end)
     else
-        def = splitdef(ex)
-        f = def[:name]
         quote
-            add_override!($(esc(cache)), $(esc(f)), $def, $__module__)
+            world_counter = cglobal(:jl_world_counter, Csize_t)
+            regular_world = unsafe_load(world_counter)
+
+            $(Expr(:tryfinally, # don't introduce scope
+                quote
+                    unsafe_store!(world_counter, $(override_world-1))
+                    $(esc(ex))
+                end,
+                quote
+                    unsafe_store!(world_counter, regular_world)
+                end
+            ))
         end
     end
 end
@@ -225,6 +225,9 @@ end
 if VERSION >= v"1.7-"
 Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
     Core.Compiler.OverlayMethodTable(interp.world, interp.method_table)
+else
+Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
+    WorldOverlayMethodTable(interp.world)
 end
 
 
@@ -241,63 +244,13 @@ function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, defaul
     for ci in get!(wvc.cache.dict, mi, CodeInstance[])
         if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
             # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
-            return ci
-        end
-    end
-
-    if VERSION < v"1.7-"
-        sig = Base.unwrap_unionall(mi.specTypes)
-
-        # check if we have any overrides for this method instance's function type
-        actual_mi = mi
-        ft′ = get_override(wvc.cache, sig; world=wvc.worlds.min_world)
-        if ft′ !== nothing
-            sig′ = Tuple{ft′, sig.parameters[2:end]...}
-            meth = which(sig′)
-
-            (ti, env) = ccall(:jl_type_intersection_with_env, Any,
-                                (Any, Any), sig′, meth.sig)::Core.SimpleVector
-            meth = Base.func_for_method_checked(meth, ti, env)
-            actual_mi = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
-                (Any, Any, Any, UInt), meth, ti, env, wvc.worlds.min_world)
-        end
-
-        # if we want to override a method instance, eagerly put its replacement in the cache.
-        # this is necessary, because we generally don't populate the cache, inference does,
-        # and it won't put the replacement method instance in the cache by itself.
-        if mi !== actual_mi
-            # XXX: is this OK to do? shouldn't we _inform_ the compiler about the replacement
-            # method instead of just spoofing the code instance? I tried to do so using a
-            # MethodTableView, but the fact that the resulting MethodMatch referred the
-            # replacement function, while there was still a GlobalRef in the IR pointing to
-            # the original function, resulted in optimizer confusion.
-            ci = ci_cache_populate(wvc.cache, nothing, actual_mi, wvc.worlds.min_world, wvc.worlds.max_world)
-
-            # make sure to recompress any IR in the CodeInstance we'll be spoofing,
-            # as the process uses both the CodeInstance and its parent Method
-            # (values are encoded as indices into the method->roots array).
             src = if ci.inferred isa Vector{UInt8}
-                temp = ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
-                            actual_mi.def, C_NULL, ci.inferred)
-                ccall(:jl_compress_ir, Any, (Any, Any), mi.def, temp)
+                ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
+                       mi.def, C_NULL, ci.inferred)
             else
-                copy(ci.inferred)
+                ci.inferred
             end
-
-            # copy the CodeInstance we'll be spoofing to ensure no cross-method effects
-            # (such as IR compression) end up in the cache of the original method.
-            if isdefined(ci, :rettype_const)
-                const_flags = 0x2
-                inferred_const = ci.rettype_const
-            else
-                const_flags = 0x0
-                inferred_const = nothing
-            end
-            ci′ = Core.CodeInstance(mi, ci.rettype, inferred_const, src,
-                                Int32(const_flags), ci.min_world, ci.max_world)
-
-            Core.Compiler.setindex!(wvc.cache, ci′, mi)
-            return ci′
+            return ci
         end
     end
 
@@ -311,6 +264,12 @@ function Core.Compiler.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
 end
 
 function Core.Compiler.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
+    src = if ci.inferred isa Vector{UInt8}
+        ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
+                mi.def, C_NULL, ci.inferred)
+    else
+        ci.inferred
+    end
     Core.Compiler.setindex!(wvc.cache, ci, mi)
 end
 
@@ -349,8 +308,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     # populate the cache
     cache = ci_cache(job)
     mt = method_table(job)
-    if ci_cache_lookup(cache, method_instance, world, world) === nothing
-        ci_cache_populate(cache, mt, method_instance, world, world)
+    if ci_cache_lookup(cache, method_instance, world, typemax(Cint)) === nothing
+        ci_cache_populate(cache, mt, method_instance, world, typemax(Cint))
     end
 
     # set-up the compiler interface
@@ -387,7 +346,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     end
 
     # get the top-level code
-    code = ci_cache_lookup(cache, method_instance, world, world)
+    code = ci_cache_lookup(cache, method_instance, world, typemax(Cint))
 
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)
