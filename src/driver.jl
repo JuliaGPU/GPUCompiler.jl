@@ -112,10 +112,10 @@ end
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
 # this could both be generalized (e.g. supporting actual function calls, instead of
 # returning a function pointer), and be integrated with the nonrecursive codegen.
-const deferred_codegen_jobs = Vector{Union{Tuple{Core.Function,Type}, CompilerJob}}()
+const deferred_codegen_jobs = Dict{Int, Union{FunctionSpec, CompilerJob}}()
 @generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
-    push!(deferred_codegen_jobs, (f,tt))
-    id = length(deferred_codegen_jobs)
+    id = length(deferred_codegen_jobs) + 1
+    deferred_codegen_jobs[id] = FunctionSpec(f,tt)
 
     quote
         # TODO: add an edge to this method instance to support method redefinitions
