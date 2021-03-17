@@ -158,3 +158,9 @@ link_libraries!(::CompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) 
 
 # whether pointer is a valid call target
 valid_function_pointer(::CompilerJob, ptr::Ptr{Cvoid}) = false
+
+# the codeinfo cache to use
+ci_cache(::CompilerJob) = GLOBAL_CI_CACHE
+
+# the method table to use
+method_table(::CompilerJob) = GLOBAL_METHOD_TABLE

@@ -124,7 +124,6 @@ end
     native_code_llvm(devnull, kernel, Tuple{Vector{Int}}; kernel=true)
 end
 
-if VERSION >= v"1.0.2"
 @testset "CUDAnative.jl#278" begin
     # codegen idempotency
     # NOTE: this isn't fixed, but surfaces here due to bad inference of checked_sub
@@ -136,7 +135,6 @@ if VERSION >= v"1.0.2"
     # breaking recursion in print_to_string makes it possible to compile
     # even in the presence of the above bug
     native_code_llvm(devnull, Base.print_to_string, Tuple{Int,Int}; optimize=false)
-end
 end
 
 @testset "LLVM D32593" begin

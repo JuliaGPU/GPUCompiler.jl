@@ -6,32 +6,43 @@ using Core.Compiler: CodeInstance, MethodInstance
 
 struct CodeCache
     dict::Dict{MethodInstance,Vector{CodeInstance}}
+
     CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
 end
 
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
-    print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries: ")
-    for (mi, cis) in cc.dict
-        println(io)
-        print(io, "  ")
-        show(io, mi)
-
-        function worldstr(min_world, max_world)
-            if min_world == typemax(UInt)
-                "empty world range"
-            elseif max_world == typemax(UInt)
-                "worlds $(Int(min_world))+"
-            else
-                "worlds $(Int(min_world)) to $(Int(max_world))"
-            end
-        end
-
-        for (i,ci) in enumerate(cis)
+    print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries")
+    if !isempty(cc.dict)
+        print(io, ": ")
+        for (mi, cis) in cc.dict
             println(io)
-            print(io, "    CodeInstance for ", worldstr(ci.min_world, ci.max_world))
+            print(io, "  ")
+            show(io, mi)
+
+            function worldstr(min_world, max_world)
+                if min_world == typemax(UInt)
+                    "empty world range"
+                elseif max_world == typemax(UInt)
+                    "worlds $(Int(min_world))+"
+                else
+                    "worlds $(Int(min_world)) to $(Int(max_world))"
+                end
+            end
+
+            for (i,ci) in enumerate(cis)
+                println(io)
+                print(io, "    CodeInstance for ", worldstr(ci.min_world, ci.max_world))
+            end
         end
     end
 end
+
+Base.empty!(cc::CodeCache) = empty!(cc.dict)
+
+const GLOBAL_CI_CACHE = CodeCache()
+
+
+## method invalidations
 
 function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
     # make sure the invalidation callback is attached to the method instance
@@ -74,7 +85,83 @@ function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, depth
     end
 end
 
-const CI_CACHE = CodeCache()
+
+## method overrides
+
+@static if isdefined(Base.Experimental, Symbol("@overlay"))
+
+# use an overlay method table
+
+Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
+
+else
+
+# use an overlay world -- a special world that contains all method overrides
+
+const GLOBAL_METHOD_TABLE = nothing
+
+const override_world = typemax(Csize_t) - 1
+
+struct WorldOverlayMethodTable <: Core.Compiler.MethodTableView
+    world::UInt
+end
+
+function Core.Compiler.findall(@nospecialize(sig::Type{<:Tuple}), table::WorldOverlayMethodTable; limit::Int=typemax(Int))
+    _min_val = Ref{UInt}(typemin(UInt))
+    _max_val = Ref{UInt}(typemax(UInt))
+    _ambig = Ref{Int32}(0)
+    ms = Base._methods_by_ftype(sig, limit, override_world, false, _min_val, _max_val, _ambig)
+    if ms === false
+        return Core.Compiler.missing
+    elseif isempty(ms)
+        # no override, so look in the regular world
+        _min_val[] = typemin(UInt)
+        _max_val[] = typemax(UInt)
+        ms = Base._methods_by_ftype(sig, limit, table.world, false, _min_val, _max_val, _ambig)
+    else
+        # HACK: inference doesn't like our override world
+        _min_val[] = table.world
+    end
+    if ms === false
+        return Core.Compiler.missing
+    end
+    return Core.Compiler.MethodLookupResult(ms::Vector{Any}, Core.Compiler.WorldRange(_min_val[], _max_val[]), _ambig[] != 0)
+end
+
+end
+
+"""
+    @override mt def
+
+!!! warning
+
+    On Julia 1.6, evaluation of the expression returned by this macro should be postponed
+    until run time (i.e. don't just call this macro or return its returned value, but
+    save it in a global expression and `eval` it during `__init__`, additionally guarded
+    by a check to `ccall(:jl_generating_output, Cint, ()) != 0`).
+"""
+macro override(mt, ex)
+    if isdefined(Base.Experimental, Symbol("@overlay"))
+        esc(quote
+            Base.Experimental.@overlay $mt $ex
+        end)
+    else
+        quote
+            world_counter = cglobal(:jl_world_counter, Csize_t)
+            regular_world = unsafe_load(world_counter)
+
+            $(Expr(:tryfinally, # don't introduce scope
+                quote
+                    unsafe_store!(world_counter, $(override_world-1))
+                    $(esc(ex))
+                end,
+                quote
+                    unsafe_store!(world_counter, regular_world)
+                end
+            ))
+        end
+    end
+end
 
 
 ## interpreter
@@ -82,8 +169,11 @@ const CI_CACHE = CodeCache()
 using Core.Compiler: AbstractInterpreter, InferenceResult, InferenceParams, InferenceState, OptimizationParams
 
 struct GPUInterpreter <: AbstractInterpreter
+    global_cache::CodeCache
+    method_table::Union{Nothing,Core.MethodTable}
+
     # Cache of inference results for this particular interpreter
-    cache::Vector{InferenceResult}
+    local_cache::Vector{InferenceResult}
     # The world age we're working inside of
     world::UInt
 
@@ -91,10 +181,13 @@ struct GPUInterpreter <: AbstractInterpreter
     inf_params::InferenceParams
     opt_params::OptimizationParams
 
-    function GPUInterpreter(world::UInt)
+    function GPUInterpreter(cache::CodeCache, mt::Union{Nothing,Core.MethodTable}, world::UInt)
         @assert world <= Base.get_world_counter()
 
         return new(
+            cache,
+            mt,
+
             # Initially empty cache
             Vector{InferenceResult}(),
 
@@ -108,15 +201,34 @@ struct GPUInterpreter <: AbstractInterpreter
     end
 end
 
-# Quickly and easily satisfy the AbstractInterpreter API contract
-Core.Compiler.get_world_counter(ni::GPUInterpreter) = ni.world
-Core.Compiler.get_inference_cache(ni::GPUInterpreter) = ni.cache
-Core.Compiler.InferenceParams(ni::GPUInterpreter) = ni.inf_params
-Core.Compiler.OptimizationParams(ni::GPUInterpreter) = ni.opt_params
-Core.Compiler.may_optimize(ni::GPUInterpreter) = true
-Core.Compiler.may_compress(ni::GPUInterpreter) = true
-Core.Compiler.may_discard_trees(ni::GPUInterpreter) = true
-Core.Compiler.add_remark!(ni::GPUInterpreter, sv::InferenceState, msg) = nothing # TODO
+Core.Compiler.InferenceParams(interp::GPUInterpreter) = interp.inf_params
+Core.Compiler.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
+Core.Compiler.get_world_counter(interp::GPUInterpreter) = interp.world
+Core.Compiler.get_inference_cache(interp::GPUInterpreter) = interp.local_cache
+Core.Compiler.code_cache(interp::GPUInterpreter) = WorldView(interp.global_cache, interp.world)
+
+# No need to do any locking since we're not putting our results into the runtime cache
+Core.Compiler.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
+Core.Compiler.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
+
+function Core.Compiler.add_remark!(interp::GPUInterpreter, sv::InferenceState, msg)
+    @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
+end
+
+Core.Compiler.may_optimize(interp::GPUInterpreter) = true
+Core.Compiler.may_compress(interp::GPUInterpreter) = true
+Core.Compiler.may_discard_trees(interp::GPUInterpreter) = true
+if VERSION >= v"1.7.0-DEV.577"
+Core.Compiler.verbose_stmt_info(interp::GPUInterpreter) = false
+end
+
+if isdefined(Base.Experimental, Symbol("@overlay"))
+Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
+    Core.Compiler.OverlayMethodTable(interp.world, interp.method_table)
+else
+Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
+    WorldOverlayMethodTable(interp.world)
+end
 
 
 ## world view of the cache
@@ -128,10 +240,16 @@ function Core.Compiler.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
 end
 
 function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
-    cache = wvc.cache
-    for ci in get!(cache.dict, mi, CodeInstance[])
+    # check the cache
+    for ci in get!(wvc.cache.dict, mi, CodeInstance[])
         if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
             # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
+            src = if ci.inferred isa Vector{UInt8}
+                ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
+                       mi.def, C_NULL, ci.inferred)
+            else
+                ci.inferred
+            end
             return ci
         end
     end
@@ -146,24 +264,24 @@ function Core.Compiler.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
 end
 
 function Core.Compiler.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
+    src = if ci.inferred isa Vector{UInt8}
+        ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
+                mi.def, C_NULL, ci.inferred)
+    else
+        ci.inferred
+    end
     Core.Compiler.setindex!(wvc.cache, ci, mi)
 end
 
 
 ## codegen/inference integration
 
-Core.Compiler.code_cache(ni::GPUInterpreter) = WorldView(CI_CACHE, ni.world)
-
-# No need to do any locking since we're not putting our results into the runtime cache
-Core.Compiler.lock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
-Core.Compiler.unlock_mi_inference(ni::GPUInterpreter, mi::MethodInstance) = nothing
-
-function ci_cache_populate(mi, min_world, max_world)
-    interp = GPUInterpreter(min_world)
+function ci_cache_populate(cache, mt, mi, min_world, max_world)
+    interp = GPUInterpreter(cache, mt, min_world)
     src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
 
     # inference populates the cache, so we don't need to jl_get_method_inferred
-    wvc = WorldView(CI_CACHE, min_world, max_world)
+    wvc = WorldView(cache, min_world, max_world)
     @assert Core.Compiler.haskey(wvc, mi)
 
     # if src is rettyp_const, the codeinfo won't cache ci.inferred
@@ -174,18 +292,26 @@ function ci_cache_populate(mi, min_world, max_world)
         ci.inferred = src
     end
 
-    return
+    return ci
 end
 
-function ci_cache_lookup(mi, min_world, max_world)
-    wvc = WorldView(CI_CACHE, min_world, max_world)
+function ci_cache_lookup(cache, mi, min_world, max_world)
+    wvc = WorldView(cache, min_world, max_world)
     return Core.Compiler.get(wvc, mi, nothing)
 end
 
 
 ## interface
 
-function compile_method_instance(@nospecialize(job::CompilerJob), method_instance::MethodInstance, world)
+function compile_method_instance(@nospecialize(job::CompilerJob),
+                                 method_instance::MethodInstance, world)
+    # populate the cache
+    cache = ci_cache(job)
+    mt = method_table(job)
+    if ci_cache_lookup(cache, method_instance, world, typemax(Cint)) === nothing
+        ci_cache_populate(cache, mt, method_instance, world, typemax(Cint))
+    end
+
     # set-up the compiler interface
     debug_info_kind = if Base.JLOptions().debug_level == 0
         LLVM.API.LLVMDebugEmissionKindNoDebug
@@ -197,31 +323,30 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
     if job.target isa PTXCompilerTarget && !job.target.debuginfo
         debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
     end
+    lookup_fun = (mi, min_world, max_world) -> ci_cache_lookup(cache, mi, min_world, max_world)
+    lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     params = Base.CodegenParams(;
         track_allocations  = false,
         code_coverage      = false,
         prefer_specsig     = true,
         gnu_pubnames       = false,
         debug_info_kind    = Cint(debug_info_kind),
-        lookup             = @cfunction(ci_cache_lookup, Any, (Any, UInt, UInt)))
-
-    # popoulate the cache
-    if ci_cache_lookup(method_instance, world, world) === nothing
-        ci_cache_populate(method_instance, world, world)
-    end
+        lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
 
     # generate IR
-    native_code = ccall(:jl_create_native, Ptr{Cvoid},
-                        (Vector{MethodInstance}, Base.CodegenParams, Cint),
-                        [method_instance], params, #=extern policy=# 1)
-    @assert native_code != C_NULL
-    llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
-                         (Ptr{Cvoid},), native_code)
-    @assert llvm_mod_ref != C_NULL
-    llvm_mod = LLVM.Module(llvm_mod_ref)
+    GC.@preserve lookup_cb begin
+        native_code = ccall(:jl_create_native, Ptr{Cvoid},
+                            (Vector{MethodInstance}, Base.CodegenParams, Cint),
+                            [method_instance], params, #=extern policy=# 1)
+        @assert native_code != C_NULL
+        llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
+                            (Ptr{Cvoid},), native_code)
+        @assert llvm_mod_ref != C_NULL
+        llvm_mod = LLVM.Module(llvm_mod_ref)
+    end
 
     # get the top-level code
-    code = ci_cache_lookup(method_instance, world, world)
+    code = ci_cache_lookup(cache, method_instance, world, typemax(Cint))
 
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)
@@ -250,5 +375,3 @@ function compile_method_instance(@nospecialize(job::CompilerJob), method_instanc
 
     return llvm_specfunc, llvm_mod
 end
-
-Base.empty!(cache::CodeCache) = empty!(cache.dict)

@@ -10,18 +10,6 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
             # only occurs in debug builds
             delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0, ctx))
 
-            if VERSION < v"1.5.0-DEV.393"
-                # make function names safe for ptxas
-                llvmfn = LLVM.name(llvmf)
-                if !isdeclaration(llvmf)
-                    llvmfn′ = safe_name(llvmfn)
-                    if llvmfn != llvmfn′
-                        LLVM.name!(llvmf, llvmfn′)
-                        llvmfn = llvmfn′
-                    end
-                end
-            end
-
             if Sys.iswindows()
                 personality!(llvmf, nothing)
             end
@@ -315,8 +303,7 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Fun
     args = []
     codegen_i = 1
     for (source_i, source_typ) in enumerate(source_types)
-        if isghosttype(source_typ) ||
-           (VERSION >= v"1.5.0-DEV.581" && Core.Compiler.isconstType(source_typ))
+        if isghosttype(source_typ) || Core.Compiler.isconstType(source_typ)
             push!(args, (cc=GHOST, typ=source_typ))
             continue
         end
@@ -326,7 +313,7 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Fun
             push!(args, (cc=MUT_REF, typ=source_typ,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         elseif codegen_typ isa LLVM.PointerType && issized(eltype(codegen_typ)) &&
-               !(source_typ <: Ptr) && !(VERSION >= v"1.5-" && source_typ <: Core.LLVMPtr)
+               !(source_typ <: Ptr) && !(source_typ <: Core.LLVMPtr)
             push!(args, (cc=BITS_REF, typ=source_typ,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         else

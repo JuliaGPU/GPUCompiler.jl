@@ -21,16 +21,8 @@ end
 function cachedir(depot=DEPOT_PATH[1])
     # this mimicks Base.compilecache. we can't just call the function, or we might actually
     # _generate_ a cache file, e.g., when running with `--compiled-modules=no`.
-    if VERSION >= v"1.3.0-alpha.146"
-        entrypath, entryfile = Base.cache_file_entry(Base.PkgId(GPUCompiler))
-        abspath(depot, entrypath, entryfile)
-    else
-        cachefile = abspath(depot, Base.cache_file_entry(Base.PkgId(GPUCompiler)))
-
-        # the cachefile consists of `/depot/compiled/vXXX/GPUCompiler/$slug.ji`
-        # transform that into `/depot/compiled/vXXX/GPUCompiler/$slug/`
-        splitext(cachefile)[1]
-    end
+    entrypath, entryfile = Base.cache_file_entry(Base.PkgId(GPUCompiler))
+    abspath(depot, entrypath, entryfile)
 end
 
 
@@ -82,21 +74,17 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
-    if VERSION >= v"1.5-"
-        pm = ModulePassManager()
-        strip_dead_prototypes!(pm)
-        run!(pm, new_mod)
-        dispose(pm)
-    end
+    pm = ModulePassManager()
+    strip_dead_prototypes!(pm)
+    run!(pm, new_mod)
+    dispose(pm)
 
     temp_name = LLVM.name(entry)
-    if VERSION >= v"1.6.0-DEV.674"
-        # FIXME: on 1.6, there's no single global LLVM context anymore,
-        #        but there's no API yet to pass a context to codegen.
-        # round-trip the module through serialization to get it in the proper context.
-        buf = convert(MemoryBuffer, new_mod)
-        new_mod = parse(LLVM.Module, buf, context(mod))
-    end
+    # FIXME: on 1.6, there's no single global LLVM context anymore,
+    #        but there's no API yet to pass a context to codegen.
+    # round-trip the module through serialization to get it in the proper context.
+    buf = convert(MemoryBuffer, new_mod)
+    new_mod = parse(LLVM.Module, buf, context(mod))
     @assert context(mod) == context(new_mod)
     link!(mod, new_mod)
     entry = functions(mod)[temp_name]

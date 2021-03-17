@@ -194,11 +194,7 @@ end
     asm = sprint(io->gcn_code_native(io, ref_kernel, Tuple{Ptr{Int64}, Int}))
 
 
-    if VERSION < v"1.2.0-DEV.375"
-        @test_broken !occursin("gpu_gc_pool_alloc", asm)
-    else
-        @test !occursin("gpu_gc_pool_alloc", asm)
-    end
+    @test !occursin("gpu_gc_pool_alloc", asm)
 end
 =#
 

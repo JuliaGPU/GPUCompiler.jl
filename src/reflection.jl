@@ -261,11 +261,7 @@ macro device_code(ex...)
         end
 
         open(joinpath(dir, "$fn.typed.jl"), "w") do io
-            if VERSION >= v"1.1.0"
-                code = only(code_typed(job; debuginfo=:source))
-            else
-                code = only(code_typed(job))
-            end
+            code = only(code_typed(job; debuginfo=:source))
             println(io, code)
         end
 

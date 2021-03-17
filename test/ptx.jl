@@ -25,11 +25,7 @@ end
     end
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}))
-    if VERSION < v"1.5.0-DEV.802"
-        @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\]) addrspace\(\d+\)?\*", ir)
-    else
-        @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\*", ir)
-    end
+    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\*", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}; kernel=true))
     @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])", ir)
@@ -247,11 +243,7 @@ end
     asm = sprint(io->ptx_code_native(io, ref_kernel, Tuple{Ptr{Int64}, Int}))
 
 
-    if VERSION < v"1.2.0-DEV.375"
-        @test_broken !occursin("gpu_gc_pool_alloc", asm)
-    else
-        @test !occursin("gpu_gc_pool_alloc", asm)
-    end
+    @test !occursin("gpu_gc_pool_alloc", asm)
 end
 
 @testset "float boxes" begin

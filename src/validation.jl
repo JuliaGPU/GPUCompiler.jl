@@ -25,10 +25,6 @@ function check_method(@nospecialize(job::CompilerJob))
     return
 end
 
-if VERSION < v"1.1.0-DEV.593"
-    fieldtypes(@nospecialize(dt)) = ntuple(i->fieldtype(dt, i), fieldcount(dt))
-end
-
 # The actual check is rather complicated
 # and might change from version to version...
 function hasfieldcount(@nospecialize(dt))
@@ -60,24 +56,13 @@ function check_invocation(@nospecialize(job::CompilerJob), entry::LLVM.Function)
     sig = Base.signature_type(job.source.f, job.source.tt)::Type
     for (arg_i,dt) in enumerate(sig.parameters)
         isghosttype(dt) && continue
-        VERSION >= v"1.5.0-DEV.581" && Core.Compiler.isconstType(dt) && continue
+        Core.Compiler.isconstType(dt) && continue
         real_arg_i += 1
 
         if !isbitstype(dt)
-            if VERSION >= v"1.5.0-DEV.581"
-                throw(KernelError(job, "passing and using non-bitstype argument",
-                    """Argument $arg_i to your kernel function is of type $dt, which is not isbits:
-                       $(explain_nonisbits(dt))"""))
-            else
-                # be slightly more lenient pre 1.5, to support `function(::Type, ...)`
-                param = parameters(entry)[real_arg_i]
-                if !isempty(uses(param))
-                    throw(KernelError(job, "passing and using non-bitstype argument",
-                    """Argument $arg_i to your kernel function is of type $dt, which is not isbits:
-                       $(explain_nonisbits(dt))
-                       Passing non-isbits types is only allowed if they they are unused by the kernel."""))
-                end
-            end
+            throw(KernelError(job, "passing and using non-bitstype argument",
+                """Argument $arg_i to your kernel function is of type $dt, which is not isbits:
+                    $(explain_nonisbits(dt))"""))
         end
     end
 
@@ -167,15 +152,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             end
         elseif fn == "jl_invoke"
             try
-                if VERSION < v"1.3.0-DEV.244"
-                    meth, args, nargs, _ = operands(inst)
-                else
-                    f, args, nargs, meth = operands(inst)
-                end
-                if VERSION < v"1.5.0-DEV.802"
-                    # addrspacecast
-                    meth = first(operands(meth::ConstantExpr))
-                end
+                f, args, nargs, meth = operands(inst)
                 meth = first(operands(meth::ConstantExpr))::ConstantInt
                 meth = convert(Int, meth)
                 meth = Ptr{Cvoid}(meth)
@@ -187,19 +164,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             end
         elseif fn == "jl_apply_generic"
             try
-                if VERSION < v"1.3.0-DEV.244"
-                    args, nargs, _ = operands(inst)
-                    ## args is a buffer where arguments are stored in
-                    f, args = user.(uses(args))
-                    ## first store into the args buffer is a direct store
-                    f = first(operands(f::LLVM.StoreInst))::ConstantExpr
-                else
-                    f, args, nargs, _ = operands(inst)
-                end
-
-                if VERSION < v"1.5.0-DEV.802"
-                    f = first(operands(f::ConstantExpr)) # get rid of addrspacecast
-                end
+                f, args, nargs, _ = operands(inst)
                 f = first(operands(f))::ConstantInt # get rid of inttoptr
                 f = convert(Int, f)
                 f = Ptr{Cvoid}(f)
@@ -245,11 +210,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 frames = ccall(:jl_lookup_code_address, Any, (Ptr{Cvoid}, Cint,), ptr, 0)
                 if length(frames) >= 1
                     @compiler_assert length(frames) == 1 job frames=frames
-                    if VERSION >= v"1.4.0-DEV.123"
-                        fn, file, line, linfo, fromC, inlined = last(frames)
-                    else
-                        fn, file, line, linfo, fromC, inlined, ip = last(frames)
-                    end
+                    fn, file, line, linfo, fromC, inlined = last(frames)
                     push!(errors, (POINTER_FUNCTION, bt, fn))
                 else
                     push!(errors, (POINTER_FUNCTION, bt, nothing))
