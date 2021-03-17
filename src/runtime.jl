@@ -86,7 +86,7 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     if def isa Symbol
         args = [gensym() for typ in types]
         @eval @inline $def($(args...)) =
-            ccall($"extern $llvm_name", llvmcall, $return_type, ($(types...),), $(args...))
+            ccall($("extern $llvm_name"), llvmcall, $return_type, ($(types...),), $(args...))
     end
 
     return
@@ -112,28 +112,8 @@ compile(:report_exception_name, Nothing, (Ptr{Cchar},))
 
 ## GC
 
-if VERSION < v"1.4"
-
-@enum AddressSpace begin
-    Generic         = 1
-    Tracked         = 10
-    Derived         = 11
-    CalleeRooted    = 12
-    Loaded          = 13
-end
-
-# LLVM type of a tracked pointer
-function T_prjlvalue(ctx)
-    T_pjlvalue = convert(LLVMType, Any, ctx; allow_boxed=true)
-    LLVM.PointerType(eltype(T_pjlvalue), Tracked)
-end
-
-else
-
-# FIXME: once we only support 1.4, get rid of this and allow boxed types
+# FIXME: get rid of this and allow boxed types
 T_prjlvalue(ctx) = convert(LLVMType, Any, ctx; allow_boxed=true)
-
-end
 
 function gc_pool_alloc(sz::Csize_t)
     ptr = malloc(sz)

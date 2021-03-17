@@ -88,7 +88,7 @@ end
 
 ## method overrides
 
-@static if VERSION >= v"1.7-"
+@static if isdefined(Base.Experimental, Symbol("@overlay"))
 
 # use an overlay method table
 
@@ -141,7 +141,7 @@ end
     by a check to `ccall(:jl_generating_output, Cint, ()) != 0`).
 """
 macro override(mt, ex)
-    if VERSION >= v"1.7-"
+    if isdefined(Base.Experimental, Symbol("@overlay"))
         esc(quote
             Base.Experimental.@overlay $mt $ex
         end)
@@ -222,7 +222,7 @@ if VERSION >= v"1.7.0-DEV.577"
 Core.Compiler.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 
-if VERSION >= v"1.7-"
+if isdefined(Base.Experimental, Symbol("@overlay"))
 Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
     Core.Compiler.OverlayMethodTable(interp.world, interp.method_table)
 else
