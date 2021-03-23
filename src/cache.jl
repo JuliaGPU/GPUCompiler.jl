@@ -67,7 +67,7 @@ end
 
 const specialization_counter = Ref{UInt}(0)
 
-@generated function cached_compilation(cache::Dict,
+@generated function cached_compilation(cache::AbstractDict,
                                        job::CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}},
                                        compiler::Function, linker::Function) where {f,tt}
     # get a hold of the method and code info of the kernel function
