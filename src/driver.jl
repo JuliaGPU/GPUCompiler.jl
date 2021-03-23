@@ -42,7 +42,7 @@ end
 
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                 strip::Bool=false, validate::Bool=true, only_entry::Bool=false, current_job::Union{Nothing, CompilerJob} = nothing)
+                 strip::Bool=false, validate::Bool=true, only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob} = nothing)
     ## Julia IR
 
     method_instance, world = emit_julia(job)
@@ -251,7 +251,7 @@ end
                 # cached compilation
                 dyn_kernel_fn = get!(cache, dyn_job) do
                     dyn_ir, dyn_kernel = codegen(:llvm, dyn_job; optimize,
-                                                 deferred_codegen=false, current_job=job)
+                                                 deferred_codegen=false, parent_job=job)
                     dyn_kernel_fn = LLVM.name(dyn_kernel)
                     @assert context(dyn_ir) == ctx
                     link!(ir, dyn_ir)
