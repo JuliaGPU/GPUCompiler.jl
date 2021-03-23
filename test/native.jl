@@ -305,6 +305,22 @@ end
     end
 end
 
+@testset "LazyCodegen" begin
+    global flag = Ref(false) # otherwise f is a closure and we can't
+                             # pass it to `Val`...
+    f() = (flag[]=true; nothing)
+
+    function caller()
+        ptr = LazyCodegen.deferred_codegen(Val(f), Val(Tuple{}))
+        ccall(ptr, Cvoid, ())
+    end
+    caller()
+    @test flag[]
+
+    ir = sprint(io->native_code_llvm(io, caller, Tuple{}, dump_module=true))
+    @test occursin(r"define void @julia_f_\d+", ir)
+end
+
 end
 
 ############################################################################################

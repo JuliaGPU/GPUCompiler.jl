@@ -42,7 +42,7 @@ end
 
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                 strip::Bool=false, validate::Bool=true, only_entry::Bool=false)
+                 strip::Bool=false, validate::Bool=true, only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob} = nothing)
     ## Julia IR
 
     method_instance, world = emit_julia(job)
@@ -112,14 +112,22 @@ end
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
 # this could both be generalized (e.g. supporting actual function calls, instead of
 # returning a function pointer), and be integrated with the nonrecursive codegen.
-const deferred_codegen_jobs = Vector{Tuple{Core.Function,Type}}()
-@generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
-    push!(deferred_codegen_jobs, (f,tt))
-    id = length(deferred_codegen_jobs)
+const deferred_codegen_jobs = Dict{Int, Union{FunctionSpec, CompilerJob}}()
 
+# We make this function explicitly callable so that we can drive OrcJIT's
+# lazy compilation from, while also enabling recursive compilation.
+Base.@ccallable Ptr{Cvoid} function deferred_codegen(ptr::Ptr{Cvoid})
+    ptr
+end
+
+@generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
+    id = length(deferred_codegen_jobs) + 1
+    deferred_codegen_jobs[id] = FunctionSpec(f,tt)
+
+    pseudo_ptr = reinterpret(Ptr{Cvoid}, id)
     quote
         # TODO: add an edge to this method instance to support method redefinitions
-        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
+        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $pseudo_ptr)
     end
 end
 
@@ -231,8 +239,10 @@ end
                 id = convert(Int, first(operands(call)))
 
                 global deferred_codegen_jobs
-                dyn_f, dyn_tt = deferred_codegen_jobs[id]
-                dyn_job = similar(job, FunctionSpec(dyn_f, dyn_tt, #=kernel=# true))
+                dyn_job = deferred_codegen_jobs[id]
+                if dyn_job isa FunctionSpec
+                    dyn_job = similar(job, dyn_job)
+                end
                 push!(worklist, dyn_job => call)
             end
 
@@ -241,7 +251,7 @@ end
                 # cached compilation
                 dyn_kernel_fn = get!(cache, dyn_job) do
                     dyn_ir, dyn_kernel = codegen(:llvm, dyn_job; optimize,
-                                                 deferred_codegen=false)
+                                                 deferred_codegen=false, parent_job=job)
                     dyn_kernel_fn = LLVM.name(dyn_kernel)
                     @assert context(dyn_ir) == ctx
                     link!(ir, dyn_ir)
