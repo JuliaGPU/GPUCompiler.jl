@@ -72,6 +72,7 @@ const specialization_counter = Ref{UInt}(0)
                                        compiler::Function, linker::Function) where {f,tt}
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
+    # XXX: instead of typemax(UInt) we should use the world-age of the fspec
     mthds = _methods_by_ftype(sig, -1, typemax(UInt))
     Base.isdispatchtuple(tt) || return(:(error("$tt is not a dispatch tuple")))
     length(mthds) == 1 || return (:(throw(MethodError(job.source.f,job.source.tt))))

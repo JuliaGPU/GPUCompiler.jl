@@ -90,7 +90,7 @@ end
     @timeit_debug to "Julia front-end" begin
 
         # get the method instance
-        world = Base.get_world_counter()
+        world = job.source.world_age
         meth = which(job.source.f, job.source.tt)
         sig = Base.signature_type(job.source.f, job.source.tt)::Type
         (ti, env) = ccall(:jl_type_intersection_with_env, Any,
