@@ -6,6 +6,7 @@ export PTXCompilerTarget
 
 Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     cap::VersionNumber
+    ptx::VersionNumber = v"6.0" # for compatibility with older versions of CUDA.jl
 
     # codegen quirks
     ## can we emit debug info in the PTX assembly?
@@ -28,9 +29,8 @@ function llvm_machine(target::PTXCompilerTarget)
     triple = llvm_triple(target)
     t = Target(triple=triple)
 
-    cpu = "sm_$(target.cap.major)$(target.cap.minor)"
-    feat = "+ptx60" # we only support CUDA 9.0+ and LLVM 6.0+
-    tm = TargetMachine(t, triple, cpu, feat)
+    tm = TargetMachine(t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
+                       "+ptx$(target.ptx.major)$(target.ptx.minor)")
     asm_verbosity!(tm, true)
 
     return tm
