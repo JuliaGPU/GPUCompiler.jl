@@ -278,8 +278,16 @@ end
         end
 
         # merge constants (such as exception messages) from each kernel
+        # and on platforms that support it inline and optimize the call to
+        # the deferred code, in particular we want to remove unnecessary
+        # alloca's that are created by pass-by-ref semantics.
         ModulePassManager() do pm
+            instruction_combining!(pm)
             constant_merge!(pm)
+            always_inliner!(pm)
+            scalar_repl_aggregates_ssa!(pm)
+            promote_memory_to_register!(pm)
+            gvn!(pm)
 
             run!(pm, ir)
         end
