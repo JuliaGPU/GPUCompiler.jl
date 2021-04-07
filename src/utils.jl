@@ -36,7 +36,8 @@ for level in [:debug, :info, :warn, :error]
             quote
                 old_logger = global_logger()
                 io = IOContext(Core.stderr, :color=>get(stderr, :color, false))
-                global_logger(Logging.ConsoleLogger(io, old_logger.min_level))
+                min_level = Logging.min_enabled_level(old_logger)
+                global_logger(Logging.ConsoleLogger(io, min_level))
                 ret = $(esc(macrocall))
                 global_logger(old_logger)
                 ret
