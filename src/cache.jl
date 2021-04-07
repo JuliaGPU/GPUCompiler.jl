@@ -15,6 +15,9 @@ const disk_cache = Ref(false)
     key = hash(job, prekey)
     force_compilation = compile_hook[] !== nothing
 
+    # XXX: by taking the hash, we index the compilation cache directly with the world age.
+    #      that's wrong; we should perform an intersection with the entry its bounds.
+
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(cache_lock)
     try
