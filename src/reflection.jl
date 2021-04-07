@@ -116,7 +116,7 @@ function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, d
     highlight(io, asm, source_code(job.target))
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =
-    code_native(stdout, func, types; kwargs...)
+    code_native(stdout, job; kwargs...)
 
 
 #
