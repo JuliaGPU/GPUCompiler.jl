@@ -69,7 +69,11 @@ end
 
 # put the function and argument types in typevars
 # so that we can access it from generated functions
-FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=Base.get_world_counter()) =
+# XXX: the default value of 0xffffffffffffffff is a hack, because we don't properly perform
+#      world age intersection when querying the compilation cache. once we do, callers
+#      should probably provide the world age of the calling code (!= the current world age)
+#      so that querying the cache from, e.g. `cufuncton` is a fully static operation.
+FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=0xffffffffffffffff) =
     FunctionSpec{typeof(f),tt}(f, tt, kernel, name, world_age)
 
 function signature(spec::FunctionSpec)
