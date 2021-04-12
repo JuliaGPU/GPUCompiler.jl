@@ -304,12 +304,12 @@ end
 ## interface
 
 function compile_method_instance(@nospecialize(job::CompilerJob),
-                                 method_instance::MethodInstance, world)
+                                 method_instance::MethodInstance)
     # populate the cache
     cache = ci_cache(job)
     mt = method_table(job)
-    if ci_cache_lookup(cache, method_instance, world, typemax(Cint)) === nothing
-        ci_cache_populate(cache, mt, method_instance, world, typemax(Cint))
+    if ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint)) === nothing
+        ci_cache_populate(cache, mt, method_instance, job.source.world, typemax(Cint))
     end
 
     # set-up the compiler interface
@@ -346,7 +346,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     end
 
     # get the top-level code
-    code = ci_cache_lookup(cache, method_instance, world, typemax(Cint))
+    code = ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint))
 
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)

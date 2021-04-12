@@ -45,14 +45,14 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  strip::Bool=false, validate::Bool=true, only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob} = nothing)
     ## Julia IR
 
-    method_instance, world = emit_julia(job)
+    method_instance, _ = emit_julia(job)
 
     output == :julia && return method_instance
 
 
     ## LLVM IR
 
-    ir, kernel = emit_llvm(job, method_instance, world;
+    ir, kernel = emit_llvm(job, method_instance;
                            libraries, deferred_codegen, optimize, only_entry)
 
     if output == :llvm
@@ -90,17 +90,13 @@ end
     @timeit_debug to "Julia front-end" begin
 
         # get the method instance
-        world = job.source.world_age
-        if world == -1%UInt
-            world = Base.get_world_counter()
-        end
         meth = which(job.source.f, job.source.tt)
         sig = Base.signature_type(job.source.f, job.source.tt)::Type
         (ti, env) = ccall(:jl_type_intersection_with_env, Any,
                           (Any, Any), sig, meth.sig)::Core.SimpleVector
         meth = Base.func_for_method_checked(meth, ti, env)
         method_instance = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
-                      (Any, Any, Any, UInt), meth, ti, env, world)
+                      (Any, Any, Any, UInt), meth, ti, env, job.source.world)
 
         for var in env
             if var isa TypeVar
@@ -109,7 +105,8 @@ end
         end
     end
 
-    return method_instance, world
+    # XXX: remove returned world for next breaking release
+    return method_instance, job.source.world
 end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
@@ -134,11 +131,15 @@ end
     end
 end
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance), world;
+@locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance),
+                           world=job.source.world;
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                            only_entry::Bool=false)
+    # XXX: remove world argument for next breaking release
+    @assert world == job.source.world
+
     @timeit_debug to "IR generation" begin
-        ir, kernel = irgen(job, method_instance, world)
+        ir, kernel = irgen(job, method_instance)
         ctx = context(ir)
         kernel_fn = LLVM.name(kernel)
     end
