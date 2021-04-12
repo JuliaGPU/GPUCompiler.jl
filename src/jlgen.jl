@@ -297,7 +297,14 @@ end
 
 function ci_cache_lookup(cache, mi, min_world, max_world)
     wvc = WorldView(cache, min_world, max_world)
-    return Core.Compiler.get(wvc, mi, nothing)
+    ci = Core.Compiler.get(wvc, mi, nothing)
+    if ci !== nothing && ci.inferred === nothing
+        # if for some reason we did end up with a codeinfo without inferred source, e.g.,
+        # because of calling `Base.return_types` which only sets rettyp, pretend we didn't
+        # run inference so that we re-infer now and not during codegen (which is disallowed)
+        return nothing
+    end
+    return ci
 end
 
 
