@@ -297,19 +297,26 @@ end
 
 function ci_cache_lookup(cache, mi, min_world, max_world)
     wvc = WorldView(cache, min_world, max_world)
-    return Core.Compiler.get(wvc, mi, nothing)
+    ci = Core.Compiler.get(wvc, mi, nothing)
+    if ci !== nothing && ci.inferred === nothing
+        # if for some reason we did end up with a codeinfo without inferred source, e.g.,
+        # because of calling `Base.return_types` which only sets rettyp, pretend we didn't
+        # run inference so that we re-infer now and not during codegen (which is disallowed)
+        return nothing
+    end
+    return ci
 end
 
 
 ## interface
 
 function compile_method_instance(@nospecialize(job::CompilerJob),
-                                 method_instance::MethodInstance, world)
+                                 method_instance::MethodInstance)
     # populate the cache
     cache = ci_cache(job)
     mt = method_table(job)
-    if ci_cache_lookup(cache, method_instance, world, typemax(Cint)) === nothing
-        ci_cache_populate(cache, mt, method_instance, world, typemax(Cint))
+    if ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint)) === nothing
+        ci_cache_populate(cache, mt, method_instance, job.source.world, typemax(Cint))
     end
 
     # set-up the compiler interface
@@ -346,7 +353,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     end
 
     # get the top-level code
-    code = ci_cache_lookup(cache, method_instance, world, typemax(Cint))
+    code = ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint))
 
     # get the top-level function index
     llvm_func_idx = Ref{Int32}(-1)

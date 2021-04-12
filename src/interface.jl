@@ -73,8 +73,19 @@ end
 #      world age intersection when querying the compilation cache. once we do, callers
 #      should probably provide the world age of the calling code (!= the current world age)
 #      so that querying the cache from, e.g. `cufuncton` is a fully static operation.
-FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=0xffffffffffffffff) =
+FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
     FunctionSpec{typeof(f),tt}(f, tt, kernel, name, world_age)
+
+function Base.getproperty(spec::FunctionSpec, sym::Symbol)
+    if sym == :world
+        # NOTE: this isn't used by the call to `hash` in `check_cache`,
+        #       so we still use the raw world age there.
+        age = spec.world_age
+        return age == -1%UInt ? Base.get_world_counter() : age
+    else
+        return getfield(spec, sym)
+    end
+end
 
 function signature(spec::FunctionSpec)
     fn = something(spec.name, nameof(spec.f))

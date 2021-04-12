@@ -13,7 +13,10 @@ function check_method(@nospecialize(job::CompilerJob))
 
     # kernels can't return values
     if job.source.kernel
-        rt = Base.return_types(job.source.f, job.source.tt)[1]
+        cache = ci_cache(job)
+        mt = method_table(job)
+        interp = GPUInterpreter(cache, mt, job.source.world)
+        rt = Base.return_types(job.source.f, job.source.tt, interp)[1]
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
                 """Make sure your kernel function ends in `return`, `return nothing` or `nothing`.
