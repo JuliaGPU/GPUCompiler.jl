@@ -132,6 +132,10 @@ runtime_module(::CompilerJob) = error("Not implemented")
 # check if a function is an intrinsic that can assumed to be always available
 isintrinsic(::CompilerJob, fn::String) = false
 
+# provide a specific interpreter to use.
+get_interpreter(job::CompilerJob) = GPUInterpreter(ci_cache(job), method_table(job),
+                                                   job.source.world)
+
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime
 can_throw(::CompilerJob) = false

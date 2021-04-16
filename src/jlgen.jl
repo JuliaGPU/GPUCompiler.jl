@@ -276,8 +276,7 @@ end
 
 ## codegen/inference integration
 
-function ci_cache_populate(cache, mt, mi, min_world, max_world)
-    interp = GPUInterpreter(cache, mt, min_world)
+function ci_cache_populate(interp, cache, mt, mi, min_world, max_world)
     src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
 
     # inference populates the cache, so we don't need to jl_get_method_inferred
@@ -315,8 +314,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     # populate the cache
     cache = ci_cache(job)
     mt = method_table(job)
+    interp = get_interpreter(job)
     if ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint)) === nothing
-        ci_cache_populate(cache, mt, method_instance, job.source.world, typemax(Cint))
+        ci_cache_populate(interp, cache, mt, method_instance, job.source.world, typemax(Cint))
     end
 
     # set-up the compiler interface
