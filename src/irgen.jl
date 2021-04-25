@@ -326,6 +326,35 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Fun
     return args
 end
 
+function is_immutable_datatype(T::Type)
+    isa(T,DataType) && !T.mutable
+end
+
+function is_concrete_immutable(T::Type)
+    is_immutable_datatype(T) && T.layout !== C_NULL
+end
+
+function is_pointerfree(T::Type)
+    if !is_immutable_datatype(T)
+        return false
+    end
+    return Base.datatype_pointerfree(T)
+end
+
+function deserves_stack(@nospecialize(T))
+    if !is_concrete_immutable(T)
+        return false
+    end
+    return T.isinlinealloc
+end
+
+deserves_argbox(T) = !deserves_stack(T)
+deserves_retbox(T) = deserves_argbox(T)
+function deserves_sret(T, llvmT)
+    @assert isa(T,DataType)
+    sizeof(T) > sizeof(Ptr{Cvoid}) && !isa(llvmT, LLVM.FloatingPointType) && !isa(llvmT, LLVM.VectorType)
+end
+
 
 ## byval lowering
 
