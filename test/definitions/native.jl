@@ -9,7 +9,7 @@ end
 
 function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false, kwargs...)
     source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
-    target = NativeCompilerTarget()
+    target = NativeCompilerTarget(always_inline=true)
     params = TestCompilerParams()
     CompilerJob(target, source, params), kwargs
 end
@@ -106,6 +106,19 @@ module LazyCodegen
         return UInt64(reinterpret(UInt, ptr))
     end
 
+    @inline assume(cond::Bool) = Base.llvmcall(("""
+    declare void @llvm.assume(i1)
+
+    define void @entry(i8) #0 {
+        %cond = icmp eq i8 %0, 1
+        call void @llvm.assume(i1 %cond)
+        ret void
+    }
+
+    attributes #0 = { alwaysinline }""", "entry"),
+    Nothing, Tuple{Bool}, cond)
+
+
     @generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
         job, _ = native_job(f, tt)
 
@@ -124,7 +137,78 @@ module LazyCodegen
         deferred_codegen_jobs[id] = job
 
         quote
-            ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $trampoline)
+            ptr = ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $trampoline)
+            assume(ptr != C_NULL)
+            return ptr
         end
+    end
+
+    @generated function abi_call(f::Ptr{Cvoid}, rt::Type{RT}, tt::Type{T}, args::Vararg{Any, N}) where {T, RT, N}
+        argtt    = tt.parameters[1]
+        rettype  = rt.parameters[1]
+        argtypes = DataType[argtt.parameters...]
+
+        argexprs = Union{Expr, Symbol}[]
+        ccall_types = DataType[]
+
+        before = :()
+        after = :(ret)
+
+        # Note this follows: emit_call_specfun_other
+        LLVM.Interop.JuliaContext() do ctx
+            T_jlvalue = LLVM.StructType(LLVMType[], ctx)
+            T_prjlvalue = LLVM.PointerType(T_jlvalue, #= AddressSpace::Tracked =# 10)
+
+            for (source_i, source_typ) in enumerate(argtypes)
+                if GPUCompiler.isghosttype(source_typ) || Core.Compiler.isconstType(source_typ)
+                    continue
+                end
+
+                argexpr = :(args[$source_i])
+
+                isboxed = GPUCompiler.deserves_argbox(source_typ)
+                et = isboxed ? T_prjlvalue : convert(LLVMType, source_typ, ctx)
+
+                if isboxed
+                    push!(ccall_types, Any)
+                elseif isa(et, LLVM.SequentialType) # et->isAggregateType
+                    push!(ccall_types, Ptr{source_typ})
+                    argexpr = Expr(:call, GlobalRef(Base, :Ref), argexpr)
+                else
+                    push!(ccall_types, source_typ)
+                end
+                push!(argexprs, argexpr)
+            end
+
+            if GPUCompiler.isghosttype(rettype) || Core.Compiler.isconstType(rettype)
+                # Do nothing...
+                # In theory we could set `rettype` to `T_void`, but ccall will do that for us
+            # elseif jl_is_uniontype?
+            elseif !GPUCompiler.deserves_retbox(rettype)
+                rt = convert(LLVMType, rettype, ctx)
+                if !isa(rt, LLVM.VoidType) && GPUCompiler.deserves_sret(rettype, rt)
+                    before = :(sret = Ref{$rettype}())
+                    pushfirst!(argexprs, :(sret))
+                    pushfirst!(ccall_types, Ptr{rettype})
+                    rettype = Nothing
+                    after = :(sret[])
+                end
+            else
+                # rt = T_prjlvalue
+            end
+        end
+
+        quote
+            $before
+            ret = ccall(f, $rettype, ($(ccall_types...),), $(argexprs...))
+            $after
+        end
+    end
+
+    @inline function call_delayed(f::F, args...) where F
+        tt = Tuple{map(Core.Typeof, args)...}
+        rt = Core.Compiler.return_type(f, tt)
+        ptr = deferred_codegen(Val(f), Val(tt))
+        abi_call(ptr, rt, tt, args...)
     end
 end

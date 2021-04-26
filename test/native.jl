@@ -306,19 +306,51 @@ end
 end
 
 @testset "LazyCodegen" begin
+    import .LazyCodegen: call_delayed
+
     global flag = Ref(false) # otherwise f is a closure and we can't
                              # pass it to `Val`...
     f() = (flag[]=true; nothing)
 
     function caller()
-        ptr = LazyCodegen.deferred_codegen(Val(f), Val(Tuple{}))
-        ccall(ptr, Cvoid, ())
+        call_delayed(f)
     end
-    caller()
+    @test caller() === nothing
     @test flag[]
 
     ir = sprint(io->native_code_llvm(io, caller, Tuple{}, dump_module=true))
     @test occursin(r"define void @julia_f_\d+", ir)
+
+    add(x, y) = x+y
+    function call_add(x, y)
+        call_delayed(add, x, y)
+    end
+
+    @test call_add(1, 3) == 4
+
+    incr(r) = r[] += 1
+    function call_incr(r)
+        call_delayed(incr, r)
+    end
+    r = Ref{Int}(0)
+    @test call_incr(r) == 1
+    @test r[] == 1
+
+    function call_real(c)
+        call_delayed(real, c)
+    end
+
+    @test call_real(1.0+im) == 1.0
+
+    # Test ABI removal
+    ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
+    @test !occursin(r"alloca", ir)
+
+    ghostly_identity(x, y) = y
+    @test call_delayed(ghostly_identity, nothing, 1) == 1
+
+    # tests struct return
+    @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
 end
 
 end
