@@ -7,7 +7,7 @@ export NativeCompilerTarget
 Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
     cpu::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
     features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
-    always_inline::Bool=false
+    always_inline::Bool=false # will mark the job function as always inline 
 end
 
 llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
