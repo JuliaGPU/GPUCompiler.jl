@@ -6,6 +6,7 @@ export GCNCompilerTarget
 
 Base.@kwdef struct GCNCompilerTarget <: AbstractCompilerTarget
     dev_isa::String
+    features::String=""
 end
 
 llvm_triple(::GCNCompilerTarget) = "amdgcn-amd-amdhsa"
@@ -15,7 +16,7 @@ function llvm_machine(target::GCNCompilerTarget)
     t = Target(triple=triple)
 
     cpu = target.dev_isa
-    feat = ""
+    feat = target.features
     optlevel = LLVM.API.LLVMCodeGenLevelDefault
     reloc = LLVM.API.LLVMRelocPIC
     tm = TargetMachine(t, triple, cpu, feat, optlevel, reloc)
@@ -29,7 +30,7 @@ end
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.target.dev_isa)"
+runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.target.dev_isa)$(job.target.features)"
 
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)

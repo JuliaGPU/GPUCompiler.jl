@@ -9,7 +9,7 @@ end
 
 function gcn_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false, kwargs...)
     source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
-    target = GCNCompilerTarget("gfx900")
+    target = GCNCompilerTarget(dev_isa="gfx900")
     params = TestCompilerParams()
     CompilerJob(target, source, params), kwargs
 end
