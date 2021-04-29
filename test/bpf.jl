@@ -25,7 +25,7 @@ end
 @testset "Errors" begin
     kernel(x) = fakefunc(x)
 
-    @test_throws GPUCompiler.KernelError bpf_code_native(kernel, (UInt64,); strip=true)[1]
+    @test_throws GPUCompiler.InvalidIRError bpf_code_native(kernel, (UInt64,); strip=true)[1]
 end
 @testset "Function Pointers" begin
     @testset "valid" begin
