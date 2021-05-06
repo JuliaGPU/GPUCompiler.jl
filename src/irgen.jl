@@ -423,6 +423,12 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f:
     push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, ctx))
     linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
 
+    # copy debug info
+    sp = LLVM.get_subprogram(entry_f)
+    if sp !== nothing
+        LLVM.set_subprogram!(wrapper_f, sp)
+    end
+
     fixup_metadata!(entry_f)
     ModulePassManager() do pm
         always_inliner!(pm)
