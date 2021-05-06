@@ -8,6 +8,7 @@ Base.@kwdef struct GCNCompilerTarget <: AbstractCompilerTarget
     dev_isa::String
     features::String=""
 end
+GCNCompilerTarget(dev_isa; features="") = GCNCompilerTarget(dev_isa, features)
 
 llvm_triple(::GCNCompilerTarget) = "amdgcn-amd-amdhsa"
 

@@ -1,5 +1,7 @@
 @testset "GCN" begin
 
+@test GCNCompilerTarget(dev_isa="gfx900") == GCNCompilerTarget("gfx900")
+
 include("definitions/gcn.jl")
 
 ############################################################################################
