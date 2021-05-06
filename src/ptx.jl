@@ -59,8 +59,6 @@ end
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsics)
 
-# TODO: encode debug build or not in the compiler job
-#       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::CompilerJob{PTXCompilerTarget}) =
     "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)" *
        "-debuginfo=$(job.target.debuginfo)" *
@@ -162,6 +160,15 @@ function optimize_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
         global_dce!(pm)
 
         run!(pm, mod)
+    end
+end
+
+function llvm_debug_info(job::CompilerJob{PTXCompilerTarget})
+    # allow overriding the debug info from CUDA.jl
+    if job.target.debuginfo
+        invoke(llvm_debug_info, Tuple{CompilerJob}, job)
+    else
+        LLVM.API.LLVMDebugEmissionKindNoDebug
     end
 end
 
