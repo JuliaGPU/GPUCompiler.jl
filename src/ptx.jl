@@ -59,9 +59,10 @@ end
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsics)
 
+# XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
 runtime_slug(job::CompilerJob{PTXCompilerTarget}) =
     "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)" *
-       "-debuginfo=$(job.target.debuginfo)" *
+       "-debuginfo=$(Int(llvm_debug_info(job)))" *
        "-exitable=$(job.target.exitable)"
 
 function process_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
