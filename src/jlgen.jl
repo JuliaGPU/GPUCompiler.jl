@@ -320,16 +320,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     end
 
     # set-up the compiler interface
-    debug_info_kind = if Base.JLOptions().debug_level == 0
-        LLVM.API.LLVMDebugEmissionKindNoDebug
-    elseif Base.JLOptions().debug_level == 1
-        LLVM.API.LLVMDebugEmissionKindLineTablesOnly
-    elseif Base.JLOptions().debug_level >= 2
-        LLVM.API.LLVMDebugEmissionKindFullDebug
-    end
-    if job.target isa PTXCompilerTarget && !job.target.debuginfo
-        debug_info_kind = LLVM.API.LLVMDebugEmissionKindNoDebug
-    end
+    debug_info_kind = llvm_debug_info(job)
     lookup_fun = (mi, min_world, max_world) -> ci_cache_lookup(cache, mi, min_world, max_world)
     lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     params = Base.CodegenParams(;

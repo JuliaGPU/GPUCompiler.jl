@@ -184,3 +184,14 @@ ci_cache(::CompilerJob) = GLOBAL_CI_CACHE
 
 # the method table to use
 method_table(::CompilerJob) = GLOBAL_METHOD_TABLE
+
+# how much debuginfo to emit
+function llvm_debug_info(::CompilerJob)
+    if Base.JLOptions().debug_level == 0
+        LLVM.API.LLVMDebugEmissionKindNoDebug
+    elseif Base.JLOptions().debug_level == 1
+        LLVM.API.LLVMDebugEmissionKindLineTablesOnly
+    elseif Base.JLOptions().debug_level >= 2
+        LLVM.API.LLVMDebugEmissionKindFullDebug
+    end
+end
