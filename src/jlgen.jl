@@ -196,7 +196,14 @@ struct GPUInterpreter <: AbstractInterpreter
 
             # parameters for inference and optimization
             InferenceParams(unoptimize_throw_blocks=false),
-            OptimizationParams(unoptimize_throw_blocks=false),
+            OptimizationParams(;
+                inline_cost_threshold=100000,
+                # TODO: should these be set as well?
+                #inline_nonleaf_penalty=100000,
+                #inline_error_path_cost=0,
+                #tuple_splat = 50,
+                unoptimize_throw_blocks=false,
+            ),
         )
     end
 end
@@ -316,7 +323,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     mt = method_table(job)
     interp = get_interpreter(job)
     if ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint)) === nothing
-        ci_cache_populate(interp, cache, mt, method_instance, job.source.world, typemax(Cint))
+        ci = ci_cache_populate(interp, cache, mt, method_instance, job.source.world, typemax(Cint))
+        # uncomment to print generated code_typed
+        #@show ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
+        #               method_instance.def, C_NULL, ci.inferred)
     end
 
     # set-up the compiler interface

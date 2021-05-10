@@ -267,4 +267,19 @@ end
 
 ############################################################################################
 
+import InteractiveUtils
+
+@testset "aggressive inlining" begin
+    @eval f_expensive(x) = $(foldl((e, _) -> :($e + x), 1:1000; init=:x))
+    g(x) = f_expensive(x)
+
+    # check that Julia's NativeInterpreter doesn't inline `f_expensive`
+    ir = sprint(InteractiveUtils.code_llvm, g, Tuple{Int})
+    @test occursin("call i64 @j_f_expensive", ir)
+
+    ir = sprint(io -> ptx_code_llvm(io, g, Tuple{Int}; optimize=false))
+    @test !occursin("call i64 @j_f_expensive", ir)
+    @test length(split(ir, '\n')) > 1000
+end
+
 end
