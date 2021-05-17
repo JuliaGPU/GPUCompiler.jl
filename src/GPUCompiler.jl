@@ -45,17 +45,6 @@ include("cache.jl")
 include("execution.jl")
 include("reflection.jl")
 
-function __init__()
-    TimerOutputs.reset_timer!(to)
-    InitializeAllTargets()
-    InitializeAllTargetInfos()
-    InitializeAllAsmPrinters()
-    InitializeAllAsmParsers()
-    InitializeAllTargetMCs()
-
-    return
-end
-
 include("precompile.jl")
 _precompile_()
 
