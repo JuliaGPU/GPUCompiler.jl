@@ -53,8 +53,6 @@ function __init__()
     InitializeAllAsmParsers()
     InitializeAllTargetMCs()
 
-    disk_cache[] = parse(Bool, get(ENV, "JULIA_GPUCOMPILER_DISKCACHE", "false"))
-
     return
 end
 

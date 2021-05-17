@@ -7,9 +7,6 @@ using Serialization, Scratch
 
 const cache_lock = ReentrantLock()
 
-# whether to cache compiled kernels on disk or not
-const disk_cache = Ref(false)
-
 @inline function check_cache(cache, job, prekey,
                              @nospecialize(compiler), @nospecialize(linker))
     key = hash(job, prekey)
@@ -25,19 +22,6 @@ const disk_cache = Ref(false)
         if obj === nothing || force_compilation
             asm = nothing
 
-            # can we load from the disk cache?
-            if disk_cache[] && !force_compilation
-                path = joinpath(@get_scratch!("kernels"), "$key.jls")
-                if isfile(path)
-                    try
-                        asm = deserialize(path)
-                        @debug "Loading compiled kernel for $spec from $path"
-                    catch ex
-                        @warn "Failed to load compiled kernel at $path" exception=(ex, catch_backtrace())
-                    end
-                end
-            end
-
             # compile
             if asm === nothing
                 if compile_hook[] !== nothing
@@ -45,10 +29,6 @@ const disk_cache = Ref(false)
                 end
 
                 asm = compiler(job)
-
-                if disk_cache[] && !isfile(path)
-                    serialize(path, asm)
-                end
             end
 
             # link (but not if we got here because of forced compilation)
