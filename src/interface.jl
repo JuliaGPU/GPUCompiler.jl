@@ -61,7 +61,7 @@ export FunctionSpec
 
 struct FunctionSpec{F,TT}
     f::F
-    tt::DataType
+    tt::Type{TT}
     kernel::Bool
     name::Union{Nothing,String}
     world_age::UInt
