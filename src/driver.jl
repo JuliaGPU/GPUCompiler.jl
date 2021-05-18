@@ -131,12 +131,23 @@ end
     end
 end
 
+const __llvm_initialized = Ref(false)
+
 @locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance),
                            world=job.source.world;
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                            only_entry::Bool=false)
     # XXX: remove world argument for next breaking release
     @assert world == job.source.world
+
+    if !__llvm_initialized[]
+        InitializeAllTargets()
+        InitializeAllTargetInfos()
+        InitializeAllAsmPrinters()
+        InitializeAllAsmParsers()
+        InitializeAllTargetMCs()
+        __llvm_initialized[] = true
+    end
 
     @timeit_debug to "IR generation" begin
         ir, kernel = irgen(job, method_instance)

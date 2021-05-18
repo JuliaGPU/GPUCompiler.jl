@@ -21,9 +21,9 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     maxregs::Union{Nothing,Int} = nothing
 end
 
-source_code(::PTXCompilerTarget) = "ptx"
+source_code(target::PTXCompilerTarget) = "ptx"
 
-llvm_triple(::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
+llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
 function llvm_machine(target::PTXCompilerTarget)
     triple = llvm_triple(target)
@@ -37,7 +37,7 @@ function llvm_machine(target::PTXCompilerTarget)
 end
 
 # the default datalayout does not match the one in the NVPTX user guide
-llvm_datalayout(::PTXCompilerTarget) = Int===Int64 ?
+llvm_datalayout(target::PTXCompilerTarget) = Int===Int64 ?
     "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64"*
      "-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64" :
     "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64"*
@@ -46,7 +46,7 @@ llvm_datalayout(::PTXCompilerTarget) = Int===Int64 ?
 
 ## job
 
-function Base.show(io::IO, job::CompilerJob{PTXCompilerTarget})
+function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
     print(io, "PTX CompilerJob of ", job.source)
     print(io, " for sm_$(job.target.cap.major)$(job.target.cap.minor)")
 
@@ -57,15 +57,16 @@ function Base.show(io::IO, job::CompilerJob{PTXCompilerTarget})
 end
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
-isintrinsic(::CompilerJob{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsics)
+isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
+    in(fn, ptx_intrinsics)
 
 # XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
-runtime_slug(job::CompilerJob{PTXCompilerTarget}) =
+runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
     "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)" *
        "-debuginfo=$(Int(llvm_debug_info(job)))" *
        "-exitable=$(job.target.exitable)"
 
-function process_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
+function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
     # calling convention
     if LLVM.version() >= v"8"
         for f in functions(mod)
@@ -75,7 +76,8 @@ function process_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
     end
 end
 
-function process_entry!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                        mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
 
     if job.source.kernel
@@ -132,12 +134,14 @@ function process_entry!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module, e
     return entry
 end
 
-function add_lowering_passes!(job::CompilerJob{PTXCompilerTarget}, pm::LLVM.PassManager)
+function add_lowering_passes!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                              pm::LLVM.PassManager)
     add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
     add!(pm, ModulePass("HideTrap", hide_trap!))
 end
 
-function optimize_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
+function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                          mod::LLVM.Module)
     tm = llvm_machine(job.target)
     ModulePassManager() do pm
         add_library_info!(pm, triple(mod))
@@ -164,7 +168,7 @@ function optimize_module!(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
     end
 end
 
-function llvm_debug_info(job::CompilerJob{PTXCompilerTarget})
+function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     # allow overriding the debug info from CUDA.jl
     if job.target.debuginfo
         invoke(llvm_debug_info, Tuple{CompilerJob}, job)

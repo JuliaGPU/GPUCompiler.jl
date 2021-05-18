@@ -19,11 +19,11 @@ export AbstractCompilerTarget
 
 abstract type AbstractCompilerTarget end
 
-source_code(::AbstractCompilerTarget) = "text"
+source_code(@nospecialize(target::AbstractCompilerTarget)) = "text"
 
-llvm_triple(::AbstractCompilerTarget) = error("Not implemented")
+llvm_triple(@nospecialize(target::AbstractCompilerTarget)) = error("Not implemented")
 
-function llvm_machine(target::AbstractCompilerTarget)
+function llvm_machine(@nospecialize(target::AbstractCompilerTarget))
     triple = llvm_triple(target)
 
     t = Target(triple=triple)
@@ -37,7 +37,7 @@ end
 llvm_datalayout(target::AbstractCompilerTarget) = DataLayout(llvm_machine(target))
 
 # the target's datalayout, with Julia's non-integral address spaces added to it
-function julia_datalayout(target::AbstractCompilerTarget)
+function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     dl = llvm_datalayout(target)
     dl === nothing && return nothing
     DataLayout(string(dl) * "-ni:10:11:12:13")
@@ -76,7 +76,7 @@ end
 FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
     FunctionSpec{typeof(f),tt}(f, tt, kernel, name, world_age)
 
-function Base.getproperty(spec::FunctionSpec, sym::Symbol)
+function Base.getproperty(@nospecialize(spec::FunctionSpec), sym::Symbol)
     if sym == :world
         # NOTE: this isn't used by the call to `hash` in `check_cache`,
         #       so we still use the raw world age there.
@@ -87,13 +87,13 @@ function Base.getproperty(spec::FunctionSpec, sym::Symbol)
     end
 end
 
-function signature(spec::FunctionSpec)
+function signature(@nospecialize(spec::FunctionSpec))
     fn = something(spec.name, nameof(spec.f))
     args = join(spec.tt.parameters, ", ")
     return "$fn($(join(spec.tt.parameters, ", ")))"
 end
 
-function Base.show(io::IO, spec::FunctionSpec)
+function Base.show(io::IO, @nospecialize(spec::FunctionSpec))
     spec.kernel ? print(io, "kernel ") : print(io, "function ")
     print(io, signature(spec))
 end
@@ -105,7 +105,7 @@ export CompilerJob
 
 # a specific invocation of the compiler, bundling everything needed to generate code
 
-Base.@kwdef struct CompilerJob{T,P,F}
+struct CompilerJob{T,P,F}
     target::T
     source::F
     params::P
@@ -114,10 +114,10 @@ Base.@kwdef struct CompilerJob{T,P,F}
         new{typeof(target), typeof(params), typeof(source)}(target, source, params)
 end
 
-Base.similar(@nospecialize(job::CompilerJob), source::FunctionSpec) =
-    CompilerJob(target=job.target, source=source, params=job.params)
+Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
+    CompilerJob(job.target, source, job.params)
 
-function Base.show(io::IO, job::CompilerJob{T}) where {T}
+function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
 end
 
@@ -127,29 +127,30 @@ end
 # the Julia module to look up target-specific runtime functions in (this includes both
 # target-specific functions from the GPU runtime library, like `malloc`, but also
 # replacements functions for operations like `Base.sin`)
-runtime_module(::CompilerJob) = error("Not implemented")
+runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 
 # check if a function is an intrinsic that can assumed to be always available
-isintrinsic(::CompilerJob, fn::String) = false
+isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
-get_interpreter(job::CompilerJob) = GPUInterpreter(ci_cache(job), method_table(job),
-                                                   job.source.world)
+get_interpreter(@nospecialize(job::CompilerJob)) =
+    GPUInterpreter(ci_cache(job), method_table(job), job.source.world)
 
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime
-can_throw(::CompilerJob) = false
+can_throw(@nospecialize(job::CompilerJob)) = false
 
 # generate a string that represents the type of compilation, for selecting a compiled
 # instance of the runtime library. this slug should encode everything that affects
 # the generated code of this compiler job (with exception of the function source)
-runtime_slug(::CompilerJob) = error("Not implemented")
+runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
 
 # early processing of the newly generated LLVM IR module
-process_module!(::CompilerJob, mod::LLVM.Module) = return
+process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
 # early processing of the newly identified LLVM kernel function
-function process_entry!(job::CompilerJob, mod::LLVM.Module, entry::LLVM.Function)
+function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                        entry::LLVM.Function)
     ctx = context(mod)
 
     if job.source.kernel
@@ -167,26 +168,27 @@ function process_entry!(job::CompilerJob, mod::LLVM.Module, entry::LLVM.Function
 end
 
 # post-Julia optimization processing of the module
-optimize_module!(::CompilerJob, mod::LLVM.Module) = return
+optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
 # final processing of the IR module, right before validation and machine-code generation
-finish_module!(::CompilerJob, mod::LLVM.Module) = return
+finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
-add_lowering_passes!(::CompilerJob, pm::LLVM.PassManager) = return
+add_lowering_passes!(@nospecialize(job::CompilerJob), pm::LLVM.PassManager) = return
 
-link_libraries!(::CompilerJob, mod::LLVM.Module, undefined_fns::Vector{String}) = return
+link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                undefined_fns::Vector{String}) = return
 
 # whether pointer is a valid call target
-valid_function_pointer(::CompilerJob, ptr::Ptr{Cvoid}) = false
+valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
 # the codeinfo cache to use
-ci_cache(::CompilerJob) = GLOBAL_CI_CACHE
+ci_cache(@nospecialize(job::CompilerJob)) = GLOBAL_CI_CACHE
 
 # the method table to use
-method_table(::CompilerJob) = GLOBAL_METHOD_TABLE
+method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
 
 # how much debuginfo to emit
-function llvm_debug_info(::CompilerJob)
+function llvm_debug_info(@nospecialize(job::CompilerJob))
     if Base.JLOptions().debug_level == 0
         LLVM.API.LLVMDebugEmissionKindNoDebug
     elseif Base.JLOptions().debug_level == 1
