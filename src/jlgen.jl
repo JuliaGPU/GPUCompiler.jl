@@ -309,6 +309,14 @@ end
 
 ## interface
 
+# for platforms without @cfunction-with-closure support
+const _method_instances = Ref{Any}()
+const _cache = Ref{Any}()
+function _lookup_fun(mi, min_world, max_world)
+    push!(_method_instances[], mi)
+    ci_cache_lookup(_cache[], mi, min_world, max_world)
+end
+
 function compile_method_instance(@nospecialize(job::CompilerJob),
                                  method_instance::MethodInstance)
     # populate the cache
@@ -319,16 +327,21 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         ci_cache_populate(interp, cache, mt, method_instance, job.source.world, typemax(Cint))
     end
 
-    # keep track of all method instances we needed
+    # create a callback to look-up function in our cache,
+    # and keep track of the method instances we needed.
     method_instances = []
-    function lookup_fun(mi, min_world, max_world)
-        push!(method_instances, mi)
-        ci_cache_lookup(cache, mi, min_world, max_world)
+    if Sys.ARCH == :x86 || Sys.ARCH == :x86_64
+        function lookup_fun(mi, min_world, max_world)
+            push!(method_instances, mi)
+            ci_cache_lookup(cache, mi, min_world, max_world)
+        end
+        lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
+    else
+        lookup_cb = @cfunction(_lookup_fun, Any, (Any, UInt, UInt))
     end
 
     # set-up the compiler interface
     debug_info_kind = llvm_debug_info(job)
-    lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     params = Base.CodegenParams(;
         track_allocations  = false,
         code_coverage      = false,
@@ -347,6 +360,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
                             (Ptr{Cvoid},), native_code)
         @assert llvm_mod_ref != C_NULL
         llvm_mod = LLVM.Module(llvm_mod_ref)
+    end
+    if !(Sys.ARCH == :x86 || Sys.ARCH == :x86_64)
+        cache_gbl = nothing
     end
 
     # process all compiled method instances
