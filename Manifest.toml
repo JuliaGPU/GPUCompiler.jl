@@ -16,9 +16,9 @@ version = "0.4.1"
 
 [[Compat]]
 deps = ["Base64", "Dates", "DelimitedFiles", "Distributed", "InteractiveUtils", "LibGit2", "Libdl", "LinearAlgebra", "Markdown", "Mmap", "Pkg", "Printf", "REPL", "Random", "SHA", "Serialization", "SharedArrays", "Sockets", "SparseArrays", "Statistics", "Test", "UUIDs", "Unicode"]
-git-tree-sha1 = "0900bc19193b8e672d9cd477e6cd92d9e7c02f99"
+git-tree-sha1 = "e4e2b39db08f967cc1360951f01e8a75ec441cab"
 uuid = "34da2185-b29b-5c13-b0c7-acf172513d20"
-version = "3.29.0"
+version = "3.30.0"
 
 [[DataStructures]]
 deps = ["Compat", "InteractiveUtils", "OrderedCollections"]
@@ -53,9 +53,9 @@ uuid = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 
 [[LLVM]]
 deps = ["CEnum", "Libdl", "Printf", "Unicode"]
-git-tree-sha1 = "a220efe4a6bc1c71809d002eb9ed9209ce5a86fb"
+git-tree-sha1 = "b499c68a45249b0385585c62f4a9b62b5db8e691"
 uuid = "929cbde3-209d-540e-8aea-75f648917ca0"
-version = "3.7.0"
+version = "3.7.1"
 
 [[LibCURL]]
 deps = ["LibCURL_jll", "MozillaCACerts_jll"]
