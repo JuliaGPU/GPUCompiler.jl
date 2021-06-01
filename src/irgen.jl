@@ -1,7 +1,7 @@
 # LLVM IR generation
 
 function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance)
-    entry, mod = @timeit_debug to "emission" compile_method_instance(job, method_instance)
+    entry, mod, func_origs = @timeit_debug to "emission" compile_method_instance(job, method_instance)
     ctx = context(mod)
 
     # clean up incompatibilities
@@ -82,7 +82,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         #     end
     end
 
-    return mod, entry
+    return mod, entry, func_origs
 end
 
 

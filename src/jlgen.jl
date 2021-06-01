@@ -321,7 +321,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
 
     # set-up the compiler interface
     debug_info_kind = llvm_debug_info(job)
-    lookup_fun = (mi, min_world, max_world) -> ci_cache_lookup(cache, mi, min_world, max_world)
+
+    inst = []
+    function lookup_fun(mi, min_world, max_world)
+        res = GPUCompiler.ci_cache_lookup(cache, mi, min_world, max_world)
+        if res !== nothing
+            push!(inst, (mi, res))
+        end
+        return res
+    end
+
     lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     params = Base.CodegenParams(;
         track_allocations  = false,
@@ -365,11 +374,27 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     @assert llvm_specfunc_ref != C_NULL
     llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
+
+    function_origin = Dict{LLVM.Function, MethodInstance}()
+    for (mi, ci) in inst
+        func_idx = Base.Ref{Int32}(-1)
+        specfptr_idx = Base.Ref{Int32}(-1)
+        cir = Base.Ref{Core.CodeInstance}(ci)
+
+        GC.@preserve func_idx specfptr_idx cir begin
+            ccall(:jl_get_function_id, Cvoid, (Ptr{Cvoid}, Ptr{Core.CodeInstance}, Ptr{Cint}, Ptr{Cint}), native_code, cir, func_idx, specfptr_idx)
+        end
+        if func_idx[] != -1
+            function_origin[LLVM.Function(ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                            (Ptr{Cvoid},Cint), native_code, func_idx[]))] = mi
+        end
+    end
+
     # configure the module
     triple!(llvm_mod, llvm_triple(job.target))
     if julia_datalayout(job.target) !== nothing
         datalayout!(llvm_mod, julia_datalayout(job.target))
     end
 
-    return llvm_specfunc, llvm_mod
+    return llvm_specfunc, llvm_mod, function_origin
 end
