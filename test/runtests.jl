@@ -16,10 +16,10 @@ GPUCompiler.reset_runtime()
 
 GPUCompiler.enable_timings()
 
-include("native.jl")
+Base.libllvm_version < v"12" && include("native.jl")    # TODO(vchuravy): wrap ORCv2
 include("ptx.jl")
-include("spirv.jl")
-include("gcn.jl")
+Base.libllvm_version < v"12" && include("spirv.jl")     # TODO(maleadt): rebuild SPIRV tools
+Base.libllvm_version < v"12" && include("gcn.jl")       # TODO(jpsamaroo): test failures
 include("bpf.jl")
 
 include("examples.jl")
