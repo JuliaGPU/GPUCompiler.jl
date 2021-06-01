@@ -11,6 +11,8 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     # codegen quirks
     ## can we emit debug info in the PTX assembly?
     debuginfo::Bool = false
+    ## do we permit unrachable statements, which often result in divergent control flow?
+    unreachable::Bool = false
     ## can exceptions use `exit` (which doesn't kill the GPU), or should they use `trap`?
     exitable::Bool = false
 
@@ -136,7 +138,11 @@ end
 
 function add_lowering_passes!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                               pm::LLVM.PassManager)
-    add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
+    if !job.target.unreachable
+        add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
+    end
+
+    # even if we support `unreachable`, we still prefer `exit` to `trap`
     add!(pm, ModulePass("HideTrap", hide_trap!))
 end
 
