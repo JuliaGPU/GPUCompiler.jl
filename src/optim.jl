@@ -140,8 +140,10 @@ function lower_ptls!(mod::LLVM.Module)
     job = current_job::CompilerJob
     changed = false
 
-    if haskey(functions(mod), "julia.ptls_states")
-        ptls_getter = functions(mod)["julia.ptls_states"]
+    intrinsic = VERSION >= v"1.7.0-DEV.1205" ? "julia.get_pgcstack" : "julia.ptls_states"
+
+    if haskey(functions(mod), intrinsic)
+        ptls_getter = functions(mod)[intrinsic]
 
         for use in uses(ptls_getter)
             val = user(use)
