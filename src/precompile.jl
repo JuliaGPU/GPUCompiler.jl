@@ -56,7 +56,7 @@ function _precompile_()
     @assert precompile(Tuple{typeof(GPUCompiler.hide_unreachable!),LLVM.Function})
     @assert precompile(Tuple{typeof(GPUCompiler.lower_gc_frame!),LLVM.Function})
     @assert precompile(Tuple{typeof(GPUCompiler.lower_throw!),LLVM.Module})
-    @assert precompile(Tuple{typeof(GPUCompiler.split_kwargs),Tuple{},Vector{Symbol},Vararg{Vector{Symbol}, N} where N})
+    #@assert precompile(Tuple{typeof(GPUCompiler.split_kwargs),Tuple{},Vector{Symbol},Vararg{Vector{Symbol}, N} where N})
     let fbody = try __lookup_kwbody__(which(GPUCompiler.compile, (Symbol,GPUCompiler.CompilerJob,))) catch missing end
         if !ismissing(fbody)
             @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
