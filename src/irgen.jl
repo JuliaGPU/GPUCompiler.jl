@@ -176,14 +176,6 @@ function lower_throw!(mod::LLVM.Module)
         "jl_bounds_error_unboxed_int"   => "bounds error",
         "jl_bounds_error_ints"          => "bounds error",
         "jl_eof_error"                  => "EOF error",
-        # Julia-level exceptions that use unsupported inputs like interpolated strings
-        r"julia_throw_exp_domainerror_\d+"      => "DomainError",
-        r"julia_throw_complex_domainerror_\d+"  => "DomainError",
-        r"julia_throw_domerr_powbysq_\d+"       => "DomainError",
-        r"julia_throw_overflowerr_binaryop_\d+" => "OverflowError",
-        r"julia_throw_overflowerr_negation_\d+" => "OverflowError",
-        r"julia_throw_inexacterror_\d+"         => "InexactError",
-        r"julia_throw_boundserror_\d+"          => "BoundsError",
     ]
 
     for f in functions(mod)
@@ -206,6 +198,7 @@ function lower_throw!(mod::LLVM.Module)
                 unsafe_delete!(LLVM.parent(call), call)
 
                 # HACK: kill the exceptions' unused arguments
+                #       this is needed for throwing objects with @nospecialize constructors.
                 for arg in call_args
                     # peek through casts
                     if isa(arg, LLVM.AddrSpaceCastInst)
