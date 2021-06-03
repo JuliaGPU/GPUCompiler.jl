@@ -274,7 +274,7 @@ macro device_code(ex...)
         end
 
         open(joinpath(dir, "$fn.asm"), "w") do io
-            code_native(io, job; dump_module=true)
+            code_native(io, job; dump_module=true, raw=true)
         end
 
         localUnique += 1
