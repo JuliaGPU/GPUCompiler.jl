@@ -16,8 +16,17 @@ job = GPUCompiler.CompilerJob(
 
 method_instance = GPUCompiler.emit_julia(job)[1]
 
-for (_, mi) in GPUCompiler.compile_method_instance(job, method_instance)[3]
-    @test mi.def in methods(Base.exp) || mi.def in methods(sqexp)
+map = GPUCompiler.compile_method_instance(job, method_instance)[2]
+@test method_instance in keys(map)
+@test method_instance.def in methods(sqexp)
+
+seen = false
+for mi in keys(map)
+    if mi != method_instance
+        @test mi.def in methods(Base.exp)
+        seen = true
+    end
 end
+@test seen
 
 end
