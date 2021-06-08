@@ -52,15 +52,15 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
 
     ## LLVM IR
 
-    ir, kernel, func_origs = emit_llvm(job, method_instance;
-                           libraries, deferred_codegen, optimize, only_entry)
+    ir, kernel, compiled = emit_llvm(job, method_instance;
+                                     libraries, deferred_codegen, optimize, only_entry)
 
     if output == :llvm
         if strip
             @timeit_debug to "strip debug info" strip_debuginfo!(ir)
         end
 
-        return ir, kernel, func_origs
+        return ir, kernel, compiled
     end
 
 
@@ -150,8 +150,9 @@ const __llvm_initialized = Ref(false)
     end
 
     @timeit_debug to "IR generation" begin
-        ir, kernel, func_origs = irgen(job, method_instance)
+        ir, compiled = irgen(job, method_instance)
         ctx = context(ir)
+        kernel = compiled[method_instance].specfunc
         kernel_fn = LLVM.name(kernel)
     end
 
@@ -308,7 +309,7 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
-    return ir, kernel, func_origs
+    return ir, kernel, compiled
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, kernel::LLVM.Function;

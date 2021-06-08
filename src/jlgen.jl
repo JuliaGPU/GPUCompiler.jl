@@ -319,18 +319,15 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         ci_cache_populate(interp, cache, mt, method_instance, job.source.world, typemax(Cint))
     end
 
-    # set-up the compiler interface
-    debug_info_kind = llvm_debug_info(job)
-
-    inst = []
+    # keep track of all method instances we needed
+    method_instances = []
     function lookup_fun(mi, min_world, max_world)
-        res = GPUCompiler.ci_cache_lookup(cache, mi, min_world, max_world)
-        if res !== nothing
-            push!(inst, (mi, res))
-        end
-        return res
+        push!(method_instances, mi)
+        ci_cache_lookup(cache, mi, min_world, max_world)
     end
 
+    # set-up the compiler interface
+    debug_info_kind = llvm_debug_info(job)
     lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     params = Base.CodegenParams(;
         track_allocations  = false,
@@ -352,41 +349,30 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         llvm_mod = LLVM.Module(llvm_mod_ref)
     end
 
-    # get the top-level code
-    code = ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint))
+    # process all compiled method instances
+    compiled = Dict()
+    for mi in method_instances
+        ci = ci_cache_lookup(cache, mi, job.source.world, typemax(Cint))
 
-    # get the top-level function index
-    llvm_func_idx = Ref{Int32}(-1)
-    llvm_specfunc_idx = Ref{Int32}(-1)
-    ccall(:jl_get_function_id, Nothing,
-          (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
-          native_code, code, llvm_func_idx, llvm_specfunc_idx)
-    @assert llvm_func_idx[] != -1
-    @assert llvm_specfunc_idx[] != -1
+        if ci !== nothing
+            # get the function index
+            llvm_func_idx = Ref{Int32}(-1)
+            llvm_specfunc_idx = Ref{Int32}(-1)
+            ccall(:jl_get_function_id, Nothing,
+                (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
+                native_code, ci, llvm_func_idx, llvm_specfunc_idx)
 
-    # get the top-level function)
-    llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                          (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
-    @assert llvm_func_ref != C_NULL
-    llvm_func = LLVM.Function(llvm_func_ref)
-    llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                              (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
-    @assert llvm_specfunc_ref != C_NULL
-    llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
+            # get the function
+            llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                                  (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
+            @assert llvm_func_ref != C_NULL
+            llvm_func = LLVM.Function(llvm_func_ref)
+            llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                                    (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
+            @assert llvm_specfunc_ref != C_NULL
+            llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
-
-    function_origin = Dict{LLVM.Function, MethodInstance}()
-    for (mi, ci) in inst
-        func_idx = Base.Ref{Int32}(-1)
-        specfptr_idx = Base.Ref{Int32}(-1)
-        cir = Base.Ref{Core.CodeInstance}(ci)
-
-        GC.@preserve func_idx specfptr_idx cir begin
-            ccall(:jl_get_function_id, Cvoid, (Ptr{Cvoid}, Ptr{Core.CodeInstance}, Ptr{Cint}, Ptr{Cint}), native_code, cir, func_idx, specfptr_idx)
-        end
-        if func_idx[] != -1
-            function_origin[LLVM.Function(ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                            (Ptr{Cvoid},Cint), native_code, func_idx[]))] = mi
+            compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
         end
     end
 
@@ -396,5 +382,5 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         datalayout!(llvm_mod, julia_datalayout(job.target))
     end
 
-    return llvm_specfunc, llvm_mod, function_origin
+    return llvm_mod, compiled
 end
