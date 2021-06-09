@@ -66,6 +66,25 @@ include("definitions/native.jl")
         (CI, rt) = native_code_typed(MyCallable(), (Int, Int), kernel=false)[1]
         @test CI.slottypes[1] == Core.Compiler.Const(MyCallable())
     end
+
+
+    @testset "Compilation database" begin
+        function sqexp(x::Float64)
+            return exp(x)*exp(x)
+        end
+
+        job, _ = native_job(sqexp, (Float64,))
+        ir, meta = GPUCompiler.compile(:llvm, job)
+
+        meth = only(methods(sqexp, (Float64,)))
+
+        mis = filter(mi->mi.def == meth, keys(meta.compiled))
+        @test length(mis) == 1
+
+        other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
+        @test length(other_mis) == 1
+        @test only(other_mis).def in methods(Base.exp)
+    end
 end
 
 ############################################################################################

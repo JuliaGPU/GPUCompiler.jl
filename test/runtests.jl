@@ -21,7 +21,6 @@ include("ptx.jl")
 Base.libllvm_version < v"12" && include("spirv.jl")     # TODO(maleadt): rebuild SPIRV tools
 Base.libllvm_version < v"12" && include("gcn.jl")       # TODO(jpsamaroo): test failures
 include("bpf.jl")
-include("defn.jl")
 include("examples.jl")
 
 haskey(ENV, "CI") && GPUCompiler.timings()
