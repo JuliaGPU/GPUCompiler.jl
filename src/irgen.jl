@@ -2,7 +2,8 @@
 
 function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance)
     mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance)
-    entry = compiled[method_instance].specfunc
+    entry_fn = compiled[method_instance].specfunc
+    entry = functions(mod)[entry_fn]
     ctx = context(mod)
 
     # clean up incompatibilities
@@ -49,6 +50,9 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         LLVM.name!(entry, mangle_call(entry, job.source.tt))
     end
     entry = process_entry!(job, mod, entry)
+    compiled[method_instance] =
+        (; compiled[method_instance].ci, compiled[method_instance].func,
+           specfunc=LLVM.name(entry))
 
     # minimal required optimization
     @timeit_debug to "rewrite" ModulePassManager() do pm
@@ -83,9 +87,6 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         #     end
     end
 
-    compiled[method_instance] =
-        (; compiled[method_instance].ci, compiled[method_instance].func,
-           specfunc=entry)
     return mod, compiled
 end
 

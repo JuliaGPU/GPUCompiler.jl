@@ -154,8 +154,8 @@ const __llvm_initialized = Ref(false)
     @timeit_debug to "IR generation" begin
         ir, compiled = irgen(job, method_instance)
         ctx = context(ir)
-        entry = compiled[method_instance].specfunc
-        entry_fn = LLVM.name(entry)
+        entry_fn = compiled[method_instance].specfunc
+        entry = functions(ir)[entry_fn]
     end
 
     # always preload the runtime, and do so early; it cannot be part of any timing block
@@ -267,11 +267,11 @@ const __llvm_initialized = Ref(false)
             # compile and link
             for dyn_job in keys(worklist)
                 # cached compilation
-                # TODO: merge meta.compiled
                 dyn_entry_fn = get!(cache, dyn_job) do
                     dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize,
                                                deferred_codegen=false, parent_job=job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
+                    merge!(compiled, dyn_meta.compiled)
                     @assert context(dyn_ir) == ctx
                     link!(ir, dyn_ir)
                     changed = true

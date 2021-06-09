@@ -372,7 +372,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
             @assert llvm_specfunc_ref != C_NULL
             llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
 
-            compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
+            # NOTE: it's not safe to store raw LLVM functions here, since those may get
+            #       removed or renamed during optimization, so we store their name instead.
+            compiled[mi] = (; ci, func=LLVM.name(llvm_func), specfunc=LLVM.name(llvm_specfunc))
         end
     end
 
