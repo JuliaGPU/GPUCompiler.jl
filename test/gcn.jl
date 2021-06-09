@@ -64,8 +64,8 @@ end
     end
 
     asm = sprint(io->gcn_code_native(io, parent, Tuple{Int64}; dump_module=true))
-    @test occursin(r"s_add_u32.*julia_child_.*@rel32@lo\+4", asm)
-    @test occursin(r"s_addc_u32.*julia_child_.*@rel32@hi\+4", asm)
+    @test occursin(r"s_add_u32.*julia_child_.*@rel32@", asm)
+    @test occursin(r"s_addc_u32.*julia_child_.*@rel32@", asm)
 end
 
 @testset "kernel functions" begin
