@@ -46,24 +46,23 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  parent_job::Union{Nothing, CompilerJob} = nothing)
     ## Julia IR
 
-    method_instance, meta = emit_julia(job)
+    mi, mi_meta = emit_julia(job)
 
     if output == :julia
-        return method_instance, meta
+        return mi, meta
     end
 
 
     ## LLVM IR
 
-    ir, meta = emit_llvm(job, method_instance;
-                         libraries, deferred_codegen, optimize, only_entry)
+    ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, only_entry)
 
     if output == :llvm
         if strip
             @timeit_debug to "strip debug info" strip_debuginfo!(ir)
         end
 
-        return ir, meta
+        return ir, ir_meta
     end
 
 
@@ -76,10 +75,10 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     else
         error("Unknown assembly format $output")
     end
-    code, meta = emit_asm(job, ir, meta.entry; strip, validate, format)
+    asm, asm_meta = emit_asm(job, ir; strip, validate, format)
 
     if output == :asm || output == :obj
-        return code, meta
+        return asm, (; entry=LLVM.name(ir_meta.entry), asm_meta...)
     end
 
 
@@ -310,13 +309,13 @@ const __llvm_initialized = Ref(false)
     return ir, (; entry, compiled)
 end
 
-@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, entry::LLVM.Function;
+@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
                           strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
     finish_module!(job, ir)
 
     if validate
         @timeit_debug to "validation" begin
-            check_invocation(job, entry)
+            check_invocation(job)
             check_ir(job, ir)
         end
     end
@@ -335,8 +334,8 @@ end
     @timeit_debug to "LLVM back-end" begin
         @timeit_debug to "preparation" prepare_execution!(job, ir)
 
-        code = @timeit_debug to "machine-code generation" mcgen(job, ir, entry, format)
+        code = @timeit_debug to "machine-code generation" mcgen(job, ir, format)
     end
 
-    return code, (; entry=LLVM.name(entry), undefined_fns, undefined_gbls)
+    return code, (; undefined_fns, undefined_gbls)
 end

@@ -68,7 +68,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
 end
 
 
-function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function, format=LLVM.API.LLVMAssemblyFile)
+function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
     tm = llvm_machine(job.target)
 
     return String(emit(tm, mod, format))

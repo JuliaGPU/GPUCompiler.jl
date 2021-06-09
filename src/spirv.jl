@@ -61,7 +61,7 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     end
 end
 
-@unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, f::LLVM.Function,
+@unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMAssemblyFile)
     # write the bitcode to a temporary file (the SPIRV Translator library doesn't have a C API)
     mktemp() do input, input_io

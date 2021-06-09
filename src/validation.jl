@@ -53,7 +53,7 @@ function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
     return msg
 end
 
-function check_invocation(@nospecialize(job::CompilerJob), entry::LLVM.Function)
+function check_invocation(@nospecialize(job::CompilerJob))
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
     sig = Base.signature_type(job.source.f, job.source.tt)::Type
