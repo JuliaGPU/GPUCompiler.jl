@@ -9,7 +9,7 @@ Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
     features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
     always_inline::Bool=false # will mark the job function as always inline
     reloc::LLVM.API.LLVMRelocMode=LLVM.API.LLVMRelocDefault
-    extern::Bool
+    extern::Bool=false
 end
 
 llvm_triple(::NativeCompilerTarget) = Sys.MACHINE

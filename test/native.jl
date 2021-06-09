@@ -332,7 +332,7 @@ function generate_shlib_fptr(f, tt, name=GPUCompiler.safe_name(repr(f)))
     end
 end
 
-@static if VERSION >= v"1.7.0-DEV.600"
+@static if VERSION >= v"1.7.0-DEV.600" && Sys.isunix()
 @testset "shared library emission" begin
     f1(x) = x+1
     @test ccall(generate_shlib_fptr(f1, (Int,)), Int, (Int,), 1) == 2
