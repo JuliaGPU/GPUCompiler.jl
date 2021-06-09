@@ -90,10 +90,10 @@ See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
-    ir, entry = codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
+    ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
     str = ccall(:jl_dump_function_ir, Ref{String},
                 (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
-                entry, !raw, dump_module, debuginfo)
+                meta.entry, !raw, dump_module, debuginfo)
     highlight(io, str, "llvm")
 end
 code_llvm(@nospecialize(job::CompilerJob); kwargs...) = code_llvm(stdout, job; kwargs...)
@@ -112,7 +112,7 @@ The following keyword arguments are supported:
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, dump_module::Bool=false)
-    asm, _ = codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
+    asm, meta = codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
     highlight(io, asm, source_code(job.target))
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =

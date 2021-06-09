@@ -42,25 +42,28 @@ end
 
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                 strip::Bool=false, validate::Bool=true, only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob} = nothing)
+                 strip::Bool=false, validate::Bool=true, only_entry::Bool=false,
+                 parent_job::Union{Nothing, CompilerJob} = nothing)
     ## Julia IR
 
-    method_instance, _ = emit_julia(job)
+    method_instance, meta = emit_julia(job)
 
-    output == :julia && return method_instance
+    if output == :julia
+        return method_instance, meta
+    end
 
 
     ## LLVM IR
 
-    ir, kernel, compiled = emit_llvm(job, method_instance;
-                                     libraries, deferred_codegen, optimize, only_entry)
+    ir, meta = emit_llvm(job, method_instance;
+                         libraries, deferred_codegen, optimize, only_entry)
 
     if output == :llvm
         if strip
             @timeit_debug to "strip debug info" strip_debuginfo!(ir)
         end
 
-        return ir, kernel, compiled
+        return ir, meta
     end
 
 
@@ -73,12 +76,11 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     else
         error("Unknown assembly format $output")
     end
-    code = emit_asm(job, ir, kernel; strip, validate, format)
+    code, meta = emit_asm(job, ir, meta.entry; strip, validate, format)
 
-    undefined_fns = LLVM.name.(decls(ir))
-    undefined_gbls = map(x->(name=LLVM.name(x),type=llvmtype(x),external=isextinit(x)), LLVM.globals(ir))
-
-    (output == :asm || output == :obj) && return code, LLVM.name(kernel), undefined_fns, undefined_gbls
+    if output == :asm || output == :obj
+        return code, meta
+    end
 
 
     error("Unknown compilation output $output")
@@ -106,7 +108,7 @@ end
     end
 
     # XXX: remove returned world for next breaking release
-    return method_instance, job.source.world
+    return method_instance, (; world=job.source.world)
 end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
@@ -152,8 +154,8 @@ const __llvm_initialized = Ref(false)
     @timeit_debug to "IR generation" begin
         ir, compiled = irgen(job, method_instance)
         ctx = context(ir)
-        kernel = compiled[method_instance].specfunc
-        kernel_fn = LLVM.name(kernel)
+        entry = compiled[method_instance].specfunc
+        entry_fn = LLVM.name(entry)
     end
 
     # always preload the runtime, and do so early; it cannot be part of any timing block
@@ -181,7 +183,7 @@ const __llvm_initialized = Ref(false)
             @timeit_debug to "optimization" optimize!(job, ir)
 
             # optimization may have replaced functions, so look the entry point up again
-            kernel = functions(ir)[kernel_fn]
+            entry = functions(ir)[entry_fn]
         end
 
         if libraries
@@ -198,7 +200,7 @@ const __llvm_initialized = Ref(false)
         if only_entry
             # replace non-entry function definitions with a declaration
             for f in functions(ir)
-                f == kernel && continue
+                f == entry && continue
                 isdeclaration(f) && continue
                 LLVM.isintrinsic(f) && continue
                 # FIXME: expose llvm::Function::deleteBody with a C API
@@ -212,9 +214,9 @@ const __llvm_initialized = Ref(false)
             end
         end
 
-        # remove everything except for the kernel and any exported global variables
+        # remove everything except for the entry and any exported global variables
         @timeit_debug to "clean-up" begin
-            exports = String[kernel_fn]
+            exports = String[entry_fn]
             for gvar in globals(ir)
                 push!(exports, LLVM.name(gvar))
             end
@@ -239,7 +241,7 @@ const __llvm_initialized = Ref(false)
     if !only_entry && deferred_codegen && haskey(functions(ir), "deferred_codegen")
         dyn_marker = functions(ir)["deferred_codegen"]
 
-        cache = Dict{CompilerJob, String}(job => kernel_fn)
+        cache = Dict{CompilerJob, String}(job => entry_fn)
 
         # iterative compilation (non-recursive)
         changed = true
@@ -265,23 +267,24 @@ const __llvm_initialized = Ref(false)
             # compile and link
             for dyn_job in keys(worklist)
                 # cached compilation
-                dyn_kernel_fn = get!(cache, dyn_job) do
-                    dyn_ir, dyn_kernel = codegen(:llvm, dyn_job; optimize,
-                                                 deferred_codegen=false, parent_job=job)
-                    dyn_kernel_fn = LLVM.name(dyn_kernel)
+                # TODO: merge meta.compiled
+                dyn_entry_fn = get!(cache, dyn_job) do
+                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize,
+                                               deferred_codegen=false, parent_job=job)
+                    dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     @assert context(dyn_ir) == ctx
                     link!(ir, dyn_ir)
                     changed = true
-                    dyn_kernel_fn
+                    dyn_entry_fn
                 end
-                dyn_kernel = functions(ir)[dyn_kernel_fn]
+                dyn_entry = functions(ir)[dyn_entry_fn]
 
-                # insert a pointer to the function everywhere the kernel is used
+                # insert a pointer to the function everywhere the entry is used
                 T_ptr = convert(LLVMType, Ptr{Cvoid}, ctx)
                 for call in worklist[dyn_job]
                     Builder(ctx) do builder
                         position!(builder, call)
-                        fptr = ptrtoint!(builder, dyn_kernel, T_ptr)
+                        fptr = ptrtoint!(builder, dyn_entry, T_ptr)
                         replace_uses!(call, fptr)
                     end
                     unsafe_delete!(LLVM.parent(call), call)
@@ -289,7 +292,7 @@ const __llvm_initialized = Ref(false)
             end
         end
 
-        # merge constants (such as exception messages) from each kernel
+        # merge constants (such as exception messages) from each entry
         # and on platforms that support it inline and optimize the call to
         # the deferred code, in particular we want to remove unnecessary
         # alloca's that are created by pass-by-ref semantics.
@@ -309,19 +312,25 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
-    return ir, kernel, compiled
+    return ir, (; entry, compiled)
 end
 
-@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, kernel::LLVM.Function;
+@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module, entry::LLVM.Function;
                           strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
     finish_module!(job, ir)
 
     if validate
         @timeit_debug to "validation" begin
-            check_invocation(job, kernel)
+            check_invocation(job, entry)
             check_ir(job, ir)
         end
     end
+
+    # get a list of undefined stuff -- front-ends might need it to link additional libraries
+    undefined_fns = LLVM.name.(decls(ir))
+    undefined_gbls = map(x->(name=LLVM.name(x),
+                             type=llvmtype(x),
+                             external=isextinit(x)), LLVM.globals(ir))
 
     # NOTE: strip after validation to get better errors
     if strip
@@ -331,8 +340,8 @@ end
     @timeit_debug to "LLVM back-end" begin
         @timeit_debug to "preparation" prepare_execution!(job, ir)
 
-        code = @timeit_debug to "machine-code generation" mcgen(job, ir, kernel, format)
+        code = @timeit_debug to "machine-code generation" mcgen(job, ir, entry, format)
     end
 
-    return code
+    return code, (; entry=LLVM.name(entry), undefined_fns, undefined_gbls)
 end

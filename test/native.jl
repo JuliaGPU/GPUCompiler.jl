@@ -7,23 +7,23 @@ include("definitions/native.jl")
 @testset "Compilation" begin
     kernel() = nothing
 
-    output = native_code_execution(kernel, (); validate=false)
-    @test occursin("kernel", output[2])
-    @test isempty(output[3])
-    @test isempty(output[4])
+    output, meta = native_code_execution(kernel, (); validate=false)
+    @test occursin("kernel", meta.entry)
+    @test isempty(meta.undefined_fns)
+    @test isempty(meta.undefined_gbls)
 
-    @testset "Undefined Functions" begin
+    @testset "Undefined functions" begin
         function undef_fn()
             ccall("extern somefunc", llvmcall, Cvoid, ())
             nothing
         end
 
-        output = native_code_execution(undef_fn, (); validate=false)
-        @test length(output[3]) == 1
-        @test output[3][1] == "somefunc"
+        output, meta = native_code_execution(undef_fn, (); validate=false)
+        @test length(meta.undefined_fns) == 1
+        @test meta.undefined_fns[1] == "somefunc"
     end
 
-    @testset "Undefined Globals" begin
+    @testset "Undefined globals" begin
         @generated function makegbl(::Val{name}, ::Type{T}, ::Val{isext}) where {name,T,isext}
             JuliaContext() do ctx
                 T_gbl = convert(LLVMType, T, ctx)
@@ -49,14 +49,14 @@ include("definitions/native.jl")
             nothing
         end
 
-        output = native_code_execution(undef_gbl, ())
-        @test length(output[4]) == 2
-        @test output[4][1].name == "someglobal"
-        @test eltype(output[4][1].type) isa LLVM.IntegerType
-        @test output[4][1].external
-        @test output[4][2].name == "otherglobal"
-        @test eltype(output[4][2].type) isa LLVM.LLVMFloat
-        @test !output[4][2].external
+        output, meta = native_code_execution(undef_gbl, ())
+        @test length(meta.undefined_gbls) == 2
+        @test meta.undefined_gbls[1].name == "someglobal"
+        @test eltype(meta.undefined_gbls[1].type) isa LLVM.IntegerType
+        @test meta.undefined_gbls[1].external
+        @test meta.undefined_gbls[2].name == "otherglobal"
+        @test eltype(meta.undefined_gbls[2].type) isa LLVM.LLVMFloat
+        @test !meta.undefined_gbls[2].external
     end
 
     @testset "Callable structs" begin
@@ -247,7 +247,7 @@ end
         (occursin(GPUCompiler.RUNTIME_FUNCTION, msg) ||
          occursin(GPUCompiler.UNKNOWN_FUNCTION, msg)) &&
         occursin("[1] println", msg) &&
-        occursin(r"\[2\] .+foobar", msg)
+        occursin(r"\[2\] .*foobar", msg)
     end
 end
 
@@ -258,7 +258,7 @@ end
                          native_code_execution(foobar, Tuple{Ptr{Int}})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
-        occursin(r"\[1\] .+foobar", msg)
+        occursin(r"\[1\] .*foobar", msg)
     end
 end
 
@@ -270,7 +270,7 @@ end
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DELAYED_BINDING, msg) &&
         occursin("use of 'undefined'", msg) &&
-        occursin(r"\[1\] .+kernel", msg)
+        occursin(r"\[1\] .*kernel", msg)
     end
 end
 
