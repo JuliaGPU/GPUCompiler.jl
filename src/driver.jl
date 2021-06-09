@@ -107,8 +107,7 @@ end
         end
     end
 
-    # XXX: remove returned world for next breaking release
-    return method_instance, (; world=job.source.world)
+    return method_instance, ()
 end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
@@ -135,13 +134,9 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance),
-                           world=job.source.world;
+@locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance);
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                            only_entry::Bool=false)
-    # XXX: remove world argument for next breaking release
-    @assert world == job.source.world
-
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
