@@ -78,7 +78,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     asm, asm_meta = emit_asm(job, ir; strip, validate, format)
 
     if output == :asm || output == :obj
-        return asm, (; entry=LLVM.name(ir_meta.entry), asm_meta...)
+        return asm, asm_meta
     end
 
 
@@ -320,12 +320,6 @@ end
         end
     end
 
-    # get a list of undefined stuff -- front-ends might need it to link additional libraries
-    undefined_fns = LLVM.name.(decls(ir))
-    undefined_gbls = map(x->(name=LLVM.name(x),
-                             type=llvmtype(x),
-                             external=isextinit(x)), LLVM.globals(ir))
-
     # NOTE: strip after validation to get better errors
     if strip
         @timeit_debug to "strip debug info" strip_debuginfo!(ir)
@@ -337,5 +331,5 @@ end
         code = @timeit_debug to "machine-code generation" mcgen(job, ir, format)
     end
 
-    return code, (; undefined_fns, undefined_gbls)
+    return code, ()
 end
