@@ -1,3 +1,4 @@
+using Distributed
 @testset "native" begin
 
 include("definitions/native.jl")
@@ -262,6 +263,7 @@ end
         occursin("[2] func", msg)
     end
 end
+end
 
 @testset "LazyCodegen" begin
     import .LazyCodegen: call_delayed
@@ -311,9 +313,15 @@ end
     @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
 end
 
-using Libdl
+addprocs(1)
 
-function generate_shlib_fptr(f, tt, name=GPUCompiler.safe_name(repr(f)))
+@everywhere workers() begin
+    using GPUCompiler
+    using Libdl
+    include("definitions/native.jl")
+end
+@everywhere begin
+function generate_shlib(f, tt, name=GPUCompiler.safe_name(repr(f)))
     mktemp() do path, io
         source = FunctionSpec(f, Base.to_tuple_type(tt), false, name)
         target = NativeCompilerTarget(;reloc=LLVM.API.LLVMRelocPIC, extern=true)
@@ -324,58 +332,75 @@ function generate_shlib_fptr(f, tt, name=GPUCompiler.safe_name(repr(f)))
         flush(io)
         # FIXME: Be more portable
         run(`ld -shared -o $path.$dlext $path`)
-        ptr = dlopen("$path.$dlext", Libdl.RTLD_LOCAL)
-        fptr = dlsym(ptr, "julia_$name")
-        @assert fptr != C_NULL
-        atexit(()->rm("$path.$dlext"))
-        fptr
+        return "$path.$dlext", name
     end
+end
+function load_fptr(path, name)
+    ptr = dlopen("$path", Libdl.RTLD_LOCAL)
+    fptr = dlsym(ptr, "julia_$name")
+    @assert fptr != C_NULL
+    atexit(()->rm("$path"))
+    fptr
+end
+generate_shlib_fptr(f, tt, name=GPUCompiler.safe_name(repr(f))) =
+    load_fptr(generate_shlib(f, tt, name)...)
 end
 
 @static if VERSION >= v"1.7.0-DEV.600" && Sys.isunix()
 @testset "shared library emission" begin
-    f1(x) = x+1
-    @test ccall(generate_shlib_fptr(f1, (Int,)), Int, (Int,), 1) == 2
-    f2(x,y) = x+y
-    @test ccall(generate_shlib_fptr(f2, (Int,Int)), Int, (Int,Int), 1, 2) == 3
-    f3(str) = str*"!"
-    @test_skip ccall(generate_shlib_fptr(f3, (String,)), String, (String,), "Hello") == "Hello!"
-    function f4()
-        # Something reasonably complicated
-        if isdir(homedir())
-            true
-        else
-            false
+    @testset "primitive types" begin
+        f1(x) = x+1
+        @test ccall(generate_shlib_fptr(f1, (Int,)), Int, (Int,), 1) == 2
+        f2(x,y) = x+y
+        path, name = generate_shlib(f2, (Int,Int))
+        @test fetch(@spawnat 2 ccall(load_fptr(path, name), Int, (Int,Int), 1, 2)) == 3
+    end
+    @testset "runtime calls" begin
+        function f3()
+            # Something reasonably complicated
+            if isdir(homedir())
+                true
+            else
+                false
+            end
         end
+        @test ccall(generate_shlib_fptr(f3, ()), Bool, ())
     end
-    @test ccall(generate_shlib_fptr(f4, ()), Bool, ())
-    f5() = :asymbol
-    @test_skip ccall(generate_shlib_fptr(f5, ()), Symbol, ()) == :asymbol
-    f6(x) = x == :asymbol ? true : false
-    @test_skip ccall(generate_shlib_fptr(f6, (Symbol,)), Bool, (Symbol,), :asymbol)
-    @test_skip !ccall(generate_shlib_fptr(f6, (Symbol,)), Bool, (Symbol,), :bsymbol)
-    #= FIXME
-    function f7(A, sym)
-        if sym != :asymbol
-            A[] = true
-        else
-            A[] = false
-        end
-        return nothing
-    end
-    A = Ref(false)
-    ccall(generate_shlib_fptr(f7, (Base.RefValue{Bool}, Symbol)), Nothing, (Base.RefValue{Bool}, Symbol), A, :asymbol); @test A[]
-    ccall(generate_shlib_fptr(f7, (Base.RefValue{Bool}, Symbol)), Nothing, (Base.RefValue{Bool}, Symbol), A, :bsymbol); @test !A[]
-    =#
-    y = [42.0]
-    function cf1(x)
-        x + y[1]
-    end
-    @test ccall(generate_shlib_fptr(cf1, (Float64,)), Float64, (Any, Float64,), cf1, 1.0) == 43.0
-end
-end
+    @testset "String/Symbol" begin
+        f4(str) = str*"!"
+        @test ccall(generate_shlib_fptr(f4, (String,)), String, (String,), "Hello") == "Hello!"
 
+        f5() = :asymbol
+        @test ccall(generate_shlib_fptr(f5, ()), Symbol, ()) == :asymbol
+
+        f6(x) = x == :asymbol ? true : false
+        @test ccall(generate_shlib_fptr(f6, (Symbol,)), Bool, (Symbol,), :asymbol)
+        @test !ccall(generate_shlib_fptr(f6, (Symbol,)), Bool, (Symbol,), :bsymbol)
+    end
+    @testset "closures" begin
+        y = [42.0]
+        function cf1(x)
+            x + y[1]
+        end
+        @test ccall(generate_shlib_fptr(cf1, (Float64,)), Float64, (Any, Float64,), cf1, 1.0) == 43.0
+    end
+    @testset "mutation" begin
+        function cf2(A, sym)
+            if sym != :asymbol
+                A[] = true
+            else
+                A[] = false
+            end
+            return nothing
+        end
+        A = Ref(false)
+        fptr = generate_shlib_fptr(cf2, (Base.RefValue{Bool}, Symbol))
+        ccall(fptr, Nothing, (Any, Symbol), A, :asymbol); @test !A[]
+        ccall(fptr, Nothing, (Any, Symbol), A, :bsymbol); @test A[]
+    end
 end
+end
+rmprocs(2)
 
 ############################################################################################
 
