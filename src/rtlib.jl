@@ -65,9 +65,9 @@ end
 
 function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     tt = Base.to_tuple_type(method.types)
-    new_mod, entry = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
-                             optimize=false, libraries=false)
-    ft = eltype(llvmtype(entry))
+    new_mod, meta = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
+                            optimize=false, libraries=false)
+    ft = eltype(llvmtype(meta.entry))
     expected_ft = convert(LLVM.FunctionType, method, context(new_mod))
     if return_type(ft) != return_type(expected_ft)
         error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
@@ -79,7 +79,7 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     run!(pm, new_mod)
     dispose(pm)
 
-    temp_name = LLVM.name(entry)
+    temp_name = LLVM.name(meta.entry)
     # FIXME: on 1.6, there's no single global LLVM context anymore,
     #        but there's no API yet to pass a context to codegen.
     # round-trip the module through serialization to get it in the proper context.

@@ -88,8 +88,8 @@ module LazyCodegen
         @assert !cc.compiled
         job = cc.job
 
-        ir, entry = GPUCompiler.codegen(:llvm, job; validate=false)
-        entry_name = name(entry)
+        ir, meta = GPUCompiler.codegen(:llvm, job; validate=false)
+        entry_name = name(meta.entry)
 
         jitted_mod = compile!(orc, ir)
 

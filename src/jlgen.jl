@@ -319,9 +319,15 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         ci_cache_populate(interp, cache, mt, method_instance, job.source.world, typemax(Cint))
     end
 
+    # keep track of all method instances we needed
+    method_instances = []
+    function lookup_fun(mi, min_world, max_world)
+        push!(method_instances, mi)
+        ci_cache_lookup(cache, mi, min_world, max_world)
+    end
+
     # set-up the compiler interface
     debug_info_kind = llvm_debug_info(job)
-    lookup_fun = (mi, min_world, max_world) -> ci_cache_lookup(cache, mi, min_world, max_world)
     lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     params = Base.CodegenParams(;
         track_allocations  = false,
@@ -343,27 +349,34 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         llvm_mod = LLVM.Module(llvm_mod_ref)
     end
 
-    # get the top-level code
-    code = ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint))
+    # process all compiled method instances
+    compiled = Dict()
+    for mi in method_instances
+        ci = ci_cache_lookup(cache, mi, job.source.world, typemax(Cint))
 
-    # get the top-level function index
-    llvm_func_idx = Ref{Int32}(-1)
-    llvm_specfunc_idx = Ref{Int32}(-1)
-    ccall(:jl_get_function_id, Nothing,
-          (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
-          native_code, code, llvm_func_idx, llvm_specfunc_idx)
-    @assert llvm_func_idx[] != -1
-    @assert llvm_specfunc_idx[] != -1
+        if ci !== nothing
+            # get the function index
+            llvm_func_idx = Ref{Int32}(-1)
+            llvm_specfunc_idx = Ref{Int32}(-1)
+            ccall(:jl_get_function_id, Nothing,
+                (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
+                native_code, ci, llvm_func_idx, llvm_specfunc_idx)
 
-    # get the top-level function)
-    llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                          (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
-    @assert llvm_func_ref != C_NULL
-    llvm_func = LLVM.Function(llvm_func_ref)
-    llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                              (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
-    @assert llvm_specfunc_ref != C_NULL
-    llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
+            # get the function
+            llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                                  (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
+            @assert llvm_func_ref != C_NULL
+            llvm_func = LLVM.Function(llvm_func_ref)
+            llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                                    (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
+            @assert llvm_specfunc_ref != C_NULL
+            llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
+
+            # NOTE: it's not safe to store raw LLVM functions here, since those may get
+            #       removed or renamed during optimization, so we store their name instead.
+            compiled[mi] = (; ci, func=LLVM.name(llvm_func), specfunc=LLVM.name(llvm_specfunc))
+        end
+    end
 
     # configure the module
     triple!(llvm_mod, llvm_triple(job.target))
@@ -371,5 +384,5 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         datalayout!(llvm_mod, julia_datalayout(job.target))
     end
 
-    return llvm_specfunc, llvm_mod
+    return llvm_mod, compiled
 end
