@@ -5,60 +5,6 @@ include("definitions/native.jl")
 ############################################################################################
 
 @testset "Compilation" begin
-    kernel() = nothing
-
-    output, meta = native_code_execution(kernel, (); validate=false)
-    @test occursin("kernel", meta.entry)
-    @test isempty(meta.undefined_fns)
-    @test isempty(meta.undefined_gbls)
-
-    @testset "Undefined functions" begin
-        function undef_fn()
-            ccall("extern somefunc", llvmcall, Cvoid, ())
-            nothing
-        end
-
-        output, meta = native_code_execution(undef_fn, (); validate=false)
-        @test length(meta.undefined_fns) == 1
-        @test meta.undefined_fns[1] == "somefunc"
-    end
-
-    @testset "Undefined globals" begin
-        @generated function makegbl(::Val{name}, ::Type{T}, ::Val{isext}) where {name,T,isext}
-            JuliaContext() do ctx
-                T_gbl = convert(LLVMType, T, ctx)
-                T_ptr = convert(LLVMType, Ptr{T}, ctx)
-                llvm_f, _ = create_function(T_ptr)
-                mod = LLVM.parent(llvm_f)
-                gvar = GlobalVariable(mod, T_gbl, string(name))
-                isext && extinit!(gvar, true)
-                Builder(ctx) do builder
-                    entry = BasicBlock(llvm_f, "entry", ctx)
-                    position!(builder, entry)
-                    result = ptrtoint!(builder, gvar, T_ptr)
-                    ret!(builder, result)
-                end
-                call_function(llvm_f, Ptr{T})
-            end
-        end
-        function undef_gbl()
-            ext_ptr = makegbl(Val(:someglobal), Int64, Val(true))
-            Base.unsafe_store!(ext_ptr, 1)
-            ptr = makegbl(Val(:otherglobal), Float32, Val(false))
-            Base.unsafe_store!(ptr, 2f0)
-            nothing
-        end
-
-        output, meta = native_code_execution(undef_gbl, ())
-        @test length(meta.undefined_gbls) == 2
-        @test meta.undefined_gbls[1].name == "someglobal"
-        @test eltype(meta.undefined_gbls[1].type) isa LLVM.IntegerType
-        @test meta.undefined_gbls[1].external
-        @test meta.undefined_gbls[2].name == "otherglobal"
-        @test eltype(meta.undefined_gbls[2].type) isa LLVM.LLVMFloat
-        @test !meta.undefined_gbls[2].external
-    end
-
     @testset "Callable structs" begin
         struct MyCallable end
         (::MyCallable)(a, b) = a+b
@@ -66,7 +12,6 @@ include("definitions/native.jl")
         (CI, rt) = native_code_typed(MyCallable(), (Int, Int), kernel=false)[1]
         @test CI.slottypes[1] == Core.Compiler.Const(MyCallable())
     end
-
 
     @testset "Compilation database" begin
         function sqexp(x::Float64)
