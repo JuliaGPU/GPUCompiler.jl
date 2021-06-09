@@ -7,11 +7,15 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         global current_job
         current_job = job
 
+        add!(pm, ModulePass("ExternalizeJuliaGlobals",
+                            externalize_julia_globals!))
         global_optimizer!(pm)
 
         add!(pm, ModulePass("ResolveCPUReferences", resolve_cpu_references!))
 
         global_dce!(pm)
+        add!(pm, ModulePass("InternalizeJuliaGlobals",
+                            internalize_julia_globals!))
         strip_dead_prototypes!(pm)
 
         run!(pm, mod)
