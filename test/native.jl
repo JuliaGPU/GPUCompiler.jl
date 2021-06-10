@@ -30,6 +30,22 @@ include("definitions/native.jl")
         @test length(other_mis) == 1
         @test only(other_mis).def in methods(Base.exp)
     end
+
+    @testset "Advanced database" begin
+        foo(x) = sum(exp(fill(x, 10, 10)))
+
+        job, _ = native_job(foo, (Float64,))
+        # shouldn't segfault
+        ir, meta = GPUCompiler.compile(:llvm, job)
+
+        meth = only(methods(foo, (Float64,)))
+
+        mis = filter(mi->mi.def == meth, keys(meta.compiled))
+        @test length(mis) == 1
+
+        expfloat = filter(mi->(mi.def in methods(Base.exp) && length(mi.sparam_vals) > 0 && all(x->x == Float64, mi.sparam_vals)), keys(meta.compiled))
+        @test length(expfloat) == 1
+    end
 end
 
 ############################################################################################

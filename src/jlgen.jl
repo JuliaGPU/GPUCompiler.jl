@@ -379,18 +379,28 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
                 native_code, ci, llvm_func_idx, llvm_specfunc_idx)
 
             # get the function
-            llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                                  (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
-            @assert llvm_func_ref != C_NULL
-            llvm_func = LLVM.Function(llvm_func_ref)
-            llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                                    (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
-            @assert llvm_specfunc_ref != C_NULL
-            llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
+            llvm_func = if llvm_func_idx[] != -1
+                llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                                      (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
+                @assert llvm_func_ref != C_NULL
+                LLVM.name(LLVM.Function(llvm_func_ref))
+            else
+                nothing
+            end
+
+
+            llvm_specfunc = if llvm_specfunc_idx[] != -1
+                llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                                        (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
+                @assert llvm_specfunc_ref != C_NULL
+                LLVM.name(LLVM.Function(llvm_specfunc_ref))
+            else
+                nothing
+            end
 
             # NOTE: it's not safe to store raw LLVM functions here, since those may get
             #       removed or renamed during optimization, so we store their name instead.
-            compiled[mi] = (; ci, func=LLVM.name(llvm_func), specfunc=LLVM.name(llvm_specfunc))
+            compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
         end
     end
 
