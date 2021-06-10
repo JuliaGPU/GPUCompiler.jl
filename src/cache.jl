@@ -8,7 +8,6 @@ using Base: _methods_by_ftype
 #
 # we also increment a global specialization counter and pass it along to index the cache.
 
-const specialization_counter = Ref{UInt}(0)
 @generated function specialization_id(job::CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}) where {f,tt}
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
@@ -18,14 +17,13 @@ const specialization_counter = Ref{UInt}(0)
     length(mthds) == 1 || return (:(throw(MethodError(job.source.f,job.source.tt))))
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
-    ci = retrieve_code_info(mi)
-    @assert isa(ci, CodeInfo)
+    ci = retrieve_code_info(mi)::CodeInfo
 
     # generate a unique id to represent this specialization
-    # TODO: should we make this the world age of the method instance?
-    id = (specialization_counter[] += 1)
-    # TODO: save the mi/ci here (or embed it in the AST to pass to the compiler)
-    #       and use that to drive compilation
+    # TODO: just use the lower world age bound in which this code info is valid.
+    #       (the method instance doesn't change when called functions are changed).
+    #       but how to get that? the ci here always has min/max world 1/-1.
+    id = objectid(ci)
 
     # prepare a new code info
     new_ci = copy(ci)

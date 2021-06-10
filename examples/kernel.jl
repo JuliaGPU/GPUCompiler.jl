@@ -16,8 +16,7 @@ end
 struct TestCompilerParams <: AbstractCompilerParams end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
 
-
-function kernel() end
+kernel() = nothing
 
 function main()
     source = FunctionSpec(kernel)
