@@ -18,7 +18,7 @@ GPUCompiler.enable_timings()
 
 Base.libllvm_version < v"12" && include("native.jl")    # TODO(vchuravy): wrap ORCv2
 include("ptx.jl")
-Base.libllvm_version < v"12" && include("spirv.jl")     # TODO(maleadt): rebuild SPIRV tools
+include("spirv.jl")
 include("gcn.jl")
 include("bpf.jl")
 include("examples.jl")
