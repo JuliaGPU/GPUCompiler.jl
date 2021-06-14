@@ -337,6 +337,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         end
         lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     else
+        _cache[] = cache
+        _method_instances[] = method_instances
         lookup_cb = @cfunction(_lookup_fun, Any, (Any, UInt, UInt))
     end
 
