@@ -23,6 +23,22 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     maxregs::Union{Nothing,Int} = nothing
 end
 
+function Base.hash(target::PTXCompilerTarget, h::UInt)
+    h = hash(target.cap, h)
+    h = hash(target.ptx, h)
+
+    h = hash(target.debuginfo, h)
+    h = hash(target.unreachable, h)
+    h = hash(target.exitable, h)
+
+    h = hash(target.minthreads, h)
+    h = hash(target.maxthreads, h)
+    h = hash(target.blocks_per_sm, h)
+    h = hash(target.maxregs, h)
+
+    h
+end
+
 source_code(target::PTXCompilerTarget) = "ptx"
 
 llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
