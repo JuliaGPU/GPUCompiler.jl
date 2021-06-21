@@ -67,6 +67,16 @@ struct FunctionSpec{F,TT}
     world_age::UInt
 end
 
+
+function Base.hash(spec::FunctionSpec, h::UInt)
+    h = hash(spec.f, h)
+    h = hash(spec.tt, h)
+    h = hash(spec.kernel, h)
+    h = hash(spec.name, h)
+    h = hash(spec.world_age, h)
+    h
+end
+
 # put the function and argument types in typevars
 # so that we can access it from generated functions
 # XXX: the default value of 0xffffffffffffffff is a hack, because we don't properly perform
@@ -119,6 +129,13 @@ Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
+end
+
+function Base.hash(job::CompilerJob, h::UInt)
+    h = hash(job.target, h)
+    h = hash(job.source, h)
+    h = hash(job.params, h)
+    h
 end
 
 
