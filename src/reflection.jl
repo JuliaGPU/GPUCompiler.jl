@@ -53,6 +53,9 @@ function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kw
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         descend_code_typed = getfield(mod, :descend_code_typed)
         descend_code_typed(job.source.f, job.source.tt; kwargs...)
+    elseif VERSION >= v"1.7-"
+        interp = get_interpreter(job)
+        InteractiveUtils.code_typed(job.source.f, job.source.tt; interp, kwargs...)
     else
         InteractiveUtils.code_typed(job.source.f, job.source.tt; kwargs...)
     end
@@ -67,6 +70,9 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         descend_code_warntype = getfield(mod, :descend_code_warntype)
         descend_code_warntype(job.source.f, job.source.tt; kwargs...)
+    elseif VERSION >= v"1.7-"
+        interp = get_interpreter(job)
+        InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; interp, kwargs...)
     else
         InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; kwargs...)
     end
