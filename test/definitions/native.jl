@@ -7,6 +7,17 @@ end
 
 # create a native test compiler, and generate reflection methods for it
 
+NativeCompilerJob = CompilerJob{NativeCompilerTarget,TestCompilerParams}
+
+# local method table for device functions
+@static if isdefined(Base.Experimental, Symbol("@overlay"))
+Base.Experimental.@MethodTable(method_table)
+else
+const method_table = nothing
+end
+
+GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = method_table
+
 function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false, kwargs...)
     source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
     target = NativeCompilerTarget(always_inline=true)
