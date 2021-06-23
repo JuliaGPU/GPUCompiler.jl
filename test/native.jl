@@ -279,7 +279,7 @@ end
     end
 end
 
-@testset "LazyCodegen" begin
+Base.libllvm_version < v"12" && @testset "LazyCodegen" begin
     import .LazyCodegen: call_delayed
 
     global flag = Ref(false) # otherwise f is a closure and we can't

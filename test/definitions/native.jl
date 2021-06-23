@@ -49,7 +49,7 @@ function native_code_execution(@nospecialize(func), @nospecialize(types); kwargs
     GPUCompiler.compile(:asm, job; kwargs...)
 end
 
-module LazyCodegen
+@static Base.libllvm_version < v"12" && module LazyCodegen
     using LLVM
     using LLVM.Interop
     using GPUCompiler
