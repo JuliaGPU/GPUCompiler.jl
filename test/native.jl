@@ -43,7 +43,9 @@ include("definitions/native.jl")
         mis = filter(mi->mi.def == meth, keys(meta.compiled))
         @test length(mis) == 1
 
-        expfloat = filter(mi->(mi.def in methods(Base.exp) && length(mi.sparam_vals) > 0 && all(x->x == Float64, mi.sparam_vals)), keys(meta.compiled))
+        expfloat = filter(keys(meta.compiled)) do mi
+            mi.def in methods(Base.exp) && mi.specTypes == Tuple{typeof(Base.exp), Float64}
+        end
         @test length(expfloat) == 1
     end
 end
@@ -279,7 +281,7 @@ end
     end
 end
 
-@testset "LazyCodegen" begin
+Base.libllvm_version < v"12" && @testset "LazyCodegen" begin
     import .LazyCodegen: call_delayed
 
     global flag = Ref(false) # otherwise f is a closure and we can't
@@ -318,7 +320,7 @@ end
 
     # Test ABI removal
     ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
-    @test !occursin(r"alloca", ir)
+    @test !occursin("alloca", ir)
 
     ghostly_identity(x, y) = y
     @test call_delayed(ghostly_identity, nothing, 1) == 1
@@ -327,6 +329,33 @@ end
     @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
 end
 
+end
+
+############################################################################################
+
+@testset "overrides" begin
+    # NOTE: method overrides do not support redefinitions, so we use different kernels
+
+    mod = @eval module $(gensym())
+        kernel() = child()
+        child() = 0
+    end
+
+    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}))
+    @test occursin("ret i64 0", ir)
+
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..method_table
+
+        kernel() = child()
+        child() = 0
+
+        GPUCompiler.@override method_table child() = 1
+    end
+
+    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}))
+    @test occursin("ret i64 1", ir)
 end
 
 ############################################################################################

@@ -16,7 +16,7 @@ GPUCompiler.reset_runtime()
 
 GPUCompiler.enable_timings()
 
-Base.libllvm_version < v"12" && include("native.jl")    # TODO(vchuravy): wrap ORCv2
+include("native.jl")
 include("ptx.jl")
 include("spirv.jl")
 include("gcn.jl")
