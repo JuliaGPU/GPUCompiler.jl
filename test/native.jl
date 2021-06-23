@@ -43,7 +43,9 @@ include("definitions/native.jl")
         mis = filter(mi->mi.def == meth, keys(meta.compiled))
         @test length(mis) == 1
 
-        expfloat = filter(mi->(mi.def in methods(Base.exp) && length(mi.sparam_vals) > 0 && all(x->x == Float64, mi.sparam_vals)), keys(meta.compiled))
+        expfloat = filter(keys(meta.compiled)) do mi
+            mi.def in methods(Base.exp) && mi.specTypes == Tuple{typeof(Base.exp), Float64}
+        end
         @test length(expfloat) == 1
     end
 end
