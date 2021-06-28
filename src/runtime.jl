@@ -127,7 +127,7 @@ end
 compile(gc_pool_alloc, Any, (Csize_t,), T_prjlvalue)
 
 # expected functions for GC support
-compile(:malloc, Ptr{Nothing}, (Csize_t,))
+compile(:malloc, Core.LLVMPtr{Cvoid, 0}, (Csize_t,))
 
 
 ## boxing and unboxing
