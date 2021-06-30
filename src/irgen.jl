@@ -10,7 +10,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     @timeit_debug to "clean-up" begin
         for llvmf in functions(mod)
             # only occurs in debug builds
-            delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0, ctx))
+            delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0; ctx))
 
             if Sys.iswindows()
                 personality!(llvmf, nothing)
@@ -254,7 +254,7 @@ function emit_exception!(builder, name, inst)
     # report each frame
     if Base.JLOptions().debug_level >= 2
         rt = Runtime.get(:report_exception_frame)
-        ft = convert(LLVM.FunctionType, rt, ctx)
+        ft = convert(LLVM.FunctionType, rt; ctx)
         bt = backtrace(inst)
         for (i,frame) in enumerate(bt)
             idx = ConstantInt(parameters(ft)[1], i)
@@ -376,7 +376,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f:
         typ = if arg.cc == BITS_REF
             eltype(arg.codegen.typ)
         else
-            convert(LLVMType, arg.typ, ctx)
+            convert(LLVMType, arg.typ; ctx)
         end
         push!(wrapper_types, typ)
     end
@@ -387,7 +387,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f:
 
     # emit IR performing the "conversions"
     let builder = Builder(ctx)
-        entry = BasicBlock(wrapper_f, "entry", ctx)
+        entry = BasicBlock(wrapper_f, "entry"; ctx)
         position!(builder, entry)
 
         wrapper_args = Vector{LLVM.Value}()
@@ -418,7 +418,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f:
     end
 
     # early-inline the original entry function into the wrapper
-    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, ctx))
+    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0; ctx))
     linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
 
     # copy debug info

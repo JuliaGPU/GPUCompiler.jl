@@ -18,9 +18,8 @@ function llvm_machine(target::GCNCompilerTarget)
 
     cpu = target.dev_isa
     feat = target.features
-    optlevel = LLVM.API.LLVMCodeGenLevelDefault
     reloc = LLVM.API.LLVMRelocPIC
-    tm = TargetMachine(t, triple, cpu, feat, optlevel, reloc)
+    tm = TargetMachine(t, triple, cpu, feat; reloc)
     asm_verbosity!(tm, true)
 
     return tm
@@ -188,7 +187,7 @@ function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
         # this, the target will only attempt to do a "masked branch", which
         # only works on vector instructions (trap is a scalar instruction, and
         # therefore it is executed even when EXEC==0).
-        rl_val = call!(builder, rl, [ConstantInt(Int32(32), ctx)])
+        rl_val = call!(builder, rl, [ConstantInt(Int32(32); ctx)])
         rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(ctx)))
         store!(builder, rl_val, rl_bc)
     end

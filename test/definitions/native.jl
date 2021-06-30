@@ -155,8 +155,8 @@ end
         after = :(ret)
 
         # Note this follows: emit_call_specfun_other
-        LLVM.Interop.JuliaContext() do ctx
-            T_jlvalue = LLVM.StructType(LLVMType[], ctx)
+        Context() do ctx
+            T_jlvalue = LLVM.StructType(LLVMType[],;ctx)
             T_prjlvalue = LLVM.PointerType(T_jlvalue, #= AddressSpace::Tracked =# 10)
 
             for (source_i, source_typ) in enumerate(argtypes)
@@ -167,7 +167,7 @@ end
                 argexpr = :(args[$source_i])
 
                 isboxed = GPUCompiler.deserves_argbox(source_typ)
-                et = isboxed ? T_prjlvalue : convert(LLVMType, source_typ, ctx)
+                et = isboxed ? T_prjlvalue : convert(LLVMType, source_typ; ctx)
 
                 if isboxed
                     push!(ccall_types, Any)
@@ -185,7 +185,7 @@ end
                 # In theory we could set `rettype` to `T_void`, but ccall will do that for us
             # elseif jl_is_uniontype?
             elseif !GPUCompiler.deserves_retbox(rettype)
-                rt = convert(LLVMType, rettype, ctx)
+                rt = convert(LLVMType, rettype; ctx)
                 if !isa(rt, LLVM.VoidType) && GPUCompiler.deserves_sret(rettype, rt)
                     before = :(sret = Ref{$rettype}())
                     pushfirst!(argexprs, :(sret))

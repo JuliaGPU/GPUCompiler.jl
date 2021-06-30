@@ -161,10 +161,10 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     wrapper_types = LLVM.LLVMType[]
     for arg in args
         typ = if arg.cc == BITS_REF
-            st = LLVM.StructType([eltype(arg.codegen.typ)], ctx)
+            st = LLVM.StructType([eltype(arg.codegen.typ)]; ctx)
             LLVM.PointerType(st, addrspace(arg.codegen.typ))
         else
-            convert(LLVMType, arg.typ, ctx)
+            convert(LLVMType, arg.typ; ctx)
         end
         push!(wrapper_types, typ)
     end
@@ -175,7 +175,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
 
     # emit IR performing the "conversions"
     let builder = Builder(ctx)
-        entry = BasicBlock(wrapper_f, "entry", ctx)
+        entry = BasicBlock(wrapper_f, "entry"; ctx)
         position!(builder, entry)
 
         wrapper_args = Vector{LLVM.Value}()
@@ -185,7 +185,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
             param = parameters(wrapper_f)[arg.codegen.i]
             attrs = parameter_attributes(wrapper_f, arg.codegen.i)
             if arg.cc == BITS_REF
-                push!(attrs, EnumAttribute("byval", 0, ctx))
+                push!(attrs, EnumAttribute("byval", 0; ctx))
                 ptr = struct_gep!(builder, param, 0)
                 push!(wrapper_args, ptr)
             else
@@ -204,8 +204,8 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
     end
 
     # early-inline the original entry function into the wrapper
-    delete!(function_attributes(entry_f), EnumAttribute("noinline", 0, ctx))
-    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0, ctx))
+    delete!(function_attributes(entry_f), EnumAttribute("noinline", 0; ctx))
+    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0; ctx))
     linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
 
     ModulePassManager() do pm

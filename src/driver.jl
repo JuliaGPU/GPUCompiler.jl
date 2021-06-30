@@ -155,7 +155,7 @@ const __llvm_initialized = Ref(false)
     # always preload the runtime, and do so early; it cannot be part of any timing block
     # because it recurses into the compiler
     if libraries
-        runtime = load_runtime(job, ctx)
+        runtime = load_runtime(job; ctx)
         if haskey(globals(runtime), "llvm.used")
             # the runtime shouldn't link-in stuff that gets preserved in the output. this is
             # a hack to get rid of the device function slots emitted by the PTX back-end,
@@ -274,7 +274,7 @@ const __llvm_initialized = Ref(false)
                 dyn_entry = functions(ir)[dyn_entry_fn]
 
                 # insert a pointer to the function everywhere the entry is used
-                T_ptr = convert(LLVMType, Ptr{Cvoid}, ctx)
+                T_ptr = convert(LLVMType, Ptr{Cvoid}; ctx)
                 for call in worklist[dyn_job]
                     Builder(ctx) do builder
                         position!(builder, call)

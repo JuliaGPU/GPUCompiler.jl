@@ -33,15 +33,15 @@ struct RuntimeMethodInstance
     llvm_name::String
 end
 
-function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance, ctx::LLVM.Context)
+function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance; ctx::LLVM.Context)
     types = if rt.llvm_types === nothing
-        LLVMType[convert(LLVMType, typ, ctx; allow_boxed=true) for typ in rt.types]
+        LLVMType[convert(LLVMType, typ; ctx, allow_boxed=true) for typ in rt.types]
     else
         rt.llvm_types(ctx)
     end
 
     return_type = if rt.llvm_return_type === nothing
-        convert(LLVMType, rt.return_type, ctx; allow_boxed=true)
+        convert(LLVMType, rt.return_type; ctx, allow_boxed=true)
     else
         rt.llvm_return_type(ctx)
     end
@@ -113,7 +113,7 @@ compile(:report_exception_name, Nothing, (Ptr{Cchar},))
 ## GC
 
 # FIXME: get rid of this and allow boxed types
-T_prjlvalue(ctx) = convert(LLVMType, Any, ctx; allow_boxed=true)
+T_prjlvalue(ctx) = convert(LLVMType, Any; ctx, allow_boxed=true)
 
 function gc_pool_alloc(sz::Csize_t)
     ptr = malloc(sz)
@@ -139,11 +139,11 @@ const gc_bits = 0x3 # FIXME
 
 # get the type tag of a type at run-time
 @generated function type_tag(::Val{type_name}) where type_name
-    JuliaContext() do ctx
-        T_tag = convert(LLVMType, tag_type, ctx)
+    Context() do ctx
+        T_tag = convert(LLVMType, tag_type; ctx)
         T_ptag = LLVM.PointerType(T_tag)
 
-        T_pjlvalue = convert(LLVMType, Any, ctx; allow_boxed=true)
+        T_pjlvalue = convert(LLVMType, Any; ctx, allow_boxed=true)
 
         # create function
         llvm_f, _ = create_function(T_tag)
@@ -155,7 +155,7 @@ const gc_bits = 0x3 # FIXME
 
         # generate IR
         Builder(ctx) do builder
-            entry = BasicBlock(llvm_f, "entry", ctx)
+            entry = BasicBlock(llvm_f, "entry"; ctx)
             position!(builder, entry)
 
             typ_var = bitcast!(builder, typ, T_ptag)

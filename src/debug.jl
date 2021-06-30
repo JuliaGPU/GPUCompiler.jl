@@ -6,18 +6,20 @@
 # sites of the containing function. if there's only one, repeat the process from that call.
 # finally, the debug information is converted to a Julia stack trace.
 function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
-    name = Ref{Cstring}()
-    filename = Ref{Cstring}()
-    line = Ref{Cuint}()
-    col = Ref{Cuint}()
-
     # look up the debug information from the current instruction
-    depth = 0
-    while LLVM.API.LLVMGetSourceLocation(inst, depth, name, filename, line, col) == 1
-        frame = StackTraces.StackFrame(replace(unsafe_string(name[]), r";$"=>""),
-                                       unsafe_string(filename[]), line[])
-        push!(bt, frame)
-        depth += 1
+    if haskey(metadata(inst), LLVM.MD_dbg)
+        loc = metadata(inst)[LLVM.MD_dbg]
+        while loc !== nothing
+            scope = LLVM.scope(loc)
+            if scope !== nothing
+                name = replace(LLVM.name(scope), r";$"=>"")
+                file = LLVM.file(scope)
+                path = joinpath(LLVM.directory(file), LLVM.filename(file))
+                line = LLVM.line(loc)
+                push!(bt, StackTraces.StackFrame(name, path, line))
+            end
+            loc = LLVM.inlined_at(loc)
+        end
     end
 
     # move up the call chain
