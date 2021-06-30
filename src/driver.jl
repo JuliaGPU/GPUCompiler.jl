@@ -219,8 +219,12 @@ const __llvm_initialized = Ref(false)
                 internalize!(pm, exports)
 
                 # eliminate all unused internal functions
+                add!(pm, ModulePass("ExternalizeJuliaGlobals",
+                                    externalize_julia_globals!))
                 global_optimizer!(pm)
                 global_dce!(pm)
+                add!(pm, ModulePass("InternalizeJuliaGlobals",
+                                    internalize_julia_globals!))
                 strip_dead_prototypes!(pm)
 
                 # merge constants (such as exception messages) from the runtime
@@ -307,6 +311,39 @@ const __llvm_initialized = Ref(false)
     end
 
     return ir, (; entry, compiled)
+end
+
+# Protect null globals from being killed and inlined
+function externalize_julia_globals!(mod::LLVM.Module)
+    changed = false
+    for gbl in LLVM.globals(mod)
+        if LLVM.linkage(gbl) == LLVM.API.LLVMInternalLinkage &&
+           typeof(LLVM.initializer(gbl)) <: LLVM.PointerNull &&
+           (startswith(LLVM.name(gbl), "jl_global") ||
+            startswith(LLVM.name(gbl), "jl_sym"))
+            LLVM.linkage!(gbl, LLVM.API.LLVMExternalLinkage)
+            LLVM.initializer!(gbl, nothing)
+            LLVM.extinit!(gbl, true)
+            changed = true
+        end
+    end
+    changed
+end
+# And reset the back later
+function internalize_julia_globals!(mod::LLVM.Module)
+    changed = false
+    for gbl in LLVM.globals(mod)
+        if LLVM.linkage(gbl) == LLVM.API.LLVMExternalLinkage &&
+           LLVM.initializer(gbl) === nothing &&
+           (startswith(LLVM.name(gbl), "jl_global") ||
+            startswith(LLVM.name(gbl), "jl_sym"))
+            LLVM.extinit!(gbl, false)
+            LLVM.initializer!(gbl, null(eltype(llvmtype(gbl))))
+            LLVM.linkage!(gbl, LLVM.API.LLVMInternalLinkage)
+            changed = true
+        end
+    end
+    changed
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
