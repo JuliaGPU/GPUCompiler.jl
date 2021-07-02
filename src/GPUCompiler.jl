@@ -7,7 +7,7 @@ using DataStructures
 
 using TimerOutputs
 
-using ExprTools
+using ExprTools: splitdef, combinedef
 
 using Libdl
 
