@@ -60,77 +60,174 @@ function native_code_execution(@nospecialize(func), @nospecialize(types); kwargs
     GPUCompiler.compile(:asm, job; kwargs...)
 end
 
-@static Base.libllvm_version < v"12" && module LazyCodegen
+module LazyCodegen
     using LLVM
     using LLVM.Interop
     using GPUCompiler
 
     import ..native_job
 
-    # We have one global JIT and TM
-    const jit = Ref{LLVM.OrcJIT}()
-    const tm  = Ref{LLVM.TargetMachine}()
+    @static if Base.libllvm_version < v"12"
+        # We have one global JIT and TM
+        const jit = Ref{LLVM.OrcJIT}()
+        const tm  = Ref{LLVM.TargetMachine}()
 
-    function __init__()
-        optlevel = LLVM.API.LLVMCodeGenLevelDefault
+        function __init__()
+            optlevel = LLVM.API.LLVMCodeGenLevelDefault
 
-        tm[] = GPUCompiler.JITTargetMachine(optlevel=optlevel)
-        LLVM.asm_verbosity!(tm[], true)
+            tm[] = GPUCompiler.JITTargetMachine(optlevel=optlevel)
+            LLVM.asm_verbosity!(tm[], true)
 
-        jit[] = LLVM.OrcJIT(tm[]) # takes ownership of tm
-        atexit() do
-            dispose(jit[])
+            jit[] = LLVM.OrcJIT(tm[]) # takes ownership of tm
+            atexit() do
+                dispose(jit[])
+            end
+        end
+
+        import GPUCompiler: deferred_codegen_jobs, CompilerJob
+        mutable struct CallbackContext
+            job::CompilerJob
+            stub::String
+            compiled::Bool
+        end
+
+        const outstanding = IdDict{CallbackContext, Nothing}()
+
+        # Setup the lazy callback for creating a module
+        function callback(orc_ref::LLVM.API.LLVMOrcJITStackRef, callback_ctx::Ptr{Cvoid})
+            orc = LLVM.OrcJIT(orc_ref)
+            cc = Base.unsafe_pointer_to_objref(callback_ctx)::CallbackContext
+
+            @assert !cc.compiled
+            job = cc.job
+
+            ir, meta = GPUCompiler.codegen(:llvm, job; validate=false)
+            entry_name = name(meta.entry)
+
+            jitted_mod = compile!(orc, ir)
+
+            addr = addressin(orc, jitted_mod, entry_name)
+            ptr  = pointer(addr)
+
+            cc.compiled = true
+            delete!(outstanding, cc)
+
+            # 4. Update the stub pointer to point to the recently compiled module
+            set_stub!(orc, cc.stub, ptr)
+
+            # 5. Return the address of the implementation, since we are going to call it now
+            return UInt64(reinterpret(UInt, ptr))
+        end
+
+        function get_trampoline(job)
+            cc = CallbackContext(job, String(gensym(:trampoline)), false)
+            outstanding[cc] = nothing
+
+            c_callback = @cfunction(callback, UInt64, (LLVM.API.LLVMOrcJITStackRef, Ptr{Cvoid}))
+
+            orc = jit[]
+            initial_addr = callback!(orc, c_callback, pointer_from_objref(cc))
+            create_stub!(orc, cc.stub, initial_addr)
+            return address(orc, cc.stub)
+        end
+    else # LLVM >=12
+
+        struct CompilerInstance
+            jit::LLVM.LLJIT
+            lctm::LLVM.LazyCallThroughManager
+            ism::LLVM.IndirectStubsManager
+        end
+        const jit = Ref{CompilerInstance}()
+
+        function __init__()
+            optlevel = LLVM.API.LLVMCodeGenLevelDefault
+            tm = GPUCompiler.JITTargetMachine(optlevel=optlevel)
+            LLVM.asm_verbosity!(tm, true)
+
+            lljit = LLJIT(;tm)
+
+            jd_main = JITDylib(lljit)
+
+            prefix = LLVM.get_prefix(lljit)
+            dg = LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix)
+            add!(jd_main, dg)
+
+            es = ExecutionSession(lljit)
+
+            lctm = LLVM.LocalLazyCallThroughManager(triple(lljit), es)
+            ism = LLVM.LocalIndirectStubsManager(triple(lljit))
+
+            jit[] = CompilerInstance(lljit, lctm, ism)
+            atexit() do
+                ci = jit[]
+                dispose(ci.ism)
+                dispose(ci.lctm)
+                dispose(ci.jit)
+            end
+        end
+
+        function get_trampoline(job)
+            compiler = jit[]
+            lljit = compiler.jit
+            lctm  = compiler.lctm
+            ism   = compiler.ism
+
+            # We could also use one dylib per job
+            jd = JITDylib(lljit)
+
+            entry_sym = String(gensym(:entry))
+            target_sym = String(gensym(:target))
+            flags = LLVM.API.LLVMJITSymbolFlags(
+                LLVM.API.LLVMJITSymbolGenericFlagsCallable |
+                LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
+            entry = LLVM.API.LLVMOrcCSymbolAliasMapPair(
+                mangle(lljit, entry_sym),
+                LLVM.API.LLVMOrcCSymbolAliasMapEntry(
+                    mangle(lljit, target_sym), flags))
+
+            mu = LLVM.reexports(lctm, ism, jd, Ref(entry))
+            LLVM.define(jd, mu)
+
+            # 2. Lookup address of entry symbol
+            addr = lookup(lljit, entry_sym)
+
+            # 3. add MU that will call back into the compiler
+            sym = LLVM.API.LLVMOrcCSymbolFlagsMapPair(mangle(lljit, target_sym), flags)
+
+            function materialize(mr)
+                ir, meta = GPUCompiler.codegen(:llvm, job; validate=false)
+
+                # Rename entry to match target_sym
+                LLVM.name!(meta.entry, target_sym)
+
+                # So 1. serialize the module
+                buf = convert(MemoryBuffer, ir)
+
+                # 2. deserialize and wrap by a ThreadSafeModule
+                ctx = ThreadSafeContext()
+                mod = parse(LLVM.Module, buf; ctx=context(ctx))
+                tsm = ThreadSafeModule(mod; ctx)
+
+                il = LLVM.IRTransformLayer(lljit)
+                LLVM.emit(il, mr, tsm)
+
+                return nothing
+            end
+
+            function discard(jd, sym)
+            end
+
+            mu = LLVM.CustomMaterializationUnit(entry_sym, Ref(sym), materialize, discard)
+            LLVM.define(jd, mu)
+            return addr
         end
     end
 
-    import GPUCompiler: deferred_codegen_jobs, CompilerJob
-    mutable struct CallbackContext
-        job::CompilerJob
-        stub::String
-        compiled::Bool
-    end
-
-    const outstanding = IdDict{CallbackContext, Nothing}()
-
-    # Setup the lazy callback for creating a module
-    function callback(orc_ref::LLVM.API.LLVMOrcJITStackRef, callback_ctx::Ptr{Cvoid})
-        orc = LLVM.OrcJIT(orc_ref)
-        cc = Base.unsafe_pointer_to_objref(callback_ctx)::CallbackContext
-
-        @assert !cc.compiled
-        job = cc.job
-
-        ir, meta = GPUCompiler.codegen(:llvm, job; validate=false)
-        entry_name = name(meta.entry)
-
-        jitted_mod = compile!(orc, ir)
-
-        addr = addressin(orc, jitted_mod, entry_name)
-        ptr  = pointer(addr)
-
-        cc.compiled = true
-        delete!(outstanding, cc)
-
-        # 4. Update the stub pointer to point to the recently compiled module
-        set_stub!(orc, cc.stub, ptr)
-
-        # 5. Return the address of the implementation, since we are going to call it now
-        return UInt64(reinterpret(UInt, ptr))
-    end
-
-
+    import GPUCompiler: deferred_codegen_jobs
     @generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
         job, _ = native_job(f, tt)
 
-        cc = CallbackContext(job, String(gensym(:trampoline)), false)
-        outstanding[cc] = nothing
-
-        c_callback = @cfunction(callback, UInt64, (LLVM.API.LLVMOrcJITStackRef, Ptr{Cvoid}))
-
-        orc = jit[]
-        initial_addr = callback!(orc, c_callback, pointer_from_objref(cc))
-        create_stub!(orc, cc.stub, initial_addr)
-        addr = address(orc, cc.stub)
+        addr = get_trampoline(job)
         trampoline = pointer(addr)
         id = Base.reinterpret(Int, trampoline)
 
