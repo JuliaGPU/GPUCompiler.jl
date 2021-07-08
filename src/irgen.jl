@@ -324,8 +324,26 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Fun
     return args
 end
 
-function is_immutable_datatype(T::Type)
-    isa(T,DataType) && !T.mutable
+if VERSION >= v"1.7.0-DEV.204"
+    function is_immutable_datatype(T::Type)
+        isa(T,DataType) && !Base.ismutabletype(T)
+    end
+else
+    function is_immutable_datatype(T::Type)
+        isa(T,DataType) && !T.mutable
+    end
+end
+
+if VERSION >= v"1.7.0-DEV.204"
+    function is_inlinealloc(T::Type)
+        mayinlinealloc = (T.name.flags >> 2) & 1 == true
+        # FIXME: To simple
+        return mayinlinealloc
+    end
+else
+    function is_inlinealloc(T::Type)
+        return T.isinlinealloc
+    end
 end
 
 function is_concrete_immutable(T::Type)
@@ -343,7 +361,7 @@ function deserves_stack(@nospecialize(T))
     if !is_concrete_immutable(T)
         return false
     end
-    return T.isinlinealloc
+    return is_inlinealloc(T)
 end
 
 deserves_argbox(T) = !deserves_stack(T)
