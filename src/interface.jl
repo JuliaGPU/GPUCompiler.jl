@@ -176,7 +176,7 @@ function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         args = classify_arguments(job, entry)
         for arg in args
             if arg.cc == BITS_REF
-                push!(parameter_attributes(entry, arg.codegen.i), EnumAttribute("byval", 0, ctx))
+                push!(parameter_attributes(entry, arg.codegen.i), EnumAttribute("byval", 0; ctx))
             end
         end
     end

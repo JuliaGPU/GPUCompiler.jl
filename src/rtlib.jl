@@ -39,7 +39,7 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         f = functions(mod)[rt.llvm_name]
         ft = eltype(llvmtype(f))
     else
-        ft = convert(LLVM.FunctionType, rt, ctx)
+        ft = convert(LLVM.FunctionType, rt; ctx)
         f = LLVM.Function(mod, rt.llvm_name, ft)
     end
 
@@ -68,7 +68,7 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     new_mod, meta = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
                             optimize=false, libraries=false)
     ft = eltype(llvmtype(meta.entry))
-    expected_ft = convert(LLVM.FunctionType, method, context(new_mod))
+    expected_ft = convert(LLVM.FunctionType, method; ctx=context(new_mod))
     if return_type(ft) != return_type(expected_ft)
         error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
     end
@@ -84,7 +84,7 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     #        but there's no API yet to pass a context to codegen.
     # round-trip the module through serialization to get it in the proper context.
     buf = convert(MemoryBuffer, new_mod)
-    new_mod = parse(LLVM.Module, buf, context(mod))
+    new_mod = parse(LLVM.Module, buf; ctx=context(mod))
     @assert context(mod) == context(new_mod)
     link!(mod, new_mod)
     entry = functions(mod)[temp_name]
@@ -101,8 +101,8 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     LLVM.name!(entry, name)
 end
 
-function build_runtime(@nospecialize(job::CompilerJob), ctx)
-    mod = LLVM.Module("GPUCompiler run-time library", ctx)
+function build_runtime(@nospecialize(job::CompilerJob); ctx)
+    mod = LLVM.Module("GPUCompiler run-time library"; ctx)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
@@ -121,7 +121,7 @@ end
 
 const runtime_lock = ReentrantLock()
 
-@locked function load_runtime(@nospecialize(job::CompilerJob), ctx)
+@locked function load_runtime(@nospecialize(job::CompilerJob); ctx)
     lock(runtime_lock) do
         # find the first existing cache directory (for when dealing with layered depots)
         cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
@@ -151,7 +151,7 @@ const runtime_lock = ReentrantLock()
         lib = try
             if ispath(path)
                 open(path) do io
-                    parse(LLVM.Module, read(io), ctx)
+                    parse(LLVM.Module, read(io); ctx)
                 end
             end
         catch ex
@@ -162,7 +162,7 @@ const runtime_lock = ReentrantLock()
         if lib === nothing
             @debug "Building the GPU runtime library at $path"
             mkpath(output_dir)
-            lib = build_runtime(job, ctx)
+            lib = build_runtime(job; ctx)
 
             # atomic write to disk
             temp_path, io = mktemp(dirname(path); cleanup=false)

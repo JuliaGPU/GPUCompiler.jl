@@ -7,7 +7,7 @@ export NativeCompilerTarget
 Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
     cpu::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
     features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
-    always_inline::Bool=false # will mark the job function as always inline 
+    always_inline::Bool=false # will mark the job function as always inline
 end
 
 llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
@@ -24,8 +24,9 @@ function llvm_machine(target::NativeCompilerTarget)
 end
 
 function process_entry!(job::CompilerJob{NativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    ctx = context(mod)
     if job.target.always_inline
-        push!(function_attributes(entry), EnumAttribute("alwaysinline", 0, context(mod)))
+        push!(function_attributes(entry), EnumAttribute("alwaysinline", 0; ctx))
     end
     invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 end

@@ -103,38 +103,39 @@ function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         entry = lower_byval(job, mod, entry)
 
         # property annotations
-        annotations = LLVM.Value[entry]
+        annotations = Metadata[entry]
 
         ## kernel metadata
-        append!(annotations, [MDString("kernel"), ConstantInt(Int32(1), ctx)])
+        append!(annotations, [MDString("kernel"; ctx),
+                              ConstantInt(Int32(1); ctx)])
 
         ## expected CTA sizes
         if job.target.minthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
                 bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
-                append!(annotations, [MDString("reqntid$name"),
-                                    ConstantInt(Int32(bound), ctx)])
+                append!(annotations, [MDString("reqntid$name"; ctx),
+                                      ConstantInt(Int32(bound); ctx)])
             end
         end
         if job.target.maxthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
                 bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
-                append!(annotations, [MDString("maxntid$name"),
-                                    ConstantInt(Int32(bound), ctx)])
+                append!(annotations, [MDString("maxntid$name"; ctx),
+                                      ConstantInt(Int32(bound); ctx)])
             end
         end
 
         if job.target.blocks_per_sm !== nothing
-            append!(annotations, [MDString("minctasm"),
-                                ConstantInt(Int32(job.target.blocks_per_sm), ctx)])
+            append!(annotations, [MDString("minctasm"; ctx),
+                                  ConstantInt(Int32(job.target.blocks_per_sm); ctx)])
         end
 
         if job.target.maxregs !== nothing
-            append!(annotations, [MDString("maxnreg"),
-                                ConstantInt(Int32(job.target.maxregs), ctx)])
+            append!(annotations, [MDString("maxnreg"; ctx),
+                                  ConstantInt(Int32(job.target.maxregs); ctx)])
         end
 
-        push!(metadata(mod), "nvvm.annotations", MDNode(annotations))
+        push!(metadata(mod)["nvvm.annotations"], MDNode(annotations; ctx))
 
 
         if LLVM.version() >= v"8"
@@ -223,7 +224,7 @@ function hide_unreachable!(fun::LLVM.Function)
     # when calling a `noreturn` function, LLVM places an `unreachable` after the call.
     # this leads to an early `ret` from the function.
     attrs = function_attributes(fun)
-    delete!(attrs, EnumAttribute("noreturn", 0, ctx))
+    delete!(attrs, EnumAttribute("noreturn", 0; ctx))
 
     # build a map of basic block predecessors
     predecessors = Dict(bb => Set{LLVM.BasicBlock}() for bb in blocks(fun))

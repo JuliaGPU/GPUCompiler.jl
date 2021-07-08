@@ -88,7 +88,7 @@ function lower_gc_frame!(fun::LLVM.Function)
         alloc_obj = functions(mod)["julia.gc_alloc_obj"]
         alloc_obj_ft = eltype(llvmtype(alloc_obj))
         T_prjlvalue = return_type(alloc_obj_ft)
-        T_pjlvalue = convert(LLVMType, Any, ctx; allow_boxed=true)
+        T_pjlvalue = convert(LLVMType, Any; ctx, allow_boxed=true)
 
         for use in uses(alloc_obj)
             call = user(use)::LLVM.CallInst
