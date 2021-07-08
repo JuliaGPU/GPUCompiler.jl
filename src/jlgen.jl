@@ -49,10 +49,8 @@ function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodI
     callback(mi, max_world) = invalidate(cache, mi, max_world)
     if !isdefined(mi, :callbacks)
         mi.callbacks = Any[callback]
-    else
-        if all(cb -> cb !== callback, mi.callbacks)
-            push!(mi.callbacks, callback)
-        end
+    elseif !in(callback, mi.callbacks)
+        push!(mi.callbacks, callback)
     end
 
     cis = get!(cache.dict, mi, CodeInstance[])
@@ -60,7 +58,9 @@ function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodI
 end
 
 # invalidation (like invalidate_method_instance, but for our cache)
-function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, depth=0)
+function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, seen=Set{MethodInstance}())
+    push!(seen, replaced)
+
     cis = get(cache.dict, replaced, nothing)
     if cis === nothing
         return
@@ -79,8 +79,8 @@ function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, depth
         # Don't touch/empty backedges `invalidate_method_instance` in C will do that later
         # replaced.backedges = Any[]
 
-        for mi in backedges
-            invalidate(cache, mi, max_world, depth + 1)
+        for mi in filter(!in(seen), backedges)
+            invalidate(cache, mi, max_world, seen)
         end
     end
 end
