@@ -49,7 +49,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     mi, mi_meta = emit_julia(job)
 
     if output == :julia
-        return mi, meta
+        return mi, mi_meta
     end
 
 
