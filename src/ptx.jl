@@ -85,11 +85,29 @@ runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
        "-exitable=$(job.target.exitable)"
 
 function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
+    ctx = context(mod)
+
     # calling convention
     if LLVM.version() >= v"8"
         for f in functions(mod)
             # JuliaGPU/GPUCompiler.jl#97
             #callconv!(f, LLVM.API.LLVMPTXDeviceCallConv)
+        end
+    end
+
+    # emit the device capability and ptx isa version as constants in the module. this makes
+    # it possible to 'query' these in device code, relying on LLVM to optimize the checks
+    # away and generate static code. note that we only do so if there's actual uses of these
+    # variables; unconditionally creating a gvar would result in duplicate declarations.
+    for (name, value) in ["sm_major"  => job.target.cap.major,
+                          "sm_minor"  => job.target.cap.minor,
+                          "ptx_major" => job.target.ptx.major,
+                          "ptx_minor" => job.target.ptx.minor]
+        if haskey(globals(mod), name)
+            gv = globals(mod)[name]
+            initializer!(gv, ConstantInt(LLVM.Int32Type(ctx), value))
+            # change the linkage so that we can inline the value
+            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
         end
     end
 end
@@ -161,6 +179,10 @@ function add_lowering_passes!(@nospecialize(job::CompilerJob{PTXCompilerTarget})
 
     # even if we support `unreachable`, we still prefer `exit` to `trap`
     add!(pm, ModulePass("HideTrap", hide_trap!))
+
+    # we emit properties (of the device and ptx isa) as private global constants,
+    # so run the optimizer so that they are inlined before the rest of the optimizer runs.
+    global_optimizer!(pm)
 end
 
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
