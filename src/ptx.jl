@@ -160,12 +160,6 @@ function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             # calling convention
             callconv!(entry, LLVM.API.LLVMPTXKernelCallConv)
         end
-    else
-        # we can't look up device functions using the CUDA APIs, so alias them to a global
-        gv = GlobalVariable(mod, llvmtype(entry), LLVM.name(entry) * "_slot")
-        initializer!(gv, entry)
-        linkage!(gv, LLVM.API.LLVMLinkOnceODRLinkage)
-        set_used!(mod, gv)
     end
 
     return entry
