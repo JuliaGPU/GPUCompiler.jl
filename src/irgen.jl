@@ -26,7 +26,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     end
 
     # target-specific processing
-    process_module!(job, mod)
+    @invokelatest process_module!(job, mod)
 
     # sanitize function names
     # FIXME: Julia should do this, but apparently fails (see maleadt/LLVM.jl#201)
@@ -49,7 +49,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     if job.source.kernel
         LLVM.name!(entry, mangle_call(entry, job.source.tt))
     end
-    entry = process_entry!(job, mod, entry)
+    entry = @invokelatest process_entry!(job, mod, entry)
     compiled[method_instance] =
         (; compiled[method_instance].ci, compiled[method_instance].func,
            specfunc=LLVM.name(entry))
@@ -68,9 +68,9 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         end
         internalize!(pm, exports)
 
-        can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
+        @invokelatest(can_throw(job)) || add!(pm, ModulePass("LowerThrow", lower_throw!))
 
-        add_lowering_passes!(job, pm)
+        @invokelatest add_lowering_passes!(job, pm)
 
         run!(pm, mod)
 

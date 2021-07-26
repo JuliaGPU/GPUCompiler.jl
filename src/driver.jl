@@ -170,7 +170,7 @@ const __llvm_initialized = Ref(false)
         # target-specific libraries
         if libraries
             undefined_fns = LLVM.name.(decls(ir))
-            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
+            @timeit_debug to "target libraries" @invokelatest link_libraries!(job, ir, undefined_fns)
         end
 
         if optimize
@@ -311,7 +311,7 @@ end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
                           strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
-    finish_module!(job, ir)
+    @invokelatest finish_module!(job, ir)
 
     if validate
         @timeit_debug to "validation" begin

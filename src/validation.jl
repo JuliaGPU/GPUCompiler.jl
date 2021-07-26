@@ -13,8 +13,8 @@ function check_method(@nospecialize(job::CompilerJob))
 
     # kernels can't return values
     if job.source.kernel
-        cache = ci_cache(job)
-        mt = method_table(job)
+        cache = @invokelatest ci_cache(job)
+        mt = @invokelatest method_table(job)
         interp = GPUInterpreter(cache, mt, job.source.world)
         rt = Base.return_types(job.source.f, job.source.tt, interp)[1]
         if rt != Nothing
@@ -208,7 +208,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             ptr_val = convert(Int, ptr_arg)
             ptr = Ptr{Cvoid}(ptr_val)
 
-            if !valid_function_pointer(job, ptr)
+            if !@invokelatest(valid_function_pointer(job, ptr))
                 # look it up in the Julia JIT cache
                 frames = ccall(:jl_lookup_code_address, Any, (Ptr{Cvoid}, Cint,), ptr, 0)
                 if length(frames) >= 1

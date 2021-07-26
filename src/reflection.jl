@@ -54,7 +54,7 @@ function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kw
         descend_code_typed = getfield(mod, :descend_code_typed)
         descend_code_typed(job.source.f, job.source.tt; kwargs...)
     elseif VERSION >= v"1.7-"
-        interp = get_interpreter(job)
+        interp = @invokelatest get_interpreter(job)
         InteractiveUtils.code_typed(job.source.f, job.source.tt; interp, kwargs...)
     else
         InteractiveUtils.code_typed(job.source.f, job.source.tt; kwargs...)
@@ -71,7 +71,7 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         descend_code_warntype = getfield(mod, :descend_code_warntype)
         descend_code_warntype(job.source.f, job.source.tt; kwargs...)
     elseif VERSION >= v"1.7-"
-        interp = get_interpreter(job)
+        interp = @invokelatest get_interpreter(job)
         InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; interp, kwargs...)
     else
         InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; kwargs...)
@@ -119,7 +119,7 @@ See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, dump_module::Bool=false)
     asm, meta = codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
-    highlight(io, asm, source_code(job.target))
+    highlight(io, asm, @invokelatest(source_code(job.target)))
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =
     code_native(stdout, job; kwargs...)

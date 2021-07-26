@@ -104,10 +104,11 @@ end
 function build_runtime(@nospecialize(job::CompilerJob); ctx)
     mod = LLVM.Module("GPUCompiler run-time library"; ctx)
 
+    srcmod = @invokelatest runtime_module(job)
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
-            isdefined(runtime_module(job), method.def) || continue
-            getfield(runtime_module(job), method.def)
+            isdefined(srcmod, method.def) || continue
+            getfield(srcmod, method.def)
         else
             method.def
         end

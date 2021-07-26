@@ -9,6 +9,8 @@ using ExprTools: splitdef, combinedef
 
 using Libdl
 
+using Base: @invokelatest
+
 const to = TimerOutput()
 
 timings() = (TimerOutputs.print_timer(to); println())
