@@ -51,15 +51,18 @@ end
 
 function _precompile_()
     ccall(:jl_generating_output, Cint, ()) == 1 || return nothing
-    @assert precompile(Tuple{typeof(GPUCompiler.assign_args!),Expr,Vector{Any}})
-    @assert precompile(Tuple{typeof(GPUCompiler.hide_trap!),LLVM.Module})
-    @assert precompile(Tuple{typeof(GPUCompiler.hide_unreachable!),LLVM.Function})
-    @assert precompile(Tuple{typeof(GPUCompiler.lower_gc_frame!),LLVM.Function})
-    @assert precompile(Tuple{typeof(GPUCompiler.lower_throw!),LLVM.Module})
-    #@assert precompile(Tuple{typeof(GPUCompiler.split_kwargs),Tuple{},Vector{Symbol},Vararg{Vector{Symbol}, N} where N})
-    let fbody = try __lookup_kwbody__(which(GPUCompiler.compile, (Symbol,GPUCompiler.CompilerJob,))) catch missing end
+    let fbody = try __lookup_kwbody__(which(emit_llvm, (CompilerJob,Any,))) catch missing end
         if !ismissing(fbody)
-            @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
+            precompile(fbody, (Bool,Bool,Bool,Bool,typeof(emit_llvm),CompilerJob,Any,))
         end
     end
+    Base.precompile(Tuple{typeof(process_entry!),CompilerJob{PTXCompilerTarget},LLVM.Module,LLVM.Function})
+    Base.precompile(Tuple{Core.kwftype(typeof(load_runtime)),NamedTuple{(:ctx,), Tuple{Context}},typeof(load_runtime),CompilerJob})
+    Base.precompile(Tuple{typeof(lower_byval),CompilerJob,LLVM.Module,LLVM.Function})
+    Base.precompile(Tuple{typeof(lower_ptls!),LLVM.Module})
+    Base.precompile(Tuple{typeof(call!),Builder,GPUCompiler.Runtime.RuntimeMethodInstance,Vector{ConstantExpr}})
+    Base.precompile(Tuple{typeof(emit_function!),LLVM.Module,CompilerJob,Function,GPUCompiler.Runtime.RuntimeMethodInstance})
+    Base.precompile(Tuple{typeof(mangle_param),Type,Vector{String}})
+    Base.precompile(Tuple{typeof(process_module!),CompilerJob{PTXCompilerTarget},LLVM.Module})
+    Base.precompile(Tuple{typeof(resolve_cpu_references!),LLVM.Module})
 end
