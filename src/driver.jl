@@ -133,9 +133,14 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance);
-                           libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                           only_entry::Bool=false)
+# JuliaLang/julia#34516: keyword functions drop @nospecialize
+@locked emit_llvm(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance;
+                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
+                  only_entry::Bool=false) =
+    emit_llvm(job, method_instance, libraries, deferred_codegen, optimize, only_entry)
+function emit_llvm(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance,
+                   libraries::Bool, deferred_codegen::Bool, optimize::Bool,
+                   only_entry::Bool)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -309,8 +314,12 @@ const __llvm_initialized = Ref(false)
     return ir, (; entry, compiled)
 end
 
-@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
-                          strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
+# JuliaLang/julia#34516: keyword functions drop @nospecialize
+@locked emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
+                 strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType) =
+    emit_asm(job, ir, strip, validate, format)
+function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
+                                strip::Bool, validate::Bool, format::LLVM.API.LLVMCodeGenFileType)
     @invokelatest finish_module!(job, ir)
 
     if validate
