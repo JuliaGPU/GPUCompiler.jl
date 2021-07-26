@@ -9,13 +9,13 @@ using Base: _methods_by_ftype
 # we also increment a global specialization counter and pass it along to index the cache.
 
 const specialization_counter = Ref{UInt}(0)
-@generated function specialization_id(job::CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}) where {f,tt}
+@generated function specialization_id(f::F, tt::Type{TT}) where {F, TT}
     # get a hold of the method and code info of the kernel function
-    sig = Tuple{f, tt.parameters...}
+    sig = Tuple{F, TT.parameters...}
     # XXX: instead of typemax(UInt) we should use the world-age of the fspec
     mthds = _methods_by_ftype(sig, -1, typemax(UInt))
-    Base.isdispatchtuple(tt) || return(:(error("$tt is not a dispatch tuple")))
-    length(mthds) == 1 || return (:(throw(MethodError(job.source.f,job.source.tt))))
+    Base.isdispatchtuple(TT) || return(:(error("$TT is not a dispatch tuple")))
+    length(mthds) == 1 || return (:(throw(MethodError(f,tt))))
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi)::CodeInfo
@@ -61,13 +61,23 @@ const specialization_counter = Ref{UInt}(0)
     return new_ci
 end
 
+# we need compile-time access to the job's source function and tuple type, but that isn't
+# part of the CompilerJob's type parameters (because we generally don't want to specialize
+# the compiler on the function being compiled). instead of using additional arguments,
+# just look it up from an inlined function (assuming the parent will have specialized
+# on the function and tuple type used to construct the CompilerJob).
+@inline cached_compilation(cache::AbstractDict, @nospecialize(job::CompilerJob),
+                           compiler::Function, linker::Function) =
+    _cached_compilation(cache, job, compiler, linker, job.source.f, job.source.tt)
+
+# NOTE: questionable use of `@inline` to avoid allocations in the kernel launch path
 const cache_lock = ReentrantLock()
-function cached_compilation(cache::AbstractDict,
-                            @nospecialize(job::CompilerJob),
-                            compiler::Function, linker::Function)
+@inline function _cached_compilation(cache::AbstractDict, @nospecialize(job::CompilerJob),
+                                     compiler::Function, linker::Function,
+                                     f::F, tt::Type{TT}) where {F, TT}
     # XXX: CompilerJob contains a world age, so can't be respecialized.
     #      have specialization_id take a f/tt and return a world to construct a CompilerJob?
-    key = hash(job, specialization_id(job))
+    key = hash(job, specialization_id(f, tt))
     force_compilation = compile_hook[] !== nothing
 
     # XXX: by taking the hash, we index the compilation cache directly with the world age.

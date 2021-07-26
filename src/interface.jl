@@ -59,12 +59,19 @@ export FunctionSpec
 
 # what we'll be compiling
 
-struct FunctionSpec{F,TT}
-    f::F
-    tt::Type{TT}
+struct FunctionSpec
+    f::Function
+    tt::Type
     kernel::Bool
     name::Union{Nothing,String}
     world_age::UInt
+
+    # XXX: the default value of 0xffffffffffffffff is a hack, because we don't properly perform
+    #      world age intersection when querying the compilation cache. once we do, callers
+    #      should probably provide the world age of the calling code (!= the current world age)
+    #      so that querying the cache from, e.g. `cufuncton` is a fully static operation.
+    FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
+        new(f, tt, kernel, name, world_age)
 end
 
 
@@ -76,15 +83,6 @@ function Base.hash(spec::FunctionSpec, h::UInt)
     h = hash(spec.world_age, h)
     h
 end
-
-# put the function and argument types in typevars
-# so that we can access it from generated functions
-# XXX: the default value of 0xffffffffffffffff is a hack, because we don't properly perform
-#      world age intersection when querying the compilation cache. once we do, callers
-#      should probably provide the world age of the calling code (!= the current world age)
-#      so that querying the cache from, e.g. `cufuncton` is a fully static operation.
-FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
-    FunctionSpec{typeof(f),tt}(f, tt, kernel, name, world_age)
 
 function Base.getproperty(@nospecialize(spec::FunctionSpec), sym::Symbol)
     if sym == :world
@@ -115,13 +113,13 @@ export CompilerJob
 
 # a specific invocation of the compiler, bundling everything needed to generate code
 
-struct CompilerJob{T,P,F}
+struct CompilerJob{T,P}
     target::T
-    source::F
+    source::FunctionSpec
     params::P
 
     CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams) =
-        new{typeof(target), typeof(params), typeof(source)}(target, source, params)
+        new{typeof(target), typeof(params)}(target, source, params)
 end
 
 Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
