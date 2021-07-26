@@ -244,7 +244,7 @@ const __llvm_initialized = Ref(false)
 
             # find deferred compiler
             # TODO: recover this information earlier, from the Julia IR
-            worklist = MultiDict{CompilerJob, LLVM.CallInst}()
+            worklist = Dict{CompilerJob, Vector{LLVM.CallInst}}()
             for use in uses(dyn_marker)
                 # decode the call
                 call = user(use)::LLVM.CallInst
@@ -255,7 +255,7 @@ const __llvm_initialized = Ref(false)
                 if dyn_job isa FunctionSpec
                     dyn_job = similar(job, dyn_job)
                 end
-                push!(worklist, dyn_job => call)
+                push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
             end
 
             # compile and link

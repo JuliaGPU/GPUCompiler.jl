@@ -3,8 +3,6 @@ module GPUCompiler
 using LLVM
 using LLVM.Interop
 
-using DataStructures
-
 using TimerOutputs
 
 using ExprTools: splitdef, combinedef
