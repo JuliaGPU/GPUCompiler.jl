@@ -130,7 +130,7 @@ function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function)
     return errors
 end
 
-const libjulia = Ref{Ptr{Cvoid}}(C_NULL)
+const libjulia = Ref{Ptr{Cvoid}}()
 
 function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
     bt = backtrace(inst)

@@ -8,7 +8,7 @@ using Base: _methods_by_ftype
 #
 # we also increment a global specialization counter and pass it along to index the cache.
 
-const specialization_counter = Ref{UInt}(0)
+const specialization_counter = Ref{UInt}()
 @generated function specialization_id(f::F, tt::Type{TT}) where {F, TT}
     # get a hold of the method and code info of the kernel function
     sig = Tuple{F, TT.parameters...}

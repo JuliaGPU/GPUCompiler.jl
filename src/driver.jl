@@ -131,7 +131,7 @@ end
     end
 end
 
-const __llvm_initialized = Ref(false)
+const __llvm_initialized = Ref{Bool}()
 
 @locked function emit_llvm(job::CompilerJob, method_instance::Core.MethodInstance;
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,

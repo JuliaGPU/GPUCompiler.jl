@@ -48,4 +48,10 @@ include("reflection.jl")
 include("precompile.jl")
 _precompile_()
 
+function __init__()
+    __llvm_initialized[] = false
+    specialization_counter[] = 0
+    libjulia[] = C_NULL
+end
+
 end # module
