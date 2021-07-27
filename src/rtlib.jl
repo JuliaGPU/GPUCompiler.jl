@@ -63,7 +63,7 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
+function emit_function!(mod, job::CompilerJob, f, method)
     tt = Base.to_tuple_type(method.types)
     new_mod, meta = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
                             optimize=false, libraries=false)
@@ -101,10 +101,10 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     LLVM.name!(entry, name)
 end
 
-function build_runtime(@nospecialize(job::CompilerJob); ctx)
+function build_runtime(job::CompilerJob; ctx)
     mod = LLVM.Module("GPUCompiler run-time library"; ctx)
 
-    srcmod = @invokelatest runtime_module(job)
+    srcmod = @invokelatest runtime_module(job.compiler)
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
             isdefined(srcmod, method.def) || continue
@@ -122,7 +122,7 @@ end
 
 const runtime_lock = ReentrantLock()
 
-@locked function load_runtime(@nospecialize(job::CompilerJob); ctx)
+@locked function load_runtime(job::CompilerJob; ctx)
     lock(runtime_lock) do
         # find the first existing cache directory (for when dealing with layered depots)
         cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
@@ -145,7 +145,7 @@ const runtime_lock = ReentrantLock()
             cp(input_dir, output_dir)
         end
 
-        slug = runtime_slug(job)
+        slug = @invokelatest runtime_slug(job.compiler)
         name = "runtime_$(slug).bc"
         path = joinpath(output_dir, name)
 

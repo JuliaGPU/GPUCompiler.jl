@@ -42,10 +42,10 @@ highlight(io, code, lexer) = print(io, code)
 # code_* replacements
 #
 
-code_lowered(@nospecialize(job::CompilerJob); kwargs...) =
+code_lowered(job::CompilerJob; kwargs...) =
     InteractiveUtils.code_lowered(job.source.f, job.source.tt; kwargs...)
 
-function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
+function code_typed(job::CompilerJob; interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
     if interactive
         # call Cthulhu without introducing a dependency on Cthulhu
@@ -54,14 +54,14 @@ function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kw
         descend_code_typed = getfield(mod, :descend_code_typed)
         descend_code_typed(job.source.f, job.source.tt; kwargs...)
     elseif VERSION >= v"1.7-"
-        interp = @invokelatest get_interpreter(job)
+        interp = @invokelatest get_interpreter(job.compiler, job.source)
         InteractiveUtils.code_typed(job.source.f, job.source.tt; interp, kwargs...)
     else
         InteractiveUtils.code_typed(job.source.f, job.source.tt; kwargs...)
     end
 end
 
-function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
+function code_warntype(io::IO, job::CompilerJob; interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
     if interactive
         @assert io == stdout
@@ -71,13 +71,13 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         descend_code_warntype = getfield(mod, :descend_code_warntype)
         descend_code_warntype(job.source.f, job.source.tt; kwargs...)
     elseif VERSION >= v"1.7-"
-        interp = @invokelatest get_interpreter(job)
+        interp = @invokelatest get_interpreter(job.compiler, job.source)
         InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; interp, kwargs...)
     else
         InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; kwargs...)
     end
 end
-code_warntype(@nospecialize(job::CompilerJob); kwargs...) = code_warntype(stdout, job; kwargs...)
+code_warntype(job::CompilerJob; kwargs...) = code_warntype(stdout, job; kwargs...)
 
 """
     code_llvm([io], job; optimize=true, raw=false, dump_module=false)
@@ -93,7 +93,7 @@ The following keyword arguments are supported:
 
 See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
+function code_llvm(io::IO, job::CompilerJob; optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
@@ -102,7 +102,7 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true,
                 meta.entry, !raw, dump_module, debuginfo)
     highlight(io, str, "llvm")
 end
-code_llvm(@nospecialize(job::CompilerJob); kwargs...) = code_llvm(stdout, job; kwargs...)
+code_llvm(job::CompilerJob; kwargs...) = code_llvm(stdout, job; kwargs...)
 
 """
     code_native([io], f, types; cap::VersionNumber, kernel=false, raw=false)
@@ -117,11 +117,10 @@ The following keyword arguments are supported:
 
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, dump_module::Bool=false)
-    asm, meta = codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
-    highlight(io, asm, @invokelatest(source_code(job.target)))
+function code_native(io::IO, job::CompilerJob; raw::Bool=false, dump_module::Bool=false)
+    @invokelatest show_native_code(job.compiler, job.source, io; raw, dump_module)
 end
-code_native(@nospecialize(job::CompilerJob); kwargs...) =
+code_native(job::CompilerJob; kwargs...) =
     code_native(stdout, job; kwargs...)
 
 

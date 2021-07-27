@@ -14,15 +14,16 @@ module TestRuntime
 end
 
 struct TestCompilerParams <: AbstractCompilerParams end
-GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
+GPUCompiler.runtime_module(::Compiler{<:Any,TestCompilerParams}) = TestRuntime
 
 kernel() = nothing
 
 function main()
-    source = FunctionSpec(kernel)
     target = NativeCompilerTarget()
     params = TestCompilerParams()
-    job = CompilerJob(target, source, params)
+    compiler = Compiler(target, params)
+    source = FunctionSpec(kernel)
+    job = CompilerJob(compiler, source)
 
     println(GPUCompiler.compile(:asm, job)[1])
 end

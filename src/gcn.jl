@@ -26,26 +26,27 @@ function llvm_machine(target::GCNCompilerTarget)
 end
 
 
-## job
+## compiler
 
-# TODO: encode debug build or not in the compiler job
+# TODO: encode debug build or not in the compiler
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.target.dev_isa)$(job.target.features)"
+runtime_slug(compiler::Compiler{GCNCompilerTarget}) =
+    "gcn-$(compiler.target.dev_isa)$(compiler.target.features)"
 
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
-isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
+isintrinsic(::Compiler{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
 
 # we have to fake our target early in the pipeline because Julia's optimization passes
 # weren't designed for a non-0 stack addrspace, and the AMDGPU target is very strict
 # about which addrspaces are permitted for various code patterns
-function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+function process_module!(compiler::Compiler{GCNCompilerTarget}, source::FunctionSpec, mod::LLVM.Module)
     triple!(mod, llvm_triple(NativeCompilerTarget()))
     datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
 end
 
-function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    if job.source.kernel
-        entry = lower_byval(job, mod, entry)
+function process_entry!(compiler::Compiler{GCNCompilerTarget}, source::FunctionSpec, mod::LLVM.Module, entry::LLVM.Function)
+    if source.kernel
+        entry = lower_byval(CompilerJob(compiler, source), mod, entry)
 
         # calling convention
         callconv!(entry, LLVM.API.LLVMAMDGPUKERNELCallConv)
@@ -54,7 +55,7 @@ function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, e
     entry
 end
 
-function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
+function add_lowering_passes!(compiler::Compiler{GCNCompilerTarget}, source::FunctionSpec, pm::LLVM.PassManager)
     add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
 end
 # We need to do alloca rewriting (from 0 to 5) after Julia's optimization
@@ -63,12 +64,12 @@ end
 #    was the target at that time
 # 2. We don't want any chance of messing with Julia's optimizations, since they
 #    eliminate target-unsafe IR patterns
-function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+function optimize_module!(compiler::Compiler{GCNCompilerTarget}, source::FunctionSpec, mod::LLVM.Module)
     # revert back to the AMDGPU target
-    triple!(mod, llvm_triple(job.target))
-    datalayout!(mod, julia_datalayout(job.target))
+    triple!(mod, llvm_triple(compiler.target))
+    datalayout!(mod, julia_datalayout(compiler.target))
 
-    tm = llvm_machine(job.target)
+    tm = llvm_machine(compiler.target)
     ModulePassManager() do pm
         add_library_info!(pm, triple(mod))
         add_transform_info!(pm, tm)
@@ -165,7 +166,7 @@ function fix_alloca_addrspace!(fn::LLVM.Function)
 end
 
 
-function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
+function emit_trap!(compiler::Compiler{GCNCompilerTarget}, source::FunctionSpec, builder, mod, inst)
     ctx = context(mod)
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]

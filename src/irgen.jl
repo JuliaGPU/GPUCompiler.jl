@@ -1,6 +1,6 @@
 # LLVM IR generation
 
-function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance)
+function irgen(job::CompilerJob, method_instance::Core.MethodInstance)
     mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance)
     entry_fn = compiled[method_instance].specfunc
     entry = functions(mod)[entry_fn]
@@ -26,7 +26,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     end
 
     # target-specific processing
-    @invokelatest process_module!(job, mod)
+    @invokelatest process_module!(job.compiler, job.source, mod)
 
     # sanitize function names
     # FIXME: Julia should do this, but apparently fails (see maleadt/LLVM.jl#201)
@@ -49,7 +49,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     if job.source.kernel
         LLVM.name!(entry, mangle_call(entry, job.source.tt))
     end
-    entry = @invokelatest process_entry!(job, mod, entry)
+    entry = @invokelatest process_entry!(job.compiler, job.source, mod, entry)
     compiled[method_instance] =
         (; compiled[method_instance].ci, compiled[method_instance].func,
            specfunc=LLVM.name(entry))
@@ -68,9 +68,9 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         end
         internalize!(pm, exports)
 
-        @invokelatest(can_throw(job)) || add!(pm, ModulePass("LowerThrow", lower_throw!))
+        @invokelatest(can_throw(job.compiler)) || add!(pm, ModulePass("LowerThrow", lower_throw!))
 
-        @invokelatest add_lowering_passes!(job, pm)
+        @invokelatest add_lowering_passes!(job.compiler, job.source, pm)
 
         run!(pm, mod)
 
@@ -271,7 +271,7 @@ function emit_exception!(builder, name, inst)
     emit_trap!(job, builder, mod, inst)
 end
 
-function emit_trap!(@nospecialize(job::CompilerJob), builder, mod, inst)
+function emit_trap!(job::CompilerJob, builder, mod, inst)
     ctx = context(mod)
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]
@@ -291,7 +291,7 @@ end
     GHOST       # not passed
 end
 
-function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Function)
+function classify_arguments(job::CompilerJob, codegen_f::LLVM.Function)
     codegen_ft = eltype(llvmtype(codegen_f)::LLVM.PointerType)::LLVM.FunctionType
     source_sig = Base.signature_type(job.source.f, job.source.tt)::Type
 
@@ -378,7 +378,7 @@ end
 # https://reviews.llvm.org/D79744
 
 # generate a kernel wrapper to fix & improve argument passing
-function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
+function lower_byval(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
     ctx = context(mod)
     entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
     @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job

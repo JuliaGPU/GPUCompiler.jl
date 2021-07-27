@@ -2,7 +2,7 @@
 
 export InvalidIRError
 
-function check_method(@nospecialize(job::CompilerJob))
+function check_method(job::CompilerJob)
     isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
@@ -13,9 +13,7 @@ function check_method(@nospecialize(job::CompilerJob))
 
     # kernels can't return values
     if job.source.kernel
-        cache = @invokelatest ci_cache(job)
-        mt = @invokelatest method_table(job)
-        interp = GPUInterpreter(cache, mt, job.source.world)
+        interp = get_interpreter(job.compiler, job.source)
         rt = Base.return_types(job.source.f, job.source.tt, interp)[1]
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
@@ -53,7 +51,7 @@ function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
     return msg
 end
 
-function check_invocation(@nospecialize(job::CompilerJob))
+function check_invocation(job::CompilerJob)
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
     sig = Base.signature_type(job.source.f, job.source.tt)::Type
@@ -179,7 +177,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             end
 
         # detect calls to undefined functions
-        elseif isdeclaration(dest) && !LLVM.isintrinsic(dest) && !isintrinsic(job, fn)
+        elseif isdeclaration(dest) && !LLVM.isintrinsic(dest) && !@invokelatest(isintrinsic(job.compiler, fn))
             # figure out if the function lives in the Julia runtime library
             if libjulia[] == C_NULL
                 paths = filter(Libdl.dllist()) do path
@@ -208,7 +206,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             ptr_val = convert(Int, ptr_arg)
             ptr = Ptr{Cvoid}(ptr_val)
 
-            if !@invokelatest(valid_function_pointer(job, ptr))
+            if !@invokelatest(valid_function_pointer(job.compiler, ptr))
                 # look it up in the Julia JIT cache
                 frames = ccall(:jl_lookup_code_address, Any, (Ptr{Cvoid}, Cint,), ptr, 0)
                 if length(frames) >= 1

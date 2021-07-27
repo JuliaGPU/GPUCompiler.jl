@@ -1,7 +1,7 @@
 # LLVM IR optimization
 
-function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    tm = @invokelatest llvm_machine(job.target)
+function optimize!(job::CompilerJob, mod::LLVM.Module)
+    tm = @invokelatest llvm_machine(job.compiler.target)
 
     function initialize!(pm)
         add_library_info!(pm, triple(mod))
@@ -45,7 +45,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     end
 
     # target-specific optimizations
-    @invokelatest optimize_module!(job, mod)
+    @invokelatest optimize_module!(job.compiler, job.source, mod)
 
     # we compile a module containing the entire call graph,
     # so perform some interprocedural optimizations.

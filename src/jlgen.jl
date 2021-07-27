@@ -317,12 +317,12 @@ function _lookup_fun(mi, min_world, max_world)
     ci_cache_lookup(_cache[], mi, min_world, max_world)
 end
 
-function compile_method_instance(@nospecialize(job::CompilerJob),
+function compile_method_instance(job::CompilerJob,
                                  method_instance::MethodInstance)
     # populate the cache
-    cache = @invokelatest ci_cache(job)
-    mt = @invokelatest method_table(job)
-    interp = @invokelatest get_interpreter(job)
+    cache = @invokelatest ci_cache(job.compiler)
+    mt = @invokelatest method_table(job.compiler)
+    interp = @invokelatest get_interpreter(job.compiler, job.source)
     if ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint)) === nothing
         ci_cache_populate(interp, cache, mt, method_instance, job.source.world, typemax(Cint))
     end
@@ -343,7 +343,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     end
 
     # set-up the compiler interface
-    debug_info_kind = @invokelatest llvm_debug_info(job)
+    debug_info_kind = @invokelatest llvm_debug_info(job.compiler)
     params = Base.CodegenParams(;
         track_allocations  = false,
         code_coverage      = false,
@@ -407,8 +407,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     end
 
     # configure the module
-    triple!(llvm_mod, @invokelatest(llvm_triple(job.target)))
-    dl = @invokelatest julia_datalayout(job.target)
+    triple!(llvm_mod, @invokelatest(llvm_triple(job.compiler.target)))
+    dl = @invokelatest julia_datalayout(job.compiler.target)
     if dl !== nothing
         datalayout!(llvm_mod, dl)
     end

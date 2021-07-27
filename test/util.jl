@@ -46,4 +46,4 @@ module TestRuntime
 end
 
 struct TestCompilerParams <: AbstractCompilerParams end
-GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
+GPUCompiler.runtime_module(::Compiler{<:Any,TestCompilerParams}) = TestRuntime

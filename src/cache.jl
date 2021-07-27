@@ -66,13 +66,13 @@ end
 # the compiler on the function being compiled). instead of using additional arguments,
 # just look it up from an inlined function (assuming the parent will have specialized
 # on the function and tuple type used to construct the CompilerJob).
-@inline cached_compilation(cache::AbstractDict, @nospecialize(job::CompilerJob),
+@inline cached_compilation(cache::AbstractDict, job::CompilerJob,
                            compiler::Function, linker::Function) =
     _cached_compilation(cache, job, compiler, linker, job.source.f, job.source.tt)
 
 # NOTE: questionable use of `@inline` to avoid allocations in the kernel launch path
 const cache_lock = ReentrantLock()
-@inline function _cached_compilation(cache::AbstractDict, @nospecialize(job::CompilerJob),
+@inline function _cached_compilation(cache::AbstractDict, job::CompilerJob,
                                      compiler::Function, linker::Function,
                                      f::F, tt::Type{TT}) where {F, TT}
     # XXX: CompilerJob contains a world age, so can't be respecialized.

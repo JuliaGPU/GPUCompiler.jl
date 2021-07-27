@@ -8,7 +8,7 @@ struct KernelError <: Exception
     help::Union{Nothing,String}
     bt::StackTraces.StackTrace
 
-    KernelError(@nospecialize(job::CompilerJob), message::String, help=nothing;
+    KernelError(job::CompilerJob, message::String, help=nothing;
                 bt=StackTraces.StackTrace()) =
         new(job, message, help, bt)
 end

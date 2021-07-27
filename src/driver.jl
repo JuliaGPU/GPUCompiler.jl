@@ -28,7 +28,7 @@ The following keyword arguments are supported:
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
-function compile(target::Symbol, @nospecialize(job::CompilerJob);
+function compile(target::Symbol, job::CompilerJob;
                  libraries::Bool=true, deferred_codegen::Bool=true,
                  optimize::Bool=true, strip::Bool=false, validate::Bool=true,
                  only_entry::Bool=false)
@@ -40,8 +40,8 @@ function compile(target::Symbol, @nospecialize(job::CompilerJob);
                    libraries, deferred_codegen, optimize, strip, validate, only_entry)
 end
 
-function codegen(output::Symbol, @nospecialize(job::CompilerJob);
-                 libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
+function codegen(output::Symbol, job::CompilerJob;
+                 libraries::Bool=true, optimize::Bool=true, deferred_codegen::Bool=true,
                  strip::Bool=false, validate::Bool=true, only_entry::Bool=false,
                  parent_job::Union{Nothing, CompilerJob} = nothing)
     ## Julia IR
@@ -85,7 +85,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     error("Unknown compilation output $output")
 end
 
-@locked function emit_julia(@nospecialize(job::CompilerJob))
+@locked function emit_julia(job::CompilerJob)
     @timeit_debug to "validation" check_method(job)
 
     @timeit_debug to "Julia front-end" begin
@@ -133,14 +133,9 @@ end
 
 const __llvm_initialized = Ref(false)
 
-# JuliaLang/julia#34516: keyword functions drop @nospecialize
-@locked emit_llvm(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance;
-                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                  only_entry::Bool=false) =
-    emit_llvm(job, method_instance, libraries, deferred_codegen, optimize, only_entry)
-function emit_llvm(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance,
-                   libraries::Bool, deferred_codegen::Bool, optimize::Bool,
-                   only_entry::Bool)
+@locked function emit_llvm(job::CompilerJob, method_instance::Core.MethodInstance;
+                           libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
+                           only_entry::Bool=false)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -175,7 +170,9 @@ function emit_llvm(@nospecialize(job::CompilerJob), method_instance::Core.Method
         # target-specific libraries
         if libraries
             undefined_fns = LLVM.name.(decls(ir))
-            @timeit_debug to "target libraries" @invokelatest link_libraries!(job, ir, undefined_fns)
+            @timeit_debug to "target libraries" begin
+                @invokelatest link_libraries!(job.compiler, job.source, ir, undefined_fns)
+            end
         end
 
         if optimize
@@ -314,13 +311,9 @@ function emit_llvm(@nospecialize(job::CompilerJob), method_instance::Core.Method
     return ir, (; entry, compiled)
 end
 
-# JuliaLang/julia#34516: keyword functions drop @nospecialize
-@locked emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
-                 strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType) =
-    emit_asm(job, ir, strip, validate, format)
-function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
-                                strip::Bool, validate::Bool, format::LLVM.API.LLVMCodeGenFileType)
-    @invokelatest finish_module!(job, ir)
+@locked function emit_asm(job::CompilerJob, ir::LLVM.Module;
+                          strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
+    @invokelatest finish_module!(job.compiler, job.source, ir)
 
     if validate
         @timeit_debug to "validation" begin

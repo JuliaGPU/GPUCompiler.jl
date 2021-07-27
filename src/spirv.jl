@@ -29,9 +29,9 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) = "spirv"
+runtime_slug(compiler::Compiler{SPIRVCompilerTarget}) = "spirv"
 
-function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+function process_module!(compiler::Compiler{SPIRVCompilerTarget}, source::FunctionSpec, mod::LLVM.Module)
     # calling convention
     for f in functions(mod)
         # JuliaGPU/GPUCompiler.jl#97
@@ -39,11 +39,11 @@ function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module
     end
 end
 
-function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    if job.source.kernel
+function process_entry!(compiler::Compiler{SPIRVCompilerTarget}, source::FunctionSpec, mod::LLVM.Module, entry::LLVM.Function)
+    if source.kernel
         # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
         #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
-        entry = wrap_byval(job, mod, entry)
+        entry = wrap_byval(CompilerJob(compiler, source), mod, entry)
 
         # calling convention
         callconv!(entry, LLVM.API.LLVMSPIRKERNELCallConv)
@@ -52,7 +52,7 @@ function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     return entry
 end
 
-function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+function finish_module!(compiler::Compiler{SPIRVCompilerTarget}, source::FunctionSpec, mod::LLVM.Module)
     # SPIR-V does not support trap, and has no mechanism to abort compute kernels
     # (OpKill is only available in fragment execution mode)
     ModulePassManager() do pm
@@ -61,8 +61,8 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     end
 end
 
-@unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
-                         format=LLVM.API.LLVMAssemblyFile)
+@unlocked function emit_assembly(compiler::Compiler{SPIRVCompilerTarget}, source::FunctionSpec,
+                                 mod::LLVM.Module, format)
     # write the bitcode to a temporary file (the SPIRV Translator library doesn't have a C API)
     mktemp() do input, input_io
         write(input_io, mod)
@@ -89,8 +89,9 @@ end
     end
 end
 
-# reimplementation that uses `spirv-dis`, giving much more pleasant output
-function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
+function show_native_code(compiler::Compiler{SPIRVCompilerTarget}, source::FunctionSpec,
+                          io::IO; raw::Bool=false, dump_module::Bool=false)
+    job = CompilerJob(compiler, source)
     if raw
         # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
         # so just return what LLVM gives us in that case (which is also more faithful).
@@ -147,7 +148,7 @@ function rm_trap!(mod::LLVM.Module)
 end
 
 # wrap byval pointers in a single-value struct
-function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
+function wrap_byval(job::CompilerJob, mod::LLVM.Module, entry_f::LLVM.Function)
     ctx = context(mod)
     entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
     @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job

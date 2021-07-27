@@ -24,12 +24,9 @@ function llvm_machine(target::BPFCompilerTarget)
 end
 
 
-## job
+## compiler
 
-runtime_slug(job::CompilerJob{BPFCompilerTarget}) = "bpf"
+runtime_slug(::Compiler{BPFCompilerTarget}) = "bpf"
 
-const bpf_intrinsics = () # TODO
-isintrinsic(::CompilerJob{BPFCompilerTarget}, fn::String) = in(fn, bpf_intrinsics)
-
-valid_function_pointer(job::CompilerJob{BPFCompilerTarget}, ptr::Ptr{Cvoid}) =
-    reinterpret(UInt, ptr) in job.target.function_pointers
+valid_function_pointer(compiler::Compiler{BPFCompilerTarget}, ptr::Ptr{Cvoid}) =
+    reinterpret(UInt, ptr) in compiler.target.function_pointers

@@ -62,29 +62,27 @@ llvm_datalayout(target::PTXCompilerTarget) = Int===Int64 ?
      "-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64"
 
 
-## job
+## compiler
 
-function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
-    print(io, "PTX CompilerJob of ", job.source)
-    print(io, " for sm_$(job.target.cap.major)$(job.target.cap.minor)")
+function Base.show(io::IO, compiler::Compiler{PTXCompilerTarget})
+    print(io, "PTX Compiler for sm_$(compiler.target.cap.major)$(compiler.target.cap.minor)")
 
-    job.target.minthreads !== nothing && print(io, ", minthreads=$(job.target.minthreads)")
-    job.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.target.maxthreads)")
-    job.target.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.target.blocks_per_sm)")
-    job.target.maxregs !== nothing && print(io, ", maxregs=$(job.target.maxregs)")
+    compiler.target.minthreads !== nothing && print(io, ", minthreads=$(compiler.target.minthreads)")
+    compiler.target.maxthreads !== nothing && print(io, ", maxthreads=$(compiler.target.maxthreads)")
+    compiler.target.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(compiler.target.blocks_per_sm)")
+    compiler.target.maxregs !== nothing && print(io, ", maxregs=$(compiler.target.maxregs)")
 end
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
-isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
-    in(fn, ptx_intrinsics)
+isintrinsic(compiler::Compiler{PTXCompilerTarget}, fn::String) = in(fn, ptx_intrinsics)
 
 # XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
-runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
-    "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)" *
-       "-debuginfo=$(Int(llvm_debug_info(job)))" *
-       "-exitable=$(job.target.exitable)"
+runtime_slug(compiler::Compiler{PTXCompilerTarget}) =
+    "ptx-sm_$(compiler.target.cap.major)$(compiler.target.cap.minor)" *
+       "-debuginfo=$(Int(llvm_debug_info(compiler)))" *
+       "-exitable=$(compiler.target.exitable)"
 
-function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
+function process_module!(compiler::Compiler{PTXCompilerTarget}, source::FunctionSpec, mod::LLVM.Module)
     ctx = context(mod)
 
     # calling convention
@@ -99,10 +97,10 @@ function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod
     # it possible to 'query' these in device code, relying on LLVM to optimize the checks
     # away and generate static code. note that we only do so if there's actual uses of these
     # variables; unconditionally creating a gvar would result in duplicate declarations.
-    for (name, value) in ["sm_major"  => job.target.cap.major,
-                          "sm_minor"  => job.target.cap.minor,
-                          "ptx_major" => job.target.ptx.major,
-                          "ptx_minor" => job.target.ptx.minor]
+    for (name, value) in ["sm_major"  => compiler.target.cap.major,
+                          "sm_minor"  => compiler.target.cap.minor,
+                          "ptx_major" => compiler.target.ptx.major,
+                          "ptx_minor" => compiler.target.ptx.minor]
         if haskey(globals(mod), name)
             gv = globals(mod)[name]
             initializer!(gv, ConstantInt(LLVM.Int32Type(ctx), value))
@@ -112,13 +110,13 @@ function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod
     end
 end
 
-function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+function process_entry!(compiler::Compiler{PTXCompilerTarget}, source::FunctionSpec,
                         mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
 
-    if job.source.kernel
+    if source.kernel
         # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
-        entry = lower_byval(job, mod, entry)
+        entry = lower_byval(CompilerJob(compiler, source), mod, entry)
 
         # property annotations
         annotations = Metadata[entry]
@@ -128,29 +126,29 @@ function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                               ConstantInt(Int32(1); ctx)])
 
         ## expected CTA sizes
-        if job.target.minthreads !== nothing
+        if compiler.target.minthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
-                bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
+                bound = dim <= length(compiler.target.minthreads) ? compiler.target.minthreads[dim] : 1
                 append!(annotations, [MDString("reqntid$name"; ctx),
                                       ConstantInt(Int32(bound); ctx)])
             end
         end
-        if job.target.maxthreads !== nothing
+        if compiler.target.maxthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
-                bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
+                bound = dim <= length(compiler.target.maxthreads) ? compiler.target.maxthreads[dim] : 1
                 append!(annotations, [MDString("maxntid$name"; ctx),
                                       ConstantInt(Int32(bound); ctx)])
             end
         end
 
-        if job.target.blocks_per_sm !== nothing
+        if compiler.target.blocks_per_sm !== nothing
             append!(annotations, [MDString("minctasm"; ctx),
-                                  ConstantInt(Int32(job.target.blocks_per_sm); ctx)])
+                                  ConstantInt(Int32(compiler.target.blocks_per_sm); ctx)])
         end
 
-        if job.target.maxregs !== nothing
+        if compiler.target.maxregs !== nothing
             append!(annotations, [MDString("maxnreg"; ctx),
-                                  ConstantInt(Int32(job.target.maxregs); ctx)])
+                                  ConstantInt(Int32(compiler.target.maxregs); ctx)])
         end
 
         push!(metadata(mod)["nvvm.annotations"], MDNode(annotations; ctx))
@@ -165,9 +163,9 @@ function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     return entry
 end
 
-function add_lowering_passes!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+function add_lowering_passes!(compiler::Compiler{PTXCompilerTarget}, source::FunctionSpec,
                               pm::LLVM.PassManager)
-    if !job.target.unreachable
+    if !compiler.target.unreachable
         add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
     end
 
@@ -179,9 +177,9 @@ function add_lowering_passes!(@nospecialize(job::CompilerJob{PTXCompilerTarget})
     global_optimizer!(pm)
 end
 
-function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+function optimize_module!(compiler::Compiler{PTXCompilerTarget}, source::FunctionSpec,
                           mod::LLVM.Module)
-    tm = llvm_machine(job.target)
+    tm = llvm_machine(compiler.target)
     ModulePassManager() do pm
         add_library_info!(pm, triple(mod))
         add_transform_info!(pm, tm)
@@ -207,10 +205,10 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 end
 
-function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
+function llvm_debug_info(compiler::Compiler{PTXCompilerTarget})
     # allow overriding the debug info from CUDA.jl
-    if job.target.debuginfo
-        invoke(llvm_debug_info, Tuple{CompilerJob}, job)
+    if compiler.target.debuginfo
+        invoke(llvm_debug_info, Tuple{Compiler}, compiler)
     else
         LLVM.API.LLVMDebugEmissionKindNoDebug
     end
@@ -345,7 +343,7 @@ function hide_trap!(mod::LLVM.Module)
 
     # inline assembly to exit a thread, hiding control flow from LLVM
     exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
-    exit = if job.target.exitable
+    exit = if job.compiler.target.exitable
         InlineAsm(exit_ft, "exit;", "", true)
     else
         InlineAsm(exit_ft, "trap;", "", true)

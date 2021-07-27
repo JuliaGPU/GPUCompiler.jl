@@ -23,14 +23,16 @@ function llvm_machine(target::NativeCompilerTarget)
     return tm
 end
 
-function process_entry!(job::CompilerJob{NativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+function process_entry!(compiler::Compiler{NativeCompilerTarget}, source::FunctionSpec, mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
-    if job.target.always_inline
+    if compiler.target.always_inline
         push!(function_attributes(entry), EnumAttribute("alwaysinline", 0; ctx))
     end
-    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+    invoke(process_entry!, Tuple{Compiler, FunctionSpec, LLVM.Module, LLVM.Function}, compiler, source, mod, entry)
 end
 
-## job
 
-runtime_slug(job::CompilerJob{NativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))"
+## compiler
+
+runtime_slug(compiler::Compiler{NativeCompilerTarget}) =
+    "native_$(compiler.target.cpu)-$(hash(compiler.target.features))"
