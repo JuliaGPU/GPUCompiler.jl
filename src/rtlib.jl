@@ -63,6 +63,9 @@ end
 
 ## functionality to build the runtime library
 
+# XXX: these APIs don't need a CompilerJob, just a Compiler, but that object causes
+#      specialization (without `@noinfer`) so we pass a wrapping CompilerJob instead.
+
 function emit_function!(mod, job::CompilerJob, f, method)
     tt = Base.to_tuple_type(method.types)
     new_mod, meta = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
