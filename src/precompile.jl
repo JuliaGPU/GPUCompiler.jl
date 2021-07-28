@@ -12,4 +12,6 @@ function _precompile_()
     job = CompilerJob(compiler, source)
     compile(:asm, job; strip=true, only_entry=true)
     empty!(GLOBAL_CI_CACHE) # JuliaLang/julia#41714
+
+    precompile(emit_llvm, (CompilerJob, MethodInstance))
 end
