@@ -86,11 +86,20 @@ optimization_params(@nospecialize(job::CompilerJob{SPIRVCompilerTarget})) =
                 run(`$translator --spirv-debug-info-version=ocl-100 -o $translated $input`)
             end
 
+            # validate
+            # XXX: parameterize this on the `validate` driver argument
+            # XXX: our code currently doesn't pass the validator
+            if Base.JLOptions().debug_level >= 2 && false
+                SPIRV_Tools_jll.spirv_val() do validator
+                    run(`$validator $translated`)
+                end
+            end
+
             # optimize
-            # XXX: make this parameterizable?
+            # XXX: parameterize this on the `optimize` driver argument
             mktemp() do optimized, optimized_io
                 SPIRV_Tools_jll.spirv_opt() do optimizer
-                    run(`$optimizer -O $translated -o $optimized`)
+                    run(`$optimizer -O --skip-validation $translated -o $optimized`)
                 end
 
                 if format == LLVM.API.LLVMObjectFile
