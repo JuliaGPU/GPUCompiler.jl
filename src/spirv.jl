@@ -81,21 +81,26 @@ optimization_params(@nospecialize(job::CompilerJob{SPIRVCompilerTarget})) =
         flush(input_io)
 
         # compile to SPIR-V
-        mktemp() do output, output_io
+        mktemp() do translated, translated_io
             SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
-                cmd = `$translator`
-                if format == LLVM.API.LLVMAssemblyFile
-                    cmd = `$cmd -spirv-text`
-                end
-                cmd = `$cmd --spirv-debug-info-version=ocl-100 -o $output $input`
-                run(cmd)
+                run(`$translator --spirv-debug-info-version=ocl-100 -o $translated $input`)
             end
 
-            # read back the file
-            if format == LLVM.API.LLVMAssemblyFile
-                read(output_io, String)
-            else
-                read(output_io)
+            # optimize
+            # XXX: make this parameterizable?
+            mktemp() do optimized, optimized_io
+                SPIRV_Tools_jll.spirv_opt() do optimizer
+                    run(`$optimizer -O $translated -o $optimized`)
+                end
+
+                if format == LLVM.API.LLVMObjectFile
+                    read(optimized)
+                else
+                    # disassemble
+                    SPIRV_Tools_jll.spirv_dis() do disassembler
+                        read(`$disassembler $optimized`, String)
+                    end
+                end
             end
         end
     end
