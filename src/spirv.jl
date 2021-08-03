@@ -64,6 +64,9 @@ end
 
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMAssemblyFile)
+    # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
+    strip_debuginfo!(mod)
+
     # write the bitcode to a temporary file (the SPIRV Translator library doesn't have a C API)
     mktemp() do input, input_io
         write(input_io, mod)
@@ -92,14 +95,6 @@ end
 
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
-    if raw
-        # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
-        # so just return what LLVM gives us in that case (which is also more faithful).
-        asm, _ = codegen(:asm, job; strip=false, only_entry=!dump_module, validate=false)
-        print(io, asm)
-        return
-    end
-
     obj, _ = codegen(:obj, job; strip=!raw, only_entry=!dump_module, validate=false)
     mktemp() do input_path, input_io
         write(input_io, obj)
