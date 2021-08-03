@@ -57,6 +57,7 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     # (OpKill is only available in fragment execution mode)
     ModulePassManager() do pm
         add!(pm, ModulePass("RemoveTrap", rm_trap!))
+        add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
         run!(pm, mod)
     end
 end
@@ -140,6 +141,27 @@ function rm_trap!(mod::LLVM.Module)
 
         @compiler_assert isempty(uses(trap)) job
         unsafe_delete!(mod, trap)
+    end
+
+    end
+    return changed
+end
+
+# remove freeze and replace uses by the original value
+# (KhronosGroup/SPIRV-LLVM-Translator#1140)
+function rm_freeze!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    changed = false
+    @timeit_debug to "remove freeze" begin
+
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        if inst isa LLVM.FreezeInst
+            orig = first(operands(inst))
+            replace_uses!(inst, orig)
+            @compiler_assert isempty(uses(inst)) job
+            unsafe_delete!(bb, inst)
+            changed = true
+        end
     end
 
     end
