@@ -1,15 +1,26 @@
 # LLVM IR optimization
 
+Base.@kwdef struct GPUOptimizationParams
+    julia::Bool = true
+    intrinsics::Bool = true
+    ipo::Bool = true
+
+    optlevel::Int = Base.JLOptions().opt_level
+end
+
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    triple = llvm_triple(job.target)
     tm = llvm_machine(job.target)
 
     function initialize!(pm)
-        add_library_info!(pm, triple(mod))
+        add_library_info!(pm, triple)
         add_transform_info!(pm, tm)
     end
 
     global current_job
     current_job = job
+
+    params = optimization_params(job)
 
     # Julia-specific optimizations
     #
@@ -18,13 +29,20 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
     ModulePassManager() do pm
         initialize!(pm)
-        ccall(:jl_add_optimization_passes, Cvoid,
-                (LLVM.API.LLVMPassManagerRef, Cint, Cint),
-                pm, Base.JLOptions().opt_level, #=lower_intrinsics=# 0)
+        if params.julia
+            ccall(:jl_add_optimization_passes, Cvoid,
+                    (LLVM.API.LLVMPassManagerRef, Cint, Cint),
+                    pm, params.optlevel, #=lower_intrinsics=# 0)
+        end
+        if params.optlevel < 2
+            # Julia doesn't run the alloc optimizer on lower optimization levels,
+            # but the pass is crucial to remove possibly unsupported malloc calls.
+            alloc_opt!(pm)
+        end
         run!(pm, mod)
     end
 
-    ModulePassManager() do pm
+    params.intrinsics && ModulePassManager() do pm
         initialize!(pm)
 
         # lower intrinsics
@@ -55,7 +73,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     # part of the LateLowerGCFrame pass) aren't collected properly.
     #
     # these might not always be safe, as Julia's IR metadata isn't designed for IPO.
-    ModulePassManager() do pm
+    params.ipo && ModulePassManager() do pm
         initialize!(pm)
 
         dead_arg_elimination!(pm)   # parent doesn't use return value --> ret void

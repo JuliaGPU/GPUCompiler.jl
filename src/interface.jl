@@ -189,9 +189,6 @@ function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     return entry
 end
 
-# post-Julia optimization processing of the module
-optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
-
 # final processing of the IR module, right before validation and machine-code generation
 finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
@@ -219,3 +216,7 @@ function llvm_debug_info(@nospecialize(job::CompilerJob))
         LLVM.API.LLVMDebugEmissionKindFullDebug
     end
 end
+
+# optimization
+optimization_params(@nospecialize(job::CompilerJob)) = GPUOptimizationParams()
+optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
