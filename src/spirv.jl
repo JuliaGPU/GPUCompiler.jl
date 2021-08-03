@@ -186,7 +186,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
             attrs = parameter_attributes(wrapper_f, arg.codegen.i)
             if arg.cc == BITS_REF
                 if LLVM.version() >= v"12"
-                    push!(attrs, TypeAttribute("byval", eltype(arg.codegen.typ); ctx))
+                    push!(attrs, TypeAttribute("byval", eltype(wrapper_types[arg.codegen.i]); ctx))
                 else
                     push!(attrs, EnumAttribute("byval", 0; ctx))
                 end
