@@ -185,7 +185,11 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::
             param = parameters(wrapper_f)[arg.codegen.i]
             attrs = parameter_attributes(wrapper_f, arg.codegen.i)
             if arg.cc == BITS_REF
-                push!(attrs, EnumAttribute("byval", 0; ctx))
+                if LLVM.version() >= v"12"
+                    push!(attrs, TypeAttribute("byval", eltype(arg.codegen.typ); ctx))
+                else
+                    push!(attrs, EnumAttribute("byval", 0; ctx))
+                end
                 ptr = struct_gep!(builder, param, 0)
                 push!(wrapper_args, ptr)
             else
