@@ -1,49 +1,115 @@
 # LLVM IR optimization
 
-Base.@kwdef struct GPUOptimizationParams
-    julia::Bool = true
-    intrinsics::Bool = true
-    ipo::Bool = true
+function addTargetPasses!(pm, tm, triple)
+    add_library_info!(pm, triple)
+    add_transform_info!(pm, tm)
+end
 
-    optlevel::Int = Base.JLOptions().opt_level
+# Based on Julia's optimization pipeline, minus the SLP and loop vectorizers.
+function addOptimizationPasses!(pm)
+    constant_merge!(pm)
+
+    propagate_julia_addrsp!(pm)
+    scoped_no_alias_aa!(pm)
+    type_based_alias_analysis!(pm)
+    basic_alias_analysis!(pm)
+    cfgsimplification!(pm)
+    dce!(pm)
+    scalar_repl_aggregates!(pm)
+
+    #mem_cpy_opt!(pm)
+
+    always_inliner!(pm) # Respect always_inline
+
+    # Running `memcpyopt` between this and `sroa` seems to give `sroa` a hard
+    # time merging the `alloca` for the unboxed data and the `alloca` created by
+    # the `alloc_opt` pass.
+
+    alloc_opt!(pm)
+    # consider AggressiveInstCombinePass at optlevel > 2
+
+    instruction_combining!(pm)
+    cfgsimplification!(pm)
+    scalar_repl_aggregates!(pm)
+    instruction_combining!(pm) # TODO: createInstSimplifyLegacy
+    jump_threading!(pm)
+
+    reassociate!(pm)
+
+    early_cse!(pm)
+
+    # Load forwarding above can expose allocations that aren't actually used
+    # remove those before optimizing loops.
+    alloc_opt!(pm)
+    loop_rotate!(pm)
+    # moving IndVarSimplify here prevented removing the loop in perf_sumcartesian(10:-1:1)
+    loop_idiom!(pm)
+
+    # LoopRotate strips metadata from terminator, so run LowerSIMD afterwards
+    lower_simdloop!(pm) # Annotate loop marked with "loopinfo" as LLVM parallel loop
+    licm!(pm)
+    julia_licm!(pm)
+    # Subsequent passes not stripping metadata from terminator
+    instruction_combining!(pm) # TODO: createInstSimplifyLegacy
+    ind_var_simplify!(pm)
+    loop_deletion!(pm)
+    loop_unroll!(pm) # TODO: in Julia createSimpleLoopUnroll
+
+    # Run our own SROA on heap objects before LLVM's
+    alloc_opt!(pm)
+    # Re-run SROA after loop-unrolling (useful for small loops that operate,
+    # over the structure of an aggregate)
+    scalar_repl_aggregates!(pm)
+    instruction_combining!(pm) # TODO: createInstSimplifyLegacy
+
+    gvn!(pm)
+    mem_cpy_opt!(pm)
+    sccp!(pm)
+
+    # Run instcombine after redundancy elimination to exploit opportunities
+    # opened up by them.
+    # This needs to be InstCombine instead of InstSimplify to allow
+    # loops over Union-typed arrays to vectorize.
+    instruction_combining!(pm)
+    jump_threading!(pm)
+    dead_store_elimination!(pm)
+
+    # More dead allocation (store) deletion before loop optimization
+    # consider removing this:
+    alloc_opt!(pm)
+
+    # see if all of the constant folding has exposed more loops
+    # to simplification and deletion
+    # this helps significantly with cleaning up iteration
+    cfgsimplification!(pm)
+    loop_deletion!(pm)
+    instruction_combining!(pm)
+    loop_vectorize!(pm)
+    # TODO: createLoopLoadEliminationPass
+    cfgsimplification!(pm)
+
+    aggressive_dce!(pm)
 end
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     triple = llvm_triple(job.target)
     tm = llvm_machine(job.target)
 
-    function initialize!(pm)
-        add_library_info!(pm, triple)
-        add_transform_info!(pm, tm)
-    end
-
     global current_job
     current_job = job
 
-    params = optimization_params(job)
-
-    # Julia-specific optimizations
-    #
-    # NOTE: we need to use multiple distinct pass managers to force pass ordering;
-    #       intrinsics should never get lowered before Julia has optimized them.
-
     ModulePassManager() do pm
-        initialize!(pm)
-        if params.julia
-            ccall(:jl_add_optimization_passes, Cvoid,
-                    (LLVM.API.LLVMPassManagerRef, Cint, Cint),
-                    pm, params.optlevel, #=lower_intrinsics=# 0)
-        end
-        if params.optlevel < 2
-            # Julia doesn't run the alloc optimizer on lower optimization levels,
-            # but the pass is crucial to remove possibly unsupported malloc calls.
-            alloc_opt!(pm)
-        end
+        addTargetPasses!(pm, tm, triple)
+        addOptimizationPasses!(pm)
         run!(pm, mod)
     end
 
-    params.intrinsics && ModulePassManager() do pm
-        initialize!(pm)
+    # NOTE: we need to use multiple distinct pass managers to force pass ordering;
+    #       intrinsics should never get lowered before Julia has optimized them.
+    # XXX: why doesn't the barrier noop pass work here?
+
+    ModulePassManager() do pm
+        addTargetPasses!(pm, tm, triple)
 
         # lower intrinsics
         add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
@@ -62,6 +128,8 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         run!(pm, mod)
     end
 
+    # TODO: combine_mul_add and create_div_rem_pairs from addMachinePasses
+
     # target-specific optimizations
     optimize_module!(job, mod)
 
@@ -73,8 +141,8 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     # part of the LateLowerGCFrame pass) aren't collected properly.
     #
     # these might not always be safe, as Julia's IR metadata isn't designed for IPO.
-    params.ipo && ModulePassManager() do pm
-        initialize!(pm)
+    ModulePassManager() do pm
+        addTargetPasses!(pm, tm, triple)
 
         dead_arg_elimination!(pm)   # parent doesn't use return value --> ret void
 

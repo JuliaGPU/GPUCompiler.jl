@@ -62,14 +62,6 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     end
 end
 
-# the LLVM to SPIRV translator does not support optimized LLVM IR
-# (KhronosGroup/SPIRV-LLVM-Translator#203). however, not optimizing at all
-# doesn't work either, as we then don't even run the alloc optimizer (resulting
-# in many calls to gpu_alloc that spirv-opt cannot remove) or even 'invalid IR'
-# like casts to addrspace-less pointers (which aren't allowed in SPIR-V).
-optimization_params(@nospecialize(job::CompilerJob{SPIRVCompilerTarget})) =
-    GPUOptimizationParams(; optlevel=1)
-
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMAssemblyFile)
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
