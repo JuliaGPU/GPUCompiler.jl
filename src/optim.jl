@@ -6,13 +6,36 @@ function addTargetPasses!(pm, tm, triple)
 end
 
 # Based on Julia's optimization pipeline, minus the SLP and loop vectorizers.
-function addOptimizationPasses!(pm)
+function addOptimizationPasses!(pm, opt_level=2)
+    # compare with the using Julia's optimization pipeline directly:
+    #ccall(:jl_add_optimization_passes, Cvoid,
+    #      (LLVM.API.LLVMPassManagerRef, Cint, Cint),
+    #      pm, opt_level, #=lower_intrinsics=# 0)
+    #return
+
     constant_merge!(pm)
+
+    if opt_level < 2
+        cfgsimplification!(pm)
+        if opt_level == 1
+            scalar_repl_aggregates!(pm)
+            instruction_combining!(pm)
+            early_cse!(pm)
+            # maybe add GVN?
+            # also try GVNHoist and GVNSink
+        end
+        mem_cpy_opt!(pm)
+        always_inliner!(pm) # Respect always_inline
+        lower_simdloop!(pm) # Annotate loop marked with "loopinfo" as LLVM parallel loop
+        return
+    end
 
     propagate_julia_addrsp!(pm)
     scoped_no_alias_aa!(pm)
     type_based_alias_analysis!(pm)
-    basic_alias_analysis!(pm)
+    if opt_level >= 3
+        basic_alias_analysis!(pm)
+    end
     cfgsimplification!(pm)
     dce!(pm)
     scalar_repl_aggregates!(pm)
@@ -27,12 +50,12 @@ function addOptimizationPasses!(pm)
 
     alloc_opt!(pm)
     # consider AggressiveInstCombinePass at optlevel > 2
-
     instruction_combining!(pm)
     cfgsimplification!(pm)
     scalar_repl_aggregates!(pm)
-    instruction_combining!(pm) # TODO: createInstSimplifyLegacy
+    instruction_simplify!(pm)
     jump_threading!(pm)
+    correlated_value_propagation!(pm)
 
     reassociate!(pm)
 
@@ -49,8 +72,11 @@ function addOptimizationPasses!(pm)
     lower_simdloop!(pm) # Annotate loop marked with "loopinfo" as LLVM parallel loop
     licm!(pm)
     julia_licm!(pm)
+    loop_unswitch!(pm)
+    licm!(pm)
+    julia_licm!(pm)
     # Subsequent passes not stripping metadata from terminator
-    instruction_combining!(pm) # TODO: createInstSimplifyLegacy
+    instruction_simplify!(pm)
     ind_var_simplify!(pm)
     loop_deletion!(pm)
     loop_unroll!(pm) # TODO: in Julia createSimpleLoopUnroll
@@ -60,7 +86,8 @@ function addOptimizationPasses!(pm)
     # Re-run SROA after loop-unrolling (useful for small loops that operate,
     # over the structure of an aggregate)
     scalar_repl_aggregates!(pm)
-    instruction_combining!(pm) # TODO: createInstSimplifyLegacy
+    # might not be necessary:
+    instruction_simplify!(pm)
 
     gvn!(pm)
     mem_cpy_opt!(pm)
@@ -72,21 +99,23 @@ function addOptimizationPasses!(pm)
     # loops over Union-typed arrays to vectorize.
     instruction_combining!(pm)
     jump_threading!(pm)
+    correlated_value_propagation!(pm)
     dead_store_elimination!(pm)
 
     # More dead allocation (store) deletion before loop optimization
     # consider removing this:
     alloc_opt!(pm)
-
     # see if all of the constant folding has exposed more loops
     # to simplification and deletion
     # this helps significantly with cleaning up iteration
-    cfgsimplification!(pm)
+    cfgsimplification!(pm)  # See note above, don't hoist instructions before LV
     loop_deletion!(pm)
     instruction_combining!(pm)
     loop_vectorize!(pm)
-    # TODO: createLoopLoadEliminationPass
+    loop_load_elimination!(pm)
+    # Cleanup after LV pass
     cfgsimplification!(pm)
+    # TODO: aggressive CFG simplificaton options
 
     aggressive_dce!(pm)
 end
@@ -108,27 +137,32 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     #       intrinsics should never get lowered before Julia has optimized them.
     # XXX: why doesn't the barrier noop pass work here?
 
+    # lower intrinsics
     ModulePassManager() do pm
         addTargetPasses!(pm, tm, triple)
 
-        # lower intrinsics
         add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
-        aggressive_dce!(pm) # remove dead uses of ptls
+
+        # remove dead uses of ptls
+        aggressive_dce!(pm)
         add!(pm, ModulePass("LowerPTLS", lower_ptls!))
 
         # the Julia GC lowering pass also has some clean-up that is required
         late_lower_gc_frame!(pm)
 
+        remove_ni!(pm)
         remove_julia_addrspaces!(pm)
 
         # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
         # FIXME: we should fix the inliner so that inlined code gets optimized early-on
         always_inliner!(pm)
 
+        # some of Julia's optimization passes happen _after_ lowering intrinsics
+        combine_mul_add!(pm)
+        div_rem_pairs!(pm)
+
         run!(pm, mod)
     end
-
-    # TODO: combine_mul_add and create_div_rem_pairs from addMachinePasses
 
     # target-specific optimizations
     optimize_module!(job, mod)
