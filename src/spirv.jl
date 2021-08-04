@@ -57,48 +57,73 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     # (OpKill is only available in fragment execution mode)
     ModulePassManager() do pm
         add!(pm, ModulePass("RemoveTrap", rm_trap!))
+        add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
         run!(pm, mod)
     end
 end
 
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMAssemblyFile)
-    # write the bitcode to a temporary file (the SPIRV Translator library doesn't have a C API)
-    mktemp() do input, input_io
-        write(input_io, mod)
-        flush(input_io)
+    # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
+    strip_debuginfo!(mod)
 
-        # compile to SPIR-V
-        mktemp() do output, output_io
-            SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
-                cmd = `$translator`
-                if format == LLVM.API.LLVMAssemblyFile
-                    cmd = `$cmd -spirv-text`
-                end
-                cmd = `$cmd --spirv-debug-info-version=ocl-100 -o $output $input`
-                run(cmd)
-            end
+    # translate to SPIR-V
+    input = tempname(cleanup=false) * ".bc"
+    translated = tempname(cleanup=false) * ".spv"
+    write(input, mod)
+    SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
+        proc = run(ignorestatus(`$translator --spirv-debug-info-version=ocl-100 -o $translated $input`))
+        if !success(proc)
+            error("""Failed to translate LLVM code to SPIR-V.
+                     If you think this is a bug, please file an issue and attach $(input).""")
+        end
+    end
 
-            # read back the file
-            if format == LLVM.API.LLVMAssemblyFile
-                read(output_io, String)
-            else
-                read(output_io)
+    # validate
+    # XXX: parameterize this on the `validate` driver argument
+    # XXX: our code currently doesn't pass the validator
+    if Base.JLOptions().debug_level >= 2 && false
+        SPIRV_Tools_jll.spirv_val() do validator
+            proc = run(ignorestatus(`$validator $translated`))
+            if !success(proc)
+                error("""Failed to validate generated SPIR-V.
+                         If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
             end
         end
     end
+
+    # optimize
+    # XXX: parameterize this on the `optimize` driver argument
+    # XXX: the optimizer segfaults on some of our code
+    optimized = tempname(cleanup=false) * ".spv"
+    if false
+        SPIRV_Tools_jll.spirv_opt() do optimizer
+            proc = run(ignorestatus(`$optimizer -O --skip-validation $translated -o $optimized`))
+            if !success(proc)
+                error("""Failed to optimize generated SPIR-V.
+                         If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+            end
+        end
+    end
+
+    output = if format == LLVM.API.LLVMObjectFile
+        read(translated)
+    else
+        # disassemble
+        SPIRV_Tools_jll.spirv_dis() do disassembler
+            read(`$disassembler $optimized`, String)
+        end
+    end
+
+    rm(input)
+    rm(translated)
+    #rm(optimized)
+
+    return output
 end
 
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
-    if raw
-        # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
-        # so just return what LLVM gives us in that case (which is also more faithful).
-        asm, _ = codegen(:asm, job; strip=false, only_entry=!dump_module, validate=false)
-        print(io, asm)
-        return
-    end
-
     obj, _ = codegen(:obj, job; strip=!raw, only_entry=!dump_module, validate=false)
     mktemp() do input_path, input_io
         write(input_io, obj)
@@ -140,6 +165,27 @@ function rm_trap!(mod::LLVM.Module)
 
         @compiler_assert isempty(uses(trap)) job
         unsafe_delete!(mod, trap)
+    end
+
+    end
+    return changed
+end
+
+# remove freeze and replace uses by the original value
+# (KhronosGroup/SPIRV-LLVM-Translator#1140)
+function rm_freeze!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    changed = false
+    @timeit_debug to "remove freeze" begin
+
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        if inst isa LLVM.FreezeInst
+            orig = first(operands(inst))
+            replace_uses!(inst, orig)
+            @compiler_assert isempty(uses(inst)) job
+            unsafe_delete!(bb, inst)
+            changed = true
+        end
     end
 
     end
