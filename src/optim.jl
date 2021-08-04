@@ -8,15 +8,23 @@ end
 # Based on Julia's optimization pipeline, minus the SLP and loop vectorizers.
 function addOptimizationPasses!(pm, opt_level=2)
     # compare with the using Julia's optimization pipeline directly:
-    #ccall(:jl_add_optimization_passes, Cvoid,
-    #      (LLVM.API.LLVMPassManagerRef, Cint, Cint),
-    #      pm, opt_level, #=lower_intrinsics=# 0)
-    #return
+    ccall(:jl_add_optimization_passes, Cvoid,
+         (LLVM.API.LLVMPassManagerRef, Cint, Cint),
+         pm, opt_level, #=lower_intrinsics=# 0)
+    return
+
+    # NOTE: LLVM 12 disabled the hoisting of common instruction
+    #       before loop vectorization (https://reviews.llvm.org/D84108).
+    #
+    #       This is re-enabled with calls to cfg_simplify here,
+    #       to merge allocations and sometimes eliminate them,
+    #       since AllocOpt does not handle PhiNodes.
+    #       Enable this instruction hoisting because of this and Union benchmarks.
 
     constant_merge!(pm)
 
     if opt_level < 2
-        cfgsimplification!(pm)
+        cfgsimplification!(pm; hoist_common_insts=true)
         if opt_level == 1
             scalar_repl_aggregates!(pm)
             instruction_combining!(pm)
@@ -36,7 +44,7 @@ function addOptimizationPasses!(pm, opt_level=2)
     if opt_level >= 3
         basic_alias_analysis!(pm)
     end
-    cfgsimplification!(pm)
+    cfgsimplification!(pm; hoist_common_insts=true)
     dce!(pm)
     scalar_repl_aggregates!(pm)
 
@@ -51,7 +59,7 @@ function addOptimizationPasses!(pm, opt_level=2)
     alloc_opt!(pm)
     # consider AggressiveInstCombinePass at optlevel > 2
     instruction_combining!(pm)
-    cfgsimplification!(pm)
+    cfgsimplification!(pm; hoist_common_insts=true)
     scalar_repl_aggregates!(pm)
     instruction_simplify!(pm)
     jump_threading!(pm)
@@ -114,8 +122,12 @@ function addOptimizationPasses!(pm, opt_level=2)
     loop_vectorize!(pm)
     loop_load_elimination!(pm)
     # Cleanup after LV pass
-    cfgsimplification!(pm)
-    # TODO: aggressive CFG simplificaton options
+    cfgsimplification!(pm; # Aggressive CFG simplification
+        forward_switch_cond_to_phi=true,
+        convert_switch_to_lookup_table=true,
+        need_canonical_loop=true,
+        hoist_common_insts=true,
+        sink_common_insts=true) # FIXME: Causes assertion in llvm-late-lowering
 
     aggressive_dce!(pm)
 end
