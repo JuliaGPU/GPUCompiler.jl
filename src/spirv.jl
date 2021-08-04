@@ -67,44 +67,59 @@ end
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
-    # write the bitcode to a temporary file (the SPIRV Translator library doesn't have a C API)
-    mktemp() do input, input_io
-        write(input_io, mod)
-        flush(input_io)
+    # translate to SPIR-V
+    input = tempname(cleanup=false) * ".bc"
+    translated = tempname(cleanup=false) * ".spv"
+    write(input, mod)
+    SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
+        proc = run(ignorestatus(`$translator --spirv-debug-info-version=ocl-100 -o $translated $input`))
+        if !success(proc)
+            error("""Failed to translate LLVM code to SPIR-V.
+                     If you think this is a bug, please file an issue and attach $(input).""")
+        end
+    end
 
-        # compile to SPIR-V
-        mktemp() do translated, translated_io
-            SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
-                run(`$translator --spirv-debug-info-version=ocl-100 -o $translated $input`)
-            end
-
-            # validate
-            # XXX: parameterize this on the `validate` driver argument
-            # XXX: our code currently doesn't pass the validator
-            if Base.JLOptions().debug_level >= 2 && false
-                SPIRV_Tools_jll.spirv_val() do validator
-                    run(`$validator $translated`)
-                end
-            end
-
-            # optimize
-            # XXX: parameterize this on the `optimize` driver argument
-            mktemp() do optimized, optimized_io
-                SPIRV_Tools_jll.spirv_opt() do optimizer
-                    run(`$optimizer -O --skip-validation $translated -o $optimized`)
-                end
-
-                if format == LLVM.API.LLVMObjectFile
-                    read(optimized)
-                else
-                    # disassemble
-                    SPIRV_Tools_jll.spirv_dis() do disassembler
-                        read(`$disassembler $optimized`, String)
-                    end
-                end
+    # validate
+    # XXX: parameterize this on the `validate` driver argument
+    # XXX: our code currently doesn't pass the validator
+    if Base.JLOptions().debug_level >= 2 && false
+        SPIRV_Tools_jll.spirv_val() do validator
+            proc = run(ignorestatus(`$validator $translated`))
+            if !success(proc)
+                error("""Failed to validate generated SPIR-V.
+                         If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
             end
         end
     end
+
+    # optimize
+    # XXX: parameterize this on the `optimize` driver argument
+    # XXX: the optimizer segfaults on some of our code
+    optimized = tempname(cleanup=false) * ".spv"
+    if false
+        SPIRV_Tools_jll.spirv_opt() do optimizer
+            proc = run(ignorestatus(`$optimizer -O --skip-validation $translated -o $optimized`))
+            if !success(proc)
+                error("""Failed to optimize generated SPIR-V.
+                         If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+            end
+        end
+    end
+
+    output = if format == LLVM.API.LLVMObjectFile
+        read(translated)
+    else
+        # disassemble
+        SPIRV_Tools_jll.spirv_dis() do disassembler
+            read(`$disassembler $optimized`, String)
+        end
+    end
+
+    rm(input)
+    rm(translated)
+    #rm(optimized)
+
+    return output
 end
 
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
