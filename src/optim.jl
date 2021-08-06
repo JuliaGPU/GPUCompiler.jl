@@ -8,10 +8,10 @@ end
 # Based on Julia's optimization pipeline, minus the SLP and loop vectorizers.
 function addOptimizationPasses!(pm, opt_level=2)
     # compare with the using Julia's optimization pipeline directly:
-    ccall(:jl_add_optimization_passes, Cvoid,
-         (LLVM.API.LLVMPassManagerRef, Cint, Cint),
-         pm, opt_level, #=lower_intrinsics=# 0)
-    return
+    #ccall(:jl_add_optimization_passes, Cvoid,
+    #     (LLVM.API.LLVMPassManagerRef, Cint, Cint),
+    #     pm, opt_level, #=lower_intrinsics=# 0)
+    #return
 
     # NOTE: LLVM 12 disabled the hoisting of common instruction
     #       before loop vectorization (https://reviews.llvm.org/D84108).
@@ -24,7 +24,11 @@ function addOptimizationPasses!(pm, opt_level=2)
     constant_merge!(pm)
 
     if opt_level < 2
-        cfgsimplification!(pm; hoist_common_insts=true)
+        if LLVM.version() >= v"12"
+            cfgsimplification!(pm; hoist_common_insts=true)
+        else
+            cfgsimplification!(pm)
+        end
         if opt_level == 1
             scalar_repl_aggregates!(pm)
             instruction_combining!(pm)
@@ -44,7 +48,11 @@ function addOptimizationPasses!(pm, opt_level=2)
     if opt_level >= 3
         basic_alias_analysis!(pm)
     end
-    cfgsimplification!(pm; hoist_common_insts=true)
+    if LLVM.version() >= v"12"
+        cfgsimplification!(pm; hoist_common_insts=true)
+    else
+        cfgsimplification!(pm)
+    end
     dce!(pm)
     scalar_repl_aggregates!(pm)
 
@@ -59,7 +67,11 @@ function addOptimizationPasses!(pm, opt_level=2)
     alloc_opt!(pm)
     # consider AggressiveInstCombinePass at optlevel > 2
     instruction_combining!(pm)
-    cfgsimplification!(pm; hoist_common_insts=true)
+    if LLVM.version() >= v"12"
+        cfgsimplification!(pm; hoist_common_insts=true)
+    else
+        cfgsimplification!(pm)
+    end
     scalar_repl_aggregates!(pm)
     instruction_simplify!(pm)
     jump_threading!(pm)
@@ -122,12 +134,16 @@ function addOptimizationPasses!(pm, opt_level=2)
     loop_vectorize!(pm)
     loop_load_elimination!(pm)
     # Cleanup after LV pass
-    cfgsimplification!(pm; # Aggressive CFG simplification
-        forward_switch_cond_to_phi=true,
-        convert_switch_to_lookup_table=true,
-        need_canonical_loop=true,
-        hoist_common_insts=true,
-        sink_common_insts=true) # FIXME: Causes assertion in llvm-late-lowering
+    if LLVM.version() >= v"12"
+        cfgsimplification!(pm; # Aggressive CFG simplification
+            forward_switch_cond_to_phi=true,
+            convert_switch_to_lookup_table=true,
+            need_canonical_loop=true,
+            hoist_common_insts=true,
+            sink_common_insts=true) # FIXME: Causes assertion in llvm-late-lowering
+    else
+        cfgsimplification!(pm)
+    end
 
     aggressive_dce!(pm)
 end
