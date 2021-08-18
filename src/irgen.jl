@@ -15,6 +15,11 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
             if Sys.iswindows()
                 personality!(llvmf, nothing)
             end
+
+            # remove the non-specialized jfptr functions
+            if startswith(LLVM.name(llvmf), "jfptr_")
+                unsafe_delete!(mod, llvmf)
+            end
         end
 
         # remove the exception-handling personality function
