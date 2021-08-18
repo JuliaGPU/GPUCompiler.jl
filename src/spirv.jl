@@ -40,6 +40,8 @@ function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module
 end
 
 function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
     if job.source.kernel
         # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
         #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
@@ -193,75 +195,83 @@ function rm_freeze!(mod::LLVM.Module)
 end
 
 # wrap byval pointers in a single-value struct
-function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
+function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
-    entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
-    @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job
+    ft = eltype(llvmtype(f)::LLVM.PointerType)::LLVM.FunctionType
+    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
 
-    args = classify_arguments(job, entry_f)
-    filter!(args) do arg
-        arg.cc != GHOST
+    # find the byval parameters
+    byval = BitVector(undef, length(parameters(ft)))
+    for i in 1:length(byval)
+        attrs = collect(parameter_attributes(f, i))
+        byval[i] = any(attrs) do attr
+            kind(attr) == kind(EnumAttribute("byval", 0; ctx))
+        end
     end
 
     # generate the wrapper function type & definition
-    wrapper_types = LLVM.LLVMType[]
-    for arg in args
-        typ = if arg.cc == BITS_REF
-            st = LLVM.StructType([eltype(arg.codegen.typ)]; ctx)
-            LLVM.PointerType(st, addrspace(arg.codegen.typ))
+    new_types = LLVM.LLVMType[]
+    for (i, param) in enumerate(parameters(ft))
+        typ = if byval[i]
+            st = LLVM.StructType([eltype(param)]; ctx)
+            LLVM.PointerType(st, addrspace(param))
         else
-            convert(LLVMType, arg.typ; ctx)
+            param
         end
-        push!(wrapper_types, typ)
+        push!(new_types, typ)
     end
-    wrapper_fn = LLVM.name(entry_f)
-    LLVM.name!(entry_f, wrapper_fn * ".inner")
-    wrapper_ft = LLVM.FunctionType(LLVM.VoidType(ctx), wrapper_types)
-    wrapper_f = LLVM.Function(mod, wrapper_fn, wrapper_ft)
+    new_ft = LLVM.FunctionType(LLVM.VoidType(ctx), new_types)
+    new_f = LLVM.Function(mod, "", new_ft)
+    linkage!(new_f, linkage(f))
 
     # emit IR performing the "conversions"
-    let builder = Builder(ctx)
-        entry = BasicBlock(wrapper_f, "entry"; ctx)
+    new_args = Vector{LLVM.Value}()
+    Builder(ctx) do builder
+        entry = BasicBlock(new_f, "entry"; ctx)
         position!(builder, entry)
 
-        wrapper_args = Vector{LLVM.Value}()
-
         # perform argument conversions
-        for arg in args
-            param = parameters(wrapper_f)[arg.codegen.i]
-            attrs = parameter_attributes(wrapper_f, arg.codegen.i)
-            if arg.cc == BITS_REF
+        for (i, param) in enumerate(parameters(new_f))
+            if byval[i]
+                ptr = struct_gep!(builder, param, 0)
+                push!(new_args, ptr)
+            else
+                push!(new_args, param)
+            end
+        end
+
+        # inline the old IR
+        value_map = Dict{LLVM.Value, LLVM.Value}(
+            param => new_args[i] for (i,param) in enumerate(parameters(f))
+        )
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+        # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
+
+        # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
+        for i in 1:length(byval)
+            attrs = parameter_attributes(new_f, i)
+            if byval[i]
                 if LLVM.version() >= v"12"
-                    push!(attrs, TypeAttribute("byval", eltype(wrapper_types[arg.codegen.i]); ctx))
+                    push!(attrs, TypeAttribute("byval", eltype(new_types[i]); ctx))
                 else
                     push!(attrs, EnumAttribute("byval", 0; ctx))
-                end
-                ptr = struct_gep!(builder, param, 0)
-                push!(wrapper_args, ptr)
-            else
-                push!(wrapper_args, param)
-                for attr in collect(attrs)
-                    push!(parameter_attributes(wrapper_f, arg.codegen.i), attr)
                 end
             end
         end
 
-        call!(builder, entry_f, wrapper_args)
-
-        ret!(builder)
-
-        dispose(builder)
+        # fall through
+        br!(builder, collect(blocks(new_f))[2])
     end
 
-    # early-inline the original entry function into the wrapper
-    delete!(function_attributes(entry_f), EnumAttribute("noinline", 0; ctx))
-    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0; ctx))
-    linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
+    # remove the old function
+    # NOTE: if we ever have legitimate uses of the old function, create a shim instead
+    fn = LLVM.name(f)
+    @assert isempty(uses(f))
+    # XXX: there may still be metadata using this function. RAUW updates those,
+    #      but asserts on a debug build due to the updated function type.
+    unsafe_delete!(mod, f)
+    LLVM.name!(new_f, fn)
 
-    ModulePassManager() do pm
-        always_inliner!(pm)
-        run!(pm, mod)
-    end
-
-    return wrapper_f
+    return new_f
 end

@@ -44,6 +44,8 @@ function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
 end
 
 function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
     if job.source.kernel
         entry = lower_byval(job, mod, entry)
 

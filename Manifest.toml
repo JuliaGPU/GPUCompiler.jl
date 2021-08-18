@@ -39,15 +39,17 @@ version = "1.3.0"
 
 [[LLVM]]
 deps = ["CEnum", "LLVMExtra_jll", "Libdl", "Printf", "Unicode"]
-git-tree-sha1 = "d6041ad706cf458b2c9f3e501152488a26451e9c"
+git-tree-sha1 = "effe3552dba16b1e9c3cc9beac454a3566f09637"
+repo-rev = "b4dfdfcf86dde4563c87e90d130c78dbbe8550f8"
+repo-url = "https://github.com/maleadt/LLVM.jl.git"
 uuid = "929cbde3-209d-540e-8aea-75f648917ca0"
 version = "4.2.0"
 
 [[LLVMExtra_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
-git-tree-sha1 = "a9b1130c4728b0e462a1c28772954650039eb847"
+git-tree-sha1 = "873e7962f14f6bdd8a0e10552d964ec0a7c69f3b"
 uuid = "dad2f222-ce93-54a1-a47d-0025e8a3acab"
-version = "0.0.7+0"
+version = "0.0.9+0"
 
 [[LibCURL]]
 deps = ["LibCURL_jll", "MozillaCACerts_jll"]
