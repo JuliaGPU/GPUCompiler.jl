@@ -73,6 +73,9 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         end
         internalize!(pm, exports)
 
+        # inline llvmcall bodies
+        always_inliner!(pm)
+
         can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
 
         add_lowering_passes!(job, pm)
