@@ -44,6 +44,8 @@ function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
 end
 
 function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
     if job.source.kernel
         entry = lower_byval(job, mod, entry)
 
@@ -109,7 +111,7 @@ function lower_throw_extra!(mod::LLVM.Module)
                     end
 
                     # remove the call
-                    call_args = collect(operands(call))[1:end-1] # last arg is function itself
+                    call_args = operands(call)[1:end-1] # last arg is function itself
                     unsafe_delete!(LLVM.parent(call), call)
 
                     # HACK: kill the exceptions' unused arguments

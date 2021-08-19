@@ -15,6 +15,11 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
             if Sys.iswindows()
                 personality!(llvmf, nothing)
             end
+
+            # remove the non-specialized jfptr functions
+            if startswith(LLVM.name(llvmf), "jfptr_")
+                unsafe_delete!(mod, llvmf)
+            end
         end
 
         # remove the exception-handling personality function
@@ -67,6 +72,9 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
             push!(exports, LLVM.name(gvar))
         end
         internalize!(pm, exports)
+
+        # inline llvmcall bodies
+        always_inliner!(pm)
 
         can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
 
@@ -199,7 +207,7 @@ function lower_throw!(mod::LLVM.Module)
                 end
 
                 # remove the call
-                call_args = collect(operands(call))[1:end-1] # last arg is function itself
+                call_args = operands(call)[1:end-1] # last arg is function itself
                 unsafe_delete!(LLVM.parent(call), call)
 
                 # HACK: kill the exceptions' unused arguments
@@ -377,90 +385,41 @@ end
 # some back-ends don't support byval, or support it badly
 # https://reviews.llvm.org/D79744
 
-# generate a kernel wrapper to fix & improve argument passing
-function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry_f::LLVM.Function)
+# modify the kernel function to fix & improve argument passing
+function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
-    entry_ft = eltype(llvmtype(entry_f)::LLVM.PointerType)::LLVM.FunctionType
-    @compiler_assert return_type(entry_ft) == LLVM.VoidType(ctx) job
+    ft = eltype(llvmtype(f)::LLVM.PointerType)::LLVM.FunctionType
+    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
 
-    args = classify_arguments(job, entry_f)
-    filter!(args) do arg
-        arg.cc != GHOST
-    end
-
-    # generate the wrapper function type & definition
-    wrapper_types = LLVM.LLVMType[]
-    for arg in args
-        typ = if arg.cc == BITS_REF
-            eltype(arg.codegen.typ)
-        else
-            convert(LLVMType, arg.typ; ctx)
-        end
-        push!(wrapper_types, typ)
-    end
-    wrapper_fn = LLVM.name(entry_f)
-    LLVM.name!(entry_f, wrapper_fn * ".inner")
-    wrapper_ft = LLVM.FunctionType(LLVM.VoidType(ctx), wrapper_types)
-    wrapper_f = LLVM.Function(mod, wrapper_fn, wrapper_ft)
-
-    # emit IR performing the "conversions"
-    let builder = Builder(ctx)
-        entry = BasicBlock(wrapper_f, "entry"; ctx)
-        position!(builder, entry)
-
-        wrapper_args = Vector{LLVM.Value}()
-
-        # perform argument conversions
-        for arg in args
-            if arg.cc == BITS_REF
-                # copy the argument value to a stack slot, and reference it.
-                ptr = alloca!(builder, eltype(arg.codegen.typ))
-                if LLVM.addrspace(arg.codegen.typ) != 0
-                    ptr = addrspacecast!(builder, ptr, arg.codegen.typ)
-                end
-                store!(builder, parameters(wrapper_f)[arg.codegen.i], ptr)
-                push!(wrapper_args, ptr)
-            else
-                push!(wrapper_args, parameters(wrapper_f)[arg.codegen.i])
-                for attr in collect(parameter_attributes(entry_f, arg.codegen.i))
-                    push!(parameter_attributes(wrapper_f, arg.codegen.i), attr)
-                end
+    # find the byval parameters
+    byval = BitVector(undef, length(parameters(ft)))
+    if LLVM.version() >= v"12"
+        for i in 1:length(byval)
+            attrs = collect(parameter_attributes(f, i))
+            byval[i] = any(attrs) do attr
+                kind(attr) == kind(EnumAttribute("byval", 0; ctx))
             end
         end
-
-        call!(builder, entry_f, wrapper_args)
-
-        ret!(builder)
-
-        dispose(builder)
+    else
+        # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
+        args = classify_arguments(job, f)
+        filter!(args) do arg
+            arg.cc != GHOST
+        end
+        for arg in args
+            if arg.cc == BITS_REF
+                byval[arg.codegen.i] = true
+            end
+        end
     end
 
-    # early-inline the original entry function into the wrapper
-    push!(function_attributes(entry_f), EnumAttribute("alwaysinline", 0; ctx))
-    linkage!(entry_f, LLVM.API.LLVMInternalLinkage)
-
-    # copy debug info
-    sp = LLVM.get_subprogram(entry_f)
-    if sp !== nothing
-        LLVM.set_subprogram!(wrapper_f, sp)
-    end
-
-    fixup_metadata!(entry_f)
-    ModulePassManager() do pm
-        always_inliner!(pm)
-        run!(pm, mod)
-    end
-
-    return wrapper_f
-end
-
-# HACK: get rid of invariant.load and const TBAA metadata on loads from pointer args,
-#       since storing to a stack slot violates the semantics of those attributes.
-# TODO: can we emit a wrapper that doesn't violate Julia's metadata?
-function fixup_metadata!(f::LLVM.Function)
-    for param in parameters(f)
-        if isa(llvmtype(param), LLVM.PointerType)
-            # collect all uses of the pointer
+    # fixup metadata
+    #
+    # Julia emits invariant.load and const TBAA metadta on loads from pointer args,
+    # which is invalid now that we have materialized the byval.
+    for (i, param) in enumerate(parameters(f))
+        if byval[i]
+            # collect all uses of the argument
             worklist = Vector{LLVM.Instruction}(user.(collect(uses(param))))
             while !isempty(worklist)
                 value = popfirst!(worklist)
@@ -480,11 +439,67 @@ function fixup_metadata!(f::LLVM.Function)
                    isa(value, LLVM.AddrSpaceCastInst)
                     append!(worklist, user.(collect(uses(value))))
                 end
-
-                # IMPORTANT NOTE: if we ever want to inline functions at the LLVM level,
-                # we need to recurse into call instructions here, and strip metadata from
-                # called functions (see CUDAnative.jl#238).
             end
         end
     end
+
+    # generate the new function type & definition
+    new_types = LLVM.LLVMType[]
+    for (i, param) in enumerate(parameters(ft))
+        if byval[i]
+            push!(new_types, eltype(param::LLVM.PointerType))
+        else
+            push!(new_types, param)
+        end
+    end
+    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_f = LLVM.Function(mod, "", new_ft)
+    linkage!(new_f, linkage(f))
+
+    # emit IR performing the "conversions"
+    new_args = LLVM.Value[]
+    Builder(ctx) do builder
+        entry = BasicBlock(new_f, "entry"; ctx)
+        position!(builder, entry)
+
+        # perform argument conversions
+        for (i, param) in enumerate(parameters(ft))
+            if byval[i]
+                # copy the argument value to a stack slot, and reference it.
+                ptr = alloca!(builder, eltype(param))
+                if LLVM.addrspace(param) != 0
+                    ptr = addrspacecast!(builder, ptr, param)
+                end
+                store!(builder, parameters(new_f)[i], ptr)
+                push!(new_args, ptr)
+            else
+                push!(new_args, parameters(new_f)[i])
+                for attr in collect(parameter_attributes(f, i))
+                    push!(parameter_attributes(new_f, i), attr)
+                end
+            end
+        end
+
+        # inline the old IR
+        value_map = Dict{LLVM.Value, LLVM.Value}(
+            param => new_args[i] for (i,param) in enumerate(parameters(f))
+        )
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+        # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
+
+        # fall through
+        br!(builder, blocks(new_f)[2])
+    end
+
+    # remove the old function
+    # NOTE: if we ever have legitimate uses of the old function, create a shim instead
+    fn = LLVM.name(f)
+    @assert isempty(uses(f))
+    # XXX: there may still be metadata using this function. RAUW updates those,
+    #      but asserts on a debug build due to the updated function type.
+    unsafe_delete!(mod, f)
+    LLVM.name!(new_f, fn)
+
+    return new_f
 end
