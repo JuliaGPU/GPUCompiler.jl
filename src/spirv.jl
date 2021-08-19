@@ -202,10 +202,23 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
-    for i in 1:length(byval)
-        attrs = collect(parameter_attributes(f, i))
-        byval[i] = any(attrs) do attr
-            kind(attr) == kind(EnumAttribute("byval", 0; ctx))
+    if LLVM.version() >= v"12"
+        for i in 1:length(byval)
+            attrs = collect(parameter_attributes(f, i))
+            byval[i] = any(attrs) do attr
+                kind(attr) == kind(EnumAttribute("byval", 0; ctx))
+            end
+        end
+    else
+        # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
+        args = classify_arguments(job, f)
+        filter!(args) do arg
+            arg.cc != GHOST
+        end
+        for arg in args
+            if arg.cc == BITS_REF
+                byval[arg.codegen.i] = true
+            end
         end
     end
 
