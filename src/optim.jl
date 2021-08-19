@@ -242,7 +242,7 @@ function lower_gc_frame!(fun::LLVM.Function)
             call = user(use)::LLVM.CallInst
 
             # decode the call
-            ops = collect(operands(call))
+            ops = operands(call)
             sz = ops[2]
 
             # replace with PTX alloc_obj

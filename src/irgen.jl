@@ -207,7 +207,7 @@ function lower_throw!(mod::LLVM.Module)
                 end
 
                 # remove the call
-                call_args = collect(operands(call))[1:end-1] # last arg is function itself
+                call_args = operands(call)[1:end-1] # last arg is function itself
                 unsafe_delete!(LLVM.parent(call), call)
 
                 # HACK: kill the exceptions' unused arguments
@@ -489,7 +489,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
 
         # fall through
-        br!(builder, collect(blocks(new_f))[2])
+        br!(builder, blocks(new_f)[2])
     end
 
     # remove the old function
