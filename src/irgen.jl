@@ -413,6 +413,36 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         end
     end
 
+    # fixup metadata
+    #
+    # Julia emits invariant.load and const TBAA metadta on loads from pointer args,
+    # which is invalid now that we have materialized the byval.
+    for (i, param) in enumerate(parameters(f))
+        if byval[i]
+            # collect all uses of the argument
+            worklist = Vector{LLVM.Instruction}(user.(collect(uses(param))))
+            while !isempty(worklist)
+                value = popfirst!(worklist)
+
+                # remove the invariant.load attribute
+                md = metadata(value)
+                if haskey(md, LLVM.MD_invariant_load)
+                    delete!(md, LLVM.MD_invariant_load)
+                end
+                if haskey(md, LLVM.MD_tbaa)
+                    delete!(md, LLVM.MD_tbaa)
+                end
+
+                # recurse on the output of some instructions
+                if isa(value, LLVM.BitCastInst) ||
+                   isa(value, LLVM.GetElementPtrInst) ||
+                   isa(value, LLVM.AddrSpaceCastInst)
+                    append!(worklist, user.(collect(uses(value))))
+                end
+            end
+        end
+    end
+
     # generate the new function type & definition
     new_types = LLVM.LLVMType[]
     for (i, param) in enumerate(parameters(ft))
