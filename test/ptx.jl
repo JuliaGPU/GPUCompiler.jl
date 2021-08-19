@@ -38,7 +38,7 @@ end
     @test !occursin("nvvm.annotations", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
-                                         dump_module=true, kernel=true))
+                                  dump_module=true, kernel=true))
     @test occursin("nvvm.annotations", ir)
     @test !occursin("maxntid", ir)
     @test !occursin("reqntid", ir)

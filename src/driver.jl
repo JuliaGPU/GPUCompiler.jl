@@ -306,13 +306,13 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
+    finish_module!(job, ir)
+
     return ir, (; entry, compiled)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
                           strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
-    finish_module!(job, ir)
-
     if validate
         @timeit_debug to "validation" begin
             check_invocation(job)

@@ -81,18 +81,6 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         add_lowering_passes!(job, pm)
 
         run!(pm, mod)
-
-        # NOTE: if an optimization is missing, try scheduling an entirely new optimization
-        # to see which passes need to be added to the target-specific list
-        #     LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
-        #     ModulePassManager() do pm
-        #         add_library_info!(pm, triple(mod))
-        #         add_transform_info!(pm, tm)
-        #         PassManagerBuilder() do pmb
-        #             populate!(pm, pmb)
-        #         end
-        #         run!(pm, mod)
-        #     end
     end
 
     return mod, compiled
@@ -380,12 +368,10 @@ function deserves_sret(T, llvmT)
 end
 
 
-## byval lowering
-
-# some back-ends don't support byval, or support it badly
+# byval lowering
+#
+# some back-ends don't support byval, or support it badly, so lower it eagerly ourselves
 # https://reviews.llvm.org/D79744
-
-# modify the kernel function to fix & improve argument passing
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
     ft = eltype(llvmtype(f)::LLVM.PointerType)::LLVM.FunctionType

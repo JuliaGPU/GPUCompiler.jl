@@ -116,46 +116,9 @@ function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
-    ctx = context(mod)
     if job.source.kernel
         # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
         entry = lower_byval(job, mod, entry)
-
-        # property annotations
-        annotations = Metadata[entry]
-
-        ## kernel metadata
-        append!(annotations, [MDString("kernel"; ctx),
-                              ConstantInt(Int32(1); ctx)])
-
-        ## expected CTA sizes
-        if job.target.minthreads !== nothing
-            for (dim, name) in enumerate([:x, :y, :z])
-                bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
-                append!(annotations, [MDString("reqntid$name"; ctx),
-                                      ConstantInt(Int32(bound); ctx)])
-            end
-        end
-        if job.target.maxthreads !== nothing
-            for (dim, name) in enumerate([:x, :y, :z])
-                bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
-                append!(annotations, [MDString("maxntid$name"; ctx),
-                                      ConstantInt(Int32(bound); ctx)])
-            end
-        end
-
-        if job.target.blocks_per_sm !== nothing
-            append!(annotations, [MDString("minctasm"; ctx),
-                                  ConstantInt(Int32(job.target.blocks_per_sm); ctx)])
-        end
-
-        if job.target.maxregs !== nothing
-            append!(annotations, [MDString("maxnreg"; ctx),
-                                  ConstantInt(Int32(job.target.maxregs); ctx)])
-        end
-
-        push!(metadata(mod)["nvvm.annotations"], MDNode(annotations; ctx))
-
 
         if LLVM.version() >= v"8"
             # calling convention
@@ -168,6 +131,7 @@ end
 
 function add_lowering_passes!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                               pm::LLVM.PassManager)
+    # hide `unreachable` from LLVM so that it doesn't introduce divergent control flow
     if !job.target.unreachable
         add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
     end
@@ -205,6 +169,62 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         global_dce!(pm)
 
         run!(pm, mod)
+    end
+end
+
+function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
+    ctx = context(mod)
+
+    # add metadata annotations for the assembler to the module
+    # NOTE: we need to do this as late as possible, because otherwise the metadata (which
+    #       refers to a specific function) can get lost when cloning functions. normally
+    #       RAUW updates those references, but we can't RAUW with a changed function type.
+    if job.source.kernel
+        # find the entry-point function
+        # XXX: make this an argument to `emit_asm` again?
+        entry = nothing
+        for f in functions(mod)
+            if callconv(f) == LLVM.API.LLVMPTXKernelCallConv
+                entry = f
+                break
+            end
+        end
+        @assert entry !== nothing
+
+        # property annotations
+        annotations = Metadata[entry]
+
+        ## kernel metadata
+        append!(annotations, [MDString("kernel"; ctx),
+                              ConstantInt(Int32(1); ctx)])
+
+        ## expected CTA sizes
+        if job.target.minthreads !== nothing
+            for (dim, name) in enumerate([:x, :y, :z])
+                bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
+                append!(annotations, [MDString("reqntid$name"; ctx),
+                                      ConstantInt(Int32(bound); ctx)])
+            end
+        end
+        if job.target.maxthreads !== nothing
+            for (dim, name) in enumerate([:x, :y, :z])
+                bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
+                append!(annotations, [MDString("maxntid$name"; ctx),
+                                      ConstantInt(Int32(bound); ctx)])
+            end
+        end
+
+        if job.target.blocks_per_sm !== nothing
+            append!(annotations, [MDString("minctasm"; ctx),
+                                  ConstantInt(Int32(job.target.blocks_per_sm); ctx)])
+        end
+
+        if job.target.maxregs !== nothing
+            append!(annotations, [MDString("maxnreg"; ctx),
+                                  ConstantInt(Int32(job.target.maxregs); ctx)])
+        end
+
+        push!(metadata(mod)["nvvm.annotations"], MDNode(annotations; ctx))
     end
 end
 
