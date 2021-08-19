@@ -39,11 +39,9 @@ version = "1.3.0"
 
 [[LLVM]]
 deps = ["CEnum", "LLVMExtra_jll", "Libdl", "Printf", "Unicode"]
-git-tree-sha1 = "97b3606f7e23cc7afd594d8a094f1f087f1d6511"
-repo-rev = "2c5db93"
-repo-url = "https://github.com/maleadt/LLVM.jl.git"
+git-tree-sha1 = "8b2ada8605ac207b4382cd3549e807ad97916b5b"
 uuid = "929cbde3-209d-540e-8aea-75f648917ca0"
-version = "4.2.0"
+version = "4.3.0"
 
 [[LLVMExtra_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
