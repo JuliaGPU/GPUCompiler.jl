@@ -9,9 +9,20 @@ end
 function addOptimizationPasses!(pm, opt_level=2)
     # compare with the using Julia's optimization pipeline directly:
     #ccall(:jl_add_optimization_passes, Cvoid,
-    #     (LLVM.API.LLVMPassManagerRef, Cint, Cint),
-    #     pm, opt_level, #=lower_intrinsics=# 0)
+    #      (LLVM.API.LLVMPassManagerRef, Cint, Cint),
+    #      pm, opt_level, #=lower_intrinsics=# 0)
     #return
+
+    # compate to Clang by using the pass manager builder APIs:
+    #LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
+    #ModulePassManager() do pm
+    #    add_library_info!(pm, triple(mod))
+    #    add_transform_info!(pm, tm)
+    #    PassManagerBuilder() do pmb
+    #        populate!(pm, pmb)
+    #    end
+    #    run!(pm, mod)
+    #end
 
     # NOTE: LLVM 12 disabled the hoisting of common instruction
     #       before loop vectorization (https://reviews.llvm.org/D84108).
