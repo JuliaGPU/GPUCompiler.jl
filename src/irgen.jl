@@ -575,28 +575,37 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # update uses
         Builder(ctx) do builder
             for use in uses(f)
-                # only replace calls
-                # TODO: can we have other uses?
-                inst = user(use)
-                inst isa LLVM.CallInst || inst isa LLVM.InvokeInst || inst isa LLVM.CallBrInst || continue
+                val = user(use)
+                if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
+                    # NOTE: we unconditionally add the state argument, even if there's no uses,
+                    #       assuming we'll perform dead arg elimination during optimization.
 
-                # NOTE: we unconditionally add the state argument, even if there's no uses,
-                #       assuming we'll perform dead arg elimination during optimization.
+                    # forward the state argument
+                    position!(builder, val)
+                    state = call!(builder, state_getter, Value[], "state")
+                    new_val = if val isa LLVM.CallInst
+                        call!(builder, new_f, [state, operands(val)[1:end-1]...])
+                    else
+                        # TODO: invoke and callbr
+                        error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
+                    end
+                    callconv!(new_val, callconv(val))
 
-                # forward the state argument
-                position!(builder, inst)
-                state = call!(builder, state_getter, Value[], "state")
-                new_inst = if inst isa LLVM.CallInst
-                    call!(builder, new_f, [state, operands(inst)[1:end-1]...])
+                    replace_uses!(val, new_val)
+                    @assert isempty(uses(val))
+                    unsafe_delete!(LLVM.parent(val), val)
+                elseif val isa LLVM.ConstantExpr
+                    # XXX: can we do this using a value materializer?
+                    if opcode(val) == LLVM.API.LLVMPtrToInt && operands(val)[1] == f
+                        new_val = LLVM.const_ptrtoint(new_f, llvmtype(val))
+                    else
+                        error("Cannot rewrite unknown constant expression: $val")
+                    end
+                    replace_uses!(val, new_val)
+                    LLVM.unsafe_destroy!(val)
                 else
-                    # TODO: invoke and callbr
-                    error("Not implemented")
+                    error("Cannot rewrite unknown use of function: $val")
                 end
-                callconv!(new_inst, callconv(inst))
-
-                replace_uses!(inst, new_inst)
-                @assert isempty(uses(inst))
-                unsafe_delete!(LLVM.parent(inst), inst)
             end
         end
 
