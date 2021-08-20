@@ -89,14 +89,6 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
         entry = lower_byval(job, mod, entry)
     end
 
-    ModulePassManager() do pm
-        # clean-up the byval wrapping
-        instruction_simplify!(pm)
-        cfgsimplification!(pm)
-
-        run!(pm, mod)
-    end
-
     return entry
 end
 

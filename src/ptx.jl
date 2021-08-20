@@ -220,14 +220,6 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         push!(metadata(mod)["nvvm.annotations"], MDNode(annotations; ctx))
     end
 
-    ModulePassManager() do pm
-        # clean-up the byval wrapping
-        instruction_simplify!(pm)
-        cfgsimplification!(pm)
-
-        run!(pm, mod)
-    end
-
     return entry
 end
 
