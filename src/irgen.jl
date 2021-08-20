@@ -592,6 +592,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     # TODO: invoke and callbr
                     error("Not implemented")
                 end
+                callconv!(new_inst, callconv(inst))
 
                 replace_uses!(inst, new_inst)
                 @assert isempty(uses(inst))
