@@ -394,7 +394,8 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         end
         for arg in args
             if arg.cc == BITS_REF
-                byval[arg.codegen.i] = true
+                # NOTE: +1 since this pass runs after introducing the kernel state
+                byval[arg.codegen.i+1] = true
             end
         end
     end
@@ -488,4 +489,121 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     LLVM.name!(new_f, fn)
 
     return new_f
+end
+
+
+# kernel state arguments
+#
+# add a state argument to the kernel and any reachable function, and lower calls to the
+# `julia.gpu.state_getter` intrinsics to use this newly-introduced state argument.
+function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
+    ctx = context(mod)
+
+    # find the functions that we need to rewrite
+    worklist = Set([entry])
+    previous_length = 0
+    while length(worklist) != previous_length
+        previous_length = length(worklist)
+
+        # iterate the list of functions and check whether any is reachable
+        # (this is faster than iterating all instructions and looking for calls)
+        for candidate_f in functions(mod)
+            isdeclaration(candidate_f) && continue
+            for use in uses(candidate_f)
+                inst = user(use)
+                bb = LLVM.parent(inst)
+                f = LLVM.parent(bb)
+                if f in worklist
+                    push!(worklist, candidate_f)
+                end
+            end
+        end
+    end
+
+    # intrinsic returning an opaque pointer to the kernel state.
+    # this is both for extern uses, and to make this transformation a two-step process.
+    state_typ = LLVM.PointerType(LLVM.StructType(LLVMType[]; ctx))
+    state_getter = if haskey(functions(mod), "julia.gpu.state_getter")
+        functions(mod)["julia.gpu.state_getter"]
+    else
+        LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(state_typ))
+    end
+    push!(function_attributes(state_getter), EnumAttribute("readnone", 0; ctx))
+
+    # add a state argument to every function
+    replaced = Set{LLVM.Function}()
+    for f in worklist
+        fn = LLVM.name(f)
+        ft = eltype(llvmtype(f))
+
+        # create a new function
+        new_param_types = [state_typ, parameters(ft)...]
+        new_ft = LLVM.FunctionType(return_type(ft), new_param_types)
+        new_f = LLVM.Function(mod, "", new_ft)
+        LLVM.name!(parameters(new_f)[1], "state")
+        linkage!(new_f, linkage(f))
+
+        # clone
+        value_map = Dict{LLVM.Value, LLVM.Value}()
+        for (param, new_param) in zip(parameters(f), parameters(new_f)[2:end])
+            LLVM.name!(new_param, LLVM.name(param))
+            value_map[param] = new_param
+        end
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+        # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
+
+        # update uses
+        Builder(ctx) do builder
+            for use in uses(f)
+                # only replace calls
+                # TODO: can we have other uses?
+                inst = user(use)
+                inst isa LLVM.CallInst || inst isa LLVM.InvokeInst || inst isa LLVM.CallBrInst || continue
+
+                # NOTE: we unconditionally add the state argument, even if there's no uses,
+                #       assuming we'll perform dead arg elimination during optimization.
+
+                # forward the state argument
+                position!(builder, inst)
+                state = call!(builder, state_getter, Value[], "state")
+                new_inst = if inst isa LLVM.CallInst
+                    call!(builder, new_f, [state, operands(inst)[1:end-1]...])
+                else
+                    # TODO: invoke and callbr
+                    error("Not implemented")
+                end
+
+                replace_uses!(inst, new_inst)
+                @assert isempty(uses(inst))
+                unsafe_delete!(LLVM.parent(inst), inst)
+            end
+        end
+
+        # clean-up
+        if f == entry
+            entry = new_f
+        end
+        @assert isempty(uses(f))
+        unsafe_delete!(mod, f)
+        LLVM.name!(new_f, fn)
+        push!(replaced, new_f)
+    end
+    empty!(worklist)    # its entries are invalid now
+
+    # fixup all uses of the state getter to use the newly introduced function state argument
+    for use in uses(state_getter)
+        inst = user(use)
+        @assert inst isa LLVM.CallInst
+
+        bb = LLVM.parent(inst)
+        f = LLVM.parent(bb)
+        @assert f in replaced
+
+        replace_uses!(inst, parameters(f)[1])
+        @assert isempty(uses(inst))
+        unsafe_delete!(LLVM.parent(inst), inst)
+    end
+
+    return
 end

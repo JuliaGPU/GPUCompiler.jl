@@ -40,7 +40,7 @@ function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module
 end
 
 function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+    entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
     if job.source.kernel
         # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
@@ -217,7 +217,8 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         end
         for arg in args
             if arg.cc == BITS_REF
-                byval[arg.codegen.i] = true
+                # NOTE: +1 since this pass runs after introducing the kernel state
+                byval[arg.codegen.i+1] = true
             end
         end
     end

@@ -169,6 +169,7 @@ process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                         entry::LLVM.Function)
     ctx = context(mod)
+    entry_fn = LLVM.name(entry)
 
     if job.source.kernel
         # pass all bitstypes by value; by default Julia passes aggregates by reference
@@ -184,6 +185,13 @@ function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 push!(parameter_attributes(entry, arg.codegen.i), attr)
             end
         end
+
+        # add the kernel state, and lower calls to the `julia.gpu.state_getter` intrinsic.
+        # we need to do this early on, because it changes the function signature (so we want
+        # to show this in the code_llvm output), and because it introduces additional `byval`
+        # arguments that may need to be materialized by the back-end.
+        add_kernel_state!(job, mod, entry)
+        entry = functions(mod)[entry_fn]
     end
 
     return entry
