@@ -631,3 +631,15 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     return
 end
+
+@inline kernel_state_pointer() = Base.llvmcall(("""
+        declare i8* @julia.gpu.state_getter()
+
+        define i64 @entry() #0 {
+            %ptls = call i8* @julia.gpu.state_getter()
+            %ptr = ptrtoint i8* %ptls to i64
+            ret i64 %ptr
+        }
+
+        attributes #0 = { alwaysinline }""", "entry"),
+    Ptr{Cvoid}, Tuple{})
