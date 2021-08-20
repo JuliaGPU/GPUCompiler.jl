@@ -388,6 +388,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         end
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
+        has_kernel_state = kernel_state_type(job) !== Nothing
         args = classify_arguments(job, f)
         filter!(args) do arg
             arg.cc != GHOST
@@ -395,8 +396,11 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         for arg in args
             if arg.cc == BITS_REF
                 # NOTE: +1 since this pass runs after introducing the kernel state
-                byval[arg.codegen.i+1] = true
+                byval[arg.codegen.i+has_kernel_state] = true
             end
+        end
+        if has_kernel_state
+            byval[1] = true
         end
     end
 
@@ -496,7 +500,13 @@ end
 #
 # add a state argument to the kernel and any reachable function, and lower calls to the
 # `julia.gpu.state_getter` intrinsics to use this newly-introduced state argument.
-function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
+#
+# the type of the state is determined by the `kernel_state_type` interface, and is passed
+# as a byval pointer so that (1) the intrinsic can use an opaque pointer for users to
+# cast to an appropriate type, while (2) ensuring the state resides in thread-local memory
+# so that it can be used without synchronizing global-memory accesses.
+function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                                         entry::LLVM.Function, T_state::LLVMType)
     ctx = context(mod)
 
     # find the functions that we need to rewrite
@@ -522,11 +532,11 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module, en
 
     # intrinsic returning an opaque pointer to the kernel state.
     # this is both for extern uses, and to make this transformation a two-step process.
-    state_typ = LLVM.PointerType(LLVM.StructType(LLVMType[]; ctx))
+    T_ptr_state = LLVM.PointerType(T_state)
     state_getter = if haskey(functions(mod), "julia.gpu.state_getter")
         functions(mod)["julia.gpu.state_getter"]
     else
-        LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(state_typ))
+        LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_ptr_state))
     end
     push!(function_attributes(state_getter), EnumAttribute("readnone", 0; ctx))
 
@@ -537,7 +547,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module, en
         ft = eltype(llvmtype(f))
 
         # create a new function
-        new_param_types = [state_typ, parameters(ft)...]
+        new_param_types = [T_ptr_state, parameters(ft)...]
         new_ft = LLVM.FunctionType(return_type(ft), new_param_types)
         new_f = LLVM.Function(mod, "", new_ft)
         LLVM.name!(parameters(new_f)[1], "state")
@@ -552,6 +562,14 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module, en
         clone_into!(new_f, f; value_map,
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
         # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
+
+        # make the byval pointer argument byval (after cloning, which overwrites attributes)
+        attr = if LLVM.version() >= v"12"
+            TypeAttribute("byval", T_state; ctx)
+        else
+            EnumAttribute("byval", 0; ctx)
+        end
+        push!(parameter_attributes(new_f, 1), attr)
 
         # update uses
         Builder(ctx) do builder

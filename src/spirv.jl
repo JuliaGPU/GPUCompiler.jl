@@ -211,6 +211,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         end
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
+        has_kernel_state = kernel_state_type(job) !== Nothing
         args = classify_arguments(job, f)
         filter!(args) do arg
             arg.cc != GHOST
@@ -218,8 +219,11 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         for arg in args
             if arg.cc == BITS_REF
                 # NOTE: +1 since this pass runs after introducing the kernel state
-                byval[arg.codegen.i+1] = true
+                byval[arg.codegen.i+has_kernel_state] = true
             end
+        end
+        if has_kernel_state
+            byval[1] = true
         end
     end
 
