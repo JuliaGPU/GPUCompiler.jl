@@ -208,6 +208,13 @@ function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry
             T_state = convert(LLVMType, state; ctx)
             add_kernel_state!(job, mod, T_state)
         end
+
+        # don't pass the state when unnecessary
+        # XXX: only apply in add_kernel_state! when needed?
+        ModulePassManager() do pm
+            dead_arg_elimination!(pm)
+            run!(pm, mod)
+        end
     end
 
     return functions(mod)[entry_fn]
