@@ -25,10 +25,10 @@ end
     end
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}))
-    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\*", ir)
+    @test occursin(r"@.*julia_kernel.+\(.*({ i64 }|\[1 x i64\])\* ", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}; kernel=true))
-    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])", ir)
+    @test occursin(r"@.*julia_kernel.+\(.*({ i64 }|\[1 x i64\]) ", ir)
 end
 
 @testset "property_annotations" begin
