@@ -43,10 +43,6 @@ function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
     if job.source.kernel
-        # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
-        #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
-        entry = wrap_byval(job, mod, entry)
-
         # calling convention
         callconv!(entry, LLVM.API.LLVMSPIRKERNELCallConv)
     end
@@ -54,14 +50,29 @@ function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     return entry
 end
 
-function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
-    # SPIR-V does not support trap, and has no mechanism to abort compute kernels
-    # (OpKill is only available in fragment execution mode)
+function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
+    if job.source.kernel
+        # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
+        #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
+        entry = wrap_byval(job, mod, entry)
+    end
+
     ModulePassManager() do pm
+        # SPIR-V does not support trap, and has no mechanism to abort compute kernels
+        # (OpKill is only available in fragment execution mode)
         add!(pm, ModulePass("RemoveTrap", rm_trap!))
         add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
+
+        # clean-up the byval wrapping
+        instruction_simplify!(pm)
+        cfgsimplification!(pm)
+
         run!(pm, mod)
     end
+
+    return entry
 end
 
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,

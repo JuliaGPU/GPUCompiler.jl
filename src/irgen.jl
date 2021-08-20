@@ -3,7 +3,6 @@
 function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance)
     mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance)
     entry_fn = compiled[method_instance].specfunc
-    entry = functions(mod)[entry_fn]
     ctx = context(mod)
 
     # clean up incompatibilities
@@ -32,6 +31,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
 
     # target-specific processing
     process_module!(job, mod)
+    entry = functions(mod)[entry_fn]
 
     # sanitize function names
     # FIXME: Julia should do this, but apparently fails (see maleadt/LLVM.jl#201)
@@ -501,7 +501,7 @@ end
 
 # kernel state arguments
 #
-# add a state argument to the kernel and any reachable function, and lower calls to the
+# add a state argument every function in the module, and lower calls to the
 # `julia.gpu.state_getter` intrinsics to use this newly-introduced state argument.
 #
 # the type of the state is determined by the `kernel_state_type` interface, and is passed
@@ -509,29 +509,8 @@ end
 # cast to an appropriate type, while (2) ensuring the state resides in thread-local memory
 # so that it can be used without synchronizing global-memory accesses.
 function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                         entry::LLVM.Function, T_state::LLVMType)
+                           T_state::LLVMType)
     ctx = context(mod)
-
-    # find the functions that we need to rewrite
-    worklist = Set([entry])
-    previous_length = 0
-    while length(worklist) != previous_length
-        previous_length = length(worklist)
-
-        # iterate the list of functions and check whether any is reachable
-        # (this is faster than iterating all instructions and looking for calls)
-        for candidate_f in functions(mod)
-            isdeclaration(candidate_f) && continue
-            for use in uses(candidate_f)
-                inst = user(use)
-                bb = LLVM.parent(inst)
-                f = LLVM.parent(bb)
-                if f in worklist
-                    push!(worklist, candidate_f)
-                end
-            end
-        end
-    end
 
     # intrinsic returning an opaque pointer to the kernel state.
     # this is both for extern uses, and to make this transformation a two-step process.
@@ -544,7 +523,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     push!(function_attributes(state_getter), EnumAttribute("readnone", 0; ctx))
 
     # add a state argument to every function
-    replaced = Set{LLVM.Function}()
+    worklist = filter(!isdeclaration, collect(functions(mod)))
     for f in worklist
         fn = LLVM.name(f)
         ft = eltype(llvmtype(f))
@@ -605,15 +584,10 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         end
 
         # clean-up
-        if f == entry
-            entry = new_f
-        end
         @assert isempty(uses(f))
         unsafe_delete!(mod, f)
         LLVM.name!(new_f, fn)
-        push!(replaced, new_f)
     end
-    empty!(worklist)    # its entries are invalid now
 
     # fixup all uses of the state getter to use the newly introduced function state argument
     for use in uses(state_getter)
@@ -622,7 +596,6 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
         bb = LLVM.parent(inst)
         f = LLVM.parent(bb)
-        @assert f in replaced
 
         replace_uses!(inst, parameters(f)[1])
         @assert isempty(uses(inst))

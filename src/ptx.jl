@@ -117,9 +117,6 @@ function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
     if job.source.kernel
-        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
-        entry = lower_byval(job, mod, entry)
-
         if LLVM.version() >= v"8"
             # calling convention
             callconv!(entry, LLVM.API.LLVMPTXKernelCallConv)
@@ -172,24 +169,20 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 end
 
-function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
+function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                        mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
+    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
-    # add metadata annotations for the assembler to the module
-    # NOTE: we need to do this as late as possible, because otherwise the metadata (which
-    #       refers to a specific function) can get lost when cloning functions. normally
-    #       RAUW updates those references, but we can't RAUW with a changed function type.
     if job.source.kernel
-        # find the entry-point function
-        # XXX: make this an argument to `emit_asm` again?
-        entry = nothing
-        for f in functions(mod)
-            if callconv(f) == LLVM.API.LLVMPTXKernelCallConv
-                entry = f
-                break
-            end
-        end
-        @assert entry !== nothing
+        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
+        entry = lower_byval(job, mod, entry)
+        # TODO: optimization passes to clean-up byval
+
+        # add metadata annotations for the assembler to the module
+        # NOTE: we need to do this as late as possible, because otherwise the metadata (which
+        #       refers to a specific function) can get lost when cloning functions. normally
+        #       RAUW updates those references, but we can't RAUW with a changed function type.
 
         # property annotations
         annotations = Metadata[entry]
@@ -226,6 +219,16 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod:
 
         push!(metadata(mod)["nvvm.annotations"], MDNode(annotations; ctx))
     end
+
+    ModulePassManager() do pm
+        # clean-up the byval wrapping
+        instruction_simplify!(pm)
+        cfgsimplification!(pm)
+
+        run!(pm, mod)
+    end
+
+    return entry
 end
 
 function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))

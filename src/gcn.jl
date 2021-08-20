@@ -47,8 +47,6 @@ function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, e
     entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
     if job.source.kernel
-        entry = lower_byval(job, mod, entry)
-
         # calling convention
         callconv!(entry, LLVM.API.LLVMAMDGPUKERNELCallConv)
     end
@@ -59,6 +57,7 @@ end
 function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
 end
+
 # We need to do alloca rewriting (from 0 to 5) after Julia's optimization
 # passes because of two reasons:
 # 1. Debug builds call the target verifier first, which would trip if AMDGPU
@@ -81,6 +80,29 @@ function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
     end
 end
 
+function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                        mod::LLVM.Module, entry::LLVM.Function)
+    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
+    if job.source.kernel
+        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
+        entry = lower_byval(job, mod, entry)
+    end
+
+    ModulePassManager() do pm
+        # clean-up the byval wrapping
+        instruction_simplify!(pm)
+        cfgsimplification!(pm)
+
+        run!(pm, mod)
+    end
+
+    return entry
+end
+
+
+## LLVM passes
+
 function lower_throw_extra!(mod::LLVM.Module)
     job = current_job::CompilerJob
     ctx = context(mod)
@@ -94,7 +116,6 @@ function lower_throw_extra!(mod::LLVM.Module)
         r"julia_error_if_canonical_setindex.*",
         r"julia___subarray_throw_boundserror.*",
     ]
-
 
     for f in functions(mod)
         f_name = LLVM.name(f)
@@ -139,6 +160,7 @@ function lower_throw_extra!(mod::LLVM.Module)
     end
     return changed
 end
+
 function fix_alloca_addrspace!(fn::LLVM.Function)
     changed = false
     alloca_as = 5
@@ -165,7 +187,6 @@ function fix_alloca_addrspace!(fn::LLVM.Function)
 
     return changed
 end
-
 
 function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
     ctx = context(mod)

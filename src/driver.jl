@@ -306,7 +306,7 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
-    finish_module!(job, ir)
+    entry = finish_module!(job, ir, entry)
 
     return ir, (; entry, compiled)
 end

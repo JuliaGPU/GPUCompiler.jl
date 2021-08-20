@@ -172,7 +172,6 @@ kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
 function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                         entry::LLVM.Function)
     ctx = context(mod)
-    entry_fn = LLVM.name(entry)
 
     if job.source.kernel
         # pass all bitstypes by value; by default Julia passes aggregates by reference
@@ -188,17 +187,6 @@ function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 push!(parameter_attributes(entry, arg.codegen.i), attr)
             end
         end
-
-        # add the kernel state, and lower calls to the `julia.gpu.state_getter` intrinsic.
-        # we need to do this early on, because it changes the function signature (so we want
-        # to show this in the code_llvm output), and because it introduces additional `byval`
-        # arguments that may need to be materialized by the back-end.
-        state = kernel_state_type(job)
-        if state !== Nothing
-            T_state = convert(LLVMType, state; ctx)
-            add_kernel_state!(job, mod, entry, T_state)
-            entry = functions(mod)[entry_fn]
-        end
     end
 
     return entry
@@ -208,7 +196,22 @@ end
 optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
 # final processing of the IR module, right before validation and machine-code generation
-finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
+function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
+    ctx = context(mod)
+    entry_fn = LLVM.name(entry)
+
+    # add the kernel state, and lower calls to the `julia.gpu.state_getter` intrinsic.
+    # we do this _after_ optimization, because the runtime is linked after optimization too.
+    if job.source.kernel
+        state = kernel_state_type(job)
+        if state !== Nothing
+            T_state = convert(LLVMType, state; ctx)
+            add_kernel_state!(job, mod, T_state)
+        end
+    end
+
+    return functions(mod)[entry_fn]
+end
 
 add_lowering_passes!(@nospecialize(job::CompilerJob), pm::LLVM.PassManager) = return
 
