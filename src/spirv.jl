@@ -241,6 +241,9 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     new_ft = LLVM.FunctionType(LLVM.VoidType(ctx), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
+    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+        LLVM.name!(new_arg, LLVM.name(arg))
+    end
 
     # emit IR performing the "conversions"
     new_args = Vector{LLVM.Value}()

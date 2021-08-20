@@ -446,6 +446,9 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     new_ft = LLVM.FunctionType(return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
+    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+        LLVM.name!(new_arg, LLVM.name(arg))
+    end
 
     # emit IR performing the "conversions"
     new_args = LLVM.Value[]
@@ -552,6 +555,9 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         new_f = LLVM.Function(mod, "", new_ft)
         LLVM.name!(parameters(new_f)[1], "state")
         linkage!(new_f, linkage(f))
+        for (arg, new_arg) in zip(parameters(f), parameters(new_f)[2:end])
+            LLVM.name!(new_arg, LLVM.name(arg))
+        end
 
         # clone
         value_map = Dict{LLVM.Value, LLVM.Value}()
