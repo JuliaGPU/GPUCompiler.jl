@@ -540,29 +540,48 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     # add a state argument to every function
     worklist = filter(!isdeclaration, collect(functions(mod)))
+    workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in worklist
         fn = LLVM.name(f)
         ft = eltype(llvmtype(f))
+        LLVM.name!(f, fn * ".stateless")
 
         # create a new function
         new_param_types = [T_ptr_state, parameters(ft)...]
         new_ft = LLVM.FunctionType(return_type(ft), new_param_types)
-        new_f = LLVM.Function(mod, "", new_ft)
+        new_f = LLVM.Function(mod, fn, new_ft)
         LLVM.name!(parameters(new_f)[1], "state")
         linkage!(new_f, linkage(f))
         for (arg, new_arg) in zip(parameters(f), parameters(new_f)[2:end])
             LLVM.name!(new_arg, LLVM.name(arg))
         end
 
-        # clone
+        workmap[f] = new_f
+    end
+
+    # clone and rewrite the function bodies
+    for (f, new_f) in workmap
+        # use a value mapper for rewriting function arguments
         value_map = Dict{LLVM.Value, LLVM.Value}()
         for (param, new_param) in zip(parameters(f), parameters(new_f)[2:end])
             LLVM.name!(new_param, LLVM.name(param))
             value_map[param] = new_param
         end
-        clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+
+        # use a value materializer for replacing uses of the function in constants
+        function materializer(val)
+            if val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMPtrToInt
+                val = operands(val)[1]
+                if haskey(workmap, val)
+                    return LLVM.const_ptrtoint(workmap[val], llvmtype(val))
+                end
+            end
+            return val
+        end
+
         # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
+        clone_into!(new_f, f; value_map, materializer,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
         # make the byval pointer argument byval (after cloning, which overwrites attributes)
         attr = if LLVM.version() >= v"12"
@@ -572,6 +591,24 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         end
         push!(parameter_attributes(new_f, 1), attr)
 
+        # we can't remove this function yet, as we might still need to rewrite any called,
+        # but remove the IR already
+        empty!(f)
+    end
+
+    # drop unused constants that may be referring to the old functions
+    # XXX: can we do this differently?
+    for f in worklist
+        for use in uses(f)
+            val = user(use)
+            if val isa LLVM.ConstantExpr && isempty(uses(val))
+                LLVM.unsafe_destroy!(val)
+            end
+        end
+    end
+
+    # update other uses of the old function
+    for (f, new_f) in workmap
         # update uses
         Builder(ctx) do builder
             for use in uses(f)
@@ -594,15 +631,6 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
                     unsafe_delete!(LLVM.parent(val), val)
-                elseif val isa LLVM.ConstantExpr
-                    # XXX: can we do this using a value materializer?
-                    if opcode(val) == LLVM.API.LLVMPtrToInt && operands(val)[1] == f
-                        new_val = LLVM.const_ptrtoint(new_f, llvmtype(val))
-                    else
-                        error("Cannot rewrite unknown constant expression: $val")
-                    end
-                    replace_uses!(val, new_val)
-                    LLVM.unsafe_destroy!(val)
                 else
                     error("Cannot rewrite unknown use of function: $val")
                 end
@@ -612,7 +640,6 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # clean-up
         @assert isempty(uses(f))
         unsafe_delete!(mod, f)
-        LLVM.name!(new_f, fn)
     end
 
     # fixup all uses of the state getter to use the newly introduced function state argument
