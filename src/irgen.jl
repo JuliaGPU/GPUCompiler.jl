@@ -486,6 +486,27 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         br!(builder, blocks(new_f)[2])
     end
 
+    # update uses of the kernel
+    # NOTE: we assume kernel functions can't be called. on-device kernel launches,
+    #       e.g. CUDA's dynamic parallelism, will pass the function to an API instead,
+    #       and we update those constant expressions arguments here.
+    for use in uses(f)
+        val = user(use)
+        if val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMPtrToInt
+            target = operands(val)[1]
+            if target == f
+                new_val = LLVM.const_ptrtoint(new_f, llvmtype(val))
+                replace_uses!(val, new_val)
+
+                # drop the old constant if it is unused
+                # XXX: can we do this differently?
+                if isempty(uses(val))
+                    LLVM.unsafe_destroy!(val)
+                end
+            end
+        end
+    end
+
     # remove the old function
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
