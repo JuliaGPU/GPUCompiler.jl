@@ -306,7 +306,10 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
-    entry = finish_module!(job, ir, entry)
+    # only finish the module once
+    if deferred_codegen
+        entry = finish_module!(job, ir, entry)
+    end
 
     return ir, (; entry, compiled)
 end
