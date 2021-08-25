@@ -197,14 +197,7 @@ const __llvm_initialized = Ref(false)
                 f == entry && continue
                 isdeclaration(f) && continue
                 LLVM.isintrinsic(f) && continue
-                # FIXME: expose llvm::Function::deleteBody with a C API
-                fn = LLVM.name(f)
-                LLVM.name!(f, "")
-                f′ = LLVM.Function(ir, fn, eltype(llvmtype(f)))
-                # copying attributes is broken due to maleadt/LLVM.jl#186,
-                # but that doesn't matter because `only_entry` is only used for reflection,
-                # and the emitted code has already been optimized at this point.
-                replace_uses!(f, f′)
+                empty!(f)
             end
         end
 
