@@ -165,7 +165,11 @@ runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
 # early processing of the newly generated LLVM IR module
 process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
-# the type of the kernel state object, or Nothing if this back-end doesn't need one
+# the type of the kernel state object, or Nothing if this back-end doesn't need one.
+#
+# the generated code will be rewritten to include an object of this type as the first
+# argument to each kernel, and pass that object to every function that accesses the kernel
+# state (possibly indirectly) via the `kernel_state_pointer` function.
 kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
 
 # early processing of the newly identified LLVM kernel function
