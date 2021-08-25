@@ -206,7 +206,7 @@ function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry
         state = kernel_state_type(job)
         if state !== Nothing
             T_state = convert(LLVMType, state; ctx)
-            add_kernel_state!(job, mod, T_state)
+            add_kernel_state!(job, mod, entry, T_state)
         end
 
         # don't pass the state when unnecessary

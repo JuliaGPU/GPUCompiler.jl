@@ -553,7 +553,7 @@ end
 # cast to an appropriate type, while (2) ensuring the state resides in thread-local memory
 # so that it can be used without synchronizing global-memory accesses.
 function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                           T_state::LLVMType)
+                           entry::LLVM.Function, T_state::LLVMType)
     ctx = context(mod)
 
     # intrinsic returning an opaque pointer to the kernel state.
@@ -611,13 +611,15 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         clone_into!(new_f, f; value_map, materializer,
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
-        # make the byval pointer argument byval (after cloning, which overwrites attributes)
-        attr = if LLVM.version() >= v"12"
-            TypeAttribute("byval", T_state; ctx)
-        else
-            EnumAttribute("byval", 0; ctx)
+        # pass the state by value to the kernel (after cloning, which overwrites attributes)
+        if f == entry
+            attr = if LLVM.version() >= v"12"
+                TypeAttribute("byval", T_state; ctx)
+            else
+                EnumAttribute("byval", 0; ctx)
+            end
+            push!(parameter_attributes(new_f, 1), attr)
         end
-        push!(parameter_attributes(new_f, 1), attr)
 
         # we can't remove this function yet, as we might still need to rewrite any called,
         # but remove the IR already
