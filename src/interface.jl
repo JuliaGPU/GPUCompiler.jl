@@ -176,7 +176,7 @@ function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     if job.source.kernel
         # pass all bitstypes by value; by default Julia passes aggregates by reference
         # (this improves performance, and is mandated by certain back-ends like SPIR-V).
-        args = classify_arguments(job, entry)
+        args = classify_arguments(job, eltype(llvmtype(entry)))
         for arg in args
             if arg.cc == BITS_REF
                 attr = if LLVM.version() >= v"12"

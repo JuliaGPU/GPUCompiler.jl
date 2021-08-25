@@ -287,12 +287,11 @@ end
     GHOST       # not passed
 end
 
-function classify_arguments(@nospecialize(job::CompilerJob), codegen_f::LLVM.Function)
-    codegen_ft = eltype(llvmtype(codegen_f)::LLVM.PointerType)::LLVM.FunctionType
+function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
     source_sig = Base.signature_type(job.source.f, job.source.tt)::Type
+    source_types = [source_sig.parameters...]
 
     codegen_types = parameters(codegen_ft)
-    source_types = [source_sig.parameters...]
 
     args = []
     codegen_i = 1
@@ -374,7 +373,7 @@ end
 # https://reviews.llvm.org/D79744
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
-    ft = eltype(llvmtype(f)::LLVM.PointerType)::LLVM.FunctionType
+    ft = eltype(llvmtype(f))
     @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
 
     # find the byval parameters
@@ -388,8 +387,16 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         end
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
+        #      so we need to re-classify the Julia arguments.
+        #      remove this once we only support 1.7.
         has_kernel_state = kernel_state_type(job) !== Nothing
-        args = classify_arguments(job, f)
+        orig_ft = if has_kernel_state
+            # the kernel state has been added here already, so strip the first parameter
+            LLVM.FunctionType(return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
+        else
+            ft
+        end
+        args = classify_arguments(job, orig_ft)
         filter!(args) do arg
             arg.cc != GHOST
         end

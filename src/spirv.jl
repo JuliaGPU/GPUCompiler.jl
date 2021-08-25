@@ -223,7 +223,13 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
         has_kernel_state = kernel_state_type(job) !== Nothing
-        args = classify_arguments(job, f)
+        orig_ft = if has_kernel_state
+            # the kernel state has been added here already, so strip the first parameter
+            LLVM.FunctionType(return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
+        else
+            ft
+        end
+        args = classify_arguments(job, orig_ft)
         filter!(args) do arg
             arg.cc != GHOST
         end
