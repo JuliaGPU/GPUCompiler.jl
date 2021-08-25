@@ -76,6 +76,44 @@ LLVM.version() >= v"8" && @testset "calling convention" begin
                                   dump_module=true, kernel=true))
     @test occursin("ptx_kernel", ir)
 end
+
+@testset "kernel state" begin
+    # state should be passed by value to kernel functions
+
+    kernel() = return
+
+    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}))
+    @test occursin(r"@.*kernel.+\(\)", ir)
+
+    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}; kernel=true))
+    @test occursin(r"@.*kernel.+\(\[1 x i64\] %state\)", ir)
+
+
+    # state should only passed to device functions that use it
+
+    @eval @noinline kernel_state_child1(ptr) = unsafe_load(ptr)
+    @eval @noinline kernel_state_child2() = ptx_kernel_state().data
+
+    function kernel(ptr)
+        unsafe_store!(ptr, kernel_state_child1(ptr) + kernel_state_child2())
+        return
+    end
+
+    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Ptr{Int64}};
+                                  kernel=true, dump_module=true))
+
+    # kernel should take state argument before all else
+    @test occursin(r"@.*kernel.+\(\[1 x i64\] %state", ir)
+
+    # child1 doesn't use the state
+    @test occursin(r"@.*child1.+\(i64", ir)
+
+    # child2 does
+    @test occursin(r"@.*child2.+\(\[1 x i64\]\* %state", ir)
+
+    # can't have the unlowered intrinsic
+    @test !occursin("julia.gpu.state_getter", ir)
+end
 end
 
 end
