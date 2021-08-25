@@ -8,9 +8,6 @@ module TestRuntime
     report_exception(ex) = return
     report_exception_name(ex) = return
     report_exception_frame(idx, func, file, line) = return
-
-    # for validation
-    sin(x) = Base.sin(x)
 end
 
 struct TestCompilerParams <: AbstractCompilerParams end
