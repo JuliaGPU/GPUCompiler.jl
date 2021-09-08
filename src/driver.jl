@@ -279,17 +279,21 @@ const __llvm_initialized = Ref(false)
             end
         end
 
-        # merge constants (such as exception messages) from each entry
-        # and on platforms that support it inline and optimize the call to
-        # the deferred code, in particular we want to remove unnecessary
-        # alloca's that are created by pass-by-ref semantics.
         ModulePassManager() do pm
+            # inline and optimize the call to the deferred code. in particular we want to
+            # remove unnecessary alloca's that are created by pass-by-ref semantics.
             instruction_combining!(pm)
-            constant_merge!(pm)
             always_inliner!(pm)
             scalar_repl_aggregates_ssa!(pm)
             promote_memory_to_register!(pm)
             gvn!(pm)
+
+            # merge constants (such as exception messages) from each entry
+            constant_merge!(pm)
+
+            # merge duplicate functions, since each compilation invocation emits everything
+            # XXX: ideally we want to avoid emitting these in the first place
+            merge_functions!(pm)
 
             run!(pm, ir)
         end
