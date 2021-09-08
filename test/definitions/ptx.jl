@@ -7,6 +7,15 @@ end
 
 # create a PTX-based test compiler, and generate reflection methods for it
 
+PTXCompilerJob = CompilerJob{PTXCompilerTarget,TestCompilerParams}
+
+struct PTXKernelState
+    data::Int64
+end
+GPUCompiler.kernel_state_type(@nospecialize(job::PTXCompilerJob)) = PTXKernelState
+ptx_kernel_state() =
+    unsafe_load(convert(Ptr{PTXKernelState}, GPUCompiler.kernel_state_pointer()))
+
 function ptx_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                  minthreads=nothing, maxthreads=nothing, blocks_per_sm=nothing,
                  maxregs=nothing, kwargs...)

@@ -40,13 +40,9 @@ function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module
 end
 
 function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+    entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
     if job.source.kernel
-        # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
-        #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
-        entry = wrap_byval(job, mod, entry)
-
         # calling convention
         callconv!(entry, LLVM.API.LLVMSPIRKERNELCallConv)
     end
@@ -54,14 +50,36 @@ function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     return entry
 end
 
-function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
-    # SPIR-V does not support trap, and has no mechanism to abort compute kernels
-    # (OpKill is only available in fragment execution mode)
+function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    ctx = context(mod)
+    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
+    if job.source.kernel
+        # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
+        #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
+        entry = wrap_byval(job, mod, entry)
+    end
+
+    # add module metadata
+    ## OpenCL 2.0
+    push!(metadata(mod)["opencl.ocl.version"],
+          MDNode([ConstantInt(Int32(2); ctx),
+                  ConstantInt(Int32(0); ctx)]; ctx))
+    ## SPIR-V 1.5
+    push!(metadata(mod)["opencl.spirv.version"],
+          MDNode([ConstantInt(Int32(1); ctx),
+                  ConstantInt(Int32(5); ctx)]; ctx))
+
     ModulePassManager() do pm
+        # SPIR-V does not support trap, and has no mechanism to abort compute kernels
+        # (OpKill is only available in fragment execution mode)
         add!(pm, ModulePass("RemoveTrap", rm_trap!))
         add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
+
         run!(pm, mod)
     end
+
+    return entry
 end
 
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
@@ -211,14 +229,25 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         end
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
-        args = classify_arguments(job, f)
+        has_kernel_state = kernel_state_type(job) !== Nothing
+        orig_ft = if has_kernel_state
+            # the kernel state has been added here already, so strip the first parameter
+            LLVM.FunctionType(return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
+        else
+            ft
+        end
+        args = classify_arguments(job, orig_ft)
         filter!(args) do arg
             arg.cc != GHOST
         end
         for arg in args
             if arg.cc == BITS_REF
-                byval[arg.codegen.i] = true
+                # NOTE: +1 since this pass runs after introducing the kernel state
+                byval[arg.codegen.i+has_kernel_state] = true
             end
+        end
+        if has_kernel_state
+            byval[1] = true
         end
     end
 
@@ -236,6 +265,9 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     new_ft = LLVM.FunctionType(LLVM.VoidType(ctx), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
+    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+        LLVM.name!(new_arg, LLVM.name(arg))
+    end
 
     # emit IR performing the "conversions"
     new_args = Vector{LLVM.Value}()
@@ -285,6 +317,18 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     #      but asserts on a debug build due to the updated function type.
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
+
+    # clean-up
+    # NOTE: byval wrapping happens very late, after optimization
+    ModulePassManager() do pm
+        # merge GEPs
+        instruction_combining!(pm)
+
+        # fold the entry bb into the rest of the function
+        cfgsimplification!(pm)
+
+        run!(pm, mod)
+    end
 
     return new_f
 end
