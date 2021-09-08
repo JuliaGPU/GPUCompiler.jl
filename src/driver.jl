@@ -231,6 +231,8 @@ const __llvm_initialized = Ref(false)
         end
     end
 
+    entry = finish_module!(job, ir, entry)
+
     # deferred code generation
     if !only_entry && deferred_codegen && haskey(functions(ir), "deferred_codegen")
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -304,11 +306,6 @@ const __llvm_initialized = Ref(false)
         # all deferred compilations should have been resolved
         @compiler_assert isempty(uses(dyn_marker)) job
         unsafe_delete!(ir, dyn_marker)
-    end
-
-    # only finish the module once
-    if deferred_codegen
-        entry = finish_module!(job, ir, entry)
     end
 
     return ir, (; entry, compiled)
