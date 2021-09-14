@@ -196,7 +196,8 @@ struct GPUInterpreter <: AbstractInterpreter
 
             # parameters for inference and optimization
             InferenceParams(unoptimize_throw_blocks=false),
-            OptimizationParams(unoptimize_throw_blocks=false),
+            VERSION >= v"1.8.0-DEV.486" ? OptimizationParams() :
+                                          OptimizationParams(unoptimize_throw_blocks=false),
         )
     end
 end
