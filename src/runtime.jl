@@ -171,7 +171,7 @@ end
 
 # we use `jl_value_ptr`, a Julia pseudo-intrinsic that can be used to box and unbox values
 
-@generated function box(val, ::Val{type_name}) where type_name
+@inline @generated function box(val, ::Val{type_name}) where type_name
     sz = sizeof(val)
     allocsz = sz + tag_size
 
@@ -180,8 +180,6 @@ end
     tag = :( type_tag(Val(type_name)) )
 
     quote
-        Base.@_inline_meta
-
         ptr = malloc($(Csize_t(allocsz)))
 
         # store the type tag
