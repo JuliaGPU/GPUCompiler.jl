@@ -284,18 +284,18 @@ end
 @testset "LazyCodegen" begin
     import .LazyCodegen: call_delayed
 
-    global flag = Ref(false) # otherwise f is a closure and we can't
-                             # pass it to `Val`...
-    f() = (flag[]=true; nothing)
+    f(A) = (A[] += 42; nothing)
 
+    global flag = [0]
     function caller()
-        call_delayed(f)
+        call_delayed(f, flag::Vector{Int})
     end
     @test caller() === nothing
-    @test flag[]
+    @test flag[] == 42
 
     ir = sprint(io->native_code_llvm(io, caller, Tuple{}, dump_module=true))
-    @test occursin(r"define void @julia_f_\d+", ir)
+    @test occursin(r"add i64 %\d+, 42", ir)
+    # NOTE: can't just look for `jl_f` here, since it may be inlined and optimized away.
 
     add(x, y) = x+y
     function call_add(x, y)
