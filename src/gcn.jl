@@ -35,14 +35,6 @@ runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.target.dev_isa)$(
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
 
-# we have to fake our target early in the pipeline because Julia's optimization passes
-# weren't designed for a non-0 stack addrspace, and the AMDGPU target is very strict
-# about which addrspaces are permitted for various code patterns
-function process_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
-    triple!(mod, llvm_triple(NativeCompilerTarget()))
-    datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
-end
-
 function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
@@ -56,6 +48,24 @@ end
 
 function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
     add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
+end
+
+function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                        mod::LLVM.Module, entry::LLVM.Function)
+    # we have to fake our target early in the pipeline because Julia's optimization passes
+    # weren't designed for a non-0 stack addrspace, and the AMDGPU target is very strict
+    # about which addrspaces are permitted for various code patterns
+    triple!(mod, llvm_triple(NativeCompilerTarget()))
+    datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
+
+    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
+    if job.source.kernel
+        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
+        entry = lower_byval(job, mod, entry)
+    end
+
+    return entry
 end
 
 # We need to do alloca rewriting (from 0 to 5) after Julia's optimization
@@ -78,18 +88,6 @@ function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
 
         run!(pm, mod)
     end
-end
-
-function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
-                        mod::LLVM.Module, entry::LLVM.Function)
-    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
-
-    if job.source.kernel
-        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
-        entry = lower_byval(job, mod, entry)
-    end
-
-    return entry
 end
 
 

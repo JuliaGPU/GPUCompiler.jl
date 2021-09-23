@@ -234,23 +234,6 @@ const __llvm_initialized = Ref(false)
                     unsafe_delete!(LLVM.parent(call), call)
                 end
             end
-
-            # clean-up
-            ModulePassManager() do pm
-                # inline and optimize the call to the deferred code. in particular we want to
-                # remove unnecessary alloca's that are created by pass-by-ref semantics.
-                instruction_combining!(pm)
-                always_inliner!(pm)
-                scalar_repl_aggregates_ssa!(pm)
-                promote_memory_to_register!(pm)
-                gvn!(pm)
-
-                # merge duplicate functions, since each compilation invocation emits everything
-                # XXX: ideally we want to avoid emitting these in the first place
-                merge_functions!(pm)
-
-                run!(pm, ir)
-            end
         end
 
         # all deferred compilations should have been resolved
@@ -299,6 +282,20 @@ const __llvm_initialized = Ref(false)
 
                 # merge constants (such as exception messages)
                 constant_merge!(pm)
+
+                if do_deferred_codegen
+                    # inline and optimize the call to the deferred code. in particular we want to
+                    # remove unnecessary alloca's that are created by pass-by-ref semantics.
+                    instruction_combining!(pm)
+                    always_inliner!(pm)
+                    scalar_repl_aggregates_ssa!(pm)
+                    promote_memory_to_register!(pm)
+                    gvn!(pm)
+
+                    # merge duplicate functions, since each compilation invocation emits everything
+                    # XXX: ideally we want to avoid emitting these in the first place
+                    merge_functions!(pm)
+                end
 
                 run!(pm, ir)
             end
