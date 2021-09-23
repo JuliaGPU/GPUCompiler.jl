@@ -171,6 +171,11 @@ const __llvm_initialized = Ref(false)
             # target-specific libraries
             undefined_fns = LLVM.name.(decls(ir))
             @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
+
+            # GPU run-time library
+            if any(fn -> fn in runtime_fns, undefined_fns)
+                @timeit_debug to "runtime library" link_library!(ir, runtime)
+            end
         end
     end
 
@@ -261,20 +266,6 @@ const __llvm_initialized = Ref(false)
 
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
-        end
-
-        if libraries
-            # GPU run-time library
-            #
-            # we do this late for multiple reasons:
-            # - the runtime library is already optimized, so we don't want to re-optimize
-            # - if `malloc(...) = 0`, the consequent stores are reduced to a trap, which
-            #   results in e.g. every `box` function just trapping. this breaks our test
-            #   suite, which runs without malloc, but expects actual code being generated.
-            undefined_fns = LLVM.name.(decls(ir))
-            if any(fn -> fn in runtime_fns, undefined_fns)
-                @timeit_debug to "runtime library" link_library!(ir, runtime)
-            end
         end
 
         if ccall(:jl_is_debugbuild, Cint, ()) == 1
