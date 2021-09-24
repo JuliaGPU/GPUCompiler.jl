@@ -257,11 +257,14 @@ function lower_gc_frame!(fun::LLVM.Function)
             sz = ops[2]
 
             # replace with PTX alloc_obj
-            let builder = Builder(ctx)
+            Builder(ctx) do builder
+                # NOTE: this happens late during the pipeline, where we may have to
+                #       pass a kernel state arguments to the runtime function.
+                state = kernel_state_type(job)
+
                 position!(builder, call)
-                ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz])
+                ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz]; state)
                 replace_uses!(call, ptr)
-                dispose(builder)
             end
 
             unsafe_delete!(LLVM.parent(call), call)
