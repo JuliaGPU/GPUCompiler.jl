@@ -299,6 +299,17 @@ const __llvm_initialized = Ref(false)
             entry = functions(ir)[entry_fn]
         end
 
+        # remove the kernel state dummy use
+        if haskey(functions(ir), "julia.gpu.state_user")
+            dummy_user = functions(ir)["julia.gpu.state_user"]
+            for use in uses(dummy_user)
+                call = user(use)
+                unsafe_delete!(LLVM.parent(call), call)
+            end
+            @assert isempty(uses(dummy_user))
+            unsafe_delete!(ir, dummy_user)
+        end
+
         if ccall(:jl_is_debugbuild, Cint, ()) == 1
             @timeit_debug to "verification" verify(ir)
         end

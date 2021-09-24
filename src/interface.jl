@@ -205,20 +205,8 @@ function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry
     entry_fn = LLVM.name(entry)
 
     # add the kernel state, and lower calls to the `julia.gpu.state_getter` intrinsic.
-    # we do this _after_ optimization, because the runtime is linked after optimization too.
     if job.source.kernel
-        state = kernel_state_type(job)
-        if state !== Nothing
-            T_state = convert(LLVMType, state; ctx)
-            add_kernel_state!(job, mod, entry, T_state)
-        end
-
-        # don't pass the state when unnecessary
-        # XXX: only apply in add_kernel_state! when needed?
-        ModulePassManager() do pm
-            dead_arg_elimination!(pm)
-            run!(pm, mod)
-        end
+        add_kernel_state!(job, mod, entry)
     end
 
     return functions(mod)[entry_fn]
