@@ -28,7 +28,8 @@ end
 
 ## higher-level functionality to work with runtime functions
 
-function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[])
+function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[];
+                    state::Type=Nothing)
     bb = position(builder)
     f = LLVM.parent(bb)
     mod = LLVM.parent(f)
@@ -39,8 +40,16 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         f = functions(mod)[rt.llvm_name]
         ft = eltype(llvmtype(f))
     else
-        ft = convert(LLVM.FunctionType, rt; ctx)
+        ft = convert(LLVM.FunctionType, rt; ctx, state)
         f = LLVM.Function(mod, rt.llvm_name, ft)
+    end
+
+    # we may be calling this function after kernel state lowering,
+    # in which case we need to manually get and pass the state.
+    args = Value[args...]
+    if state !== Nothing
+        state_val = kernel_state_argument(f, state)
+        pushfirst!(args, state_val)
     end
 
     # runtime functions are written in Julia, while we're calling from LLVM,
