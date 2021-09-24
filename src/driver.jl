@@ -246,16 +246,6 @@ const __llvm_initialized = Ref(false)
 
         # some early clean-up to reduce the amount of code to optimize
         @timeit_debug to "clean-up" begin
-            # replace non-entry function definitions with a declaration
-            if only_entry
-                for f in functions(ir)
-                    f == entry && continue
-                    isdeclaration(f) && continue
-                    LLVM.isintrinsic(f) && continue
-                    empty!(f)
-                end
-            end
-
             ModulePassManager() do pm
                 # mark everything internal except for the entry and exported global variables.
                 # this makes sure that the optimizer can, e.g., touch function signatures.
@@ -297,6 +287,18 @@ const __llvm_initialized = Ref(false)
 
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
+        end
+
+        # replace non-entry function definitions with a declaration
+        # NOTE: we can't do this before optimization, because the definitions of called
+        #       functions may affect optimization.
+        if only_entry
+            for f in functions(ir)
+                f == entry && continue
+                isdeclaration(f) && continue
+                LLVM.isintrinsic(f) && continue
+                empty!(f)
+            end
         end
 
         # remove the kernel state dummy use
