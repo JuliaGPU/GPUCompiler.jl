@@ -263,10 +263,20 @@ const __llvm_initialized = Ref(false)
                 # merge constants (such as exception messages)
                 constant_merge!(pm)
 
-                if do_deferred_codegen
+                run!(pm, ir)
+            end
+        end
+
+        if optimize
+            @timeit_debug to "optimization" begin
+                optimize!(job, ir)
+
+                # deferred codegen has some special optimization requirements,
+                # which also need to happen _after_ regular optimization.
+                # XXX: make these part of the optimizer pipeline?
+                do_deferred_codegen && ModulePassManager() do pm
                     # inline and optimize the call to e deferred code. in particular we want
                     # to remove unnecessary alloca's created by pass-by-ref semantics.
-                    # TODO: is this still necesary, now that we optimize after codegen?
                     instruction_combining!(pm)
                     always_inliner!(pm)
                     scalar_repl_aggregates_ssa!(pm)
@@ -276,14 +286,10 @@ const __llvm_initialized = Ref(false)
                     # merge duplicate functions, since each compilation invocation emits everything
                     # XXX: ideally we want to avoid emitting these in the first place
                     merge_functions!(pm)
+
+                    run!(pm, ir)
                 end
-
-                run!(pm, ir)
             end
-        end
-
-        if optimize
-            @timeit_debug to "optimization" optimize!(job, ir)
 
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
