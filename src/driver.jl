@@ -244,17 +244,7 @@ const __llvm_initialized = Ref(false)
     @timeit_debug to "IR post-processing" begin
         entry = finish_module!(job, ir, entry)
 
-        if optimize
-            @timeit_debug to "optimization" optimize!(job, ir)
-
-            # optimization may have replaced functions, so look the entry point up again
-            entry = functions(ir)[entry_fn]
-        end
-
-        if ccall(:jl_is_debugbuild, Cint, ()) == 1
-            @timeit_debug to "verification" verify(ir)
-        end
-
+        # some early clean-up to reduce the amount of code to optimize
         @timeit_debug to "clean-up" begin
             # replace non-entry function definitions with a declaration
             if only_entry
@@ -266,13 +256,13 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
-            # remove everything except for the entry and any exported global variables
-            exports = String[entry_fn]
-            for gvar in globals(ir)
-                push!(exports, LLVM.name(gvar))
-            end
-
             ModulePassManager() do pm
+                # mark everything internal except for the entry and exported global variables.
+                # this makes sure that the optimizer can, e.g., touch function signatures.
+                exports = String[entry_fn]
+                for gvar in globals(ir)
+                    push!(exports, LLVM.name(gvar))
+                end
                 internalize!(pm, exports)
 
                 # eliminate all unused internal functions
@@ -284,8 +274,9 @@ const __llvm_initialized = Ref(false)
                 constant_merge!(pm)
 
                 if do_deferred_codegen
-                    # inline and optimize the call to the deferred code. in particular we want to
-                    # remove unnecessary alloca's that are created by pass-by-ref semantics.
+                    # inline and optimize the call to e deferred code. in particular we want
+                    # to remove unnecessary alloca's created by pass-by-ref semantics.
+                    # TODO: is this still necesary, now that we optimize after codegen?
                     instruction_combining!(pm)
                     always_inliner!(pm)
                     scalar_repl_aggregates_ssa!(pm)
@@ -299,6 +290,17 @@ const __llvm_initialized = Ref(false)
 
                 run!(pm, ir)
             end
+        end
+
+        if optimize
+            @timeit_debug to "optimization" optimize!(job, ir)
+
+            # optimization may have replaced functions, so look the entry point up again
+            entry = functions(ir)[entry_fn]
+        end
+
+        if ccall(:jl_is_debugbuild, Cint, ()) == 1
+            @timeit_debug to "verification" verify(ir)
         end
     end
 
