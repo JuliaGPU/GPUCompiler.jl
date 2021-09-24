@@ -637,8 +637,8 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         end
     end
 
-    # update other uses of the old function
-    for (f, new_f) in workmap
+    # update other uses of the old function, modifying call sites to pass the state argument
+    function rewrite_uses!(f, new_f)
         # update uses
         Builder(ctx) do builder
             for use in uses(f)
@@ -661,13 +661,28 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
                     unsafe_delete!(LLVM.parent(val), val)
+                elseif val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMBitCast
+                    # XXX: why isn't this caught by the value materializer above?
+                    target = operands(val)[1]
+                    @assert target == f
+                    new_val = LLVM.const_bitcast(new_f, llvmtype(val))
+                    rewrite_uses!(val, new_val)
+                    # we can't simply replace this constant expression, as it may be used
+                    # as a call, taking arguments (so we need to rewrite it to pass the state)
+
+                    # drop the old constant if it is unused
+                    # XXX: can we do this differently?
+                    if isempty(uses(val))
+                        LLVM.unsafe_destroy!(val)
+                    end
                 else
                     error("Cannot rewrite unknown use of function: $val")
                 end
             end
         end
-
-        # clean-up
+    end
+    for (f, new_f) in workmap
+        rewrite_uses!(f, new_f)
         @assert isempty(uses(f))
         unsafe_delete!(mod, f)
     end
