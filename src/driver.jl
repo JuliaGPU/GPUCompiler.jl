@@ -166,68 +166,23 @@ const __llvm_initialized = Ref(false)
         runtime_fns = LLVM.name.(defs(runtime))
     end
 
-    @timeit_debug to "LLVM middle-end" begin
-        # target-specific libraries
+    @timeit_debug to "Library linking" begin
         if libraries
+            # target-specific libraries
             undefined_fns = LLVM.name.(decls(ir))
             @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
-        end
 
-        if optimize
-            @timeit_debug to "optimization" optimize!(job, ir)
-
-            # optimization may have replaced functions, so look the entry point up again
-            entry = functions(ir)[entry_fn]
-        end
-
-        if libraries
-            undefined_fns = LLVM.name.(decls(ir))
+            # GPU run-time library
             if any(fn -> fn in runtime_fns, undefined_fns)
                 @timeit_debug to "runtime library" link_library!(ir, runtime)
             end
         end
-
-        if ccall(:jl_is_debugbuild, Cint, ()) == 1
-            @timeit_debug to "verification" verify(ir)
-        end
-
-        if only_entry
-            # replace non-entry function definitions with a declaration
-            for f in functions(ir)
-                f == entry && continue
-                isdeclaration(f) && continue
-                LLVM.isintrinsic(f) && continue
-                empty!(f)
-            end
-        end
-
-        # remove everything except for the entry and any exported global variables
-        @timeit_debug to "clean-up" begin
-            exports = String[entry_fn]
-            for gvar in globals(ir)
-                push!(exports, LLVM.name(gvar))
-            end
-
-            ModulePassManager() do pm
-                internalize!(pm, exports)
-
-                # eliminate all unused internal functions
-                global_optimizer!(pm)
-                global_dce!(pm)
-                strip_dead_prototypes!(pm)
-
-                # merge constants (such as exception messages) from the runtime
-                constant_merge!(pm)
-
-                run!(pm, ir)
-            end
-        end
     end
 
-    entry = finish_module!(job, ir, entry)
-
     # deferred code generation
-    if !only_entry && deferred_codegen && haskey(functions(ir), "deferred_codegen")
+    do_deferred_codegen = !only_entry && deferred_codegen &&
+                          haskey(functions(ir), "deferred_codegen")
+    if do_deferred_codegen
         dyn_marker = functions(ir)["deferred_codegen"]
 
         cache = Dict{CompilerJob, String}(job => entry_fn)
@@ -257,7 +212,7 @@ const __llvm_initialized = Ref(false)
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(cache, dyn_job) do
-                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize,
+                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize=false,
                                                deferred_codegen=false, parent_job=job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
@@ -281,28 +236,70 @@ const __llvm_initialized = Ref(false)
             end
         end
 
-        ModulePassManager() do pm
-            # inline and optimize the call to the deferred code. in particular we want to
-            # remove unnecessary alloca's that are created by pass-by-ref semantics.
-            instruction_combining!(pm)
-            always_inliner!(pm)
-            scalar_repl_aggregates_ssa!(pm)
-            promote_memory_to_register!(pm)
-            gvn!(pm)
-
-            # merge constants (such as exception messages) from each entry
-            constant_merge!(pm)
-
-            # merge duplicate functions, since each compilation invocation emits everything
-            # XXX: ideally we want to avoid emitting these in the first place
-            merge_functions!(pm)
-
-            run!(pm, ir)
-        end
-
         # all deferred compilations should have been resolved
         @compiler_assert isempty(uses(dyn_marker)) job
         unsafe_delete!(ir, dyn_marker)
+    end
+
+    @timeit_debug to "IR post-processing" begin
+        entry = finish_module!(job, ir, entry)
+
+        if optimize
+            @timeit_debug to "optimization" optimize!(job, ir)
+
+            # optimization may have replaced functions, so look the entry point up again
+            entry = functions(ir)[entry_fn]
+        end
+
+        if ccall(:jl_is_debugbuild, Cint, ()) == 1
+            @timeit_debug to "verification" verify(ir)
+        end
+
+        @timeit_debug to "clean-up" begin
+            # replace non-entry function definitions with a declaration
+            if only_entry
+                for f in functions(ir)
+                    f == entry && continue
+                    isdeclaration(f) && continue
+                    LLVM.isintrinsic(f) && continue
+                    empty!(f)
+                end
+            end
+
+            # remove everything except for the entry and any exported global variables
+            exports = String[entry_fn]
+            for gvar in globals(ir)
+                push!(exports, LLVM.name(gvar))
+            end
+
+            ModulePassManager() do pm
+                internalize!(pm, exports)
+
+                # eliminate all unused internal functions
+                global_optimizer!(pm)
+                global_dce!(pm)
+                strip_dead_prototypes!(pm)
+
+                # merge constants (such as exception messages)
+                constant_merge!(pm)
+
+                if do_deferred_codegen
+                    # inline and optimize the call to the deferred code. in particular we want to
+                    # remove unnecessary alloca's that are created by pass-by-ref semantics.
+                    instruction_combining!(pm)
+                    always_inliner!(pm)
+                    scalar_repl_aggregates_ssa!(pm)
+                    promote_memory_to_register!(pm)
+                    gvn!(pm)
+
+                    # merge duplicate functions, since each compilation invocation emits everything
+                    # XXX: ideally we want to avoid emitting these in the first place
+                    merge_functions!(pm)
+                end
+
+                run!(pm, ir)
+            end
+        end
     end
 
     return ir, (; entry, compiled)
