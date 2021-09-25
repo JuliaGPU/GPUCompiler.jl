@@ -572,7 +572,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     state_intr = if haskey(functions(mod), "julia.gpu.state_getter")
         functions(mod)["julia.gpu.state_getter"]
     else
-        LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_int8))
+        LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_pint8))
     end
     push!(function_attributes(state_intr), EnumAttribute("readnone", 0; ctx))
 
@@ -709,7 +709,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             f = LLVM.parent(bb)
 
             state = parameters(f)[1]
-            state = bitcast!(builder, state, T_int8)
+            state = bitcast!(builder, state, T_pint8)
             replace_uses!(inst, state)
 
             @assert isempty(uses(inst))
