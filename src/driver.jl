@@ -179,6 +179,21 @@ const __llvm_initialized = Ref(false)
         end
     end
 
+    # mark everything internal except for the entry and any exported global variables.
+    # this makes sure that the optimizer can, e.g., touch function signatures.
+    ModulePassManager() do pm
+        # NOTE: this needs to happen after linking libraries to remove unused functions,
+        #       but before deferred codegen so that all kernels remain available.
+        exports = String[entry_fn]
+        for gvar in globals(ir)
+            if linkage(gvar) == LLVM.API.LLVMExternalLinkage
+                push!(exports, LLVM.name(gvar))
+            end
+        end
+        internalize!(pm, exports)
+        run!(pm, ir)
+    end
+
     # deferred code generation
     do_deferred_codegen = !only_entry && deferred_codegen &&
                           haskey(functions(ir), "deferred_codegen")
@@ -247,14 +262,6 @@ const __llvm_initialized = Ref(false)
         # some early clean-up to reduce the amount of code to optimize
         @timeit_debug to "clean-up" begin
             ModulePassManager() do pm
-                # mark everything internal except for the entry and exported global variables.
-                # this makes sure that the optimizer can, e.g., touch function signatures.
-                exports = String[entry_fn]
-                for gvar in globals(ir)
-                    push!(exports, LLVM.name(gvar))
-                end
-                internalize!(pm, exports)
-
                 # eliminate all unused internal functions
                 global_optimizer!(pm)
                 global_dce!(pm)
