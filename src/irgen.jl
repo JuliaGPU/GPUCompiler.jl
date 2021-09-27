@@ -726,11 +726,6 @@ function lower_kernel_state!(fun::LLVM.Function)
     changed = false
 
     # check if we even need a kernel state argument
-    if !job.source.kernel
-        # only kernels have had a kernel state argument added
-        # XXX: for consistency, also add the state to non-kernel compilation jobs?
-        return false
-    end
     state = kernel_state_type(job)
     if state === Nothing
         return false

@@ -182,10 +182,12 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
         add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
 
-        # GC lowering is the last pass that may introduce calls to the runtime library,
-        # and thus additional uses of the kernel state.
-        add!(pm, FunctionPass("LowerKernelState", lower_kernel_state!))
-        add!(pm, ModulePass("CleanupKernelState", cleanup_kernel_state!))
+        if job.source.kernel
+            # GC lowering is the last pass that may introduce calls to the runtime library,
+            # and thus additional uses of the kernel state intrinsic.
+            add!(pm, FunctionPass("LowerKernelState", lower_kernel_state!))
+            add!(pm, ModulePass("CleanupKernelState", cleanup_kernel_state!))
+        end
 
         # remove dead uses of ptls
         aggressive_dce!(pm)
@@ -222,7 +224,9 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     ModulePassManager() do pm
         addTargetPasses!(pm, tm, triple)
 
-        dead_arg_elimination!(pm)   # parent doesn't use return value --> ret void
+        # - remove unused kernel state arguments
+        # - simplify function calls that don't use the returned value
+        dead_arg_elimination!(pm)
 
         run!(pm, mod)
     end
