@@ -182,6 +182,10 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
         add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
 
+        # GC lowering is the last pass that may introduce calls to the runtime library,
+        # and thus additional uses of the kernel state.
+        add!(pm, FunctionPass("LowerKernelState", lower_kernel_state!))
+
         # remove dead uses of ptls
         aggressive_dce!(pm)
         add!(pm, ModulePass("LowerPTLS", lower_ptls!))

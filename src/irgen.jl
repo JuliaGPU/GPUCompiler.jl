@@ -545,13 +545,14 @@ end
 
 # kernel state arguments
 #
-# add a state argument every function in the module, and lower calls to the
-# `julia.gpu.state_getter` intrinsics to use this newly-introduced state argument.
-#
-# the type of the state is determined by the `kernel_state_type` interface, and is passed
-# as a byval pointer so that (1) the intrinsic can use an opaque pointer for users to
-# cast to an appropriate type, while (2) ensuring the state resides in thread-local memory
-# so that it can be used without synchronizing global-memory accesses.
+# to facilitate passing stateful information to kernels without having to recompile, e.g.,
+# the storage location for exception flags, or the location of a I/O buffer, we enable the
+# back-end to specify a Julia object that will be passed to the kernel by-value, and to
+# every called function by-reference. Access to this object is done using the
+# `julia.gpu.state_getter` intrinsic, which returns an opaque pointer to the state object.
+# after optimization, these intrinsics will be lowered to refer to the state argument.
+
+# add a state argument to every function in the module, starting from the kernel entry point
 function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                            entry::LLVM.Function)
     ctx = context(mod)
@@ -559,6 +560,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     # check if we even need a kernel state argument
     state = kernel_state_type(job)
+    @assert job.source.kernel
     if state === Nothing
         return false
     end
@@ -569,12 +571,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # this is both for extern uses, and to make this transformation a two-step process.
     T_int8 = LLVM.IntType(8; ctx)
     T_pint8 = LLVM.PointerType(T_int8)
-    state_intr = if haskey(functions(mod), "julia.gpu.state_getter")
-        functions(mod)["julia.gpu.state_getter"]
-    else
-        LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_pint8))
-    end
-    push!(function_attributes(state_intr), EnumAttribute("readnone", 0; ctx))
+    state_intr = kernel_state_intr(mod)
 
     # add a state argument to every function
     worklist = filter(!isdeclaration, collect(functions(mod)))
@@ -659,10 +656,10 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
                     # forward the state argument
                     position!(builder, val)
-                    state = call!(builder, state_intr, Value[], "state")
-                    state = bitcast!(builder, state, T_ptr_state)
+                    untyped_state = call!(builder, state_intr, Value[], "state")
+                    typed_state = bitcast!(builder, untyped_state, T_ptr_state)
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, new_f, [state, operands(val)[1:end-1]...])
+                        call!(builder, new_f, [typed_state, operands(val)[1:end-1]...])
                     else
                         # TODO: invoke and callbr
                         error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
@@ -698,27 +695,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         unsafe_delete!(mod, f)
     end
 
-    # fixup all uses of the state getter to use the newly introduced function state argument
-    Builder(ctx) do builder
-        for use in uses(state_intr)
-            inst = user(use)
-            @assert inst isa LLVM.CallInst
-
-            position!(builder, inst)
-            bb = LLVM.parent(inst)
-            f = LLVM.parent(bb)
-
-            state = parameters(f)[1]
-            state = bitcast!(builder, state, T_pint8)
-            replace_uses!(inst, state)
-
-            @assert isempty(uses(inst))
-            unsafe_delete!(LLVM.parent(inst), inst)
-        end
-    end
-
-    # HACK: add a dummy use of the kernel state pointer to ensure it is always available
-    #       also see `kernel_state_argument` below.
+    # HACK: add a dummy use of the kernel state pointer to ensure it survives optimization
     dummy_user = if haskey(functions(mod), "julia.gpu.state_user")
         functions(mod)["julia.gpu.state_user"]
     else
@@ -731,54 +708,112 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         call!(builder, dummy_user, [parameters(entry)[1]])
     end
 
-    # clean-up
-    @assert isempty(uses(state_intr))
-    unsafe_delete!(mod, state_intr)
-
-    # don't pass the state when unnecessary
-    # XXX: isn't this done during optimization as well?
-    ModulePassManager() do pm
-        dead_arg_elimination!(pm)
-        run!(pm, mod)
-    end
-
     return true
 end
 
-# return a value pointing to the state argument in a given function.
-function kernel_state_argument(f::LLVM.Function, state::Type)
-    ctx = context(f)
-    mod = LLVM.parent(f)
+# lower calls to the state getter intrinsic. this is a two-step process, so that the state
+# argument can be added before optimization, and that optimization can introduce new uses
+# before the intrinsic getting lowered late during optimization.
+#
+# the reason we want to add the state argument before optimization, is that the initial
+# argument is marked byval, but some backends need to eagerly lower that byval property
+# (because the LLVM back-end doesn't support emitting code for it). That lowering typically
+# generates a lot of expensive code, so _needs_ to be optimized.
+function lower_kernel_state!(fun::LLVM.Function)
+    job = current_job::CompilerJob
+    mod = LLVM.parent(fun)
+    ctx = context(fun)
+    changed = false
 
-    T_state = convert(LLVMType, state; ctx)
-    T_ptr_state = LLVM.PointerType(T_state)
-
-    arg = parameters(f)[1]
-    if llvmtype(arg) == T_ptr_state
-        return arg
+    # check if we even need a kernel state argument
+    if !job.source.kernel
+        # only kernels have had a kernel state argument added
+        return false
+    end
+    state = kernel_state_type(job)
+    if state === Nothing
+        return false
     end
 
-    # if the first argument isn't a valid kernel state pointer, this probably means we're
-    # in a kernel function whose byval-annotated kernel state argument got lowered eagerly.
-    # to make sure we can still get a pointer to the kernel state, we've emitted a dummy
-    # use, which we can use here to get a pointer to the kernel state.
+    # find the kernel state argument. normally, this is the first argument of the function.
+    state_arg = nothing
+    T_state = convert(LLVMType, state; ctx)
+    T_ptr_state = LLVM.PointerType(T_state)
+    first_arg = parameters(fun)[1]
+    if llvmtype(first_arg) == T_ptr_state
+        state_arg = first_arg
+    end
+
+    # with kernels, the story is more complicated: the kernel state argument is marked byval,
+    # and it's possible we eagerly lowered that pointer to a value. to retrieve the state,
+    # look for the alloca slot the argument was stored in via the dummy use we introduced.
     #
     # this is obviously a hack, stemming from the fact that while lowering Julia intrinsics
     # (which needs to happen _after_ optimization) we may have to emit calls to the GPU
     # runtime while those functions may already have had their kernel state arguments added
     # (which we do _before_ optimization to make sure that any lowered byval performs well).
-    @assert llvmtype(arg) == T_state
-    dummy_user = functions(mod)["julia.gpu.state_user"]
-    for use in uses(dummy_user)
-        call = user(use)
-        bb = LLVM.parent(call)
-        if LLVM.parent(bb) == f
-            arg = operands(call)[1]
-            return arg
+    if state_arg === nothing
+        @assert llvmtype(first_arg) == T_state
+        dummy_user = functions(mod)["julia.gpu.state_user"]
+        for use in uses(dummy_user)
+            call = user(use)
+            bb = LLVM.parent(call)
+            if LLVM.parent(bb) == fun
+                state_arg = operands(call)[1]
+                break
+            end
         end
     end
 
-    error("Internal compiler error: could not reconstruct kernel state argument")
+    if state_arg === nothing
+        error("Internal compiler error: could not reconstruct kernel state argument")
+    end
+
+    # get the intrinsic returning an opaque pointer to the kernel state.
+    T_int8 = LLVM.IntType(8; ctx)
+    T_pint8 = LLVM.PointerType(T_int8)
+    state_intr = kernel_state_intr(mod)
+
+    # fixup all uses of the state getter to use the newly introduced function state argument
+    Builder(ctx) do builder
+        for use in uses(state_intr)
+            inst = user(use)
+            @assert inst isa LLVM.CallInst
+
+            position!(builder, inst)
+            bb = LLVM.parent(inst)
+            f = LLVM.parent(bb)
+
+            untyped_state = bitcast!(builder, state_arg, T_pint8)
+            replace_uses!(inst, untyped_state)
+
+            @assert isempty(uses(inst))
+            unsafe_delete!(LLVM.parent(inst), inst)
+
+            changed = true
+        end
+    end
+
+    # clean-up
+    @assert isempty(uses(state_intr))
+    unsafe_delete!(mod, state_intr)
+
+    return changed
+end
+
+function kernel_state_intr(mod::LLVM.Module)
+    ctx = context(mod)
+    T_int8 = LLVM.IntType(8; ctx)
+    T_pint8 = LLVM.PointerType(T_int8)
+
+    state_intr = if haskey(functions(mod), "julia.gpu.state_getter")
+        functions(mod)["julia.gpu.state_getter"]
+    else
+        LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_pint8))
+    end
+    push!(function_attributes(state_intr), EnumAttribute("readnone", 0; ctx))
+
+    return state_intr
 end
 
 # run-time equivalent (untyped)
