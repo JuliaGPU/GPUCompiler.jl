@@ -118,6 +118,11 @@ end
 function build_runtime(@nospecialize(job::CompilerJob); ctx)
     mod = LLVM.Module("GPUCompiler run-time library"; ctx)
 
+    # the compiler job passed into here is identifies the job that requires the runtime.
+    # derive a job that represents the runtime itself (notably with kernel=false).
+    source = FunctionSpec(identity, Tuple{Nothing}, false, nothing, job.source.world_age)
+    job = CompilerJob(job.target, source, job.params)
+
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
             isdefined(runtime_module(job), method.def) || continue
