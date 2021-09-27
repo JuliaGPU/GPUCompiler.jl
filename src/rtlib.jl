@@ -28,7 +28,8 @@ end
 
 ## higher-level functionality to work with runtime functions
 
-function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[])
+function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[];
+                    state::Type=Nothing)
     bb = position(builder)
     f = LLVM.parent(bb)
     mod = LLVM.parent(f)
@@ -39,8 +40,21 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         f = functions(mod)[rt.llvm_name]
         ft = eltype(llvmtype(f))
     else
-        ft = convert(LLVM.FunctionType, rt; ctx)
+        ft = convert(LLVM.FunctionType, rt; ctx, state)
         f = LLVM.Function(mod, rt.llvm_name, ft)
+    end
+
+    # we may be calling this function after kernel state lowering,
+    # in which case we need to manually get and pass the state.
+    args = Value[args...]
+    if state !== Nothing
+        T_state = convert(LLVMType, state; ctx)
+        T_ptr_state = LLVM.PointerType(T_state)
+
+        state_intr = kernel_state_intr(mod)
+        untyped_state = call!(builder, state_intr, Value[], "state")
+        typed_state = bitcast!(builder, untyped_state, T_ptr_state)
+        pushfirst!(args, typed_state)
     end
 
     # runtime functions are written in Julia, while we're calling from LLVM,
@@ -103,6 +117,11 @@ end
 
 function build_runtime(@nospecialize(job::CompilerJob); ctx)
     mod = LLVM.Module("GPUCompiler run-time library"; ctx)
+
+    # the compiler job passed into here is identifies the job that requires the runtime.
+    # derive a job that represents the runtime itself (notably with kernel=false).
+    source = FunctionSpec(identity, Tuple{Nothing}, false, nothing, job.source.world_age)
+    job = CompilerJob(job.target, source, job.params)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
