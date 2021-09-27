@@ -728,6 +728,7 @@ function lower_kernel_state!(fun::LLVM.Function)
     # check if we even need a kernel state argument
     if !job.source.kernel
         # only kernels have had a kernel state argument added
+        # XXX: for consistency, also add the state to non-kernel compilation jobs?
         return false
     end
     state = kernel_state_type(job)
@@ -779,6 +780,8 @@ function lower_kernel_state!(fun::LLVM.Function)
         for use in uses(state_intr)
             inst = user(use)
             @assert inst isa LLVM.CallInst
+            bb = LLVM.parent(inst)
+            LLVM.parent(bb) == fun || continue
 
             position!(builder, inst)
             bb = LLVM.parent(inst)
@@ -794,9 +797,35 @@ function lower_kernel_state!(fun::LLVM.Function)
         end
     end
 
-    # clean-up
-    @assert isempty(uses(state_intr))
-    unsafe_delete!(mod, state_intr)
+    return changed
+end
+
+function cleanup_kernel_state!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    ctx = context(mod)
+    changed = false
+
+    # remove the getter intrinsic
+    if haskey(functions(mod), "julia.gpu.state_getter")
+        intr = functions(mod)["julia.gpu.state_getter"]
+        if isempty(uses(intr))
+            # if we're not emitting a kernel, we can't resolve the intrinsic to an argument.
+            unsafe_delete!(mod, intr)
+            changed = true
+        end
+    end
+
+    # remove the kernel state dummy use
+    if haskey(functions(mod), "julia.gpu.state_user")
+        intr = functions(mod)["julia.gpu.state_user"]
+        for use in uses(intr)
+            call = user(use)
+            unsafe_delete!(LLVM.parent(call), call)
+        end
+        @assert isempty(uses(intr))
+        unsafe_delete!(mod, intr)
+        changed = true
+    end
 
     return changed
 end

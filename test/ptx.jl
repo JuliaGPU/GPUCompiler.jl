@@ -92,7 +92,11 @@ end
     # state should only passed to device functions that use it
 
     @eval @noinline kernel_state_child1(ptr) = unsafe_load(ptr)
-    @eval @noinline kernel_state_child2() = ptx_kernel_state().data
+    @eval @noinline function kernel_state_child2()
+        data = ptx_kernel_state().data
+        ptr = reinterpret(Ptr{Int}, data)
+        unsafe_load(ptr)
+    end
 
     function kernel(ptr)
         unsafe_store!(ptr, kernel_state_child1(ptr) + kernel_state_child2())
