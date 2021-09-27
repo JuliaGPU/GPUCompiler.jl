@@ -194,6 +194,10 @@ const __llvm_initialized = Ref(false)
         run!(pm, ir)
     end
 
+    # finalize the current module. this needs to happen before linking deferred modules,
+    # since those modules have been finalized themselves, and we don't want to re-finalize.
+    entry = finish_module!(job, ir, entry)
+
     # deferred code generation
     do_deferred_codegen = !only_entry && deferred_codegen &&
                           haskey(functions(ir), "deferred_codegen")
@@ -257,8 +261,6 @@ const __llvm_initialized = Ref(false)
     end
 
     @timeit_debug to "IR post-processing" begin
-        entry = finish_module!(job, ir, entry)
-
         # some early clean-up to reduce the amount of code to optimize
         @timeit_debug to "clean-up" begin
             ModulePassManager() do pm
