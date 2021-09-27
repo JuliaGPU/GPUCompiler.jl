@@ -606,9 +606,9 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # use a value materializer for replacing uses of the function in constants
         function materializer(val)
             if val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMPtrToInt
-                val = operands(val)[1]
-                if haskey(workmap, val)
-                    return LLVM.const_ptrtoint(workmap[val], llvmtype(val))
+                src = operands(val)[1]
+                if haskey(workmap, src)
+                    return LLVM.const_ptrtoint(workmap[src], llvmtype(val))
                 end
             end
             return val
