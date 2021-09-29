@@ -13,8 +13,7 @@ struct PTXKernelState
     data::Int64
 end
 GPUCompiler.kernel_state_type(@nospecialize(job::PTXCompilerJob)) = PTXKernelState
-ptx_kernel_state() =
-    unsafe_load(convert(Ptr{PTXKernelState}, GPUCompiler.kernel_state_pointer()))
+@inline @generated ptx_kernel_state() = GPUCompiler.kernel_state_value(PTXKernelState)
 
 # a version of the test runtime that has some side effects, loading the kernel state
 # (so that we can test if kernel state arguments are appropriately optimized away)
@@ -22,10 +21,8 @@ module PTXTestRuntime
     using ..GPUCompiler
     import ..PTXKernelState
 
-    kernel_state() = unsafe_load(convert(Ptr{PTXKernelState}, GPUCompiler.kernel_state_pointer()))
-
     function signal_exception()
-        kernel_state()
+        ptx_kernel_state()
         return
     end
 

@@ -49,12 +49,10 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     args = Value[args...]
     if state !== Nothing
         T_state = convert(LLVMType, state; ctx)
-        T_ptr_state = LLVM.PointerType(T_state)
 
-        state_intr = kernel_state_intr(mod)
-        untyped_state = call!(builder, state_intr, Value[], "state")
-        typed_state = bitcast!(builder, untyped_state, T_ptr_state)
-        pushfirst!(args, typed_state)
+        state_intr = kernel_state_intr(mod, T_state)
+        state_val = call!(builder, state_intr, Value[], "state")
+        pushfirst!(args, state_val)
     end
 
     # runtime functions are written in Julia, while we're calling from LLVM,

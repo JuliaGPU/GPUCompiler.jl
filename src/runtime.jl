@@ -44,8 +44,7 @@ function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance;
     # if we're running post-optimization, prepend the kernel state to the argument list
     if state !== Nothing
         T_state = convert(LLVMType, state; ctx)
-        T_ptr_state = LLVM.PointerType(T_state)
-        pushfirst!(types, T_ptr_state)
+        pushfirst!(types, T_state)
     end
 
     return_type = if rt.llvm_return_type === nothing
