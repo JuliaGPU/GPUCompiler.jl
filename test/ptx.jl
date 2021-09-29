@@ -113,7 +113,7 @@ end
     @test occursin(r"@.*child1.+\(i64", ir)
 
     # child2 does
-    @test occursin(r"@.*child2.+\(\[1 x i64\]\* %state", ir)
+    @test occursin(r"@.*child2.+\(\[1 x i64\] %state", ir)
 
     # can't have the unlowered intrinsic
     @test !occursin("julia.gpu.state_getter", ir)
