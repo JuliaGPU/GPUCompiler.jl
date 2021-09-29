@@ -195,7 +195,7 @@ function lower_throw!(mod::LLVM.Module)
                 end
 
                 # remove the call
-                call_args = operands(call)[1:end-1] # last arg is function itself
+                call_args = arguments(call)
                 unsafe_delete!(LLVM.parent(call), call)
 
                 # HACK: kill the exceptions' unused arguments
@@ -659,7 +659,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     untyped_state = call!(builder, state_intr, Value[], "state")
                     typed_state = bitcast!(builder, untyped_state, T_ptr_state)
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, new_f, [typed_state, operands(val)[1:end-1]...])
+                        call!(builder, new_f, [typed_state, arguments(val)...], operand_bundles(val))
                     else
                         # TODO: invoke and callbr
                         error("Rewrite of $(typeof(val))-based calls is not implemented: $val")

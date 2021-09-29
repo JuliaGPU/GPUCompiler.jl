@@ -143,7 +143,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
         # some special handling for runtime functions that we don't implement
         if fn == "jl_get_binding_or_error"
             try
-                m, sym, _ = operands(inst)
+                m, sym = arguments(inst)
                 sym = first(operands(sym::ConstantExpr))::ConstantInt
                 sym = convert(Int, sym)
                 sym = Ptr{Cvoid}(sym)
@@ -155,7 +155,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             end
         elseif fn == "jl_invoke"
             try
-                f, args, nargs, meth = operands(inst)
+                f, args, nargs, meth = arguments(inst)
                 meth = first(operands(meth::ConstantExpr))::ConstantInt
                 meth = convert(Int, meth)
                 meth = Ptr{Cvoid}(meth)
@@ -167,7 +167,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             end
         elseif fn == "jl_apply_generic"
             try
-                f, args, nargs, _ = operands(inst)
+                f, args, nargs = arguments(inst)
                 f = first(operands(f))::ConstantInt # get rid of inttoptr
                 f = convert(Int, f)
                 f = Ptr{Cvoid}(f)
@@ -201,7 +201,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
 
     elseif isa(dest, ConstantExpr)
         # detect calls to literal pointers
-        if occursin("inttoptr", string(dest))
+        if opcode(dest) == LLVM.API.LLVMIntToPtr
             # extract the literal pointer
             ptr_arg = first(operands(dest))
             @compiler_assert isa(ptr_arg, ConstantInt) job
