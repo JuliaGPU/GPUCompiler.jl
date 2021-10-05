@@ -6,7 +6,7 @@
 # sites of the containing function. if there's only one, repeat the process from that call.
 # finally, the debug information is converted to a Julia stack trace.
 function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
-    done = Set(LLVM.Instruction[])
+    done = Set{LLVM.Instruction}()
     while true
         if in(inst, done)
             break
