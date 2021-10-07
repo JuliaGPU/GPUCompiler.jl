@@ -355,12 +355,18 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
 
     # generate IR
     GC.@preserve lookup_cb begin
-        native_code = ccall(:jl_create_native, Ptr{Cvoid},
-                            (Vector{MethodInstance}, Base.CodegenParams, Cint),
-                            [method_instance], params, #=extern policy=# 1)
+        native_code = if VERSION >= v"1.8.0-DEV.661"
+            ccall(:jl_create_native, Ptr{Cvoid},
+                  (Vector{MethodInstance}, Ptr{Base.CodegenParams}, Cint),
+                  [method_instance], Ref(params), #=extern policy=# 1)
+        else
+            ccall(:jl_create_native, Ptr{Cvoid},
+                  (Vector{MethodInstance}, Base.CodegenParams, Cint),
+                  [method_instance], params, #=extern policy=# 1)
+        end
         @assert native_code != C_NULL
         llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
-                            (Ptr{Cvoid},), native_code)
+                             (Ptr{Cvoid},), native_code)
         @assert llvm_mod_ref != C_NULL
         llvm_mod = LLVM.Module(llvm_mod_ref)
     end
