@@ -261,21 +261,6 @@ const __llvm_initialized = Ref(false)
     end
 
     @timeit_debug to "IR post-processing" begin
-        # some early clean-up to reduce the amount of code to optimize
-        @timeit_debug to "clean-up" begin
-            ModulePassManager() do pm
-                # eliminate all unused internal functions
-                global_optimizer!(pm)
-                global_dce!(pm)
-                strip_dead_prototypes!(pm)
-
-                # merge constants (such as exception messages)
-                constant_merge!(pm)
-
-                run!(pm, ir)
-            end
-        end
-
         if optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir)
@@ -302,6 +287,22 @@ const __llvm_initialized = Ref(false)
 
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
+        end
+
+        @timeit_debug to "clean-up" begin
+            # we can only clean-up now, as optimization may lower or introduce calls to
+            # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
+            ModulePassManager() do pm
+                # eliminate all unused internal functions
+                global_optimizer!(pm)
+                global_dce!(pm)
+                strip_dead_prototypes!(pm)
+
+                # merge constants (such as exception messages)
+                constant_merge!(pm)
+
+                run!(pm, ir)
+            end
         end
 
         # replace non-entry function definitions with a declaration
