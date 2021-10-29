@@ -16,12 +16,11 @@ function pygmentize()
     return _pygmentize[]
 end
 
-function highlight(io::Base.TTY, code, lexer)
+function highlight(io::IO, code, lexer)
     highlighter = pygmentize()
     have_color = get(io, :color, false)
     if highlighter === nothing || !have_color
         print(io, code)
-        return code
     else
         custom_lexer = joinpath(dirname(@__DIR__), "res", "pygments", "$lexer.py")
         if isfile(custom_lexer)
@@ -33,9 +32,8 @@ function highlight(io::Base.TTY, code, lexer)
         close(pipe.in)
         print(io, read(pipe, String))
     end
+    return
 end
-
-highlight(io, code, lexer) = print(io, code)
 
 
 #
