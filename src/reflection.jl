@@ -49,8 +49,9 @@ function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kw
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
+        interp = get_interpreter(job)
         descend_code_typed = getfield(mod, :descend_code_typed)
-        descend_code_typed(job.source.f, job.source.tt; kwargs...)
+        descend_code_typed(job.source.f, job.source.tt; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
         InteractiveUtils.code_typed(job.source.f, job.source.tt; interp, kwargs...)
@@ -66,8 +67,9 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
+        interp = get_interpreter(job)
         descend_code_warntype = getfield(mod, :descend_code_warntype)
-        descend_code_warntype(job.source.f, job.source.tt; kwargs...)
+        descend_code_warntype(job.source.f, job.source.tt; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
         InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; interp, kwargs...)
@@ -187,8 +189,8 @@ See also: `InteractiveUtils.@code_typed`
 macro device_code_typed(ex...)
     quote
         output = Dict{CompilerJob,Any}()
-        function hook(job::CompilerJob)
-            output[job] = code_typed(job)
+        function hook(job::CompilerJob; kwargs...)
+            output[job] = code_typed(job; kwargs...)
         end
         $(emit_hooked_compilation(:hook, ex...))
         output
