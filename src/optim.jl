@@ -13,17 +13,6 @@ function addOptimizationPasses!(pm, opt_level=2)
     #      pm, opt_level, #=lower_intrinsics=# 0)
     #return
 
-    # compate to Clang by using the pass manager builder APIs:
-    #LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
-    #ModulePassManager() do pm
-    #    add_library_info!(pm, triple(mod))
-    #    add_transform_info!(pm, tm)
-    #    PassManagerBuilder() do pmb
-    #        populate!(pm, pmb)
-    #    end
-    #    run!(pm, mod)
-    #end
-
     # NOTE: LLVM 12 disabled the hoisting of common instruction
     #       before loop vectorization (https://reviews.llvm.org/D84108).
     #
@@ -106,6 +95,7 @@ function addOptimizationPasses!(pm, opt_level=2)
     loop_unswitch!(pm)
     licm!(pm)
     julia_licm!(pm)
+    inductive_range_check_elimination!(pm)
     # Subsequent passes not stripping metadata from terminator
     instruction_simplify!(pm)
     ind_var_simplify!(pm)
@@ -230,6 +220,17 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
         run!(pm, mod)
     end
+
+    # compare to Clang by using the pass manager builder APIs:
+    #LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
+    #ModulePassManager() do pm
+    #    addTargetPasses!(pm, tm, triple)
+    #    PassManagerBuilder() do pmb
+    #        optlevel!(pmb, 2)
+    #        populate!(pm, pmb)
+    #    end
+    #    run!(pm, mod)
+    #end
 
     return
 end
