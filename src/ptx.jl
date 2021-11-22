@@ -148,6 +148,9 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         add_library_info!(pm, triple(mod))
         add_transform_info!(pm, tm)
 
+        # needed by GemmKernels.jl-like code
+        speculative_execution_if_has_branch_divergence!(pm)
+
         # NVPTX's target machine info enables runtime unrolling,
         # but Julia's pass sequence only invokes the simple unroller.
         loop_unroll!(pm)
