@@ -14,21 +14,22 @@ include("definitions/native.jl")
     end
 
     @testset "Compilation database" begin
-        function sqexp(x::Float64)
-            return exp(x)*exp(x)
+        @noinline inner(x) = x+1
+        function outer(x)
+            return inner(x)
         end
 
-        job, _ = native_job(sqexp, (Float64,))
+        job, _ = native_job(outer, (Int,))
         ir, meta = GPUCompiler.compile(:llvm, job)
 
-        meth = only(methods(sqexp, (Float64,)))
+        meth = only(methods(outer, (Int,)))
 
         mis = filter(mi->mi.def == meth, keys(meta.compiled))
         @test length(mis) == 1
 
         other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
         @test length(other_mis) == 1
-        @test only(other_mis).def in methods(Base.exp)
+        @test only(other_mis).def in methods(inner)
     end
 
     @testset "Advanced database" begin
