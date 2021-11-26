@@ -156,13 +156,6 @@ const __llvm_initialized = Ref(false)
     # because it recurses into the compiler
     if libraries
         runtime = load_runtime(job; ctx)
-        if haskey(globals(runtime), "llvm.used")
-            # the runtime shouldn't link-in stuff that gets preserved in the output. this is
-            # a hack to get rid of the device function slots emitted by the PTX back-end,
-            # but it also makes sense.
-            gv = globals(runtime)["llvm.used"]
-            LLVM.unsafe_delete!(runtime, gv)
-        end
         runtime_fns = LLVM.name.(defs(runtime))
     end
 
