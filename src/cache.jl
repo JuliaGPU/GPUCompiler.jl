@@ -49,8 +49,9 @@ const specialization_counter = Ref{UInt}(0)
     linker = SlotNumber(5)
 
     # call the compiler
-    append!(new_ci.code, [ReturnNode(id)])
-    append!(new_ci.codelocs, [1])   # see note below
+    push!(new_ci.code, ReturnNode(id))
+    push!(new_ci.ssaflags, 0x00)   # Julia's native compilation pipeline (and its verifier) expects `ssaflags` to be the same length as `code`
+    push!(new_ci.codelocs, 1)   # see note below
     new_ci.ssavaluetypes += 1
 
     # NOTE: we keep the first entry of the original linetable, and use it for location info
