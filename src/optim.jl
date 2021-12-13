@@ -24,6 +24,10 @@ function addOptimizationPasses!(pm, opt_level=2)
     constant_merge!(pm)
 
     if opt_level < 2
+        cpu_features!(pm)
+        if opt_level == 1
+            instruction_simplify!(pm)
+        end
         if LLVM.version() >= v"12"
             cfgsimplification!(pm; hoist_common_insts=true)
         else
@@ -72,6 +76,7 @@ function addOptimizationPasses!(pm, opt_level=2)
     else
         cfgsimplification!(pm)
     end
+    cpu_features!(pm)
     scalar_repl_aggregates!(pm)
     instruction_simplify!(pm)
     jump_threading!(pm)
@@ -237,6 +242,53 @@ end
 
 
 ## lowering intrinsics
+cpu_features!(pm::PassManager) = add!(pm, ModulePass("LowerCPUFeatures", cpu_features!))
+function cpu_features!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    ctx = context(mod)
+    changed = false
+
+    argtyps = Dict(
+        "f32" => Float32,
+        "f64" => Float64,
+    )
+
+    # have_fma
+    for f in functions(mod)
+        ft = eltype(llvmtype(f))
+        fn = LLVM.name(f)
+        startswith(fn, "julia.cpu.have_fma.") || continue
+        typnam = fn[20:end]
+
+        # determine whether this back-end supports FMA on this type
+        has_fma = if haskey(argtyps, typnam)
+            typ = argtyps[typnam]
+            have_fma(job.target, typ)
+        else
+            # warn?
+            false
+        end
+        has_fma = ConstantInt(return_type(ft), has_fma)
+
+        # substitute all uses of the intrinsic with a constant
+        materialized = LLVM.Value[]
+        for use in uses(f)
+            val = user(use)
+            replace_uses!(val, has_fma)
+            push!(materialized, val)
+        end
+
+        # remove the intrinsic and its uses
+        for val in materialized
+            @assert isempty(uses(val))
+            unsafe_delete!(LLVM.parent(val), val)
+        end
+        @assert isempty(uses(f))
+        unsafe_delete!(mod, f)
+    end
+
+    return changed
+end
 
 # lower object allocations to to PTX malloc
 #

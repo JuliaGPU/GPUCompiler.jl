@@ -43,6 +43,8 @@ function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     DataLayout(string(dl) * "-ni:10:11:12:13")
 end
 
+have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
+
 
 ## params
 
