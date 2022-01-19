@@ -520,22 +520,6 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 
-    # clean-up
-    # NOTE: byval lowering happens very late, after optimization
-    ModulePassManager() do pm
-        # fold the entry bb into the rest of the function
-        instruction_simplify!(pm)
-        cfgsimplification!(pm)
-
-        # avoid alloca's
-        scalar_repl_aggregates!(pm)
-        instruction_combining!(pm)
-
-        cfgsimplification!(pm)
-
-        run!(pm, mod)
-    end
-
     return new_f
 end
 
