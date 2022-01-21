@@ -91,7 +91,7 @@ directives = ["address_size", "align", "branchtargets", "callprototype",
               "minnctapersm", "param", "pragma", "reg", "reqntid", "section",
               "shared", "sreg", "target", "tex", "version", "visible", "weak"]
 
-r_directive = join(directives, "|")
+r_directive = "(?:.(?:" * join(directives, "|") * "))"
 
 
 r_hex = "0[xX][A-F]+U?"
@@ -121,7 +121,7 @@ r_label = "[\\w_]+:"
 r_comment = "//"
 r_unknown = "[^\\s]*"
 
-r_line = "(?:(?:.$r_directive)|(?:$r_instruction)|(?:$r_register)|(?:$r_number)|(?:$r_label)|(?:$r_guard_predicate)|(?:$r_comment)|(?:$r_identifier)|(?:$r_unknown))"
+r_line = "(?:(?:$r_directive)|(?:$r_instruction)|(?:$r_register)|(?:$r_number)|(?:$r_label)|(?:$r_guard_predicate)|(?:$r_comment)|(?:$r_identifier)|(?:$r_unknown))"
 
 get_token(n::Nothing) = nothing, nothing, nothing
 
