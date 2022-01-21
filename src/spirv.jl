@@ -70,15 +70,6 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
           MDNode([ConstantInt(Int32(1); ctx),
                   ConstantInt(Int32(5); ctx)]; ctx))
 
-    ModulePassManager() do pm
-        # SPIR-V does not support trap, and has no mechanism to abort compute kernels
-        # (OpKill is only available in fragment execution mode)
-        add!(pm, ModulePass("RemoveTrap", rm_trap!))
-        add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
-
-        run!(pm, mod)
-    end
-
     return entry
 end
 
@@ -86,6 +77,18 @@ end
                          format=LLVM.API.LLVMAssemblyFile)
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
+
+    ModulePassManager() do pm
+        # SPIR-V does not support trap, and has no mechanism to abort compute kernels
+        # (OpKill is only available in fragment execution mode)
+        add!(pm, ModulePass("RemoveTrap", rm_trap!))
+
+        # the LLVM to SPIR-V translator does not support the freeze instruction
+        # (SPIRV-LLVM-Translator#1140)
+        add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
+
+        run!(pm, mod)
+    end
 
     # translate to SPIR-V
     input = tempname(cleanup=false) * ".bc"
