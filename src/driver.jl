@@ -159,15 +159,11 @@ const __llvm_initialized = Ref(false)
         runtime_fns = LLVM.name.(defs(runtime))
     end
 
-    @timeit_debug to "Library linking" begin
+    @timeit_debug to "Runtime library linking" begin
         if libraries
-            # target-specific libraries
             undefined_fns = LLVM.name.(decls(ir))
-            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
-
-            # GPU run-time library
             if any(fn -> fn in runtime_fns, undefined_fns)
-                @timeit_debug to "runtime library" link_library!(ir, runtime)
+                link_library!(ir, runtime)
             end
         end
     end
@@ -253,35 +249,48 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
-    @timeit_debug to "IR post-processing" begin
-        if optimize
-            @timeit_debug to "optimization" begin
-                optimize!(job, ir)
-
-                # deferred codegen has some special optimization requirements,
-                # which also need to happen _after_ regular optimization.
-                # XXX: make these part of the optimizer pipeline?
-                do_deferred_codegen && ModulePassManager() do pm
-                    # inline and optimize the call to e deferred code. in particular we want
-                    # to remove unnecessary alloca's created by pass-by-ref semantics.
-                    instruction_combining!(pm)
-                    always_inliner!(pm)
-                    scalar_repl_aggregates_ssa!(pm)
-                    promote_memory_to_register!(pm)
-                    gvn!(pm)
-
-                    # merge duplicate functions, since each compilation invocation emits everything
-                    # XXX: ideally we want to avoid emitting these in the first place
-                    merge_functions!(pm)
-
-                    run!(pm, ir)
-                end
-            end
-
-            # optimization may have replaced functions, so look the entry point up again
-            entry = functions(ir)[entry_fn]
+    if optimize
+        @timeit_debug to "IR optimization" begin
+            optimize!(job, ir)
         end
+    end
 
+    # Avoid bloating the code before optimizations
+    if libraries
+        @timeit_debug to "Target library linking" begin
+            undefined_fns = LLVM.name.(decls(ir))
+            link_libraries!(job, ir, undefined_fns)
+        end
+    end
+
+    # deferred codegen has some special optimization requirements,
+    # which also need to happen _after_ regular optimization.
+    # We also use this oportunity to clean up after target library linking
+    if do_deferred_codegen || libraries
+        @timeit_debug to "Deferred codegen & libraries cleanup" begin
+            ModulePassManager() do pm
+                # inline and optimize the call to e deferred code. in particular we want
+                # to remove unnecessary alloca's created by pass-by-ref semantics.
+                always_inliner!(pm)
+                # TODO: Run NVVMReflect
+                instruction_combining!(pm)
+                scalar_repl_aggregates_ssa!(pm)
+                promote_memory_to_register!(pm)
+                gvn!(pm)
+
+                # merge duplicate functions, since each compilation invocation emits everything
+                # XXX: ideally we want to avoid emitting these in the first place
+                merge_functions!(pm)
+
+                run!(pm, ir)
+            end
+        end
+    end
+
+    # optimization may have replaced functions, so look the entry point up again
+    entry = functions(ir)[entry_fn]
+
+    @timeit_debug to "IR postprocessing" begin
         @timeit_debug to "clean-up" begin
             # we can only clean-up now, as optimization may lower or introduce calls to
             # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
