@@ -15,21 +15,40 @@ include("definitions/native.jl")
     end
 
     @testset "Compilation database" begin
-        function sqexp(x::Float64)
-            return exp(x)*exp(x)
+        @noinline inner(x) = x+1
+        function outer(x)
+            return inner(x)
         end
 
-        job, _ = native_job(sqexp, (Float64,))
+        job, _ = native_job(outer, (Int,))
         ir, meta = GPUCompiler.compile(:llvm, job)
 
-        meth = only(methods(sqexp, (Float64,)))
+        meth = only(methods(outer, (Int,)))
 
         mis = filter(mi->mi.def == meth, keys(meta.compiled))
         @test length(mis) == 1
 
         other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
         @test length(other_mis) == 1
-        @test only(other_mis).def in methods(Base.exp)
+        @test only(other_mis).def in methods(inner)
+    end
+
+    @testset "Advanced database" begin
+        foo(x) = sum(exp(fill(x, 10, 10)))
+
+        job, _ = native_job(foo, (Float64,))
+        # shouldn't segfault
+        ir, meta = GPUCompiler.compile(:llvm, job)
+
+        meth = only(methods(foo, (Float64,)))
+
+        mis = filter(mi->mi.def == meth, keys(meta.compiled))
+        @test length(mis) == 1
+
+        expfloat = filter(keys(meta.compiled)) do mi
+            mi.def in methods(Base.exp) && mi.specTypes == Tuple{typeof(Base.exp), Float64}
+        end
+        @test length(expfloat) == 1
     end
 end
 
@@ -268,18 +287,18 @@ end
 @testset "LazyCodegen" begin
     import .LazyCodegen: call_delayed
 
-    global flag = Ref(false) # otherwise f is a closure and we can't
-                             # pass it to `Val`...
-    f() = (flag[]=true; nothing)
+    f(A) = (A[] += 42; nothing)
 
+    global flag = [0]
     function caller()
-        call_delayed(f)
+        call_delayed(f, flag::Vector{Int})
     end
     @test caller() === nothing
-    @test flag[]
+    @test flag[] == 42
 
     ir = sprint(io->native_code_llvm(io, caller, Tuple{}, dump_module=true))
-    @test occursin(r"define void @julia_f_\d+", ir)
+    @test occursin(r"add i64 %\d+, 42", ir)
+    # NOTE: can't just look for `jl_f` here, since it may be inlined and optimized away.
 
     add(x, y) = x+y
     function call_add(x, y)
@@ -304,7 +323,7 @@ end
 
     # Test ABI removal
     ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
-    @test !occursin(r"alloca", ir)
+    @test !occursin("alloca", ir)
 
     ghostly_identity(x, y) = y
     @test call_delayed(ghostly_identity, nothing, 1) == 1
@@ -401,6 +420,33 @@ end
 end
 end
 rmprocs(2)
+
+############################################################################################
+
+@testset "overrides" begin
+    # NOTE: method overrides do not support redefinitions, so we use different kernels
+
+    mod = @eval module $(gensym())
+        kernel() = child()
+        child() = 0
+    end
+
+    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}))
+    @test occursin("ret i64 0", ir)
+
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..method_table
+
+        kernel() = child()
+        child() = 0
+
+        GPUCompiler.@override method_table child() = 1
+    end
+
+    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}))
+    @test occursin("ret i64 1", ir)
+end
 
 ############################################################################################
 

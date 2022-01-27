@@ -18,14 +18,14 @@ const specialization_counter = Ref{UInt}(0)
     length(mthds) == 1 || return (:(throw(MethodError(job.source.f,job.source.tt))))
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
-    ci = retrieve_code_info(mi)
-    @assert isa(ci, CodeInfo)
+    ci = retrieve_code_info(mi)::CodeInfo
 
     # generate a unique id to represent this specialization
-    # TODO: should we make this the world age of the method instance?
+    # TODO: just use the lower world age bound in which this code info is valid.
+    #       (the method instance doesn't change when called functions are changed).
+    #       but how to get that? the ci here always has min/max world 1/-1.
+    # XXX: don't use `objectid(ci)` here, apparently it can alias (or the CI doesn't change?)
     id = (specialization_counter[] += 1)
-    # TODO: save the mi/ci here (or embed it in the AST to pass to the compiler)
-    #       and use that to drive compilation
 
     # prepare a new code info
     new_ci = copy(ci)
@@ -49,8 +49,9 @@ const specialization_counter = Ref{UInt}(0)
     linker = SlotNumber(5)
 
     # call the compiler
-    append!(new_ci.code, [ReturnNode(id)])
-    append!(new_ci.codelocs, [1])   # see note below
+    push!(new_ci.code, ReturnNode(id))
+    push!(new_ci.ssaflags, 0x00)   # Julia's native compilation pipeline (and its verifier) expects `ssaflags` to be the same length as `code`
+    push!(new_ci.codelocs, 1)   # see note below
     new_ci.ssavaluetypes += 1
 
     # NOTE: we keep the first entry of the original linetable, and use it for location info

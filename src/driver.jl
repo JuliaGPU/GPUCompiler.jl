@@ -49,7 +49,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     mi, mi_meta = emit_julia(job)
 
     if output == :julia
-        return mi, meta
+        return mi, mi_meta
     end
 
 
@@ -155,88 +155,46 @@ const __llvm_initialized = Ref(false)
     # always preload the runtime, and do so early; it cannot be part of any timing block
     # because it recurses into the compiler
     if libraries
-        runtime = load_runtime(job, ctx)
-        if haskey(globals(runtime), "llvm.used")
-            # the runtime shouldn't link-in stuff that gets preserved in the output. this is
-            # a hack to get rid of the device function slots emitted by the PTX back-end,
-            # but it also makes sense.
-            gv = globals(runtime)["llvm.used"]
-            LLVM.unsafe_delete!(runtime, gv)
-        end
+        runtime = load_runtime(job; ctx)
         runtime_fns = LLVM.name.(defs(runtime))
     end
 
-    @timeit_debug to "LLVM middle-end" begin
-        # target-specific libraries
+    @timeit_debug to "Library linking" begin
         if libraries
+            # target-specific libraries
             undefined_fns = LLVM.name.(decls(ir))
             @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
-        end
 
-        if optimize
-            @timeit_debug to "optimization" optimize!(job, ir)
-
-            # optimization may have replaced functions, so look the entry point up again
-            entry = functions(ir)[entry_fn]
-        end
-
-        if libraries
-            undefined_fns = LLVM.name.(decls(ir))
+            # GPU run-time library
             if any(fn -> fn in runtime_fns, undefined_fns)
                 @timeit_debug to "runtime library" link_library!(ir, runtime)
             end
         end
-
-        if ccall(:jl_is_debugbuild, Cint, ()) == 1
-            @timeit_debug to "verification" verify(ir)
-        end
-
-        if only_entry
-            # replace non-entry function definitions with a declaration
-            for f in functions(ir)
-                f == entry && continue
-                isdeclaration(f) && continue
-                LLVM.isintrinsic(f) && continue
-                # FIXME: expose llvm::Function::deleteBody with a C API
-                fn = LLVM.name(f)
-                LLVM.name!(f, "")
-                f′ = LLVM.Function(ir, fn, eltype(llvmtype(f)))
-                # copying attributes is broken due to maleadt/LLVM.jl#186,
-                # but that doesn't matter because `only_entry` is only used for reflection,
-                # and the emitted code has already been optimized at this point.
-                replace_uses!(f, f′)
-            end
-        end
-
-        # remove everything except for the entry and any exported global variables
-        @timeit_debug to "clean-up" begin
-            exports = String[entry_fn]
-            for gvar in globals(ir)
-                push!(exports, LLVM.name(gvar))
-            end
-
-            ModulePassManager() do pm
-                internalize!(pm, exports)
-
-                # eliminate all unused internal functions
-                add!(pm, ModulePass("ExternalizeJuliaGlobals",
-                                    externalize_julia_globals!))
-                global_optimizer!(pm)
-                global_dce!(pm)
-                add!(pm, ModulePass("InternalizeJuliaGlobals",
-                                    internalize_julia_globals!))
-                strip_dead_prototypes!(pm)
-
-                # merge constants (such as exception messages) from the runtime
-                constant_merge!(pm)
-
-                run!(pm, ir)
-            end
-        end
     end
 
+    # mark everything internal except for the entry and any exported global variables.
+    # this makes sure that the optimizer can, e.g., touch function signatures.
+    ModulePassManager() do pm
+        # NOTE: this needs to happen after linking libraries to remove unused functions,
+        #       but before deferred codegen so that all kernels remain available.
+        exports = String[entry_fn]
+        for gvar in globals(ir)
+            if linkage(gvar) == LLVM.API.LLVMExternalLinkage
+                push!(exports, LLVM.name(gvar))
+            end
+        end
+        internalize!(pm, exports)
+        run!(pm, ir)
+    end
+
+    # finalize the current module. this needs to happen before linking deferred modules,
+    # since those modules have been finalized themselves, and we don't want to re-finalize.
+    entry = finish_module!(job, ir, entry)
+
     # deferred code generation
-    if !only_entry && deferred_codegen && haskey(functions(ir), "deferred_codegen")
+    do_deferred_codegen = !only_entry && deferred_codegen &&
+                          haskey(functions(ir), "deferred_codegen")
+    if do_deferred_codegen
         dyn_marker = functions(ir)["deferred_codegen"]
 
         cache = Dict{CompilerJob, String}(job => entry_fn)
@@ -248,7 +206,7 @@ const __llvm_initialized = Ref(false)
 
             # find deferred compiler
             # TODO: recover this information earlier, from the Julia IR
-            worklist = MultiDict{CompilerJob, LLVM.CallInst}()
+            worklist = Dict{CompilerJob, Vector{LLVM.CallInst}}()
             for use in uses(dyn_marker)
                 # decode the call
                 call = user(use)::LLVM.CallInst
@@ -259,14 +217,14 @@ const __llvm_initialized = Ref(false)
                 if dyn_job isa FunctionSpec
                     dyn_job = similar(job, dyn_job)
                 end
-                push!(worklist, dyn_job => call)
+                push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
             end
 
             # compile and link
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(cache, dyn_job) do
-                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize,
+                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize=false,
                                                deferred_codegen=false, parent_job=job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
@@ -278,7 +236,7 @@ const __llvm_initialized = Ref(false)
                 dyn_entry = functions(ir)[dyn_entry_fn]
 
                 # insert a pointer to the function everywhere the entry is used
-                T_ptr = convert(LLVMType, Ptr{Cvoid}, ctx)
+                T_ptr = convert(LLVMType, Ptr{Cvoid}; ctx)
                 for call in worklist[dyn_job]
                     Builder(ctx) do builder
                         position!(builder, call)
@@ -290,24 +248,71 @@ const __llvm_initialized = Ref(false)
             end
         end
 
-        # merge constants (such as exception messages) from each entry
-        # and on platforms that support it inline and optimize the call to
-        # the deferred code, in particular we want to remove unnecessary
-        # alloca's that are created by pass-by-ref semantics.
-        ModulePassManager() do pm
-            instruction_combining!(pm)
-            constant_merge!(pm)
-            always_inliner!(pm)
-            scalar_repl_aggregates_ssa!(pm)
-            promote_memory_to_register!(pm)
-            gvn!(pm)
-
-            run!(pm, ir)
-        end
-
         # all deferred compilations should have been resolved
         @compiler_assert isempty(uses(dyn_marker)) job
         unsafe_delete!(ir, dyn_marker)
+    end
+
+    @timeit_debug to "IR post-processing" begin
+        if optimize
+            @timeit_debug to "optimization" begin
+                optimize!(job, ir)
+
+                # deferred codegen has some special optimization requirements,
+                # which also need to happen _after_ regular optimization.
+                # XXX: make these part of the optimizer pipeline?
+                do_deferred_codegen && ModulePassManager() do pm
+                    # inline and optimize the call to e deferred code. in particular we want
+                    # to remove unnecessary alloca's created by pass-by-ref semantics.
+                    instruction_combining!(pm)
+                    always_inliner!(pm)
+                    scalar_repl_aggregates_ssa!(pm)
+                    promote_memory_to_register!(pm)
+                    gvn!(pm)
+
+                    # merge duplicate functions, since each compilation invocation emits everything
+                    # XXX: ideally we want to avoid emitting these in the first place
+                    merge_functions!(pm)
+
+                    run!(pm, ir)
+                end
+            end
+
+            # optimization may have replaced functions, so look the entry point up again
+            entry = functions(ir)[entry_fn]
+        end
+
+        @timeit_debug to "clean-up" begin
+            # we can only clean-up now, as optimization may lower or introduce calls to
+            # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
+            ModulePassManager() do pm
+                # eliminate all unused internal functions
+                global_optimizer!(pm)
+                global_dce!(pm)
+                strip_dead_prototypes!(pm)
+
+                # merge constants (such as exception messages)
+                constant_merge!(pm)
+
+                run!(pm, ir)
+            end
+        end
+
+        # replace non-entry function definitions with a declaration
+        # NOTE: we can't do this before optimization, because the definitions of called
+        #       functions may affect optimization.
+        if only_entry
+            for f in functions(ir)
+                f == entry && continue
+                isdeclaration(f) && continue
+                LLVM.isintrinsic(f) && continue
+                empty!(f)
+            end
+        end
+
+        if ccall(:jl_is_debugbuild, Cint, ()) == 1
+            @timeit_debug to "verification" verify(ir)
+        end
     end
 
     return ir, (; entry, compiled)
@@ -348,8 +353,6 @@ end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
                           strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
-    finish_module!(job, ir)
-
     if validate
         @timeit_debug to "validation" begin
             check_invocation(job)

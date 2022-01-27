@@ -35,14 +35,13 @@ end
 module TestRuntime
     # dummy methods
     signal_exception() = return
-    malloc(sz) = C_NULL
+    # HACK: if malloc returns 0 or traps, all calling functions (like jl_box_*)
+    #       get reduced to a trap, which really messes with our test suite.
+    malloc(sz) = Ptr{Cvoid}(Int(0xDEADBEEF))
     report_oom(sz) = return
     report_exception(ex) = return
     report_exception_name(ex) = return
     report_exception_frame(idx, func, file, line) = return
-
-    # for validation
-    sin(x) = Base.sin(x)
 end
 
 struct TestCompilerParams <: AbstractCompilerParams end

@@ -44,7 +44,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
             # eagerly resolve the address of the binding
             address = ccall(:jl_cglobal, Any, (Any, Any), fn, UInt)
             dereferenced = unsafe_load(address)
-            dereferenced = LLVM.ConstantInt(dereferenced, ctx)
+            dereferenced = LLVM.ConstantInt(dereferenced; ctx)
 
             function replace_bindings!(value)
                 changed = false

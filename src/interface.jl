@@ -43,6 +43,8 @@ function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     DataLayout(string(dl) * "-ni:10:11:12:13")
 end
 
+have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
+
 
 ## params
 
@@ -65,6 +67,16 @@ struct FunctionSpec{F,TT}
     kernel::Bool
     name::Union{Nothing,String}
     world_age::UInt
+end
+
+
+function Base.hash(spec::FunctionSpec, h::UInt)
+    h = hash(spec.f, h)
+    h = hash(spec.tt, h)
+    h = hash(spec.kernel, h)
+    h = hash(spec.name, h)
+    h = hash(spec.world_age, h)
+    h
 end
 
 # put the function and argument types in typevars
@@ -121,6 +133,13 @@ function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
 end
 
+function Base.hash(job::CompilerJob, h::UInt)
+    h = hash(job.target, h)
+    h = hash(job.source, h)
+    h = hash(job.params, h)
+    h
+end
+
 
 ## interfaces and fallback definitions
 
@@ -148,6 +167,13 @@ runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
 # early processing of the newly generated LLVM IR module
 process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
+# the type of the kernel state object, or Nothing if this back-end doesn't need one.
+#
+# the generated code will be rewritten to include an object of this type as the first
+# argument to each kernel, and pass that object to every function that accesses the kernel
+# state (possibly indirectly) via the `kernel_state_pointer` function.
+kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
+
 # early processing of the newly identified LLVM kernel function
 function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                         entry::LLVM.Function)
@@ -156,10 +182,15 @@ function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     if job.source.kernel
         # pass all bitstypes by value; by default Julia passes aggregates by reference
         # (this improves performance, and is mandated by certain back-ends like SPIR-V).
-        args = classify_arguments(job, entry)
+        args = classify_arguments(job, eltype(llvmtype(entry)))
         for arg in args
             if arg.cc == BITS_REF
-                push!(parameter_attributes(entry, arg.codegen.i), EnumAttribute("byval", 0, ctx))
+                attr = if LLVM.version() >= v"12"
+                    TypeAttribute("byval", eltype(arg.codegen.typ); ctx)
+                else
+                    EnumAttribute("byval", 0; ctx)
+                end
+                push!(parameter_attributes(entry, arg.codegen.i), attr)
             end
         end
     end
@@ -171,7 +202,17 @@ end
 optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
 # final processing of the IR module, right before validation and machine-code generation
-finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
+function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
+    ctx = context(mod)
+    entry_fn = LLVM.name(entry)
+
+    # add the kernel state, and lower calls to the `julia.gpu.state_getter` intrinsic.
+    if job.source.kernel
+        add_kernel_state!(job, mod, entry)
+    end
+
+    return functions(mod)[entry_fn]
+end
 
 add_lowering_passes!(@nospecialize(job::CompilerJob), pm::LLVM.PassManager) = return
 

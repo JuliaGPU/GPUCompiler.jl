@@ -33,15 +33,22 @@ struct RuntimeMethodInstance
     llvm_name::String
 end
 
-function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance, ctx::LLVM.Context)
+function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance;
+                      ctx::LLVM.Context, state::Type=Nothing)
     types = if rt.llvm_types === nothing
-        LLVMType[convert(LLVMType, typ, ctx; allow_boxed=true) for typ in rt.types]
+        LLVMType[convert(LLVMType, typ; ctx, allow_boxed=true) for typ in rt.types]
     else
         rt.llvm_types(ctx)
     end
 
+    # if we're running post-optimization, prepend the kernel state to the argument list
+    if state !== Nothing
+        T_state = convert(LLVMType, state; ctx)
+        pushfirst!(types, T_state)
+    end
+
     return_type = if rt.llvm_return_type === nothing
-        convert(LLVMType, rt.return_type, ctx; allow_boxed=true)
+        convert(LLVMType, rt.return_type; ctx, allow_boxed=true)
     else
         rt.llvm_return_type(ctx)
     end
@@ -113,7 +120,7 @@ compile(:report_exception_name, Nothing, (Ptr{Cchar},))
 ## GC
 
 # FIXME: get rid of this and allow boxed types
-T_prjlvalue(ctx) = convert(LLVMType, Any, ctx; allow_boxed=true)
+T_prjlvalue(ctx) = convert(LLVMType, Any; ctx, allow_boxed=true)
 
 function gc_pool_alloc(sz::Csize_t)
     ptr = malloc(sz)
@@ -139,11 +146,11 @@ const gc_bits = 0x3 # FIXME
 
 # get the type tag of a type at run-time
 @generated function type_tag(::Val{type_name}) where type_name
-    JuliaContext() do ctx
-        T_tag = convert(LLVMType, tag_type, ctx)
+    Context() do ctx
+        T_tag = convert(LLVMType, tag_type; ctx)
         T_ptag = LLVM.PointerType(T_tag)
 
-        T_pjlvalue = convert(LLVMType, Any, ctx; allow_boxed=true)
+        T_pjlvalue = convert(LLVMType, Any; ctx, allow_boxed=true)
 
         # create function
         llvm_f, _ = create_function(T_tag)
@@ -155,7 +162,7 @@ const gc_bits = 0x3 # FIXME
 
         # generate IR
         Builder(ctx) do builder
-            entry = BasicBlock(llvm_f, "entry", ctx)
+            entry = BasicBlock(llvm_f, "entry"; ctx)
             position!(builder, entry)
 
             typ_var = bitcast!(builder, typ, T_ptag)
@@ -171,7 +178,7 @@ end
 
 # we use `jl_value_ptr`, a Julia pseudo-intrinsic that can be used to box and unbox values
 
-@generated function box(val, ::Val{type_name}) where type_name
+@inline @generated function box(val, ::Val{type_name}) where type_name
     sz = sizeof(val)
     allocsz = sz + tag_size
 
@@ -180,8 +187,6 @@ end
     tag = :( type_tag(Val(type_name)) )
 
     quote
-        Base.@_inline_meta
-
         ptr = malloc($(Csize_t(allocsz)))
 
         # store the type tag
@@ -214,8 +219,13 @@ for (T, t) in [Int8   => :int8,  Int16  => :int16,  Int32  => :int32,  Int64  =>
         $box_fn(val)   = box($T(val), Val($(QuoteNode(t))))
         $unbox_fn(obj) = unbox(obj, $T)
 
-        compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name=$"jl_$box_fn")
-        compile($unbox_fn, $T, (Any,); llvm_name=$"jl_$unbox_fn")
+        if VERSION >= v"1.8.0-DEV.600"
+            compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name=$"ijl_$box_fn")
+            compile($unbox_fn, $T, (Any,); llvm_name=$"ijl_$unbox_fn")
+        else
+            compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name=$"jl_$box_fn")
+            compile($unbox_fn, $T, (Any,); llvm_name=$"jl_$unbox_fn")
+        end
     end
 end
 

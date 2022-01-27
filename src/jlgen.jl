@@ -49,10 +49,8 @@ function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodI
     callback(mi, max_world) = invalidate(cache, mi, max_world)
     if !isdefined(mi, :callbacks)
         mi.callbacks = Any[callback]
-    else
-        if all(cb -> cb !== callback, mi.callbacks)
-            push!(mi.callbacks, callback)
-        end
+    elseif !in(callback, mi.callbacks)
+        push!(mi.callbacks, callback)
     end
 
     cis = get!(cache.dict, mi, CodeInstance[])
@@ -60,7 +58,9 @@ function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodI
 end
 
 # invalidation (like invalidate_method_instance, but for our cache)
-function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, depth=0)
+function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, seen=Set{MethodInstance}())
+    push!(seen, replaced)
+
     cis = get(cache.dict, replaced, nothing)
     if cis === nothing
         return
@@ -79,8 +79,8 @@ function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, depth
         # Don't touch/empty backedges `invalidate_method_instance` in C will do that later
         # replaced.backedges = Any[]
 
-        for mi in backedges
-            invalidate(cache, mi, max_world, depth + 1)
+        for mi in filter(!in(seen), backedges)
+            invalidate(cache, mi, max_world, seen)
         end
     end
 end
@@ -196,7 +196,8 @@ struct GPUInterpreter <: AbstractInterpreter
 
             # parameters for inference and optimization
             InferenceParams(unoptimize_throw_blocks=false),
-            OptimizationParams(unoptimize_throw_blocks=false),
+            VERSION >= v"1.8.0-DEV.486" ? OptimizationParams() :
+                                          OptimizationParams(unoptimize_throw_blocks=false),
         )
     end
 end
@@ -337,6 +338,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         end
         lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     else
+        _cache[] = cache
+        _method_instances[] = method_instances
         lookup_cb = @cfunction(_lookup_fun, Any, (Any, UInt, UInt))
     end
 
@@ -352,12 +355,18 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
 
     # generate IR
     GC.@preserve lookup_cb begin
-        native_code = ccall(:jl_create_native, Ptr{Cvoid},
-                            (Vector{MethodInstance}, Base.CodegenParams, Cint),
-                            [method_instance], params, #=extern policy=# 1)
+        native_code = if VERSION >= v"1.8.0-DEV.661"
+            ccall(:jl_create_native, Ptr{Cvoid},
+                  (Vector{MethodInstance}, Ptr{Base.CodegenParams}, Cint),
+                  [method_instance], Ref(params), #=extern policy=# 1)
+        else
+            ccall(:jl_create_native, Ptr{Cvoid},
+                  (Vector{MethodInstance}, Base.CodegenParams, Cint),
+                  [method_instance], params, #=extern policy=# 1)
+        end
         @assert native_code != C_NULL
         llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
-                            (Ptr{Cvoid},), native_code)
+                             (Ptr{Cvoid},), native_code)
         @assert llvm_mod_ref != C_NULL
         llvm_mod = LLVM.Module(llvm_mod_ref)
     end
@@ -379,18 +388,28 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
                 native_code, ci, llvm_func_idx, llvm_specfunc_idx)
 
             # get the function
-            llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                                  (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
-            @assert llvm_func_ref != C_NULL
-            llvm_func = LLVM.Function(llvm_func_ref)
-            llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                                    (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
-            @assert llvm_specfunc_ref != C_NULL
-            llvm_specfunc = LLVM.Function(llvm_specfunc_ref)
+            llvm_func = if llvm_func_idx[] != -1
+                llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                                      (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
+                @assert llvm_func_ref != C_NULL
+                LLVM.name(LLVM.Function(llvm_func_ref))
+            else
+                nothing
+            end
+
+
+            llvm_specfunc = if llvm_specfunc_idx[] != -1
+                llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                                        (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
+                @assert llvm_specfunc_ref != C_NULL
+                LLVM.name(LLVM.Function(llvm_specfunc_ref))
+            else
+                nothing
+            end
 
             # NOTE: it's not safe to store raw LLVM functions here, since those may get
             #       removed or renamed during optimization, so we store their name instead.
-            compiled[mi] = (; ci, func=LLVM.name(llvm_func), specfunc=LLVM.name(llvm_specfunc))
+            compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
         end
     end
 

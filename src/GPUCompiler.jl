@@ -3,11 +3,9 @@ module GPUCompiler
 using LLVM
 using LLVM.Interop
 
-using DataStructures
-
 using TimerOutputs
 
-using ExprTools
+using ExprTools: splitdef, combinedef
 
 using Libdl
 
@@ -47,5 +45,9 @@ include("reflection.jl")
 
 include("precompile.jl")
 _precompile_()
+
+function __init__()
+    STDERR_HAS_COLOR[] = get(stderr, :color, false)
+end
 
 end # module
