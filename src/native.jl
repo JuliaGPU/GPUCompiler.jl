@@ -17,11 +17,11 @@ llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
 function llvm_machine(target::NativeCompilerTarget)
     triple = llvm_triple(target)
 
-    t = Target(triple=triple)
+    t = Target(triple = triple)
 
     optlevel = LLVM.API.LLVMCodeGenLevelDefault
     reloc = target.reloc
-    tm = TargetMachine(t, triple, target.cpu, target.features, optlevel, reloc)
+    tm = TargetMachine(t, triple, target.cpu, target.features; optlevel, reloc)
     asm_verbosity!(tm, true)
 
     return tm
