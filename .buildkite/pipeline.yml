@@ -78,7 +78,7 @@ steps:
 
                 println("--- :julia: Instantiating project");
                 Pkg.develop(PackageSpec(path=pwd()));
-                Pkg.add(PackageSpec(name="Enzyme", rev="master"));
+                Pkg.add(PackageSpec(name="Enzyme", rev="main"));
                 Pkg.build();
 
                 println("+++ :julia: Running tests");
