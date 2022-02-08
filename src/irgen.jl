@@ -600,9 +600,10 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             return val
         end
 
-        # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
+        # we don't want module-level changes, because otherwise LLVM will clone metadata,
+        # resulting in mismatching references between `!dbg` metadata and `dbg` instructions
         clone_into!(new_f, f; value_map, materializer,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
 
         # we can't remove this function yet, as we might still need to rewrite any called,
         # but remove the IR already
