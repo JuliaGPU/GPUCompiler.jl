@@ -102,10 +102,10 @@ The following keyword arguments are supported:
 See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
-                   debuginfo::Symbol=:default, dump_module::Bool=false)
+                   debuginfo::Symbol=:default, dump_module::Bool=false, kwargs...)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     str = JuliaContext() do ctx
-        ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false, ctx)
+        ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false, ctx, kwargs...)
         ccall(:jl_dump_function_ir, Ref{String},
               (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
               meta.entry, !raw, dump_module, debuginfo)

@@ -1,9 +1,13 @@
 # LLVM IR generation
 
 function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance;
-               ctx::Context)
+               ctx::Context, specfunc_entry=true)
     mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance; ctx)
-    entry_fn = compiled[method_instance].specfunc
+    if specfunc_entry
+        entry_fn = compiled[method_instance].specfunc
+    else
+        entry_fn = compiled[method_instance].func
+    end
 
     # clean up incompatibilities
     @timeit_debug to "clean-up" begin
@@ -16,8 +20,11 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
             end
 
             # remove the non-specialized jfptr functions
-            if startswith(LLVM.name(llvmf), "jfptr_")
-                unsafe_delete!(mod, llvmf)
+            # TODO: Do we need to remove these?
+            if specfunc_entry
+                if startswith(LLVM.name(llvmf), "jfptr_")
+                    unsafe_delete!(mod, llvmf)
+                end
             end
         end
 
@@ -55,9 +62,16 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         LLVM.name!(entry, mangle_call(entry, job.source.tt))
     end
     entry = process_entry!(job, mod, entry)
+    if specfunc_entry
+        func = compiled[method_instance].func
+        specfunc = LLVM.name(entry)
+    else
+        func = LLVM.name(entry)
+        specfunc = compiled[method_instance].specfunc
+    end
+
     compiled[method_instance] =
-        (; compiled[method_instance].ci, compiled[method_instance].func,
-           specfunc=LLVM.name(entry))
+        (; compiled[method_instance].ci, func, specfunc)
 
     # minimal required optimization
     @timeit_debug to "rewrite" ModulePassManager() do pm

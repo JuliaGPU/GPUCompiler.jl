@@ -79,6 +79,7 @@ end
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                  strip::Bool=false, validate::Bool=true, only_entry::Bool=false,
+                 specfunc_entry=true,
                  parent_job::Union{Nothing, CompilerJob}=nothing,
                  ctx::Union{Context,Nothing}=nothing)
     ## Julia IR
@@ -105,7 +106,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                      Use a JuliaContext instead.""")
         end
 
-        ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, only_entry, ctx)
+        ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, only_entry, ctx, specfunc_entry)
 
         if output == :llvm
             if strip
@@ -191,7 +192,7 @@ const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance);
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                           only_entry::Bool=false, ctx::Context)
+                           only_entry::Bool=false, ctx::Context, specfunc_entry=true)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -202,8 +203,12 @@ const __llvm_initialized = Ref(false)
     end
 
     @timeit_debug to "IR generation" begin
-        ir, compiled = irgen(job, method_instance; ctx)
-        entry_fn = compiled[method_instance].specfunc
+        ir, compiled = irgen(job, method_instance; ctx, specfunc_entry)
+        if specfunc_entry
+            entry_fn = compiled[method_instance].specfunc
+        else
+            entry_fn = compiled[method_instance].func
+        end
         entry = functions(ir)[entry_fn]
     end
 
