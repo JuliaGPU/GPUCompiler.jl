@@ -483,7 +483,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
             param => new_args[i] for (i,param) in enumerate(parameters(f))
         )
         clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
         # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
 
         # fall through

@@ -293,8 +293,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
             param => new_args[i] for (i,param) in enumerate(parameters(f))
         )
         clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
-        # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
 
         # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
         for i in 1:length(byval)
