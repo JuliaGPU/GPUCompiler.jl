@@ -17,7 +17,7 @@ function split_kwargs(kwargs, kw_groups...)
         isa(key, Symbol) || throw(ArgumentError("non-symbolic keyword '$key'"))
 
         # find a matching group
-        group = length(kw_groups)
+        group = length(kwarg_groups)
         for (i, kws) in enumerate(kw_groups)
             if key in kws
                 group = i
