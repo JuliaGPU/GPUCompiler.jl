@@ -157,6 +157,7 @@ const __llvm_initialized = Ref(false)
     if libraries
         runtime = load_runtime(job; ctx)
         runtime_fns = LLVM.name.(defs(runtime))
+        runtime_intrinsics = ["julia.gc_alloc_obj"]
     end
 
     @timeit_debug to "Library linking" begin
@@ -166,7 +167,7 @@ const __llvm_initialized = Ref(false)
             @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
 
             # GPU run-time library
-            if any(fn -> fn in runtime_fns, undefined_fns)
+            if any(fn -> fn in runtime_fns || fn in runtime_intrinsics, undefined_fns)
                 @timeit_debug to "runtime library" link_library!(ir, runtime)
             end
         end
