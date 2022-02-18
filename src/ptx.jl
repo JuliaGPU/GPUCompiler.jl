@@ -427,6 +427,10 @@ function nvvm_reflect!(fun::LLVM.Function)
         str = operands(call)[1]
         isa(str, LLVM.ConstantExpr) || error("Format of __nvvm__reflect function not recognized")
         sym = operands(str)[1]
+        if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
+            # CUDA 11.0 or below
+            sym = operands(sym)[1]
+        end
         isa(sym, LLVM.GlobalVariable) || error("Format of __nvvm__reflect function not recognized")
         sym_op = operands(sym)[1]
         isa(sym_op, LLVM.ConstantArray) || error("Format of __nvvm__reflect function not recognized")
