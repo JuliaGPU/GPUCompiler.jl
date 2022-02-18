@@ -79,6 +79,10 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
 end
 code_warntype(@nospecialize(job::CompilerJob); kwargs...) = code_warntype(stdout, job; kwargs...)
 
+InteractiveUtils.code_lowered(err::InvalidIRError; kwargs...) = code_lowered(err.job; kwargs...)
+InteractiveUtils.code_typed(err::InvalidIRError; kwargs...) = code_typed(err.job; kwargs...)
+InteractiveUtils.code_warntype(err::InvalidIRError; kwargs...) = code_warntype(err.job; kwargs...)
+
 """
     code_llvm([io], job; optimize=true, raw=false, dump_module=false)
 

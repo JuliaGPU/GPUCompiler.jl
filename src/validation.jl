@@ -101,6 +101,14 @@ function Base.showerror(io::IO, err::InvalidIRError)
         end
         Base.show_backtrace(io, bt)
     end
+    println(io)
+    printstyled(io, "HINT"; bold = true, color = :cyan)
+    printstyled(
+        io,
+        ": catch this exception as `err` and call `code_typed(err; interactive = true)` to",
+        " introspect the erronous code";
+        color = :cyan,
+    )
     return
 end
 
