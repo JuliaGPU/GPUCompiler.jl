@@ -166,7 +166,8 @@ end
 
 ## interpreter
 
-using Core.Compiler: AbstractInterpreter, InferenceResult, InferenceParams, InferenceState, OptimizationParams
+using Core.Compiler: AbstractInterpreter, InferenceResult, InferenceParams, InferenceState,
+                     OptimizationParams, CachedMethodTable
 
 struct GPUInterpreter <: AbstractInterpreter
     global_cache::CodeCache
@@ -224,11 +225,12 @@ Core.Compiler.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 
 if isdefined(Base.Experimental, Symbol("@overlay"))
+using Core.Compiler: OverlayMethodTable
 Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
-    Core.Compiler.OverlayMethodTable(interp.world, interp.method_table)
+    CachedMethodTable(OverlayMethodTable(interp.world, interp.method_table))
 else
 Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
-    WorldOverlayMethodTable(interp.world)
+    CachedMethodTable(WorldOverlayMethodTable(interp.world))
 end
 
 
