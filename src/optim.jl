@@ -322,7 +322,11 @@ function lower_gc_frame!(fun::LLVM.Function)
             Builder(ctx) do builder
                 # NOTE: this happens late during the pipeline, where we may have to
                 #       pass a kernel state arguments to the runtime function.
-                state = kernel_state_type(job)
+                state = if job.source.kernel
+                    kernel_state_type(job)
+                else
+                    Nothing
+                end
 
                 position!(builder, call)
                 ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz]; state)
