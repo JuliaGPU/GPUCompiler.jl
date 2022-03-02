@@ -102,7 +102,7 @@ function Base.showerror(io::IO, err::InvalidIRError)
         Base.show_backtrace(io, bt)
     end
     println(io)
-    printstyled(io, "HINT"; bold = true, color = :cyan)
+    printstyled(io, "Hint"; bold = true, color = :cyan)
     printstyled(
         io,
         ": catch this exception as `err` and call `code_typed(err; interactive = true)` to",
