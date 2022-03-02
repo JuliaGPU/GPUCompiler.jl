@@ -283,6 +283,10 @@ end
     end
 end
 
+end
+
+############################################################################################
+
 @testset "LazyCodegen" begin
     import .LazyCodegen: call_delayed
 
@@ -329,8 +333,6 @@ end
 
     # tests struct return
     @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
-end
-
 end
 
 ############################################################################################
