@@ -588,8 +588,30 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # this is both for extern uses, and to make this transformation a two-step process.
     state_intr = kernel_state_intr(mod, T_state)
 
-    # add a state argument to every function
-    worklist = filter(!isdeclaration, collect(functions(mod)))
+    # determine which functions need a kernel state argument
+    #
+    # previously, we add the argument to every function and relied on unused arg elim to
+    # clean-up the IR. however, some libraries do Funny Stuff, e.g., libdevice bitcasting
+    # function pointers. such IR is hard to rewrite, so instead be more conservative.
+    worklist = Set{LLVM.Function}([entry, state_intr])
+    worklist_length = 0
+    while worklist_length != length(worklist)
+        # iteratively discover functions that use the intrinsic or any function calling it
+        worklist_length = length(worklist)
+        additions = LLVM.Function[]
+        for f in worklist, use in uses(f)
+            inst = user(use)::Instruction
+            bb = LLVM.parent(inst)
+            new_f = LLVM.parent(bb)
+            in(new_f, worklist) || push!(additions, new_f)
+        end
+        for f in additions
+            push!(worklist, f)
+        end
+    end
+    delete!(worklist, state_intr)
+
+    # add a state argument
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in worklist
         fn = LLVM.name(f)
@@ -726,14 +748,10 @@ function lower_kernel_state!(fun::LLVM.Function)
         return false
     end
 
-    # find the kernel state argument. this should be the first argument of the function.
-    state_arg = parameters(fun)[1]
-    T_state = convert(LLVMType, state; ctx)
-    @assert llvmtype(state_arg) == T_state
-
     # fixup all uses of the state getter to use the newly introduced function state argument
     if haskey(functions(mod), "julia.gpu.state_getter")
         state_intr = functions(mod)["julia.gpu.state_getter"]
+        state_arg = nothing # only look-up when needed
 
         Builder(ctx) do builder
             for use in uses(state_intr)
@@ -745,6 +763,14 @@ function lower_kernel_state!(fun::LLVM.Function)
                 position!(builder, inst)
                 bb = LLVM.parent(inst)
                 f = LLVM.parent(bb)
+
+                if state_arg === nothing
+                    # find the kernel state argument. this should be the first argument of
+                    # the function, but only when this function needs the state!
+                    state_arg = parameters(fun)[1]
+                    T_state = convert(LLVMType, state; ctx)
+                    @assert llvmtype(state_arg) == T_state
+                end
 
                 replace_uses!(inst, state_arg)
 
