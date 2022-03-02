@@ -228,7 +228,8 @@ end
                          native_code_execution(foobar, Tuple{Int})) do msg
         occursin("invalid LLVM IR", msg) &&
         (occursin(GPUCompiler.RUNTIME_FUNCTION, msg) ||
-         occursin(GPUCompiler.UNKNOWN_FUNCTION, msg)) &&
+         occursin(GPUCompiler.UNKNOWN_FUNCTION, msg) ||
+         occursin(GPUCompiler.DYNAMIC_CALL, msg)) &&
         occursin("[1] println", msg) &&
         occursin(r"\[2\] .*foobar", msg)
     end
