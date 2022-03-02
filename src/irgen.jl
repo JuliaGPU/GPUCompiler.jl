@@ -501,30 +501,42 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         else
             changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
         end
-        clone_into!(new_f, f; value_map, changes)
+
+        # use a value materializer for replacing uses of the function in constants
+        # NOTE: we assume kernel functions can't be called. on-device kernel launches,
+        #       e.g. CUDA's dynamic parallelism, will pass the function to an API instead,
+        #       and we update those constant expressions arguments here.
+        function materializer(val)
+            opcodes = (LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMBitCast)
+            if val isa LLVM.ConstantExpr && opcode(val) in opcodes
+                target = operands(val)[1]
+                if target == f
+                    return if opcode(val) == LLVM.API.LLVMPtrToInt
+                        LLVM.const_ptrtoint(new_f, llvmtype(val))
+                    elseif opcode(val) == LLVM.API.LLVMAddrSpaceCast
+                        LLVM.const_addrspacecast(new_f, llvmtype(val))
+                    elseif opcode(val) == LLVM.API.LLVMBitCast
+                        LLVM.const_bitcast(new_f, llvmtype(val))
+                    end
+                end
+            end
+            return val
+        end
+
+        # we don't want module-level changes, because otherwise LLVM will clone metadata,
+        # resulting in mismatching references between `!dbg` metadata and `dbg` instructions
+        clone_into!(new_f, f; value_map, changes, materializer)
 
         # fall through
         br!(builder, blocks(new_f)[2])
     end
 
-    # update uses of the kernel
-    # NOTE: we assume kernel functions can't be called. on-device kernel launches,
-    #       e.g. CUDA's dynamic parallelism, will pass the function to an API instead,
-    #       and we update those constant expressions arguments here.
+    # drop unused constants that may be referring to the old functions
+    # XXX: can we do this differently?
     for use in uses(f)
         val = user(use)
-        if val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMPtrToInt
-            target = operands(val)[1]
-            if target == f
-                new_val = LLVM.const_ptrtoint(new_f, llvmtype(val))
-                replace_uses!(val, new_val)
-
-                # drop the old constant if it is unused
-                # XXX: can we do this differently?
-                if isempty(uses(val))
-                    LLVM.unsafe_destroy!(val)
-                end
-            end
+        if val isa LLVM.ConstantExpr && isempty(uses(val))
+            LLVM.unsafe_destroy!(val)
         end
     end
 
@@ -608,10 +620,17 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
         # use a value materializer for replacing uses of the function in constants
         function materializer(val)
-            if val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMPtrToInt
+            opcodes = (LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMBitCast)
+            if val isa LLVM.ConstantExpr && opcode(val) in opcodes
                 src = operands(val)[1]
                 if haskey(workmap, src)
-                    return LLVM.const_ptrtoint(workmap[src], llvmtype(val))
+                    return if opcode(val) == LLVM.API.LLVMPtrToInt
+                        LLVM.const_ptrtoint(workmap[src], llvmtype(val))
+                    elseif opcode(val) == LLVM.API.LLVMAddrSpaceCast
+                        LLVM.const_addrspacecast(workmap[src], llvmtype(val))
+                    elseif opcode(val) == LLVM.API.LLVMBitCast
+                        LLVM.const_bitcast(workmap[src], llvmtype(val))
+                    end
                 end
             end
             return val
@@ -677,20 +696,6 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
                     unsafe_delete!(LLVM.parent(val), val)
-                elseif val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMBitCast
-                    # XXX: why isn't this caught by the value materializer above?
-                    target = operands(val)[1]
-                    @assert target == f
-                    new_val = LLVM.const_bitcast(new_f, llvmtype(val))
-                    rewrite_uses!(val, new_val)
-                    # we can't simply replace this constant expression, as it may be used
-                    # as a call, taking arguments (so we need to rewrite it to pass the state)
-
-                    # drop the old constant if it is unused
-                    # XXX: can we do this differently?
-                    if isempty(uses(val))
-                        LLVM.unsafe_destroy!(val)
-                    end
                 else
                     error("Cannot rewrite unknown use of function: $val")
                 end
