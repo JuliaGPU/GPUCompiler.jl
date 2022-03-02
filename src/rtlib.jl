@@ -131,7 +131,10 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
         emit_function!(mod, job, def, method)
     end
 
-    optimize!(job, mod)
+    # we cannot optimize the runtime library, because the code would then be optimized again
+    # during main compilation (and optimizing twice isn't safe). for example, optimization
+    # removes Julia address spaces, which would then lead to type mismatches when using
+    # functions from the runtime library from IR that has not been stripped of AS info.
 
     mod
 end
