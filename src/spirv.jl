@@ -292,8 +292,26 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         value_map = Dict{LLVM.Value, LLVM.Value}(
             param => new_args[i] for (i,param) in enumerate(parameters(f))
         )
-        clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
+
+        # before D96531 (part of LLVM 13), clone_into! wants to duplicate debug metadata
+        # when the functions are part of the same module. that is invalid, because it
+        # results in desynchronized debug intrinsics (GPUCompiler#284), so remove those.
+        if LLVM.version() < v"13"
+            removals = LLVM.Instruction[]
+            for bb in blocks(f), inst in instructions(bb)
+                if inst isa LLVM.CallInst && LLVM.name(called_value(inst)) == "llvm.dbg.declare"
+                    push!(removals, inst)
+                end
+            end
+            for inst in removals
+                @assert isempty(uses(inst))
+                unsafe_delete!(LLVM.parent(inst), inst)
+            end
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
+        else
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
+        end
+        clone_into!(new_f, f; value_map, changes)
 
         # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
         for i in 1:length(byval)

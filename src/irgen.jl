@@ -482,9 +482,26 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         value_map = Dict{LLVM.Value, LLVM.Value}(
             param => new_args[i] for (i,param) in enumerate(parameters(f))
         )
-        clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
-        # NOTE: we need global changes because LLVM 12 wants to clone debug metadata
+
+        # before D96531 (part of LLVM 13), clone_into! wants to duplicate debug metadata
+        # when the functions are part of the same module. that is invalid, because it
+        # results in desynchronized debug intrinsics (GPUCompiler#284), so remove those.
+        if LLVM.version() < v"13"
+            removals = LLVM.Instruction[]
+            for bb in blocks(f), inst in instructions(bb)
+                if inst isa LLVM.CallInst && LLVM.name(called_value(inst)) == "llvm.dbg.declare"
+                    push!(removals, inst)
+                end
+            end
+            for inst in removals
+                @assert isempty(uses(inst))
+                unsafe_delete!(LLVM.parent(inst), inst)
+            end
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
+        else
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
+        end
+        clone_into!(new_f, f; value_map, changes)
 
         # fall through
         br!(builder, blocks(new_f)[2])
@@ -600,10 +617,25 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             return val
         end
 
-        # we don't want module-level changes, because otherwise LLVM will clone metadata,
-        # resulting in mismatching references between `!dbg` metadata and `dbg` instructions
-        clone_into!(new_f, f; value_map, materializer,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
+        # before D96531 (part of LLVM 13), clone_into! wants to duplicate debug metadata
+        # when the functions are part of the same module. that is invalid, because it
+        # results in desynchronized debug intrinsics (GPUCompiler#284), so remove those.
+        if LLVM.version() < v"13"
+            removals = LLVM.Instruction[]
+            for bb in blocks(f), inst in instructions(bb)
+                if inst isa LLVM.CallInst && LLVM.name(called_value(inst)) == "llvm.dbg.declare"
+                    push!(removals, inst)
+                end
+            end
+            for inst in removals
+                @assert isempty(uses(inst))
+                unsafe_delete!(LLVM.parent(inst), inst)
+            end
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
+        else
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
+        end
+        clone_into!(new_f, f; value_map, materializer, changes)
 
         # we can't remove this function yet, as we might still need to rewrite any called,
         # but remove the IR already
