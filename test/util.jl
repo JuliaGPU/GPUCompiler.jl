@@ -1,5 +1,7 @@
 ## test helpers
 
+using Test
+
 # @test_throw, with additional testing for the exception message
 macro test_throws_message(f, typ, ex...)
     quote
