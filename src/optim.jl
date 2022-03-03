@@ -91,7 +91,6 @@ function addOptimizationPasses!(pm, opt_level=2)
     alloc_opt!(pm)
     loop_rotate!(pm)
     # moving IndVarSimplify here prevented removing the loop in perf_sumcartesian(10:-1:1)
-    loop_idiom!(pm)
 
     # LoopRotate strips metadata from terminator, so run LowerSIMD afterwards
     lower_simdloop!(pm) # Annotate loop marked with "loopinfo" as LLVM parallel loop
@@ -103,6 +102,7 @@ function addOptimizationPasses!(pm, opt_level=2)
     inductive_range_check_elimination!(pm)
     # Subsequent passes not stripping metadata from terminator
     instruction_simplify!(pm)
+    loop_idiom!(pm)
     ind_var_simplify!(pm)
     loop_deletion!(pm)
     loop_unroll!(pm) # TODO: in Julia createSimpleLoopUnroll
@@ -119,13 +119,21 @@ function addOptimizationPasses!(pm, opt_level=2)
     mem_cpy_opt!(pm)
     sccp!(pm)
 
+    # These next two passes must come before IRCE to eliminate the bounds check in #43308
+    correlated_value_propagation!(pm)
+    dce!(pm)
+
+    inductive_range_check_elimination!(pm)  # Must come between the two GVN passes
+
     # Run instcombine after redundancy elimination to exploit opportunities
     # opened up by them.
     # This needs to be InstCombine instead of InstSimplify to allow
     # loops over Union-typed arrays to vectorize.
     instruction_combining!(pm)
     jump_threading!(pm)
-    correlated_value_propagation!(pm)
+    if opt_level >= 3
+        gvn!(pm)    # Must come after JumpThreading and before LoopVectorize
+    end
     dead_store_elimination!(pm)
 
     # More dead allocation (store) deletion before loop optimization
@@ -140,13 +148,15 @@ function addOptimizationPasses!(pm, opt_level=2)
     loop_vectorize!(pm)
     loop_load_elimination!(pm)
     # Cleanup after LV pass
+    instruction_combining!(pm)
     if LLVM.version() >= v"12"
         cfgsimplification!(pm; # Aggressive CFG simplification
             forward_switch_cond_to_phi=true,
             convert_switch_to_lookup_table=true,
             need_canonical_loop=true,
             hoist_common_insts=true,
-            sink_common_insts=true) # FIXME: Causes assertion in llvm-late-lowering
+            #sink_common_insts=true # FIXME: Causes assertion in llvm-late-lowering
+        )
     else
         cfgsimplification!(pm)
     end

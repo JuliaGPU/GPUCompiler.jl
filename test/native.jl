@@ -228,7 +228,8 @@ end
                          native_code_execution(foobar, Tuple{Int})) do msg
         occursin("invalid LLVM IR", msg) &&
         (occursin(GPUCompiler.RUNTIME_FUNCTION, msg) ||
-         occursin(GPUCompiler.UNKNOWN_FUNCTION, msg)) &&
+         occursin(GPUCompiler.UNKNOWN_FUNCTION, msg) ||
+         occursin(GPUCompiler.DYNAMIC_CALL, msg)) &&
         occursin("[1] println", msg) &&
         occursin(r"\[2\] .*foobar", msg)
     end
@@ -282,6 +283,10 @@ end
     end
 end
 
+end
+
+############################################################################################
+
 @testset "LazyCodegen" begin
     import .LazyCodegen: call_delayed
 
@@ -328,8 +333,6 @@ end
 
     # tests struct return
     @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
-end
-
 end
 
 ############################################################################################
