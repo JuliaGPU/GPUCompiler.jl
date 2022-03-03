@@ -4,7 +4,7 @@
 # https://github.com/KhronosGroup/LLVM-SPIRV-Backend/blob/master/llvm/docs/SPIR-V-Backend.rst
 # https://github.com/KhronosGroup/SPIRV-LLVM-Translator/blob/master/docs/SPIRVRepresentationInLLVM.rst
 
-const SPIRV_LLVM_Translator_jll = LazyModule("SPIRV_LLVM_Translator_jll", UUID("4a5d46fc-d8cf-5151-a261-86b458210efb"))
+const SPIRV_LLVM_Translator_unified_jll = LazyModule("SPIRV_LLVM_Translator_unified_jll", UUID("85f0d8ed-5b39-5caa-b1ae-7472de402361"))
 const SPIRV_Tools_jll = LazyModule("SPIRV_Tools_jll", UUID("6ac6d60f-d740-5983-97d7-a4482c0689f4"))
 
 
@@ -94,7 +94,7 @@ end
     input = tempname(cleanup=false) * ".bc"
     translated = tempname(cleanup=false) * ".spv"
     write(input, mod)
-    SPIRV_LLVM_Translator_jll.llvm_spirv() do translator
+    SPIRV_LLVM_Translator_unified_jll.llvm_spirv() do translator
         proc = run(ignorestatus(`$translator --spirv-debug-info-version=ocl-100 -o $translated $input`))
         if !success(proc)
             error("""Failed to translate LLVM code to SPIR-V.
