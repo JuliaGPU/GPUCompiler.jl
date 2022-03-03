@@ -75,10 +75,10 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
+function emit_function!(mod, @nospecialize(job::CompilerJob), f, method; ctx::Context)
     tt = Base.to_tuple_type(method.types)
     new_mod, meta = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
-                            optimize=false, libraries=false)
+                            optimize=false, libraries=false, ctx)
     ft = eltype(llvmtype(meta.entry))
     expected_ft = convert(LLVM.FunctionType, method; ctx=context(new_mod))
     if return_type(ft) != return_type(expected_ft)
@@ -92,12 +92,6 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method)
     dispose(pm)
 
     temp_name = LLVM.name(meta.entry)
-    # FIXME: on 1.6, there's no single global LLVM context anymore,
-    #        but there's no API yet to pass a context to codegen.
-    # round-trip the module through serialization to get it in the proper context.
-    buf = convert(MemoryBuffer, new_mod)
-    new_mod = parse(LLVM.Module, buf; ctx=context(mod))
-    @assert context(mod) == context(new_mod)
     link!(mod, new_mod)
     entry = functions(mod)[temp_name]
 
@@ -128,7 +122,7 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
         else
             method.def
         end
-        emit_function!(mod, job, def, method)
+        emit_function!(mod, job, def, method; ctx)
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again

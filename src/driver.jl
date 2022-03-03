@@ -1,5 +1,7 @@
 # compiler driver and main interface
 
+export JuliaContext
+
 # NOTE: the keyword arguments to compile/codegen control those aspects of compilation that
 #       might have to be changed (e.g. set libraries=false when recursing, or set
 #       strip=true for reflection). What remains defines the compilation job itself,
@@ -31,19 +33,54 @@ Other keyword arguments can be found in the documentation of [`cufunction`](@ref
 function compile(target::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true,
                  optimize::Bool=true, strip::Bool=false, validate::Bool=true,
-                 only_entry::Bool=false)
+                 only_entry::Bool=false, ctx::Union{Context,Nothing}=nothing)
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
 
     return codegen(target, job;
-                   libraries, deferred_codegen, optimize, strip, validate, only_entry)
+                   libraries, deferred_codegen, optimize, strip, validate, only_entry, ctx)
+end
+
+# transitionary feature to deal versions of Julia that rely on a global context
+#
+# Julia 1.9 removed the global LLVM context, requiring to pass a context to codegen APIs,
+# so the GPUCompiler APIs have been adapted to require passing a Context object as well.
+# however, on older versions of Julia we cannot make codegen emit into that context. we
+# could use a hack (serialize + deserialize) to move code into the correct context, however
+# as it turns out some of our optimization passes erroneously rely on the context being
+# global and unique, resulting in segfaults when we use a local context instead.
+#
+# to work around this mess, and still present a reasonably unified API, we introduce the
+# JuliaContext helper below, which returns a local context on Julia 1.9, and the global
+# unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
+# this helper to a regular `Contxet()` call.
+function JuliaContext()
+    if VERSION >= v"1.9.0-DEV.115"
+        # Julia 1.9 knows how to deal with arbitrary contexts
+        Context()
+    else
+        # earlier versions of Julia claim so, but actually use a global context
+        isboxed_ref = Ref{Bool}()
+        typ = LLVMType(ccall(:jl_type_to_llvm, LLVM.API.LLVMTypeRef,
+                       (Any, Ptr{Bool}), Any, isboxed_ref))
+        context(typ)
+    end
+end
+function JuliaContext(f)
+    if VERSION >= v"1.9.0-DEV.115"
+        Context(f)
+    else
+        f(JuliaContext())
+        # we cannot dispose of the global unique context
+    end
 end
 
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                  strip::Bool=false, validate::Bool=true, only_entry::Bool=false,
-                 parent_job::Union{Nothing, CompilerJob} = nothing)
+                 parent_job::Union{Nothing, CompilerJob}=nothing,
+                 ctx::Union{Context,Nothing}=nothing)
     ## Julia IR
 
     mi, mi_meta = emit_julia(job)
@@ -52,37 +89,56 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
         return mi, mi_meta
     end
 
+    temporary_context = ctx === nothing
+    if temporary_context && output == :llvm
+        # if we return IR structures, we cannot construct a temporary context
+        error("Request to return LLVM IR; please provide a context")
+    end
 
-    ## LLVM IR
+    try
+        ## LLVM IR
 
-    ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, only_entry)
-
-    if output == :llvm
-        if strip
-            @timeit_debug to "strip debug info" strip_debuginfo!(ir)
+        if temporary_context
+            ctx = JuliaContext()
+        elseif VERSION < v"1.9.0-DEV.115" && ctx != JuliaContext()
+            error("""Julia <1.9 does not suppport generating code in an arbitrary LLVM context.
+                     Use a JuliaContext instead.""")
         end
 
-        return ir, ir_meta
+        ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, only_entry, ctx)
+
+        if output == :llvm
+            if strip
+                @timeit_debug to "strip debug info" strip_debuginfo!(ir)
+            end
+
+            return ir, ir_meta
+        end
+
+
+        ## machine code
+
+        format = if output == :asm
+            LLVM.API.LLVMAssemblyFile
+        elseif output == :obj
+            LLVM.API.LLVMObjectFile
+        else
+            error("Unknown assembly format $output")
+        end
+        asm, asm_meta = emit_asm(job, ir; strip, validate, format)
+
+        if output == :asm || output == :obj
+            return asm, asm_meta
+        end
+
+
+        error("Unknown compilation output $output")
+    finally
+        if temporary_context && VERSION >= v"1.9.0-DEV.115"
+            @assert ctx != JuliaContext()
+            dispose(ctx)
+        end
     end
-
-
-    ## machine code
-
-    format = if output == :asm
-        LLVM.API.LLVMAssemblyFile
-    elseif output == :obj
-        LLVM.API.LLVMObjectFile
-    else
-        error("Unknown assembly format $output")
-    end
-    asm, asm_meta = emit_asm(job, ir; strip, validate, format)
-
-    if output == :asm || output == :obj
-        return asm, asm_meta
-    end
-
-
-    error("Unknown compilation output $output")
 end
 
 @locked function emit_julia(@nospecialize(job::CompilerJob))
@@ -135,7 +191,7 @@ const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance);
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                           only_entry::Bool=false)
+                           only_entry::Bool=false, ctx::Context)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -146,8 +202,7 @@ const __llvm_initialized = Ref(false)
     end
 
     @timeit_debug to "IR generation" begin
-        ir, compiled = irgen(job, method_instance)
-        ctx = context(ir)
+        ir, compiled = irgen(job, method_instance; ctx)
         entry_fn = compiled[method_instance].specfunc
         entry = functions(ir)[entry_fn]
     end
@@ -226,7 +281,7 @@ const __llvm_initialized = Ref(false)
                 # cached compilation
                 dyn_entry_fn = get!(cache, dyn_job) do
                     dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize=false,
-                                               deferred_codegen=false, parent_job=job)
+                                               deferred_codegen=false, parent_job=job, ctx)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     @assert context(dyn_ir) == ctx
