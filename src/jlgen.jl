@@ -220,14 +220,19 @@ end
 Core.Compiler.may_optimize(interp::GPUInterpreter) = true
 Core.Compiler.may_compress(interp::GPUInterpreter) = true
 Core.Compiler.may_discard_trees(interp::GPUInterpreter) = true
-@static if VERSION >= v"1.7.0-DEV.577"
+if VERSION >= v"1.7.0-DEV.577"
 Core.Compiler.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 
-@static if isdefined(Base.Experimental, Symbol("@overlay"))
+if isdefined(Base.Experimental, Symbol("@overlay"))
 using Core.Compiler: OverlayMethodTable
+if VERSION >= v"1.9.0-DEV.120"
+Core.Compiler.method_table(interp::GPUInterpreter) =
+    OverlayMethodTable(interp.world, interp.method_table)
+else
 Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
     OverlayMethodTable(interp.world, interp.method_table)
+end
 else
 Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
     WorldOverlayMethodTable(interp.world)
