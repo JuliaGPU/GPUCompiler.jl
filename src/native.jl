@@ -34,3 +34,4 @@ end
 ## job
 
 runtime_slug(job::CompilerJob{NativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))"
+can_throw(job::CompilerJob{NativeCompilerTarget}) = true
