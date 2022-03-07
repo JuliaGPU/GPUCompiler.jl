@@ -20,34 +20,38 @@ include("definitions/native.jl")
         end
 
         job, _ = native_job(outer, (Int,))
-        ir, meta = GPUCompiler.compile(:llvm, job)
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job; ctx)
 
-        meth = only(methods(outer, (Int,)))
+            meth = only(methods(outer, (Int,)))
 
-        mis = filter(mi->mi.def == meth, keys(meta.compiled))
-        @test length(mis) == 1
+            mis = filter(mi->mi.def == meth, keys(meta.compiled))
+            @test length(mis) == 1
 
-        other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
-        @test length(other_mis) == 1
-        @test only(other_mis).def in methods(inner)
+            other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
+            @test length(other_mis) == 1
+            @test only(other_mis).def in methods(inner)
+        end
     end
 
     @testset "Advanced database" begin
         foo(x) = sum(exp(fill(x, 10, 10)))
 
         job, _ = native_job(foo, (Float64,))
-        # shouldn't segfault
-        ir, meta = GPUCompiler.compile(:llvm, job)
+        JuliaContext() do ctx
+            # shouldn't segfault
+            ir, meta = GPUCompiler.compile(:llvm, job; ctx)
 
-        meth = only(methods(foo, (Float64,)))
+            meth = only(methods(foo, (Float64,)))
 
-        mis = filter(mi->mi.def == meth, keys(meta.compiled))
-        @test length(mis) == 1
+            mis = filter(mi->mi.def == meth, keys(meta.compiled))
+            @test length(mis) == 1
 
-        expfloat = filter(keys(meta.compiled)) do mi
-            mi.def in methods(Base.exp) && mi.specTypes == Tuple{typeof(Base.exp), Float64}
+            expfloat = filter(keys(meta.compiled)) do mi
+                mi.def in methods(Base.exp) && mi.specTypes == Tuple{typeof(Base.exp), Float64}
+            end
+            @test length(expfloat) == 1
         end
-        @test length(expfloat) == 1
     end
 end
 
@@ -324,17 +328,23 @@ end
 
     @test call_real(1.0+im) == 1.0
 
-    if VERSION < v"1.8-" # FIXME(@vchuravy)
-        # Test ABI removal
-        ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
+    # Test ABI removal
+    ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
+    if VERSION < v"1.8-"
         @test !occursin("alloca", ir)
+    else
+        @test_broken !occursin("alloca", ir)
     end
 
     ghostly_identity(x, y) = y
     @test call_delayed(ghostly_identity, nothing, 1) == 1
 
     # tests struct return
-    @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
+    if Sys.ARCH != :aarch64
+        @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
+    else
+        @test_broken call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
+    end
 
     throws(arr, i) = arr[i]
     @test call_delayed(throws, [1], 1) == 1
