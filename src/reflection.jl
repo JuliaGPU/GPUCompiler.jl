@@ -100,10 +100,12 @@ See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
-    ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false)
-    str = ccall(:jl_dump_function_ir, Ref{String},
-                (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
-                meta.entry, !raw, dump_module, debuginfo)
+    str = JuliaContext() do ctx
+        ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false, ctx)
+        ccall(:jl_dump_function_ir, Ref{String},
+              (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
+              meta.entry, !raw, dump_module, debuginfo)
+    end
     highlight(io, str, "llvm")
 end
 code_llvm(@nospecialize(job::CompilerJob); kwargs...) = code_llvm(stdout, job; kwargs...)

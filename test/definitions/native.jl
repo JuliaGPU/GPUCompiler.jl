@@ -101,10 +101,10 @@ module LazyCodegen
             @assert !cc.compiled
             job = cc.job
 
-            ir, meta = GPUCompiler.codegen(:llvm, job; validate=false)
-            entry_name = name(meta.entry)
-
-            jitted_mod = compile!(orc, ir)
+            entry_name, jitted_mod = JuliaContext() do ctx
+                ir, meta = GPUCompiler.codegen(:llvm, job; validate=false, ctx)
+                name(meta.entry), compile!(orc, ir)
+            end
 
             addr = addressin(orc, jitted_mod, entry_name)
             ptr  = pointer(addr)
@@ -195,21 +195,24 @@ module LazyCodegen
             sym = LLVM.API.LLVMOrcCSymbolFlagsMapPair(mangle(lljit, target_sym), flags)
 
             function materialize(mr)
-                ir, meta = GPUCompiler.codegen(:llvm, job; validate=false)
+                JuliaContext() do ctx
+                    ir, meta = GPUCompiler.codegen(:llvm, job; validate=false, ctx)
 
-                # Rename entry to match target_sym
-                LLVM.name!(meta.entry, target_sym)
+                    # Rename entry to match target_sym
+                    LLVM.name!(meta.entry, target_sym)
 
-                # So 1. serialize the module
-                buf = convert(MemoryBuffer, ir)
+                    # So 1. serialize the module
+                    buf = convert(MemoryBuffer, ir)
 
-                # 2. deserialize and wrap by a ThreadSafeModule
-                ctx = ThreadSafeContext()
-                mod = parse(LLVM.Module, buf; ctx=context(ctx))
-                tsm = ThreadSafeModule(mod; ctx)
+                    # 2. deserialize and wrap by a ThreadSafeModule
+                    ThreadSafeContext() do ctx
+                        mod = parse(LLVM.Module, buf; ctx=context(ctx))
+                        tsm = ThreadSafeModule(mod; ctx)
 
-                il = LLVM.IRTransformLayer(lljit)
-                LLVM.emit(il, mr, tsm)
+                        il = LLVM.IRTransformLayer(lljit)
+                        LLVM.emit(il, mr, tsm)
+                    end
+                end
 
                 return nothing
             end
@@ -252,7 +255,7 @@ module LazyCodegen
         after = :(ret)
 
         # Note this follows: emit_call_specfun_other
-        Context() do ctx
+        JuliaContext() do ctx
             T_jlvalue = LLVM.StructType(LLVMType[],;ctx)
             T_prjlvalue = LLVM.PointerType(T_jlvalue, #= AddressSpace::Tracked =# 10)
 

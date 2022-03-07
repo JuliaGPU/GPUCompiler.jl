@@ -326,7 +326,7 @@ function _lookup_fun(mi, min_world, max_world)
 end
 
 function compile_method_instance(@nospecialize(job::CompilerJob),
-                                 method_instance::MethodInstance)
+                                 method_instance::MethodInstance; ctx::Context)
     # populate the cache
     cache = ci_cache(job)
     mt = method_table(job)
@@ -362,11 +362,17 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
 
     # generate IR
     GC.@preserve lookup_cb begin
-        native_code = if VERSION >= v"1.8.0-DEV.661"
+        native_code = if VERSION >= v"1.9.0-DEV.115"
+            ccall(:jl_create_native, Ptr{Cvoid},
+                  (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
+                  [method_instance], ctx, Ref(params), #=extern policy=# 1)
+        elseif VERSION >= v"1.8.0-DEV.661"
+            @assert ctx == JuliaContext()
             ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Ptr{Base.CodegenParams}, Cint),
                   [method_instance], Ref(params), #=extern policy=# 1)
         else
+            @assert ctx == JuliaContext()
             ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Base.CodegenParams, Cint),
                   [method_instance], params, #=extern policy=# 1)

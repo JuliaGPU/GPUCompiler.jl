@@ -20,34 +20,38 @@ include("definitions/native.jl")
         end
 
         job, _ = native_job(outer, (Int,))
-        ir, meta = GPUCompiler.compile(:llvm, job)
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job; ctx)
 
-        meth = only(methods(outer, (Int,)))
+            meth = only(methods(outer, (Int,)))
 
-        mis = filter(mi->mi.def == meth, keys(meta.compiled))
-        @test length(mis) == 1
+            mis = filter(mi->mi.def == meth, keys(meta.compiled))
+            @test length(mis) == 1
 
-        other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
-        @test length(other_mis) == 1
-        @test only(other_mis).def in methods(inner)
+            other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
+            @test length(other_mis) == 1
+            @test only(other_mis).def in methods(inner)
+        end
     end
 
     @testset "Advanced database" begin
         foo(x) = sum(exp(fill(x, 10, 10)))
 
         job, _ = native_job(foo, (Float64,))
-        # shouldn't segfault
-        ir, meta = GPUCompiler.compile(:llvm, job)
+        JuliaContext() do ctx
+            # shouldn't segfault
+            ir, meta = GPUCompiler.compile(:llvm, job; ctx)
 
-        meth = only(methods(foo, (Float64,)))
+            meth = only(methods(foo, (Float64,)))
 
-        mis = filter(mi->mi.def == meth, keys(meta.compiled))
-        @test length(mis) == 1
+            mis = filter(mi->mi.def == meth, keys(meta.compiled))
+            @test length(mis) == 1
 
-        expfloat = filter(keys(meta.compiled)) do mi
-            mi.def in methods(Base.exp) && mi.specTypes == Tuple{typeof(Base.exp), Float64}
+            expfloat = filter(keys(meta.compiled)) do mi
+                mi.def in methods(Base.exp) && mi.specTypes == Tuple{typeof(Base.exp), Float64}
+            end
+            @test length(expfloat) == 1
         end
-        @test length(expfloat) == 1
     end
 end
 
