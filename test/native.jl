@@ -324,17 +324,23 @@ end
 
     @test call_real(1.0+im) == 1.0
 
-    if VERSION < v"1.8-" # FIXME(@vchuravy)
-        # Test ABI removal
-        ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
+    # Test ABI removal
+    ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
+    if VERSION < v"1.8-"
         @test !occursin("alloca", ir)
+    else
+        @test_broken !occursin("alloca", ir)
     end
 
     ghostly_identity(x, y) = y
     @test call_delayed(ghostly_identity, nothing, 1) == 1
 
     # tests struct return
-    @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
+    if Sys.ARCH != :aarch64
+        @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
+    else
+        @test_broken call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
+    end
 end
 
 ############################################################################################
