@@ -501,30 +501,42 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         else
             changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
         end
-        clone_into!(new_f, f; value_map, changes)
+
+        # use a value materializer for replacing uses of the function in constants
+        # NOTE: we assume kernel functions can't be called. on-device kernel launches,
+        #       e.g. CUDA's dynamic parallelism, will pass the function to an API instead,
+        #       and we update those constant expressions arguments here.
+        function materializer(val)
+            opcodes = (LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMBitCast)
+            if val isa LLVM.ConstantExpr && opcode(val) in opcodes
+                target = operands(val)[1]
+                if target == f
+                    return if opcode(val) == LLVM.API.LLVMPtrToInt
+                        LLVM.const_ptrtoint(new_f, llvmtype(val))
+                    elseif opcode(val) == LLVM.API.LLVMAddrSpaceCast
+                        LLVM.const_addrspacecast(new_f, llvmtype(val))
+                    elseif opcode(val) == LLVM.API.LLVMBitCast
+                        LLVM.const_bitcast(new_f, llvmtype(val))
+                    end
+                end
+            end
+            return val
+        end
+
+        # we don't want module-level changes, because otherwise LLVM will clone metadata,
+        # resulting in mismatching references between `!dbg` metadata and `dbg` instructions
+        clone_into!(new_f, f; value_map, changes, materializer)
 
         # fall through
         br!(builder, blocks(new_f)[2])
     end
 
-    # update uses of the kernel
-    # NOTE: we assume kernel functions can't be called. on-device kernel launches,
-    #       e.g. CUDA's dynamic parallelism, will pass the function to an API instead,
-    #       and we update those constant expressions arguments here.
+    # drop unused constants that may be referring to the old functions
+    # XXX: can we do this differently?
     for use in uses(f)
         val = user(use)
-        if val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMPtrToInt
-            target = operands(val)[1]
-            if target == f
-                new_val = LLVM.const_ptrtoint(new_f, llvmtype(val))
-                replace_uses!(val, new_val)
-
-                # drop the old constant if it is unused
-                # XXX: can we do this differently?
-                if isempty(uses(val))
-                    LLVM.unsafe_destroy!(val)
-                end
-            end
+        if val isa LLVM.ConstantExpr && isempty(uses(val))
+            LLVM.unsafe_destroy!(val)
         end
     end
 
@@ -576,8 +588,30 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # this is both for extern uses, and to make this transformation a two-step process.
     state_intr = kernel_state_intr(mod, T_state)
 
-    # add a state argument to every function
-    worklist = filter(!isdeclaration, collect(functions(mod)))
+    # determine which functions need a kernel state argument
+    #
+    # previously, we add the argument to every function and relied on unused arg elim to
+    # clean-up the IR. however, some libraries do Funny Stuff, e.g., libdevice bitcasting
+    # function pointers. such IR is hard to rewrite, so instead be more conservative.
+    worklist = Set{LLVM.Function}([entry, state_intr])
+    worklist_length = 0
+    while worklist_length != length(worklist)
+        # iteratively discover functions that use the intrinsic or any function calling it
+        worklist_length = length(worklist)
+        additions = LLVM.Function[]
+        for f in worklist, use in uses(f)
+            inst = user(use)::Instruction
+            bb = LLVM.parent(inst)
+            new_f = LLVM.parent(bb)
+            in(new_f, worklist) || push!(additions, new_f)
+        end
+        for f in additions
+            push!(worklist, f)
+        end
+    end
+    delete!(worklist, state_intr)
+
+    # add a state argument
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in worklist
         fn = LLVM.name(f)
@@ -608,10 +642,17 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
         # use a value materializer for replacing uses of the function in constants
         function materializer(val)
-            if val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMPtrToInt
+            opcodes = (LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMBitCast)
+            if val isa LLVM.ConstantExpr && opcode(val) in opcodes
                 src = operands(val)[1]
                 if haskey(workmap, src)
-                    return LLVM.const_ptrtoint(workmap[src], llvmtype(val))
+                    return if opcode(val) == LLVM.API.LLVMPtrToInt
+                        LLVM.const_ptrtoint(workmap[src], llvmtype(val))
+                    elseif opcode(val) == LLVM.API.LLVMAddrSpaceCast
+                        LLVM.const_addrspacecast(workmap[src], llvmtype(val))
+                    elseif opcode(val) == LLVM.API.LLVMBitCast
+                        LLVM.const_bitcast(workmap[src], llvmtype(val))
+                    end
                 end
             end
             return val
@@ -677,20 +718,6 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
                     unsafe_delete!(LLVM.parent(val), val)
-                elseif val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMBitCast
-                    # XXX: why isn't this caught by the value materializer above?
-                    target = operands(val)[1]
-                    @assert target == f
-                    new_val = LLVM.const_bitcast(new_f, llvmtype(val))
-                    rewrite_uses!(val, new_val)
-                    # we can't simply replace this constant expression, as it may be used
-                    # as a call, taking arguments (so we need to rewrite it to pass the state)
-
-                    # drop the old constant if it is unused
-                    # XXX: can we do this differently?
-                    if isempty(uses(val))
-                        LLVM.unsafe_destroy!(val)
-                    end
                 else
                     error("Cannot rewrite unknown use of function: $val")
                 end
@@ -721,14 +748,10 @@ function lower_kernel_state!(fun::LLVM.Function)
         return false
     end
 
-    # find the kernel state argument. this should be the first argument of the function.
-    state_arg = parameters(fun)[1]
-    T_state = convert(LLVMType, state; ctx)
-    @assert llvmtype(state_arg) == T_state
-
     # fixup all uses of the state getter to use the newly introduced function state argument
     if haskey(functions(mod), "julia.gpu.state_getter")
         state_intr = functions(mod)["julia.gpu.state_getter"]
+        state_arg = nothing # only look-up when needed
 
         Builder(ctx) do builder
             for use in uses(state_intr)
@@ -740,6 +763,14 @@ function lower_kernel_state!(fun::LLVM.Function)
                 position!(builder, inst)
                 bb = LLVM.parent(inst)
                 f = LLVM.parent(bb)
+
+                if state_arg === nothing
+                    # find the kernel state argument. this should be the first argument of
+                    # the function, but only when this function needs the state!
+                    state_arg = parameters(fun)[1]
+                    T_state = convert(LLVMType, state; ctx)
+                    @assert llvmtype(state_arg) == T_state
+                end
 
                 replace_uses!(inst, state_arg)
 
