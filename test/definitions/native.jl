@@ -132,6 +132,27 @@ module LazyCodegen
         end
     else # LLVM >=12
 
+        function absolute_symbol_materialization(name, ptr)
+            address = LLVM.API.LLVMOrcJITTargetAddress(reinterpret(UInt, ptr))
+            flags = LLVM.API.LLVMJITSymbolFlags(
+                LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
+            symbol = LLVM.API.LLVMJITEvaluatedSymbol(
+                address, flags)
+            gv = LLVM.API.LLVMJITCSymbolMapPair(
+                    mangle(lljit, name), symbol)
+
+            return LLVM.absolute_symbols(Ref(gv))
+        end
+
+        function add_absolute_symbol!(jd, name)
+            ptr = LLVM.find_symbol(name)
+            if ptr !== C_NULL
+                add!(jd, absolute_symbol_materialization(name, ptr))
+                return true
+            end
+            return false
+        end
+
         struct CompilerInstance
             jit::LLVM.LLJIT
             lctm::LLVM.LazyCallThroughManager
@@ -151,6 +172,10 @@ module LazyCodegen
             prefix = LLVM.get_prefix(lljit)
             dg = LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix)
             add!(jd_main, dg)
+            if Sys.iswindows() && Int === Int64
+                # TODO can we check isGNU?
+                add_absolute_symbol!(jd_main, "___chkst_ms")
+            end
 
             es = ExecutionSession(lljit)
 
