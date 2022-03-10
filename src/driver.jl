@@ -209,7 +209,7 @@ const __llvm_initialized = Ref(false)
 
     # always preload the runtime, and do so early; it cannot be part of any timing block
     # because it recurses into the compiler
-    if libraries
+    if !uses_julia_runtime(job) && libraries
         runtime = load_runtime(job; ctx)
         runtime_fns = LLVM.name.(defs(runtime))
         runtime_intrinsics = ["julia.gc_alloc_obj"]
@@ -222,7 +222,7 @@ const __llvm_initialized = Ref(false)
             @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
 
             # GPU run-time library
-            if any(fn -> fn in runtime_fns || fn in runtime_intrinsics, undefined_fns)
+            if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns || fn in runtime_intrinsics, undefined_fns)
                 @timeit_debug to "runtime library" link_library!(ir, runtime)
             end
         end

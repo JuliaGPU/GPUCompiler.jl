@@ -345,6 +345,10 @@ end
     else
         @test_broken call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
     end
+
+    throws(arr, i) = arr[i]
+    @test call_delayed(throws, [1], 1) == 1
+    @test_throws BoundsError call_delayed(throws, [1], 0)
 end
 
 ############################################################################################

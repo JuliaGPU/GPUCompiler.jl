@@ -143,6 +143,12 @@ end
 
 ## interfaces and fallback definitions
 
+# Has the runtime available and does not require special handling
+uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
+
+# Should emit PTLS lookup that can be relocated
+dump_native(@nospecialize(job::CompilerJob)) = false
+
 # the Julia module to look up target-specific runtime functions in (this includes both
 # target-specific functions from the GPU runtime library, like `malloc`, but also
 # replacements functions for operations like `Base.sin`)
@@ -157,7 +163,7 @@ get_interpreter(@nospecialize(job::CompilerJob)) =
 
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime
-can_throw(@nospecialize(job::CompilerJob)) = false
+can_throw(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 
 # generate a string that represents the type of compilation, for selecting a compiled
 # instance of the runtime library. this slug should encode everything that affects
