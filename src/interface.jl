@@ -146,6 +146,9 @@ end
 # Has the runtime available and does not require special handling
 uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 
+# Should emit PTLS lookup that can be relocated
+dump_native(@nospecialize(job::CompilerJob)) = false
+
 # the Julia module to look up target-specific runtime functions in (this includes both
 # target-specific functions from the GPU runtime library, like `malloc`, but also
 # replacements functions for operations like `Base.sin`)

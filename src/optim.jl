@@ -185,7 +185,9 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     ModulePassManager() do pm
         addTargetPasses!(pm, tm, triple)
 
-        add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
+        if !uses_julia_runtime(job)
+            add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
+        end
 
         if job.source.kernel
             # GC lowering is the last pass that may introduce calls to the runtime library,
@@ -194,15 +196,37 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             add!(pm, ModulePass("CleanupKernelState", cleanup_kernel_state!))
         end
 
-        # remove dead uses of ptls
-        aggressive_dce!(pm)
-        add!(pm, ModulePass("LowerPTLS", lower_ptls!))
+        if !uses_julia_runtime(job)
+            # remove dead uses of ptls
+            aggressive_dce!(pm)
+            add!(pm, ModulePass("LowerPTLS", lower_ptls!))
+        end
 
+        if uses_julia_runtime(job)
+            lower_exc_handlers!(pm)
+        end
         # the Julia GC lowering pass also has some clean-up that is required
         late_lower_gc_frame!(pm)
+        if uses_julia_runtime(job)
+            final_lower_gc!(pm)
+        end
 
         remove_ni!(pm)
         remove_julia_addrspaces!(pm)
+
+        if uses_julia_runtime(job)
+            # We need these two passes and the instcombine below
+            # after GC lowering to let LLVM do some constant propagation on the tags.
+            # and remove some unnecessary write barrier checks.
+            gvn!(pm)
+            sccp!(pm)
+            # Remove dead use of ptls
+            dce!(pm)
+            LLVM.lower_ptls!(pm, dump_native(job))
+            instruction_combining!(pm)
+            # Clean up write barrier and ptls lowering
+            cfgsimplification!(pm)
+        end
 
         # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
         # FIXME: we should fix the inliner so that inlined code gets optimized early-on
