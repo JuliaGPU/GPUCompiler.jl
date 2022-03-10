@@ -35,4 +35,4 @@ end
 ## job
 
 runtime_slug(job::CompilerJob{NativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))$(job.target.jlruntime ? "-jlrt" : "")"
-can_throw(job::CompilerJob{NativeCompilerTarget}) = job.target.jlruntime
+uses_julia_runtime(job::CompilerJob{NativeCompilerTarget}) = job.target.jlruntime
