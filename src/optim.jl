@@ -222,7 +222,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             sccp!(pm)
             # Remove dead use of ptls
             dce!(pm)
-            LLVM.lower_ptls!(pm, dump_native(job))
+            LLVM.Interop.lower_ptls!(pm, dump_native(job))
             instruction_combining!(pm)
             # Clean up write barrier and ptls lowering
             cfgsimplification!(pm)
