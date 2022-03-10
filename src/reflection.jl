@@ -19,9 +19,11 @@ end
 function highlight(io::IO, code, lexer)
     highlighter = pygmentize()
     have_color = get(io, :color, false)
-    if highlighter === nothing || !have_color
+    if !have_color
         print(io, code)
-    else
+    elseif lexer == "llvm"
+        InteractiveUtils.print_llvm(io, code)
+    elseif highlighter !== nothing
         custom_lexer = joinpath(dirname(@__DIR__), "res", "pygments", "$lexer.py")
         if isfile(custom_lexer)
             lexer = `$custom_lexer -x`
@@ -31,6 +33,8 @@ function highlight(io::IO, code, lexer)
         print(pipe, code)
         close(pipe.in)
         print(io, read(pipe, String))
+    else
+        print(io, code)
     end
     return
 end
