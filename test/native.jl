@@ -376,4 +376,22 @@ end
 
 ############################################################################################
 
+@testset "classify_arguments" begin
+    f_sret(x) = (x, x)
+    job, _ = native_job(f_sret, Tuple{Float64})
+    _, meta = GPUCompiler.compile(:llvm, job)
+    ft = LLVM.eltype(LLVM.llvmtype(meta.entry))
+
+    sret = EnumAttribute("sret"; ctx=context(ft))
+    attrs = collect(parameter_attributes(meta.entry, 1))
+    has_sret = any(attr->kind(attr)==kind(sret), attrs)
+
+    @test has_sret
+
+    classification = GPUCompiler.classify_arguments(job, ft, has_sret)
+    @test length(classification) == 2
+    @test classification[1].typ == typeof(f_sret)
+    @test classification[2].typ == Float64
+end
+
 end

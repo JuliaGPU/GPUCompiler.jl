@@ -287,14 +287,14 @@ end
     GHOST       # not passed
 end
 
-function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
+function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType, has_sret=false)
     source_sig = Base.signature_type(job.source.f, job.source.tt)::Type
     source_types = [source_sig.parameters...]
 
     codegen_types = parameters(codegen_ft)
 
     args = []
-    codegen_i = 1
+    codegen_i = 1 + has_sret
     for (source_i, source_typ) in enumerate(source_types)
         if isghosttype(source_typ) || Core.Compiler.isconstType(source_typ)
             push!(args, (cc=GHOST, typ=source_typ))
