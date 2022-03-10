@@ -121,13 +121,20 @@ struct CompilerJob{T,P,F}
     target::T
     source::F
     params::P
+    entry_abi::Symbol
 
-    CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams) =
-        new{typeof(target), typeof(params), typeof(source)}(target, source, params)
+    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams, entry_abi::Symbol)
+        if entry_abi ∉ (:specfunc, :func)
+            error("Unknown entry_abi=$entry_abi")
+        end
+        new{typeof(target), typeof(params), typeof(source)}(target, source, params, entry_abi)
+    end
 end
+CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams; entry_abi=:specfunc) =
+    CompilerJob(target, source, params, entry_abi)
 
 Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
-    CompilerJob(job.target, source, job.params)
+    CompilerJob(job.target, source, job.params, job.entry_abi)
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
@@ -137,6 +144,7 @@ function Base.hash(job::CompilerJob, h::UInt)
     h = hash(job.target, h)
     h = hash(job.source, h)
     h = hash(job.params, h)
+    h = hash(job.entry_abi, h)
     h
 end
 
