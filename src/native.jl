@@ -8,6 +8,7 @@ Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
     cpu::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
     features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
     always_inline::Bool=false # will mark the job function as always inline
+    jlruntime::Bool=true # Use Julia runtime for throwing errors, instead of the GPUCompiler support
 end
 
 llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
@@ -33,5 +34,5 @@ end
 
 ## job
 
-runtime_slug(job::CompilerJob{NativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))"
-can_throw(job::CompilerJob{NativeCompilerTarget}) = true
+runtime_slug(job::CompilerJob{NativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))$(job.target.jlruntime ? "-jlrt" : "")"
+can_throw(job::CompilerJob{NativeCompilerTarget}) = job.target.jlruntime
