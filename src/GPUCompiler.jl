@@ -29,6 +29,7 @@ include("bpf.jl")
 include("runtime.jl")
 
 # compiler implementation
+include("early_transform.jl")
 include("jlgen.jl")
 include("irgen.jl")
 include("optim.jl")

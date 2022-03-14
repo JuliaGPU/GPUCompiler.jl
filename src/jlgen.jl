@@ -213,6 +213,25 @@ Core.Compiler.code_cache(interp::GPUInterpreter) = WorldView(interp.global_cache
 Core.Compiler.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 Core.Compiler.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
+import Core.Compiler: retrieve_code_info, validate_code_in_debug_mode, InferenceState
+# Replace usage sites of `retrieve_code_info`, OptimizationState is one such, but in all interesting use-cases
+# it is derived from an InferenceState. There is a third one in `typeinf_ext` in case the module forbids inference.
+function InferenceState(result::InferenceResult, cached::Symbol, interp::GPUInterpreter)
+    src = retrieve_code_info(result.linfo)
+    src === nothing && return nothing
+    validate_code_in_debug_mode(result.linfo, src, "lowered")
+    src = transform(interp, result.linfo, src)
+    validate_code_in_debug_mode(result.linfo, src, "transformed")
+    return InferenceState(result, src, cached, interp)
+end
+
+function transform(interp, mi, src)
+    src = copy(src)
+    early_transform!(mi, src)
+    return src
+end
+
+
 function Core.Compiler.add_remark!(interp::GPUInterpreter, sv::InferenceState, msg)
     @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
 end
