@@ -203,7 +203,11 @@ const __llvm_initialized = Ref(false)
 
     @timeit_debug to "IR generation" begin
         ir, compiled = irgen(job, method_instance; ctx)
-        entry_fn = compiled[method_instance].specfunc
+        if job.entry_abi === :specfunc
+            entry_fn = compiled[method_instance].specfunc
+        else
+            entry_fn = compiled[method_instance].func
+        end
         entry = functions(ir)[entry_fn]
     end
 

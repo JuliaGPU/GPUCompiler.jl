@@ -117,17 +117,37 @@ export CompilerJob
 
 # a specific invocation of the compiler, bundling everything needed to generate code
 
+"""
+    CompilerJob(target, source, params, entry_abi)
+
+Construct a `CompilerJob` for `source` that will be used to drive compilation for
+the given `target` and `params`. The `entry_abi` can be either `:specfunc` the default,
+or `:func`. `:specfunc` expects the arguments to be passed in registers, simple
+return values are returned in registers as well, and complex return values are returned
+on the stack using `sret`, the calling convention is `fastcc`. The `:func` abi is simpler
+with a calling convention of the first argument being the function itself (to support closures),
+the second argument being a pointer to a vector of boxed Julia values and the third argument
+being the number of values, the return value will also be boxed. The `:func` abi
+will internally call the `:specfunc` abi, but is generally easier to invoke directly.
+"""
 struct CompilerJob{T,P,F}
     target::T
     source::F
     params::P
+    entry_abi::Symbol
 
-    CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams) =
-        new{typeof(target), typeof(params), typeof(source)}(target, source, params)
+    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams, entry_abi::Symbol)
+        if entry_abi ∉ (:specfunc, :func)
+            error("Unknown entry_abi=$entry_abi")
+        end
+        new{typeof(target), typeof(params), typeof(source)}(target, source, params, entry_abi)
+    end
 end
+CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams; entry_abi=:specfunc) =
+    CompilerJob(target, source, params, entry_abi)
 
 Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
-    CompilerJob(job.target, source, job.params)
+    CompilerJob(job.target, source, job.params, job.entry_abi)
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
@@ -137,6 +157,7 @@ function Base.hash(job::CompilerJob, h::UInt)
     h = hash(job.target, h)
     h = hash(job.source, h)
     h = hash(job.params, h)
+    h = hash(job.entry_abi, h)
     h
 end
 

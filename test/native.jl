@@ -135,6 +135,15 @@ end
     native_code_llvm(devnull, D32593, Tuple{Ptr{D32593_struct}})
 end
 
+@testset "slow abi" begin
+    x = 2
+    f = () -> x+1
+    ir = sprint(io->native_code_llvm(io, f, Tuple{}, entry_abi=:func, dump_module=true))
+    @test occursin(r"define nonnull {}\* @jfptr", ir)
+    @test occursin(r"define internal fastcc .+ @julia", ir)
+    @test occursin(r"call fastcc .+ @julia", ir)
+end
+
 end
 
 ############################################################################################
