@@ -134,7 +134,7 @@ end
     else
         # disassemble
         SPIRV_Tools_jll.spirv_dis() do disassembler
-            read(`$disassembler $optimized`, String)
+            read(`$disassembler $translated`, String)
         end
     end
 
