@@ -339,7 +339,7 @@ end
 
     # Test ABI removal
     ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
-    if VERSION < v"1.8-"
+    if VERSION < v"1.8-" || v"1.8-beta2" <= VERSION < v"1.9-" || VERSION ≥ v"1.9.0-DEV.190"
         @test !occursin("alloca", ir)
     else
         @test_broken !occursin("alloca", ir)

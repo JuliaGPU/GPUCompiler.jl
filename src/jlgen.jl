@@ -226,7 +226,7 @@ end
 
 if isdefined(Base.Experimental, Symbol("@overlay"))
 using Core.Compiler: OverlayMethodTable
-if VERSION >= v"1.9.0-DEV.120"
+if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION >= v"1.9.0-DEV.120"
 Core.Compiler.method_table(interp::GPUInterpreter) =
     OverlayMethodTable(interp.world, interp.method_table)
 else
