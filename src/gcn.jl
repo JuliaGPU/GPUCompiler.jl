@@ -52,12 +52,6 @@ end
 
 function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
-    # we have to fake our target early in the pipeline because Julia's optimization passes
-    # weren't designed for a non-0 stack addrspace, and the AMDGPU target is very strict
-    # about which addrspaces are permitted for various code patterns
-    triple!(mod, llvm_triple(NativeCompilerTarget()))
-    datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
-
     entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
     if job.source.kernel
@@ -66,6 +60,17 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
     end
 
     return entry
+end
+
+function optimize!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+    # we have to fake our target early in the pipeline because Julia's
+    # optimization passes weren't designed for a non-0 stack addrspace, and the
+    # AMDGPU target is very strict about which addrspaces are permitted for
+    # various code patterns
+    triple!(mod, llvm_triple(NativeCompilerTarget()))
+    datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
+
+    invoke(optimize!, Tuple{CompilerJob, LLVM.Module}, job, mod)
 end
 
 # We need to do alloca rewriting (from 0 to 5) after Julia's optimization
