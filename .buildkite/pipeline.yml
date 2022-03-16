@@ -1,5 +1,5 @@
 steps:
-  - label: "CUDA.jl"
+  - label: "CUDA.jl - Julia 1.6"
     plugins:
       - JuliaCI/julia#v1:
           version: 1.6
@@ -21,7 +21,29 @@ steps:
     if: build.message !~ /\[skip tests\]/
     timeout_in_minutes: 60
 
-  - label: "oneAPI.jl"
+  - label: "CUDA.jl - Julia 1.7"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: 1.7
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+      julia -e 'using Pkg;
+
+                println("--- :julia: Instantiating project");
+                Pkg.develop(PackageSpec(path=pwd()));
+                Pkg.add(PackageSpec(name="CUDA", rev="master"));
+                Pkg.build();
+
+                println("+++ :julia: Running tests");
+                Pkg.test("CUDA"; coverage=true);'
+    agents:
+      queue: "juliagpu"
+      cuda: "*"
+    if: build.message !~ /\[skip tests\]/
+    timeout_in_minutes: 60
+
+  - label: "oneAPI.jl - Julia 1.6"
     plugins:
       - JuliaCI/julia#v1:
           version: 1.6
@@ -43,10 +65,32 @@ steps:
     if: build.message !~ /\[skip tests\]/
     timeout_in_minutes: 60
 
-  - label: "AMDGPU.jl"
+  - label: "oneAPI.jl - Julia 1.7"
     plugins:
       - JuliaCI/julia#v1:
-          version: 1.6
+          version: 1.7
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+      julia -e 'using Pkg;
+
+                println("--- :julia: Instantiating project");
+                Pkg.develop(PackageSpec(path=pwd()));
+                Pkg.add(PackageSpec(name="oneAPI", rev="master"));
+                Pkg.build();
+
+                println("+++ :julia: Running tests");
+                Pkg.test("oneAPI"; coverage=true);'
+    agents:
+      queue: "juliagpu"
+      intel: "*"
+    if: build.message !~ /\[skip tests\]/
+    timeout_in_minutes: 60
+
+  - label: "AMDGPU.jl - Julia 1.7"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: 1.7
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -63,14 +107,33 @@ steps:
       queue: "juliagpu"
       rocm: "*"
     if: build.message !~ /\[skip tests\]/
-    timeout_in_minutes: 120
-    soft_fail:
-      - exit_status: 1
+    timeout_in_minutes: 180
 
-  - label: "Enzyme.jl"
+  - label: "Enzyme.jl - Julia 1.6"
     plugins:
       - JuliaCI/julia#v1:
           version: 1.6
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+      julia -e 'using Pkg;
+
+                println("--- :julia: Instantiating project");
+                Pkg.develop(PackageSpec(path=pwd()));
+                Pkg.add(PackageSpec(name="Enzyme", rev="main"));
+                Pkg.build();
+
+                println("+++ :julia: Running tests");
+                Pkg.test("Enzyme"; coverage=true);'
+    agents:
+      queue: "juliagpu"
+    if: build.message !~ /\[skip tests\]/
+    timeout_in_minutes: 60
+
+  - label: "Enzyme.jl - Julia 1.7"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: 1.7
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
