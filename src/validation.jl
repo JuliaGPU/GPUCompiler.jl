@@ -16,7 +16,12 @@ function check_method(@nospecialize(job::CompilerJob))
         cache = ci_cache(job)
         mt = method_table(job)
         interp = GPUInterpreter(cache, mt, job.source.world)
-        rt = Base.return_types(job.source.f, job.source.tt, interp)[1]
+        @static if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION ≥ v"1.9.0-DEV.190"
+            # https://github.com/JuliaLang/julia/pull/44515
+            rt = Base.return_types(job.source.f, job.source.tt; interp)[1]
+        else
+            rt = Base.return_types(job.source.f, job.source.tt, interp)[1]
+        end
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
                 """Make sure your kernel function ends in `return`, `return nothing` or `nothing`.
