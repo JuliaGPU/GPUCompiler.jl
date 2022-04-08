@@ -288,30 +288,14 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
             end
         end
 
-        # inline the old IR
+        # map the arguments
         value_map = Dict{LLVM.Value, LLVM.Value}(
             param => new_args[i] for (i,param) in enumerate(parameters(f))
         )
 
-        # before D96531 (part of LLVM 13), clone_into! wants to duplicate debug metadata
-        # when the functions are part of the same module. that is invalid, because it
-        # results in desynchronized debug intrinsics (GPUCompiler#284), so remove those.
-        if LLVM.version() < v"13"
-            removals = LLVM.Instruction[]
-            for bb in blocks(f), inst in instructions(bb)
-                if inst isa LLVM.CallInst && LLVM.name(called_value(inst)) == "llvm.dbg.declare"
-                    push!(removals, inst)
-                end
-            end
-            for inst in removals
-                @assert isempty(uses(inst))
-                unsafe_delete!(LLVM.parent(inst), inst)
-            end
-            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
-        else
-            changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
-        end
-        clone_into!(new_f, f; value_map, changes)
+        value_map[f] = new_f
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
         # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
         for i in 1:length(byval)
@@ -333,8 +317,6 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
-    # XXX: there may still be metadata using this function. RAUW updates those,
-    #      but asserts on a debug build due to the updated function type.
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 
