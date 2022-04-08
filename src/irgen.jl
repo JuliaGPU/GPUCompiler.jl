@@ -492,54 +492,14 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
             end
         end
 
-        # inline the old IR
+        # map the arguments
         value_map = Dict{LLVM.Value, LLVM.Value}(
             param => new_args[i] for (i,param) in enumerate(parameters(f))
         )
 
-        # before D96531 (part of LLVM 13), clone_into! wants to duplicate debug metadata
-        # when the functions are part of the same module. that is invalid, because it
-        # results in desynchronized debug intrinsics (GPUCompiler#284), so remove those.
-        if LLVM.version() < v"13"
-            removals = LLVM.Instruction[]
-            for bb in blocks(f), inst in instructions(bb)
-                if inst isa LLVM.CallInst && LLVM.name(called_value(inst)) == "llvm.dbg.declare"
-                    push!(removals, inst)
-                end
-            end
-            for inst in removals
-                @assert isempty(uses(inst))
-                unsafe_delete!(LLVM.parent(inst), inst)
-            end
-            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
-        else
-            changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
-        end
-
-        # use a value materializer for replacing uses of the function in constants
-        # NOTE: we assume kernel functions can't be called. on-device kernel launches,
-        #       e.g. CUDA's dynamic parallelism, will pass the function to an API instead,
-        #       and we update those constant expressions arguments here.
-        function materializer(val)
-            opcodes = (LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMBitCast)
-            if val isa LLVM.ConstantExpr && opcode(val) in opcodes
-                target = operands(val)[1]
-                if target == f
-                    return if opcode(val) == LLVM.API.LLVMPtrToInt
-                        LLVM.const_ptrtoint(new_f, llvmtype(val))
-                    elseif opcode(val) == LLVM.API.LLVMAddrSpaceCast
-                        LLVM.const_addrspacecast(new_f, llvmtype(val))
-                    elseif opcode(val) == LLVM.API.LLVMBitCast
-                        LLVM.const_bitcast(new_f, llvmtype(val))
-                    end
-                end
-            end
-            return val
-        end
-
-        # we don't want module-level changes, because otherwise LLVM will clone metadata,
-        # resulting in mismatching references between `!dbg` metadata and `dbg` instructions
-        clone_into!(new_f, f; value_map, changes, materializer)
+        value_map[f] = new_f
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
         # fall through
         br!(builder, blocks(new_f)[2])
@@ -558,8 +518,6 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
-    # XXX: there may still be metadata using this function. RAUW updates those,
-    #      but asserts on a debug build due to the updated function type.
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 
@@ -654,43 +612,9 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             value_map[param] = new_param
         end
 
-        # use a value materializer for replacing uses of the function in constants
-        function materializer(val)
-            opcodes = (LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMBitCast)
-            if val isa LLVM.ConstantExpr && opcode(val) in opcodes
-                src = operands(val)[1]
-                if haskey(workmap, src)
-                    return if opcode(val) == LLVM.API.LLVMPtrToInt
-                        LLVM.const_ptrtoint(workmap[src], llvmtype(val))
-                    elseif opcode(val) == LLVM.API.LLVMAddrSpaceCast
-                        LLVM.const_addrspacecast(workmap[src], llvmtype(val))
-                    elseif opcode(val) == LLVM.API.LLVMBitCast
-                        LLVM.const_bitcast(workmap[src], llvmtype(val))
-                    end
-                end
-            end
-            return val
-        end
-
-        # before D96531 (part of LLVM 13), clone_into! wants to duplicate debug metadata
-        # when the functions are part of the same module. that is invalid, because it
-        # results in desynchronized debug intrinsics (GPUCompiler#284), so remove those.
-        if LLVM.version() < v"13"
-            removals = LLVM.Instruction[]
-            for bb in blocks(f), inst in instructions(bb)
-                if inst isa LLVM.CallInst && LLVM.name(called_value(inst)) == "llvm.dbg.declare"
-                    push!(removals, inst)
-                end
-            end
-            for inst in removals
-                @assert isempty(uses(inst))
-                unsafe_delete!(LLVM.parent(inst), inst)
-            end
-            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
-        else
-            changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
-        end
-        clone_into!(new_f, f; value_map, materializer, changes)
+        value_map[f] = new_f
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
         # we can't remove this function yet, as we might still need to rewrite any called,
         # but remove the IR already

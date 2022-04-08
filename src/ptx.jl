@@ -188,9 +188,6 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         # TODO: optimization passes to clean-up byval
 
         # add metadata annotations for the assembler to the module
-        # NOTE: we need to do this as late as possible, because otherwise the metadata (which
-        #       refers to a specific function) can get lost when cloning functions. normally
-        #       RAUW updates those references, but we can't RAUW with a changed function type.
 
         # property annotations
         annotations = Metadata[entry]
