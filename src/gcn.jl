@@ -159,6 +159,7 @@ end
 
 function fix_alloca_addrspace!(fn::LLVM.Function)
     changed = false
+    # TODO: Detect AS from DL to make this pass generic
     alloca_as = 5
     ctx = context(fn)
 
@@ -166,13 +167,29 @@ function fix_alloca_addrspace!(fn::LLVM.Function)
         for insn in instructions(bb)
             if isa(insn, LLVM.AllocaInst)
                 ty = llvmtype(insn)
-                ety = eltype(ty)
-                addrspace(ty) == alloca_as && continue
+                inner_ty = ty
+                nesting = 0
+                while true
+                    @assert inner_ty isa LLVM.PointerType
+                    ety = eltype(inner_ty)
+                    if ety isa LLVM.PointerType
+                        inner_ty = ety
+                        nesting += 1
+                    else
+                        break
+                    end
+                end
+                addrspace(inner_ty) == alloca_as && continue
 
+                new_ty = inner_ty
+                while nesting > 0
+                    new_ty = LLVM.PointerType(new_ty)
+                    nesting -= 1
+                end
                 new_insn = nothing
                 Builder(ctx) do builder
                     position!(builder, insn)
-                    _alloca = alloca!(builder, ety, name(insn))
+                    _alloca = alloca!(builder, new_ty, name(insn))
                     new_insn = addrspacecast!(builder, _alloca, ty)
                 end
                 replace_uses!(insn, new_insn)
