@@ -228,7 +228,7 @@ end
 # post-Julia optimization processing of the module
 optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
-# final processing of the IR module, right before validation and machine-code generation
+# finalization of the module, before deferred codegen and optimization
 function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
     entry_fn = LLVM.name(entry)
@@ -239,6 +239,11 @@ function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry
     end
 
     return functions(mod)[entry_fn]
+end
+
+# final processing of the IR, right before validation and machine-code generation
+function finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
+    return entry
 end
 
 add_lowering_passes!(@nospecialize(job::CompilerJob), pm::LLVM.PassManager) = return
