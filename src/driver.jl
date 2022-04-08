@@ -358,6 +358,8 @@ const __llvm_initialized = Ref(false)
             end
         end
 
+        entry = finish_ir!(job, ir, entry)
+
         # replace non-entry function definitions with a declaration
         # NOTE: we can't do this before optimization, because the definitions of called
         #       functions may affect optimization.
