@@ -505,15 +505,6 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         br!(builder, blocks(new_f)[2])
     end
 
-    # drop unused constants that may be referring to the old functions
-    # XXX: can we do this differently?
-    for use in uses(f)
-        val = user(use)
-        if val isa LLVM.ConstantExpr && isempty(uses(val))
-            LLVM.unsafe_destroy!(val)
-        end
-    end
-
     # remove the old function
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
@@ -619,17 +610,6 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # we can't remove this function yet, as we might still need to rewrite any called,
         # but remove the IR already
         empty!(f)
-    end
-
-    # drop unused constants that may be referring to the old functions
-    # XXX: can we do this differently?
-    for f in worklist
-        for use in uses(f)
-            val = user(use)
-            if val isa LLVM.ConstantExpr && isempty(uses(val))
-                LLVM.unsafe_destroy!(val)
-            end
-        end
     end
 
     # update other uses of the old function, modifying call sites to pass the state argument
