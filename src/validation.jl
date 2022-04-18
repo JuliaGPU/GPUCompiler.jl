@@ -6,10 +6,8 @@ function check_method(@nospecialize(job::CompilerJob))
     isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
-    u = Base.unwrap_unionall(job.source.tt)
-    tt = Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+    tt = typed_signature(job)
 
-    world = Base.get_world_counter()
     ms = Method[]
     for m in Base._methods_by_ftype(tt, -1, job.source.world)::Vector
         m = m::Core.MethodMatch
@@ -38,7 +36,7 @@ function check_method(@nospecialize(job::CompilerJob))
             push!(rts, something(ty, Any))
         end
 
-        rt = rts[1]
+        rt = only(rts)
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
                 """Make sure your kernel function ends in `return`, `return nothing` or `nothing`.
@@ -79,8 +77,7 @@ function check_invocation(@nospecialize(job::CompilerJob))
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
 
-    u = Base.unwrap_unionall(job.source.tt)
-    sig = Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+    sig = typed_signature(job)
 
     for (arg_i,dt) in enumerate(sig.parameters)
         isghosttype(dt) && continue
