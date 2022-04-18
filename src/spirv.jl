@@ -239,7 +239,8 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         else
             ft
         end
-        args = classify_arguments(job, orig_ft)
+        source_sig = Base.signature_type(job.source.f, job.source.tt)::Type
+        args = classify_arguments(source_sig, orig_ft)
         filter!(args) do arg
             arg.cc != GHOST
         end
