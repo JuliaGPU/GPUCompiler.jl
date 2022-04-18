@@ -78,7 +78,10 @@ end
 function check_invocation(@nospecialize(job::CompilerJob))
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
-    sig = Base.signature_type(job.source.f, job.source.tt)::Type
+
+    u = Base.unwrap_unionall(job.source.tt)
+    sig = Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+
     for (arg_i,dt) in enumerate(sig.parameters)
         isghosttype(dt) && continue
         Core.Compiler.isconstType(dt) && continue

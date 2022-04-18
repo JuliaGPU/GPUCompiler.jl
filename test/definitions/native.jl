@@ -18,8 +18,7 @@ end
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = method_table
 
-function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false, entry_abi=:specfunc, kwargs...)
-    f_type = isa(func, Type) ? Type{func} : typeof(func)
+function native_job(@nospecialize(f_type), @nospecialize(types); kernel::Bool=false, entry_abi=:specfunc, kwargs...)
     source = FunctionSpec(f_type, Base.to_tuple_type(types), kernel)
     target = NativeCompilerTarget(always_inline=true)
     params = TestCompilerParams()
@@ -251,7 +250,7 @@ module LazyCodegen
 
     import GPUCompiler: deferred_codegen_jobs
     @generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
-        job, _ = native_job(f, tt)
+        job, _ = native_job(typeof(f), tt)
 
         addr = get_trampoline(job)
         trampoline = pointer(addr)
