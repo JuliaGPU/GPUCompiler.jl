@@ -6,22 +6,39 @@ function check_method(@nospecialize(job::CompilerJob))
     isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
-    ms = Base.methods(job.source.f, job.source.tt)
+    u = Base.unwrap_unionall(job.source.tt)
+    tt = Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+
+    world = Base.get_world_counter()
+    ms = Method[]
+    for m in Base._methods_by_ftype(tt, -1, job.source.world)::Vector
+        m = m::Core.MethodMatch
+        push!(ms, m.method)
+    end
+
     isempty(ms)   && throw(KernelError(job, "no method found"))
     length(ms)!=1 && throw(KernelError(job, "no unique matching method"))
     m = first(ms)
 
     # kernels can't return values
     if job.source.kernel
+        rts = Type[]
+
         cache = ci_cache(job)
         mt = method_table(job)
         interp = GPUInterpreter(cache, mt, job.source.world)
-        @static if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION ≥ v"1.9.0-DEV.190"
-            # https://github.com/JuliaLang/julia/pull/44515
-            rt = Base.return_types(job.source.f, job.source.tt; interp)[1]
-        else
-            rt = Base.return_types(job.source.f, job.source.tt, interp)[1]
+
+        for m in Base._methods_by_ftype(tt, -1, job.source.world)::Vector
+            m = m::Core.MethodMatch
+
+            cache = ci_cache(job)
+            mt = method_table(job)
+            interp = GPUInterpreter(cache, mt, job.source.world)
+            ty = Core.Compiler.typeinf_type(interp, m.method, m.spec_types, m.sparams)
+            push!(rts, something(ty, Any))
         end
+
+        rt = rts[1]
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
                 """Make sure your kernel function ends in `return`, `return nothing` or `nothing`.

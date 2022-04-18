@@ -112,7 +112,7 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
 
     # the compiler job passed into here is identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
-    source = FunctionSpec(identity, Tuple{Nothing}, false, nothing, job.source.world_age)
+    source = FunctionSpec(typeof(identity), Tuple{Nothing}, false, nothing, job.source.world_age)
     job = CompilerJob(job.target, source, job.params)
 
     for method in values(Runtime.methods)
@@ -122,7 +122,7 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
         else
             method.def
         end
-        emit_function!(mod, job, def, method; ctx)
+        emit_function!(mod, job, typeof(def), method; ctx)
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again

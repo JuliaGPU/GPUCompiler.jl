@@ -8,7 +8,7 @@ end
 # create a native test compiler, and generate reflection methods for it
 
 function bpf_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false, kwargs...)
-    source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
+    source = FunctionSpec(typeof(func), Base.to_tuple_type(types), kernel)
     target = BPFCompilerTarget()
     params = TestCompilerParams()
     CompilerJob(target, source, params), kwargs

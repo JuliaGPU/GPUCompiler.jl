@@ -147,11 +147,17 @@ end
     @timeit_debug to "Julia front-end" begin
 
         # get the method instance
-        meth = which(job.source.f, job.source.tt)
-        sig = Base.signature_type(job.source.f, job.source.tt)::Type
+        u = Base.unwrap_unionall(job.source.tt)
+        sig = Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+        meth = which(sig)
+
         (ti, env) = ccall(:jl_type_intersection_with_env, Any,
                           (Any, Any), sig, meth.sig)::Core.SimpleVector
+
+
         meth = Base.func_for_method_checked(meth, ti, env)
+
+
         method_instance = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
                       (Any, Any, Any, UInt), meth, ti, env, job.source.world)
 

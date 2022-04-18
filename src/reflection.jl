@@ -58,7 +58,11 @@ function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kw
         descend_code_typed(job.source.f, job.source.tt; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
-        InteractiveUtils.code_typed(job.source.f, job.source.tt; interp, kwargs...)
+        # InteractiveUtils.code_typed(job.source.f, job.source.tt; interp, kwargs...)
+        # tt = Tuple{job.source.f, job.source.tt...}
+        u = Base.unwrap_unionall(job.source.tt)
+        tt = Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+        Base.code_typed_by_type(tt; interp, kwargs...)
     else
         InteractiveUtils.code_typed(job.source.f, job.source.tt; kwargs...)
     end
