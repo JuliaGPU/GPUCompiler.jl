@@ -147,8 +147,7 @@ end
     @timeit_debug to "Julia front-end" begin
 
         # get the method instance
-        u = Base.unwrap_unionall(job.source.tt)
-        sig = Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+        sig = typed_signature(job)
         meth = which(sig)
 
         (ti, env) = ccall(:jl_type_intersection_with_env, Any,
