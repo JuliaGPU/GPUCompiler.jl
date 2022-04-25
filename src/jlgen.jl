@@ -363,9 +363,18 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     # generate IR
     GC.@preserve lookup_cb begin
         native_code = if VERSION >= v"1.9.0-DEV.115"
+            mod = Module(;ctx)
+            # configure the module
+            triple!(mod, llvm_triple(job.target))
+            if julia_datalayout(job.target) !== nothing
+                datalayout!(mod, julia_datalayout(job.target))
+            end
+
+
+            ts_mod = ThreadSafeModule(mod; ctx)
             ccall(:jl_create_native, Ptr{Cvoid},
-                  (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
-                  [method_instance], ctx, Ref(params), #=extern policy=# 1)
+                  (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint),
+                  [method_instance], ts_mod, Ref(params), #=extern policy=# 1)
         elseif VERSION >= v"1.8.0-DEV.661"
             @assert ctx == JuliaContext()
             ccall(:jl_create_native, Ptr{Cvoid},
@@ -378,10 +387,14 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
                   [method_instance], params, #=extern policy=# 1)
         end
         @assert native_code != C_NULL
-        llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
+        llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMOrcThreadSafeModuleRef,
                              (Ptr{Cvoid},), native_code)
         @assert llvm_mod_ref != C_NULL
-        llvm_mod = LLVM.Module(llvm_mod_ref)
+        llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref)
+        llvm_mod = nothing
+        llvm_ts_mod() do mod
+            llvm_mod = mod
+        end
     end
     if !(Sys.ARCH == :x86 || Sys.ARCH == :x86_64)
         cache_gbl = nothing
@@ -424,12 +437,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
             #       removed or renamed during optimization, so we store their name instead.
             compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
         end
-    end
-
-    # configure the module
-    triple!(llvm_mod, llvm_triple(job.target))
-    if julia_datalayout(job.target) !== nothing
-        datalayout!(llvm_mod, julia_datalayout(job.target))
     end
 
     return llvm_mod, compiled

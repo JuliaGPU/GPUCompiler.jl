@@ -62,40 +62,6 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
     return entry
 end
 
-function optimize!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
-    # we have to fake our target early in the pipeline because Julia's
-    # optimization passes weren't designed for a non-0 stack addrspace, and the
-    # AMDGPU target is very strict about which addrspaces are permitted for
-    # various code patterns
-    triple!(mod, llvm_triple(NativeCompilerTarget()))
-    datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
-
-    invoke(optimize!, Tuple{CompilerJob, LLVM.Module}, job, mod)
-end
-
-# We need to do alloca rewriting (from 0 to 5) after Julia's optimization
-# passes because of two reasons:
-# 1. Debug builds call the target verifier first, which would trip if AMDGPU
-#    was the target at that time
-# 2. We don't want any chance of messing with Julia's optimizations, since they
-#    eliminate target-unsafe IR patterns
-function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
-    # revert back to the AMDGPU target
-    triple!(mod, llvm_triple(job.target))
-    datalayout!(mod, julia_datalayout(job.target))
-
-    tm = llvm_machine(job.target)
-    ModulePassManager() do pm
-        add_library_info!(pm, triple(mod))
-        add_transform_info!(pm, tm)
-
-        add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
-
-        run!(pm, mod)
-    end
-end
-
-
 ## LLVM passes
 
 function lower_throw_extra!(mod::LLVM.Module)

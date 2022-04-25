@@ -58,7 +58,7 @@ end
 function JuliaContext()
     if VERSION >= v"1.9.0-DEV.115"
         # Julia 1.9 knows how to deal with arbitrary contexts
-        Context()
+        ThreadSafeContext()
     else
         # earlier versions of Julia claim so, but actually use a global context
         isboxed_ref = Ref{Bool}()
@@ -69,7 +69,7 @@ function JuliaContext()
 end
 function JuliaContext(f)
     if VERSION >= v"1.9.0-DEV.115"
-        Context(f)
+        ThreadSafeContext(f)
     else
         f(JuliaContext())
         # we cannot dispose of the global unique context
