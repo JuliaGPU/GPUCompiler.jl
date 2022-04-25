@@ -2,41 +2,36 @@
 
 export InvalidIRError
 
+function get_method_matches(@nospecialize(job::CompilerJob))
+    tt = typed_signature(job)
+
+    ms = Core.MethodMatch[]
+    for m in Base._methods_by_ftype(tt, -1, job.source.world)::Vector
+        m = m::Core.MethodMatch
+        push!(ms, m)
+    end
+
+    return ms
+end
+
+
 function check_method(@nospecialize(job::CompilerJob))
     isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
-    tt = typed_signature(job)
-
-    ms = Method[]
-    for m in Base._methods_by_ftype(tt, -1, job.source.world)::Vector
-        m = m::Core.MethodMatch
-        push!(ms, m.method)
-    end
-
+    ms = get_method_matches(job)
     isempty(ms)   && throw(KernelError(job, "no method found"))
     length(ms)!=1 && throw(KernelError(job, "no unique matching method"))
-    m = first(ms)
 
     # kernels can't return values
     if job.source.kernel
-        rts = Type[]
-
         cache = ci_cache(job)
         mt = method_table(job)
         interp = GPUInterpreter(cache, mt, job.source.world)
+        m = only(ms)
+        ty = Core.Compiler.typeinf_type(interp, m.method, m.spec_types, m.sparams)
+        rt = something(ty, Any)
 
-        for m in Base._methods_by_ftype(tt, -1, job.source.world)::Vector
-            m = m::Core.MethodMatch
-
-            cache = ci_cache(job)
-            mt = method_table(job)
-            interp = GPUInterpreter(cache, mt, job.source.world)
-            ty = Core.Compiler.typeinf_type(interp, m.method, m.spec_types, m.sparams)
-            push!(rts, something(ty, Any))
-        end
-
-        rt = only(rts)
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
                 """Make sure your kernel function ends in `return`, `return nothing` or `nothing`.
