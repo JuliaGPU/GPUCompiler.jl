@@ -1,7 +1,7 @@
 # LLVM IR generation
 
 function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance;
-               ctx::Context)
+               ctx::ThreadSafeContext)
     mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance; ctx)
     if job.entry_abi === :specfunc
         entry_fn = compiled[method_instance].specfunc
@@ -13,7 +13,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     @timeit_debug to "clean-up" begin
         for llvmf in functions(mod)
             # only occurs in debug builds
-            delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0; ctx))
+            delete!(function_attributes(llvmf), EnumAttribute("sspstrong", 0; ctx=context(ctx)))
 
             if Sys.iswindows()
                 personality!(llvmf, nothing)

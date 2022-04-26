@@ -33,7 +33,7 @@ Other keyword arguments can be found in the documentation of [`cufunction`](@ref
 function compile(target::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true,
                  optimize::Bool=true, strip::Bool=false, validate::Bool=true,
-                 only_entry::Bool=false, ctx::Union{Context,Nothing}=nothing)
+                 only_entry::Bool=false, ctx::Union{ThreadSafeContext,Nothing}=nothing)
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
@@ -80,7 +80,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                  strip::Bool=false, validate::Bool=true, only_entry::Bool=false,
                  parent_job::Union{Nothing, CompilerJob}=nothing,
-                 ctx::Union{Context,Nothing}=nothing)
+                 ctx::Union{ThreadSafeContext,Nothing}=nothing)
     ## Julia IR
 
     mi, mi_meta = emit_julia(job)
@@ -191,7 +191,7 @@ const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance);
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                           only_entry::Bool=false, ctx::Context)
+                           only_entry::Bool=false, ctx::ThreadSafeContext)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()

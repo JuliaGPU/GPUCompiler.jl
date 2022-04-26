@@ -326,7 +326,7 @@ function _lookup_fun(mi, min_world, max_world)
 end
 
 function compile_method_instance(@nospecialize(job::CompilerJob),
-                                 method_instance::MethodInstance; ctx::Context)
+                                 method_instance::MethodInstance; ctx::ThreadSafeContext)
     # populate the cache
     cache = ci_cache(job)
     mt = method_table(job)
@@ -363,7 +363,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     # generate IR
     GC.@preserve lookup_cb begin
         native_code = if VERSION >= v"1.9.0-DEV.115"
-            mod = Module(;ctx)
+            mod = LLVM.Module("start";ctx=context(ctx))
             # configure the module
             triple!(mod, llvm_triple(job.target))
             if julia_datalayout(job.target) !== nothing

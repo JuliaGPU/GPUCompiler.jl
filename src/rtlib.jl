@@ -75,7 +75,7 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, @nospecialize(job::CompilerJob), f, method; ctx::Context)
+function emit_function!(mod, @nospecialize(job::CompilerJob), f, method; ctx::ThreadSafeContext)
     tt = Base.to_tuple_type(method.types)
     new_mod, meta = codegen(:llvm, similar(job, FunctionSpec(f, tt, #=kernel=# false));
                             optimize=false, libraries=false, ctx)
@@ -108,7 +108,7 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method; ctx::Co
 end
 
 function build_runtime(@nospecialize(job::CompilerJob); ctx)
-    mod = LLVM.Module("GPUCompiler run-time library"; ctx)
+    mod = LLVM.Module("GPUCompiler run-time library"; ctx=context(ctx))
 
     # the compiler job passed into here is identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
@@ -165,7 +165,7 @@ const runtime_lock = ReentrantLock()
         lib = try
             if ispath(path)
                 open(path) do io
-                    parse(LLVM.Module, read(io); ctx)
+                    parse(LLVM.Module, read(io); ctx=context(ctx))
                 end
             end
         catch ex
