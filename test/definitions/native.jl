@@ -249,8 +249,8 @@ module LazyCodegen
     end
 
     import GPUCompiler: deferred_codegen_jobs
-    @generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
-        job, _ = native_job(typeof(f), tt)
+    @generated function deferred_codegen(f::F, ::Val{tt}) where {F,tt}
+        job, _ = native_job(F, tt)
 
         addr = get_trampoline(job)
         trampoline = pointer(addr)
@@ -330,7 +330,7 @@ module LazyCodegen
     @inline function call_delayed(f::F, args...) where F
         tt = Tuple{map(Core.Typeof, args)...}
         rt = Core.Compiler.return_type(f, tt)
-        ptr = deferred_codegen(Val(f), Val(tt))
+        ptr = deferred_codegen(f, Val(tt))
         abi_call(ptr, rt, tt, args...)
     end
 end
