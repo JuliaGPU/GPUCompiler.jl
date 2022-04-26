@@ -562,11 +562,22 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # iteratively discover functions that use the intrinsic or any function calling it
         worklist_length = length(worklist)
         additions = LLVM.Function[]
+        function check_user(val)
+            if val isa Instruction
+                bb = LLVM.parent(val)
+                new_f = LLVM.parent(bb)
+                in(new_f, worklist) || push!(additions, new_f)
+            elseif val isa ConstantExpr
+                # constant expressions don't have a parent; we need to look up their uses
+                for use in uses(val)
+                    check_user(user(use))
+                end
+            else
+                error("Don't know how to check uses of $val. Please file an issue.")
+            end
+        end
         for f in worklist, use in uses(f)
-            inst = user(use)::Instruction
-            bb = LLVM.parent(inst)
-            new_f = LLVM.parent(bb)
-            in(new_f, worklist) || push!(additions, new_f)
+            check_user(user(use))
         end
         for f in additions
             push!(worklist, f)
@@ -604,6 +615,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         end
 
         value_map[f] = new_f
+        # XXX: do we want this? we're adding a new arg, after all
         clone_into!(new_f, f; value_map,
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
@@ -613,6 +625,8 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     end
 
     # update other uses of the old function, modifying call sites to pass the state argument
+    # TODO: why isn't this covered by the value mapper above? because we need to add an arg!
+    # XXX: do this with a value mapper, and a materialize (?) to rewrite calls.
     function rewrite_uses!(f, new_f)
         # update uses
         Builder(ctx) do builder
@@ -636,6 +650,16 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
                     unsafe_delete!(LLVM.parent(val), val)
+                elseif val isa ConstantExpr && opcode(val) == LLVM.API.LLVMPtrToInt
+                    # XXX: are these safe? we're not adding an arg
+                    # XXX: in addition, won't this RAUW assert in debug mode?
+                    replace_uses!(val, const_ptrtoint(new_f, llvmtype(val)))
+                    LLVM.unsafe_destroy!(val)
+                elseif val isa ConstantExpr && opcode(val) == LLVM.API.LLVMBitCast
+                    # XXX: are these safe? we're not adding an arg
+                    # XXX: in addition, won't this RAUW assert in debug mode?
+                    replace_uses!(val, const_bitcast(new_f, llvmtype(val)))
+                    LLVM.unsafe_destroy!(val)
                 else
                     error("Cannot rewrite unknown use of function: $val")
                 end
