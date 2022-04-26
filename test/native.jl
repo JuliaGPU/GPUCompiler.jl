@@ -357,6 +357,13 @@ end
     throws(arr, i) = arr[i]
     @test call_delayed(throws, [1], 1) == 1
     @test_throws BoundsError call_delayed(throws, [1], 0)
+
+    struct Closure
+        x::Integer
+    end
+    (c::Closure)(b) = c.x+b
+
+    @test call_delayed(Closure(3), 5) == 8
 end
 
 ############################################################################################
