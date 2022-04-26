@@ -265,7 +265,7 @@ module LazyCodegen
         end
     end
 
-    @generated function abi_call(f::Ptr{Cvoid}, rt::Type{RT}, tt::Type{T}, args::Vararg{Any, N}) where {T, RT, N}
+    @generated function abi_call(f::Ptr{Cvoid}, rt::Type{RT}, tt::Type{T}, func::F, args::Vararg{Any, N}) where {T, RT, F, N}
         argtt    = tt.parameters[1]
         rettype  = rt.parameters[1]
         argtypes = DataType[argtt.parameters...]
@@ -275,6 +275,18 @@ module LazyCodegen
 
         before = :()
         after = :(ret)
+
+        if !isghosttype(F) && !Core.Compiler.isconstType(F)
+            isboxed = GPUCompiler.deserves_argbox(F)
+            argexpr = :(func)
+            if isboxed
+                push!(ccall_types, Any)
+            else
+                push!(ccall_types, F)
+            end
+            push!(argexprs, argexpr)
+        end
+
 
         # Note this follows: emit_call_specfun_other
         JuliaContext() do ctx
@@ -331,6 +343,6 @@ module LazyCodegen
         tt = Tuple{map(Core.Typeof, args)...}
         rt = Core.Compiler.return_type(f, tt)
         ptr = deferred_codegen(f, Val(tt))
-        abi_call(ptr, rt, tt, args...)
+        abi_call(ptr, rt, tt, f, args...)
     end
 end
