@@ -47,6 +47,11 @@ end
 code_lowered(@nospecialize(job::CompilerJob); kwargs...) =
     InteractiveUtils.code_lowered(job.source.f, job.source.tt; kwargs...)
 
+@inline function typed_signature(@nospecialize(job::CompilerJob))
+    u = Base.unwrap_unionall(job.source.tt)
+    return Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+end
+
 function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
     if interactive
@@ -58,9 +63,9 @@ function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kw
         descend_code_typed(job.source.f, job.source.tt; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
-        InteractiveUtils.code_typed(job.source.f, job.source.tt; interp, kwargs...)
+        Base.code_typed_by_type(typed_signature(job); interp, kwargs...)
     else
-        InteractiveUtils.code_typed(job.source.f, job.source.tt; kwargs...)
+        Base.code_typed_by_type(typed_signature(job); kwargs...)
     end
 end
 

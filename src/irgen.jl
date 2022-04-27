@@ -302,7 +302,8 @@ end
 end
 
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
-    source_sig = Base.signature_type(job.source.f, job.source.tt)::Type
+    source_sig = typed_signature(job)
+
     source_types = [source_sig.parameters...]
 
     codegen_types = parameters(codegen_ft)

@@ -62,7 +62,7 @@ export FunctionSpec
 # what we'll be compiling
 
 struct FunctionSpec{F,TT}
-    f::F
+    f::Type{F}
     tt::Type{TT}
     kernel::Bool
     name::Union{Nothing,String}
@@ -85,8 +85,11 @@ end
 #      world age intersection when querying the compilation cache. once we do, callers
 #      should probably provide the world age of the calling code (!= the current world age)
 #      so that querying the cache from, e.g. `cufuncton` is a fully static operation.
+FunctionSpec(f::Type, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
+    FunctionSpec{f,tt}(f, tt, kernel, name, world_age)
+
 FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
-    FunctionSpec{typeof(f),tt}(f, tt, kernel, name, world_age)
+    FunctionSpec(Core.Typeof(f), tt, kernel, name, world_age)
 
 function Base.getproperty(@nospecialize(spec::FunctionSpec), sym::Symbol)
     if sym == :world

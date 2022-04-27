@@ -83,11 +83,10 @@ end
     kernel() = return
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}))
-    @test occursin(r"@.*kernel.+\(\)", ir)
+    @test any(occursin(r"@.*kernel.+\(\)", a) for a in split(ir, "\n"))
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}; kernel=true))
-    @test occursin(r"@.*kernel.+\(\[1 x i64\] %state\)", ir)
-
+    @test any(occursin(r"@.*kernel.+\(\[1 x i64\] %state\)", a) for a in split(ir, "\n"))
 
     # state should only passed to device functions that use it
 
@@ -107,16 +106,16 @@ end
                                   kernel=true, dump_module=true))
 
     # kernel should take state argument before all else
-    @test occursin(r"@.*kernel.+\(\[1 x i64\] %state", ir)
+    @test any(occursin(r"@.*kernel.+\(\[1 x i64\] %state", a) for a in split(ir, "\n"))
 
     # child1 doesn't use the state
-    @test occursin(r"@.*child1.+\(i64", ir)
+    @test any(occursin(r"@.*child1.+\(i64", a) for a in split(ir, "\n"))
 
     # child2 does
-    @test occursin(r"@.*child2.+\(\[1 x i64\] %state", ir)
+    @test any(occursin(r"@.*child2.+\(\[1 x i64\] %state", a) for a in split(ir, "\n"))
 
     # can't have the unlowered intrinsic
-    @test !occursin("julia.gpu.state_getter", ir)
+    @test !any(occursin("julia.gpu.state_getter", a) for a in split(ir, "\n"))
 end
 end
 

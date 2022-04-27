@@ -11,6 +11,9 @@ include("definitions/native.jl")
 
         (CI, rt) = native_code_typed(MyCallable(), (Int, Int), kernel=false)[1]
         @test CI.slottypes[1] == Core.Compiler.Const(MyCallable())
+
+        (CI, rt) = native_code_typed(typeof(MyCallable()), (Int, Int), kernel=false)[1]
+        @test CI.slottypes[1] == Core.Compiler.Const(MyCallable())
     end
 
     @testset "Compilation database" begin
@@ -339,11 +342,7 @@ end
 
     # Test ABI removal
     ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
-    if VERSION < v"1.8-" || v"1.8-beta2" <= VERSION < v"1.9-" || VERSION ≥ v"1.9.0-DEV.190"
-        @test !occursin("alloca", ir)
-    else
-        @test_broken !occursin("alloca", ir)
-    end
+    @test !occursin("alloca", ir)
 
     ghostly_identity(x, y) = y
     @test call_delayed(ghostly_identity, nothing, 1) == 1
@@ -358,6 +357,20 @@ end
     throws(arr, i) = arr[i]
     @test call_delayed(throws, [1], 1) == 1
     @test_throws BoundsError call_delayed(throws, [1], 0)
+
+    struct Closure
+        x::Int64
+    end
+    (c::Closure)(b) = c.x+b
+
+    @test call_delayed(Closure(3), 5) == 8
+
+    struct Closure2
+        x::Integer
+    end
+    (c::Closure2)(b) = c.x+b
+
+    @test call_delayed(Closure2(3), 5) == 8
 end
 
 ############################################################################################

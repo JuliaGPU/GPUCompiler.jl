@@ -18,8 +18,8 @@ end
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = method_table
 
-function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false, entry_abi=:specfunc, kwargs...)
-    source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
+function native_job(@nospecialize(f_type), @nospecialize(types); kernel::Bool=false, entry_abi=:specfunc, kwargs...)
+    source = FunctionSpec(f_type, Base.to_tuple_type(types), kernel)
     target = NativeCompilerTarget(always_inline=true)
     params = TestCompilerParams()
     CompilerJob(target, source, params, entry_abi), kwargs
@@ -249,8 +249,8 @@ module LazyCodegen
     end
 
     import GPUCompiler: deferred_codegen_jobs
-    @generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
-        job, _ = native_job(f, tt)
+    @generated function deferred_codegen(f::F, ::Val{tt}) where {F,tt}
+        job, _ = native_job(F, tt)
 
         addr = get_trampoline(job)
         trampoline = pointer(addr)
@@ -265,7 +265,7 @@ module LazyCodegen
         end
     end
 
-    @generated function abi_call(f::Ptr{Cvoid}, rt::Type{RT}, tt::Type{T}, args::Vararg{Any, N}) where {T, RT, N}
+    @generated function abi_call(f::Ptr{Cvoid}, rt::Type{RT}, tt::Type{T}, func::F, args::Vararg{Any, N}) where {T, RT, F, N}
         argtt    = tt.parameters[1]
         rettype  = rt.parameters[1]
         argtypes = DataType[argtt.parameters...]
@@ -276,8 +276,27 @@ module LazyCodegen
         before = :()
         after = :(ret)
 
+
         # Note this follows: emit_call_specfun_other
         JuliaContext() do ctx
+
+            if !isghosttype(F) && !Core.Compiler.isconstType(F)
+                isboxed = GPUCompiler.deserves_argbox(F)
+                argexpr = :(func)
+                if isboxed
+                    push!(ccall_types, Any)
+                else
+                    et = convert(LLVMType, func; ctx)
+                    if isa(et, LLVM.SequentialType) # et->isAggregateType
+                        push!(ccall_types, Ptr{F})
+                        argexpr = Expr(:call, GlobalRef(Base, :Ref), argexpr)
+                    else
+                        push!(ccall_types, F)
+                    end
+                end
+                push!(argexprs, argexpr)
+            end
+
             T_jlvalue = LLVM.StructType(LLVMType[],;ctx)
             T_prjlvalue = LLVM.PointerType(T_jlvalue, #= AddressSpace::Tracked =# 10)
 
@@ -330,7 +349,7 @@ module LazyCodegen
     @inline function call_delayed(f::F, args...) where F
         tt = Tuple{map(Core.Typeof, args)...}
         rt = Core.Compiler.return_type(f, tt)
-        ptr = deferred_codegen(Val(f), Val(tt))
-        abi_call(ptr, rt, tt, args...)
+        ptr = deferred_codegen(f, Val(tt))
+        abi_call(ptr, rt, tt, f, args...)
     end
 end
