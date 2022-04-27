@@ -276,20 +276,27 @@ module LazyCodegen
         before = :()
         after = :(ret)
 
-        if !isghosttype(F) && !Core.Compiler.isconstType(F)
-            isboxed = GPUCompiler.deserves_argbox(F)
-            argexpr = :(func)
-            if isboxed
-                push!(ccall_types, Any)
-            else
-                push!(ccall_types, F)
-            end
-            push!(argexprs, argexpr)
-        end
-
 
         # Note this follows: emit_call_specfun_other
         JuliaContext() do ctx
+
+            if !isghosttype(F) && !Core.Compiler.isconstType(F)
+                isboxed = GPUCompiler.deserves_argbox(F)
+                argexpr = :(func)
+                if isboxed
+                    push!(ccall_types, Any)
+                else
+                    et = convert(LLVMType, func; ctx)
+                    if isa(et, LLVM.SequentialType) # et->isAggregateType
+                        push!(ccall_types, Ptr{F})
+                        argexpr = Expr(:call, GlobalRef(Base, :Ref), argexpr)
+                    else
+                        push!(ccall_types, F)
+                    end
+                end
+                push!(argexprs, argexpr)
+            end
+
             T_jlvalue = LLVM.StructType(LLVMType[],;ctx)
             T_prjlvalue = LLVM.PointerType(T_jlvalue, #= AddressSpace::Tracked =# 10)
 

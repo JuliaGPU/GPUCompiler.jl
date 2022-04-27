@@ -359,11 +359,18 @@ end
     @test_throws BoundsError call_delayed(throws, [1], 0)
 
     struct Closure
-        x::Integer
+        x::Int64
     end
     (c::Closure)(b) = c.x+b
 
     @test call_delayed(Closure(3), 5) == 8
+
+    struct Closure2
+        x::Integer
+    end
+    (c::Closure2)(b) = c.x+b
+
+    @test call_delayed(Closure2(3), 5) == 8
 end
 
 ############################################################################################
