@@ -236,8 +236,8 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             if !valid_function_pointer(job, ptr)
                 # look it up in the Julia JIT cache
                 frames = ccall(:jl_lookup_code_address, Any, (Ptr{Cvoid}, Cint,), ptr, 0)
-                if length(frames) >= 1
-                    @compiler_assert length(frames) == 1 job frames=frames
+                # XXX: what if multiple frames are returned? rare, but happens
+                if length(frames) == 1
                     fn, file, line, linfo, fromC, inlined = last(frames)
                     push!(errors, (POINTER_FUNCTION, bt, fn))
                 else

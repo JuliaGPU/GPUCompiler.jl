@@ -563,11 +563,22 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # iteratively discover functions that use the intrinsic or any function calling it
         worklist_length = length(worklist)
         additions = LLVM.Function[]
+        function check_user(val)
+            if val isa Instruction
+                bb = LLVM.parent(val)
+                new_f = LLVM.parent(bb)
+                in(new_f, worklist) || push!(additions, new_f)
+            elseif val isa ConstantExpr
+                # constant expressions don't have a parent; we need to look up their uses
+                for use in uses(val)
+                    check_user(user(use))
+                end
+            else
+                error("Don't know how to check uses of $val. Please file an issue.")
+            end
+        end
         for f in worklist, use in uses(f)
-            inst = user(use)::Instruction
-            bb = LLVM.parent(inst)
-            new_f = LLVM.parent(bb)
-            in(new_f, worklist) || push!(additions, new_f)
+            check_user(user(use))
         end
         for f in additions
             push!(worklist, f)
@@ -595,7 +606,39 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         workmap[f] = new_f
     end
 
-    # clone and rewrite the function bodies
+    # clone and rewrite the function bodies, replacing uses of the old stateless function
+    # with the newly created definition that includes the state argument.
+    #
+    # most uses are rewritten by LLVM by putting the functions in the value map.
+    # a separate value materializer is used to recreate constant expressions.
+    #
+    # note that this only _replaces_ the uses of these functions, we'll still need to
+    # _correct_ the uses (i.e. actually add the state argument) afterwards.
+    function materializer(val)
+        if val isa ConstantExpr
+            if opcode(val) == LLVM.API.LLVMBitCast
+                target = operands(val)[1]
+                if target isa LLVM.Function && haskey(workmap, target)
+                    # the function is being bitcasted to a different function type.
+                    # we need to mutate that function type to include the state argument,
+                    # or we'd be invoking the original function in an invalid way.
+                    #
+                    # XXX: ptrtoint/inttoptr pairs can also lose the state argument...
+                    #      is all this even sound?
+                    typ = llvmtype(val)::LLVM.PointerType
+                    ft = eltype(typ)::LLVM.FunctionType
+                    new_ft = LLVM.FunctionType(return_type(ft), [T_state, parameters(ft)...])
+                    return const_bitcast(workmap[target], LLVM.PointerType(new_ft, addrspace(typ)))
+                end
+            elseif opcode(val) == LLVM.API.LLVMPtrToInt
+                target = operands(val)[1]
+                if target isa LLVM.Function && haskey(workmap, target)
+                    return const_ptrtoint(workmap[target], llvmtype(val))
+                end
+            end
+        end
+        return val
+    end
     for (f, new_f) in workmap
         # use a value mapper for rewriting function arguments
         value_map = Dict{LLVM.Value, LLVM.Value}()
@@ -604,30 +647,54 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             value_map[param] = new_param
         end
 
-        value_map[f] = new_f
-        clone_into!(new_f, f; value_map,
+        # rewrite references to the old function
+        merge!(value_map, workmap)
+
+        clone_into!(new_f, f; value_map, materializer,
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
-        # we can't remove this function yet, as we might still need to rewrite any called,
-        # but remove the IR already
+        # remove the function IR so that we won't have any uses left after this pass.
         empty!(f)
     end
 
-    # update other uses of the old function, modifying call sites to pass the state argument
-    function rewrite_uses!(f, new_f)
+    # ensure the old (stateless) functions don't have uses anymore, and remove them
+    for f in keys(workmap)
+        for use in uses(f)
+            val = user(use)
+            if val isa ConstantExpr
+                # XXX: shouldn't clone_into! remove unused CEs?
+                isempty(uses(val)) || error("old function still has uses (via a constant expr)")
+                LLVM.unsafe_destroy!(val)
+            else
+                error("old function still has uses")
+            end
+        end
+        unsafe_delete!(mod, f)
+    end
+
+    # update uses of the new function, modifying call sites to include the kernel state
+    function rewrite_uses!(f)
         # update uses
         Builder(ctx) do builder
             for use in uses(f)
                 val = user(use)
-                if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
-                    # NOTE: we unconditionally add the state argument, even if there's no uses,
-                    #       assuming we'll perform dead arg elimination during optimization.
+                if val isa LLVM.CallBase && called_value(val) == f
+                    # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
+                    #       as those have a fixed argument list, passing actual arguments
+                    #       in an array of objects. that doesn't matter, for now, since
+                    #       GPU back-ends don't support such calls anyhow. but if we ever
+                    #       want to support kernel state passing on more capable back-ends,
+                    #       we'll need to update the argument array instead.
+                    if callconv(val) == 37 || callconv(val) == 38
+                        # TODO: update for LLVM 15 when JuliaLang/julia#45088 is merged.
+                        continue
+                    end
 
                     # forward the state argument
                     position!(builder, val)
                     state = call!(builder, state_intr, Value[], "state")
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, new_f, [state, arguments(val)...], operand_bundles(val))
+                        call!(builder, f, [state, arguments(val)...], operand_bundles(val))
                     else
                         # TODO: invoke and callbr
                         error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
@@ -637,16 +704,19 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
                     unsafe_delete!(LLVM.parent(val), val)
+                elseif val isa LLVM.CallBase
+                    # the function is being passed as an argument, which we'll just permit,
+                    # because we expect to have rewritten the call down the line separately.
+                elseif val isa ConstantExpr
+                    rewrite_uses!(val)
                 else
                     error("Cannot rewrite unknown use of function: $val")
                 end
             end
         end
     end
-    for (f, new_f) in workmap
-        rewrite_uses!(f, new_f)
-        @assert isempty(uses(f))
-        unsafe_delete!(mod, f)
+    for f in values(workmap)
+        rewrite_uses!(f)
     end
 
     return true
