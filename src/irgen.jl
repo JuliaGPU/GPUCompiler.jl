@@ -678,6 +678,17 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             for use in uses(f)
                 val = user(use)
                 if val isa LLVM.CallBase && called_value(val) == f
+                    # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
+                    #       as those have a fixed argument list, passing actual arguments
+                    #       in an array of objects. that doesn't matter, for now, since
+                    #       GPU back-ends don't support such calls anyhow. but if we ever
+                    #       want to support kernel state passing on more capable back-ends,
+                    #       we'll need to update the argument array instead.
+                    if callconv(val) == 37 || callconv(val) == 38
+                        # TODO: update for LLVM 15 when JuliaLang/julia#45088 is merged.
+                        continue
+                    end
+
                     # forward the state argument
                     position!(builder, val)
                     state = call!(builder, state_intr, Value[], "state")
