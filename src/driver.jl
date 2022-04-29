@@ -33,7 +33,7 @@ Other keyword arguments can be found in the documentation of [`cufunction`](@ref
 function compile(target::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true,
                  optimize::Bool=true, strip::Bool=false, validate::Bool=true,
-                 only_entry::Bool=false, ctx::Union{Context,Nothing}=nothing)
+                 only_entry::Bool=false, ctx::Union{JuliaContextType,Nothing}=nothing)
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
@@ -58,7 +58,7 @@ end
 function JuliaContext()
     if VERSION >= v"1.9.0-DEV.115"
         # Julia 1.9 knows how to deal with arbitrary contexts
-        Context()
+        JuliaContextType()
     else
         # earlier versions of Julia claim so, but actually use a global context
         isboxed_ref = Ref{Bool}()
@@ -69,18 +69,23 @@ function JuliaContext()
 end
 function JuliaContext(f)
     if VERSION >= v"1.9.0-DEV.115"
-        Context(f)
+        JuliaContextType(f)
     else
         f(JuliaContext())
         # we cannot dispose of the global unique context
     end
 end
 
+if VERSION >= v"1.9.0-DEV.516"
+unwrap_context(ctx::ThreadSafeContext) = context(ctx)
+end
+unwrap_context(ctx::Context) = ctx
+
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
                  strip::Bool=false, validate::Bool=true, only_entry::Bool=false,
                  parent_job::Union{Nothing, CompilerJob}=nothing,
-                 ctx::Union{Context,Nothing}=nothing)
+                 ctx::Union{JuliaContextType,Nothing}=nothing)
     ## Julia IR
 
     mi, mi_meta = emit_julia(job)
@@ -194,7 +199,7 @@ const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance);
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                           only_entry::Bool=false, ctx::Context)
+                           only_entry::Bool=false, ctx::JuliaContextType)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -290,7 +295,7 @@ const __llvm_initialized = Ref(false)
                                                deferred_codegen=false, parent_job=job, ctx)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
-                    @assert context(dyn_ir) == ctx
+                    @assert context(dyn_ir) == unwrap_context(ctx)
                     link!(ir, dyn_ir)
                     changed = true
                     dyn_entry_fn
@@ -298,9 +303,9 @@ const __llvm_initialized = Ref(false)
                 dyn_entry = functions(ir)[dyn_entry_fn]
 
                 # insert a pointer to the function everywhere the entry is used
-                T_ptr = convert(LLVMType, Ptr{Cvoid}; ctx)
+                T_ptr = convert(LLVMType, Ptr{Cvoid}; ctx=unwrap_context(ctx))
                 for call in worklist[dyn_job]
-                    @dispose builder=Builder(ctx) begin
+                    @dispose builder=Builder(unwrap_context(ctx)) begin
                         position!(builder, call)
                         fptr = ptrtoint!(builder, dyn_entry, T_ptr)
                         replace_uses!(call, fptr)
@@ -318,7 +323,7 @@ const __llvm_initialized = Ref(false)
     @timeit_debug to "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.source.kernel
-            push!(metadata(ir)["julia.kernel"], MDNode([entry]; ctx))
+            push!(metadata(ir)["julia.kernel"], MDNode([entry]; ctx=unwrap_context(ctx)))
 
             # IDEA: save all jobs, not only kernels, and save other attributes
             #       so that we can reconstruct the CompileJob instead of setting it globally
