@@ -269,7 +269,6 @@ Evaluates the expression `ex` and dumps all intermediate forms of code to the di
 `dir`.
 """
 macro device_code(ex...)
-    only(xs) = (@assert length(xs) == 1; first(xs))
     localUnique = 1
     function hook(job::CompilerJob; dir::AbstractString)
         name = something(job.source.name, nameof(job.source.f))
