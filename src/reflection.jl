@@ -80,18 +80,19 @@ end
 
 function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
+    tt = typed_signature(job)
     if interactive
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         interp = get_interpreter(job)
         descend_code_typed = getfield(mod, :descend_code_typed)
-        descend_code_typed(job.source.f, job.source.tt; interp, kwargs...)
+        descend_code_typed(tt; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
-        Base.code_typed_by_type(typed_signature(job); interp, kwargs...)
+        Base.code_typed_by_type(tt; interp, kwargs...)
     else
-        Base.code_typed_by_type(typed_signature(job); kwargs...)
+        Base.code_typed_by_type(tt; kwargs...)
     end
 end
 
