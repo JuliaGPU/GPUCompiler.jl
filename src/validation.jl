@@ -2,9 +2,9 @@
 
 export InvalidIRError
 
-function method_matches(@nospecialize(tt::Tuple))
+function method_matches(@nospecialize(tt::Type{<:Tuple}); world=Base.get_world_counter())
     ms = Core.MethodMatch[]
-    for m in Base._methods_by_ftype(tt, -1, job.source.world)::Vector
+    for m in Base._methods_by_ftype(tt, -1, world)::Vector
         m = m::Core.MethodMatch
         push!(ms, m)
     end
@@ -23,7 +23,8 @@ function check_method(@nospecialize(job::CompilerJob))
     isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
 
     # get the method
-    ms = method_matches(typed_signature(job))
+    world = job.source.world
+    ms = method_matches(typed_signature(job); world)
     isempty(ms)   && throw(KernelError(job, "no method found"))
     length(ms)!=1 && throw(KernelError(job, "no unique matching method"))
 
@@ -31,7 +32,7 @@ function check_method(@nospecialize(job::CompilerJob))
     if job.source.kernel
         cache = ci_cache(job)
         mt = method_table(job)
-        interp = GPUInterpreter(cache, mt, job.source.world)
+        interp = GPUInterpreter(cache, mt, world)
         rt = return_type(only(ms); interp)
 
         if rt != Nothing
