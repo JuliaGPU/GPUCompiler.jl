@@ -81,8 +81,8 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method; ctx::Co
                             optimize=false, libraries=false, ctx)
     ft = eltype(llvmtype(meta.entry))
     expected_ft = convert(LLVM.FunctionType, method; ctx=context(new_mod))
-    if return_type(ft) != return_type(expected_ft)
-        error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
+    if LLVM.return_type(ft) != LLVM.return_type(expected_ft)
+        error("Invalid return type for runtime function '$(method.name)': expected $(LLVM.return_type(expected_ft)), got $(LLVM.return_type(ft))")
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused

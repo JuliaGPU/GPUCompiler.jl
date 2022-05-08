@@ -219,7 +219,7 @@ end
 function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
     ft = eltype(llvmtype(f)::LLVM.PointerType)::LLVM.FunctionType
-    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
+    @compiler_assert LLVM.return_type(ft) == LLVM.VoidType(ctx) job
 
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
@@ -235,7 +235,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         has_kernel_state = kernel_state_type(job) !== Nothing
         orig_ft = if has_kernel_state
             # the kernel state has been added here already, so strip the first parameter
-            LLVM.FunctionType(return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
+            LLVM.FunctionType(LLVM.return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
         else
             ft
         end

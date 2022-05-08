@@ -337,7 +337,7 @@ function hide_unreachable!(fun::LLVM.Function)
                     # couldn't find any other successor. this happens with functions
                     # that only contain a single block, or when the block is dead.
                     ft = eltype(llvmtype(fun))
-                    if return_type(ft) == LLVM.VoidType(ctx)
+                    if LLVM.return_type(ft) == LLVM.VoidType(ctx)
                         # even though returning can lead to invalid control flow,
                         # it mostly happens with functions that just throw,
                         # and leaving the unreachable there would make the optimizer
@@ -411,7 +411,7 @@ function nvvm_reflect!(fun::LLVM.Function)
     haskey(LLVM.functions(mod), NVVM_REFLECT_FUNCTION) || return false
     reflect_function = LLVM.functions(mod)[NVVM_REFLECT_FUNCTION]
     isdeclaration(reflect_function) || error("_reflect function should not have a body")
-    reflect_typ = return_type(eltype(llvmtype(reflect_function)))
+    reflect_typ = LLVM.return_type(eltype(llvmtype(reflect_function)))
     isa(reflect_typ, LLVM.IntegerType) || error("_reflect's return type should be integer")
 
     to_remove = []

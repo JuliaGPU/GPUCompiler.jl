@@ -302,7 +302,7 @@ function cpu_features!(mod::LLVM.Module)
             # warn?
             false
         end
-        has_fma = ConstantInt(return_type(ft), has_fma)
+        has_fma = ConstantInt(LLVM.return_type(ft), has_fma)
 
         # substitute all uses of the intrinsic with a constant
         materialized = LLVM.Value[]
@@ -342,7 +342,7 @@ function lower_gc_frame!(fun::LLVM.Function)
     if haskey(functions(mod), "julia.gc_alloc_obj")
         alloc_obj = functions(mod)["julia.gc_alloc_obj"]
         alloc_obj_ft = eltype(llvmtype(alloc_obj))
-        T_prjlvalue = return_type(alloc_obj_ft)
+        T_prjlvalue = LLVM.return_type(alloc_obj_ft)
         T_pjlvalue = convert(LLVMType, Any; ctx, allow_boxed=true)
 
         for use in uses(alloc_obj)
