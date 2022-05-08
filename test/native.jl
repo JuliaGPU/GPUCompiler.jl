@@ -4,6 +4,21 @@ include("definitions/native.jl")
 
 ############################################################################################
 
+@testset "reflection" begin
+    job, _ = native_job(identity, (Int,))
+    CI, rt = only(GPUCompiler.code_typed(job))
+    @test rt === Int
+
+    IR = sprint(io->GPUCompiler.code_warntype(io, job))
+    @test contains(IR, "MethodInstance for identity")
+
+    IR = sprint(io->GPUCompiler.code_llvm(io, job))
+    @test contains(IR, "julia_identity")
+
+    ASM = sprint(io->GPUCompiler.code_native(io, job))
+    @test contains(ASM, "julia_identity")
+end
+
 @testset "Compilation" begin
     @testset "Callable structs" begin
         struct MyCallable end
