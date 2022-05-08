@@ -108,7 +108,7 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
     if isempty(MIs)
         return
     end
-    f = mi_to_func(MIs)
+    f = mi_to_func(first(MIs))
     if interactive
         @assert io == stdout
         # call Cthulhu without introducing a dependency on Cthulhu
