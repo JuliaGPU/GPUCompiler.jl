@@ -43,20 +43,7 @@ end
 # Compat shims
 # 
 
-@inline function typed_signature(@nospecialize(job::CompilerJob))
-    u = Base.unwrap_unionall(job.source.tt)
-    return Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
-end
-
-function method_instances(@nospecialize(tt::Type), world::UInt=Base.get_world_counter())
-    return map(Core.Compiler.specialize_method, method_matches(tt; world))
-end
-
-# FIXME: This is a horrible hack, is there a better way?
-function mi_to_func(mi::Core.MethodInstance)
-    method = mi.def
-    return getproperty(method.module, method.name)
-end
+include("reflection_compat.jl")
 
 #
 # code_* replacements
@@ -104,11 +91,7 @@ end
 
 function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
-    MIs = method_instances(typed_signature(job))
-    if isempty(MIs)
-        return
-    end
-    f = mi_to_func(first(MIs))
+    tt = typed_signature(job)
     if interactive
         @assert io == stdout
         # call Cthulhu without introducing a dependency on Cthulhu
@@ -116,13 +99,12 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         interp = get_interpreter(job)
         descend_code_warntype = getfield(mod, :descend_code_warntype)
-        descend_code_warntype(f, job.source.tt; interp, kwargs...)
+        descend_code_warntype(tt; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
-        # TODO add support for TT in code_warntype
-        InteractiveUtils.code_warntype(io, f, job.source.tt; interp, kwargs...)
+        code_warntype_by_type(io, tt; interp, kwargs...)
     else
-        InteractiveUtils.code_warntype(io, f, job.source.tt; kwargs...)
+        code_warntype_by_type(io, tt; kwargs...)
     end
 end
 code_warntype(@nospecialize(job::CompilerJob); kwargs...) = code_warntype(stdout, job; kwargs...)
