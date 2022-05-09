@@ -6,6 +6,9 @@ include("definitions/native.jl")
 
 @testset "reflection" begin
     job, _ = native_job(identity, (Int,))
+
+    @test only(GPUCompiler.code_lowered(job)) isa Core.CodeInfo
+
     CI, rt = only(GPUCompiler.code_typed(job))
     @test rt === Int
 

@@ -20,8 +20,8 @@ function code_lowered_by_type(@nospecialize(tt); generated::Bool=true, debuginfo
                       "not leaf types, but the `generated` argument is `true`.")
             end
         end
-        code = uncompressed_ir(m.def::Method)
-        debuginfo === :none && remove_linenums!(code)
+        code = Base.uncompressed_ir(m.def::Method)
+        debuginfo === :none && Base.remove_linenums!(code)
         return code
     end
 end
