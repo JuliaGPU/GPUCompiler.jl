@@ -4,6 +4,12 @@ function method_instances(@nospecialize(tt::Type), world::UInt=Base.get_world_co
     return map(Core.Compiler.specialize_method, method_matches(tt; world))
 end
 
+if VERSION >= v"1.7-"
+    const hasgenerator = Base.hasgenerator
+else
+    const hasgenerator = Base.isgenerated
+end
+
 function code_lowered_by_type(@nospecialize(tt); generated::Bool=true, debuginfo::Symbol=:default)
 
     debuginfo = Base.IRShow.debuginfo(debuginfo)
@@ -11,7 +17,7 @@ function code_lowered_by_type(@nospecialize(tt); generated::Bool=true, debuginfo
         throw(ArgumentError("'debuginfo' must be either :source or :none"))
     end
     return map(method_instances(tt)) do m
-        if generated && Base.hasgenerator(m)
+        if generated && hasgenerator(m)
             if Base.may_invoke_generator(m)
                 return ccall(:jl_code_for_staged, Any, (Any,), m)::CodeInfo
             else
