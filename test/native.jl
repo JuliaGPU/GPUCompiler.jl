@@ -9,9 +9,9 @@ if VERSION >= v"1.8-"
     include(joinpath(dirname(pathof(Cthulhu)), "..", "test", "FakeTerminals.jl"))
     using .FakeTerminals
 
-    const test_interactive = true
+    test_interactive = true
 else
-    const test_interactive = false
+    test_interactive = false
 end
 
 cread1(io) = readuntil(io, '↩'; keep=true)
