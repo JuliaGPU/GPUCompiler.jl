@@ -1,6 +1,8 @@
 [deps]
+Cthulhu = "f68482b8-f384-11e8-15f7-abe071a5a75f"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
+REPL = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"
 SPIRV_LLVM_Translator_unified_jll = "85f0d8ed-5b39-5caa-b1ae-7472de402361"
 SPIRV_Tools_jll = "6ac6d60f-d740-5983-97d7-a4482c0689f4"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

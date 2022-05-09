@@ -4,6 +4,19 @@ include("definitions/native.jl")
 
 ############################################################################################
 
+if VERSION >= v"1.8-"
+    using Cthulhu
+    include(joinpath(dirname(pathof(Cthulhu)), "..", "test", "FakeTerminals.jl"))
+    using .FakeTerminals
+
+    const test_interactive = true
+else
+    const test_interactive = false
+end
+
+cread1(io) = readuntil(io, '↩'; keep=true)
+cread(io) = cread1(io) * cread1(io)
+
 @testset "reflection" begin
     job, _ = native_job(identity, (Int,))
 
@@ -20,7 +33,20 @@ include("definitions/native.jl")
 
     ASM = sprint(io->GPUCompiler.code_native(io, job))
     @test contains(ASM, "julia_identity")
+
+    if test_interactive
+        fake_terminal() do term, in, out
+            T = @async begin
+                GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term)
+            end
+            lines = cread(out)
+            @test contains(lines, "identity(x)")
+            write(in, 'q')
+            wait(T)
+        end
+    end
 end
+
 
 @testset "Compilation" begin
     @testset "Callable structs" begin
