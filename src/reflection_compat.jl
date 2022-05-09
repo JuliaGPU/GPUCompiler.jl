@@ -1,12 +1,29 @@
 # The content of this file should be upstreamed to Julia proper
 
-@inline function typed_signature(@nospecialize(job::CompilerJob))
-    u = Base.unwrap_unionall(job.source.tt)
-    return Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
-end
-
 function method_instances(@nospecialize(tt::Type), world::UInt=Base.get_world_counter())
     return map(Core.Compiler.specialize_method, method_matches(tt; world))
+end
+
+function code_lowered_by_type(@nospecialize(tt); generated::Bool=true, debuginfo::Symbol=:default)
+
+    debuginfo = Base.IRShow.debuginfo(debuginfo)
+    if debuginfo !== :source && debuginfo !== :none
+        throw(ArgumentError("'debuginfo' must be either :source or :none"))
+    end
+    return map(method_instances(tt)) do m
+        if generated && Base.hasgenerator(m)
+            if Base.may_invoke_generator(m)
+                return ccall(:jl_code_for_staged, Any, (Any,), m)::CodeInfo
+            else
+                error("Could not expand generator for `@generated` method ", m, ". ",
+                      "This can happen if the provided argument types (", t, ") are ",
+                      "not leaf types, but the `generated` argument is `true`.")
+            end
+        end
+        code = uncompressed_ir(m.def::Method)
+        debuginfo === :none && remove_linenums!(code)
+        return code
+    end
 end
 
 function code_warntype_by_type(io::IO, @nospecialize(tt);

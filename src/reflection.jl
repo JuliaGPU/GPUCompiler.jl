@@ -49,27 +49,13 @@ include("reflection_compat.jl")
 # code_* replacements
 #
 
-function code_lowered(@nospecialize(job::CompilerJob); generated::Bool=true, debuginfo::Symbol=:default)
-
-    debuginfo = Base.IRShow.debuginfo(debuginfo)
-    if debuginfo !== :source && debuginfo !== :none
-        throw(ArgumentError("'debuginfo' must be either :source or :none"))
-    end
-    return map(method_instances(typed_signature(job))) do m
-        if generated && Base.hasgenerator(m)
-            if Base.may_invoke_generator(m)
-                return ccall(:jl_code_for_staged, Any, (Any,), m)::CodeInfo
-            else
-                error("Could not expand generator for `@generated` method ", m, ". ",
-                      "This can happen if the provided argument types (", t, ") are ",
-                      "not leaf types, but the `generated` argument is `true`.")
-            end
-        end
-        code = uncompressed_ir(m.def::Method)
-        debuginfo === :none && remove_linenums!(code)
-        return code
-    end
+@inline function typed_signature(@nospecialize(job::CompilerJob))
+    u = Base.unwrap_unionall(job.source.tt)
+    return Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
 end
+
+code_lowered(@nospecialize(job::CompilerJob); kwargs...) =
+    code_lowered_by_type(typed_signature(job); kwargs...)
 
 function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
