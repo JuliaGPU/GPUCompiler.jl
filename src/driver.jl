@@ -317,6 +317,13 @@ const __llvm_initialized = Ref(false)
     end
 
     @timeit_debug to "IR post-processing" begin
+        # mark the entry-point function (optimization may need it)
+        if deferred_codegen
+            # IDEA: save other parts of the CompileJob (so that we can reconstruct it
+            #       instead of setting it globally, which is incompatible with threading)?
+            push!(metadata(ir)["julia.entry"], MDNode([entry]; ctx))
+        end
+
         if optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir)
