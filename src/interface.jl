@@ -233,15 +233,7 @@ optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
 # finalization of the module, before deferred codegen and optimization
 function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
-    ctx = context(mod)
-    entry_fn = LLVM.name(entry)
-
-    # add the kernel state, and lower calls to the `julia.gpu.state_getter` intrinsic.
-    if job.source.kernel
-        add_kernel_state!(job, mod, entry)
-    end
-
-    return functions(mod)[entry_fn]
+    return entry
 end
 
 # final processing of the IR, right before validation and machine-code generation

@@ -535,10 +535,9 @@ end
 # so that the julia.gpu.state_getter` can be simplified to return an opaque pointer.
 
 # add a state argument to every function in the module, starting from the kernel entry point
-function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                           entry::LLVM.Function)
+function add_kernel_state!(mod::LLVM.Module)
+    job = current_job::CompilerJob
     ctx = context(mod)
-    entry_fn = LLVM.name(entry)
 
     # check if we even need a kernel state argument
     state = kernel_state_type(job)
@@ -551,6 +550,11 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # intrinsic returning an opaque pointer to the kernel state.
     # this is both for extern uses, and to make this transformation a two-step process.
     state_intr = kernel_state_intr(mod, T_state)
+
+    entry_md = operands(metadata(mod)["julia.entry"])[1]
+    entry = Value(operands(entry_md)[1]; ctx)
+    # XXX: this metadata will be invalid after the replacement here (it'll be null).
+    #      how do we replace Metadata uses? Normally RAUW, but it asserts type equality
 
     # determine which functions need a kernel state argument
     #

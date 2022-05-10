@@ -192,6 +192,8 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         if job.source.kernel
             # GC lowering is the last pass that may introduce calls to the runtime library,
             # and thus additional uses of the kernel state intrinsic.
+            # TODO: now that all kernel state-related passes are being run here, merge some?
+            add!(pm, ModulePass("AddKernelState", add_kernel_state!))
             add!(pm, FunctionPass("LowerKernelState", lower_kernel_state!))
             add!(pm, ModulePass("CleanupKernelState", cleanup_kernel_state!))
         end
