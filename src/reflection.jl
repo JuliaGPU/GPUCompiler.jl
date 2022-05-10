@@ -39,38 +39,45 @@ function highlight(io::IO, code, lexer)
     return
 end
 
+#
+# Compat shims
+# 
+
+include("reflection_compat.jl")
 
 #
 # code_* replacements
 #
-
-code_lowered(@nospecialize(job::CompilerJob); kwargs...) =
-    InteractiveUtils.code_lowered(job.source.f, job.source.tt; kwargs...)
 
 @inline function typed_signature(@nospecialize(job::CompilerJob))
     u = Base.unwrap_unionall(job.source.tt)
     return Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
 end
 
+code_lowered(@nospecialize(job::CompilerJob); kwargs...) =
+    code_lowered_by_type(typed_signature(job); kwargs...)
+
 function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
+    tt = typed_signature(job)
     if interactive
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         interp = get_interpreter(job)
         descend_code_typed = getfield(mod, :descend_code_typed)
-        descend_code_typed(job.source.f, job.source.tt; interp, kwargs...)
+        descend_code_typed(tt; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
-        Base.code_typed_by_type(typed_signature(job); interp, kwargs...)
+        Base.code_typed_by_type(tt; interp, kwargs...)
     else
-        Base.code_typed_by_type(typed_signature(job); kwargs...)
+        Base.code_typed_by_type(tt; kwargs...)
     end
 end
 
 function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
+    tt = typed_signature(job)
     if interactive
         @assert io == stdout
         # call Cthulhu without introducing a dependency on Cthulhu
@@ -78,12 +85,12 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         interp = get_interpreter(job)
         descend_code_warntype = getfield(mod, :descend_code_warntype)
-        descend_code_warntype(job.source.f, job.source.tt; interp, kwargs...)
+        descend_code_warntype(tt; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
-        InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; interp, kwargs...)
+        code_warntype_by_type(io, tt; interp, kwargs...)
     else
-        InteractiveUtils.code_warntype(io, job.source.f, job.source.tt; kwargs...)
+        code_warntype_by_type(io, tt; kwargs...)
     end
 end
 code_warntype(@nospecialize(job::CompilerJob); kwargs...) = code_warntype(stdout, job; kwargs...)

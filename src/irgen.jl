@@ -389,7 +389,7 @@ end
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
     ft = eltype(llvmtype(f))
-    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
+    @compiler_assert LLVM.return_type(ft) == LLVM.VoidType(ctx) job
 
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
@@ -407,7 +407,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         has_kernel_state = kernel_state_type(job) !== Nothing
         orig_ft = if has_kernel_state
             # the kernel state has been added here already, so strip the first parameter
-            LLVM.FunctionType(return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
+            LLVM.FunctionType(LLVM.return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
         else
             ft
         end
@@ -462,7 +462,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
             push!(new_types, param)
         end
     end
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
     for (arg, new_arg) in zip(parameters(f), parameters(new_f))
@@ -595,7 +595,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
         # create a new function
         new_param_types = [T_state, parameters(ft)...]
-        new_ft = LLVM.FunctionType(return_type(ft), new_param_types)
+        new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_param_types)
         new_f = LLVM.Function(mod, fn, new_ft)
         LLVM.name!(parameters(new_f)[1], "state")
         linkage!(new_f, linkage(f))
@@ -627,7 +627,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     #      is all this even sound?
                     typ = llvmtype(val)::LLVM.PointerType
                     ft = eltype(typ)::LLVM.FunctionType
-                    new_ft = LLVM.FunctionType(return_type(ft), [T_state, parameters(ft)...])
+                    new_ft = LLVM.FunctionType(LLVM.return_type(ft), [T_state, parameters(ft)...])
                     return const_bitcast(workmap[target], LLVM.PointerType(new_ft, addrspace(typ)))
                 end
             elseif opcode(val) == LLVM.API.LLVMPtrToInt
