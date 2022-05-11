@@ -552,9 +552,8 @@ function add_kernel_state!(mod::LLVM.Module)
     state_intr = kernel_state_intr(mod, T_state)
 
     entry_md = operands(metadata(mod)["julia.entry"])[1]
-    entry = Value(operands(entry_md)[1]; ctx)
-    # XXX: this metadata will be invalid after the replacement here (it'll be null).
-    #      how do we replace Metadata uses? Normally RAUW, but it asserts type equality
+    entry_fn = string(operands(entry_md)[1])
+    entry = functions(mod)[entry_fn]
 
     # determine which functions need a kernel state argument
     #

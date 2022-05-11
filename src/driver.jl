@@ -321,7 +321,11 @@ const __llvm_initialized = Ref(false)
         if deferred_codegen
             # IDEA: save other parts of the CompileJob (so that we can reconstruct it
             #       instead of setting it globally, which is incompatible with threading)?
-            push!(metadata(ir)["julia.entry"], MDNode([entry]; ctx))
+            # XXX: we want to save the actual function here, but due to our passes rewriting
+            #      functions, and the inability to RAUW values with a different type, that
+            #      metadata gets lost. So instead we save the function name. See also:
+            #      https://discourse.llvm.org/t/replacing-module-metadata-uses-of-function/62431
+            push!(metadata(ir)["julia.entry"], MDNode([MDString(LLVM.name(entry); ctx)]; ctx))
         end
 
         if optimize
