@@ -551,16 +551,19 @@ function add_kernel_state!(mod::LLVM.Module)
     # this is both for extern uses, and to make this transformation a two-step process.
     state_intr = kernel_state_intr(mod, T_state)
 
-    entry_md = operands(metadata(mod)["julia.entry"])[1]
-    entry_fn = string(operands(entry_md)[1])
-    entry = functions(mod)[entry_fn]
+    kernels = []
+    kernels_md = metadata(mod)["julia.kernel"]
+    for kernel_md in operands(kernels_md)
+        kernel_fn = string(operands(kernel_md)[1])
+        push!(kernels, functions(mod)[kernel_fn])
+    end
 
     # determine which functions need a kernel state argument
     #
     # previously, we add the argument to every function and relied on unused arg elim to
     # clean-up the IR. however, some libraries do Funny Stuff, e.g., libdevice bitcasting
     # function pointers. such IR is hard to rewrite, so instead be more conservative.
-    worklist = Set{LLVM.Function}([entry, state_intr])
+    worklist = Set{LLVM.Function}([state_intr, kernels...])
     worklist_length = 0
     while worklist_length != length(worklist)
         # iteratively discover functions that use the intrinsic or any function calling it
