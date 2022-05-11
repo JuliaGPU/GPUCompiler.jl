@@ -198,10 +198,6 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     if job.source.kernel
         # add metadata annotations for the assembler to the module
 
-        # NOTE: we do this here, rather than in finish_module!, because otherwise
-        #       the metadata is lost when functions are cloned. See also:
-        #       https://discourse.llvm.org/t/replacing-module-metadata-uses-of-function/62431
-
         # property annotations
         annotations = Metadata[entry]
 

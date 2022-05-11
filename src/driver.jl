@@ -318,13 +318,9 @@ const __llvm_initialized = Ref(false)
     @timeit_debug to "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.source.kernel
-            # XXX: we want to save the actual function here, but due to our passes rewriting
-            #      functions, and the inability to RAUW values with a different type, that
-            #      metadata gets lost. So instead we save the function name. See also:
-            #      https://discourse.llvm.org/t/replacing-module-metadata-uses-of-function/62431
-            push!(metadata(ir)["julia.kernel"], MDNode([MDString(LLVM.name(entry); ctx)]; ctx))
+            push!(metadata(ir)["julia.kernel"], MDNode([entry]; ctx))
 
-            # IDEA: save all jobs, not only top-level kernels, and save other attributes
+            # IDEA: save all jobs, not only kernels, and save other attributes
             #       so that we can reconstruct the CompileJob instead of setting it globally
         end
 

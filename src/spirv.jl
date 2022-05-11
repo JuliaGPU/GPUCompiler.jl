@@ -317,6 +317,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 

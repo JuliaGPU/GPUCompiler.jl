@@ -510,6 +510,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 
@@ -554,8 +555,7 @@ function add_kernel_state!(mod::LLVM.Module)
     kernels = []
     kernels_md = metadata(mod)["julia.kernel"]
     for kernel_md in operands(kernels_md)
-        kernel_fn = string(operands(kernel_md)[1])
-        push!(kernels, functions(mod)[kernel_fn])
+        push!(kernels, Value(operands(kernel_md)[1]; ctx))
     end
 
     # determine which functions need a kernel state argument
@@ -675,6 +675,7 @@ function add_kernel_state!(mod::LLVM.Module)
                 error("old function still has uses")
             end
         end
+        replace_metadata_uses!(f, workmap[f])
         unsafe_delete!(mod, f)
     end
 
