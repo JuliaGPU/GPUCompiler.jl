@@ -713,10 +713,12 @@ function add_kernel_state!(mod::LLVM.Module)
                 elseif val isa LLVM.CallBase
                     # the function is being passed as an argument, which we'll just permit,
                     # because we expect to have rewritten the call down the line separately.
+                elseif val isa LLVM.StoreInst
+                    # the function is being stored, which again we'll permit like before.
                 elseif val isa ConstantExpr
                     rewrite_uses!(val)
                 else
-                    error("Cannot rewrite unknown use of function: $val")
+                    error("Cannot rewrite $(typeof(val)) use of function: $val")
                 end
             end
         end
