@@ -192,6 +192,8 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         if job.source.kernel
             # GC lowering is the last pass that may introduce calls to the runtime library,
             # and thus additional uses of the kernel state intrinsic.
+            # TODO: now that all kernel state-related passes are being run here, merge some?
+            add!(pm, ModulePass("AddKernelState", add_kernel_state!))
             add!(pm, FunctionPass("LowerKernelState", lower_kernel_state!))
             add!(pm, ModulePass("CleanupKernelState", cleanup_kernel_state!))
         end
@@ -253,8 +255,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     ModulePassManager() do pm
         addTargetPasses!(pm, tm, triple)
 
-        # - remove unused kernel state arguments
-        # - simplify function calls that don't use the returned value
+        # simplify function calls that don't use the returned value
         dead_arg_elimination!(pm)
 
         run!(pm, mod)
@@ -354,16 +355,8 @@ function lower_gc_frame!(fun::LLVM.Function)
 
             # replace with PTX alloc_obj
             Builder(ctx) do builder
-                # NOTE: this happens late during the pipeline, where we may have to
-                #       pass a kernel state arguments to the runtime function.
-                state = if job.source.kernel
-                    kernel_state_type(job)
-                else
-                    Nothing
-                end
-
                 position!(builder, call)
-                ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz]; state)
+                ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz])
                 replace_uses!(call, ptr)
             end
 

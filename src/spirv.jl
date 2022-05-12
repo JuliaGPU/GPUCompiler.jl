@@ -232,25 +232,14 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         end
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
-        has_kernel_state = kernel_state_type(job) !== Nothing
-        orig_ft = if has_kernel_state
-            # the kernel state has been added here already, so strip the first parameter
-            LLVM.FunctionType(LLVM.return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
-        else
-            ft
-        end
-        args = classify_arguments(job, orig_ft)
+        args = classify_arguments(job, ft)
         filter!(args) do arg
             arg.cc != GHOST
         end
         for arg in args
             if arg.cc == BITS_REF
-                # NOTE: +1 since this pass runs after introducing the kernel state
-                byval[arg.codegen.i+has_kernel_state] = true
+                byval[arg.codegen.i] = true
             end
-        end
-        if has_kernel_state
-            byval[1] = true
         end
     end
 
@@ -317,6 +306,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 

@@ -185,8 +185,17 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     if job.source.kernel
         # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
         entry = lower_byval(job, mod, entry)
-        # TODO: optimization passes to clean-up byval
+    end
 
+    return entry
+end
+
+function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                        mod::LLVM.Module, entry::LLVM.Function)
+    ctx = context(mod)
+    entry = invoke(finish_ir!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
+    if job.source.kernel
         # add metadata annotations for the assembler to the module
 
         # property annotations

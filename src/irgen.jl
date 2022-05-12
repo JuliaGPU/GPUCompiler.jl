@@ -404,21 +404,14 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
         #      so we need to re-classify the Julia arguments.
         #      remove this once we only support 1.7.
-        has_kernel_state = kernel_state_type(job) !== Nothing
-        orig_ft = if has_kernel_state
-            # the kernel state has been added here already, so strip the first parameter
-            LLVM.FunctionType(LLVM.return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
-        else
-            ft
-        end
-        args = classify_arguments(job, orig_ft)
+        args = classify_arguments(job, ft)
         filter!(args) do arg
             arg.cc != GHOST
         end
         for arg in args
             if arg.cc == BITS_REF
                 # NOTE: +1 since this pass runs after introducing the kernel state
-                byval[arg.codegen.i+has_kernel_state] = true
+                byval[arg.codegen.i] = true
             end
         end
     end
@@ -510,6 +503,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 
@@ -535,10 +529,9 @@ end
 # so that the julia.gpu.state_getter` can be simplified to return an opaque pointer.
 
 # add a state argument to every function in the module, starting from the kernel entry point
-function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                           entry::LLVM.Function)
+function add_kernel_state!(mod::LLVM.Module)
+    job = current_job::CompilerJob
     ctx = context(mod)
-    entry_fn = LLVM.name(entry)
 
     # check if we even need a kernel state argument
     state = kernel_state_type(job)
@@ -552,12 +545,18 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # this is both for extern uses, and to make this transformation a two-step process.
     state_intr = kernel_state_intr(mod, T_state)
 
+    kernels = []
+    kernels_md = metadata(mod)["julia.kernel"]
+    for kernel_md in operands(kernels_md)
+        push!(kernels, Value(operands(kernel_md)[1]; ctx))
+    end
+
     # determine which functions need a kernel state argument
     #
     # previously, we add the argument to every function and relied on unused arg elim to
     # clean-up the IR. however, some libraries do Funny Stuff, e.g., libdevice bitcasting
     # function pointers. such IR is hard to rewrite, so instead be more conservative.
-    worklist = Set{LLVM.Function}([entry, state_intr])
+    worklist = Set{LLVM.Function}([state_intr, kernels...])
     worklist_length = 0
     while worklist_length != length(worklist)
         # iteratively discover functions that use the intrinsic or any function calling it
@@ -669,6 +668,7 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 error("old function still has uses")
             end
         end
+        replace_metadata_uses!(f, workmap[f])
         unsafe_delete!(mod, f)
     end
 
@@ -707,10 +707,12 @@ function add_kernel_state!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 elseif val isa LLVM.CallBase
                     # the function is being passed as an argument, which we'll just permit,
                     # because we expect to have rewritten the call down the line separately.
+                elseif val isa LLVM.StoreInst
+                    # the function is being stored, which again we'll permit like before.
                 elseif val isa ConstantExpr
                     rewrite_uses!(val)
                 else
-                    error("Cannot rewrite unknown use of function: $val")
+                    error("Cannot rewrite $(typeof(val)) use of function: $val")
                 end
             end
         end

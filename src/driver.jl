@@ -257,10 +257,9 @@ const __llvm_initialized = Ref(false)
     # deferred code generation
     do_deferred_codegen = !only_entry && deferred_codegen &&
                           haskey(functions(ir), "deferred_codegen")
+    deferred_jobs = Dict{CompilerJob, String}(job => entry_fn)
     if do_deferred_codegen
         dyn_marker = functions(ir)["deferred_codegen"]
-
-        cache = Dict{CompilerJob, String}(job => entry_fn)
 
         # iterative compilation (non-recursive)
         changed = true
@@ -286,7 +285,7 @@ const __llvm_initialized = Ref(false)
             # compile and link
             for dyn_job in keys(worklist)
                 # cached compilation
-                dyn_entry_fn = get!(cache, dyn_job) do
+                dyn_entry_fn = get!(deferred_jobs, dyn_job) do
                     dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize=false,
                                                deferred_codegen=false, parent_job=job, ctx)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
@@ -317,6 +316,14 @@ const __llvm_initialized = Ref(false)
     end
 
     @timeit_debug to "IR post-processing" begin
+        # mark the kernel entry-point functions (optimization may need it)
+        if job.source.kernel
+            push!(metadata(ir)["julia.kernel"], MDNode([entry]; ctx))
+
+            # IDEA: save all jobs, not only kernels, and save other attributes
+            #       so that we can reconstruct the CompileJob instead of setting it globally
+        end
+
         if optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir)
@@ -361,7 +368,18 @@ const __llvm_initialized = Ref(false)
             end
         end
 
-        entry = finish_ir!(job, ir, entry)
+        # finish the module
+        #
+        # we want to finish the module after optimization, so we cannot do so during
+        # deferred code generation. instead, process the deferred jobs here.
+        if deferred_codegen
+            entry = finish_ir!(job, ir, entry)
+
+            for (deferred_job, deferred_fn) in deferred_jobs
+                deferred_job == job && continue
+                finish_ir!(deferred_job, ir, functions(ir)[deferred_fn])
+            end
+        end
 
         # replace non-entry function definitions with a declaration
         # NOTE: we can't do this before optimization, because the definitions of called
