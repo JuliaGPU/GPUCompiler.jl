@@ -404,21 +404,14 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
         #      so we need to re-classify the Julia arguments.
         #      remove this once we only support 1.7.
-        has_kernel_state = kernel_state_type(job) !== Nothing
-        orig_ft = if has_kernel_state
-            # the kernel state has been added here already, so strip the first parameter
-            LLVM.FunctionType(LLVM.return_type(ft), parameters(ft)[2:end]; vararg=isvararg(ft))
-        else
-            ft
-        end
-        args = classify_arguments(job, orig_ft)
+        args = classify_arguments(job, ft)
         filter!(args) do arg
             arg.cc != GHOST
         end
         for arg in args
             if arg.cc == BITS_REF
                 # NOTE: +1 since this pass runs after introducing the kernel state
-                byval[arg.codegen.i+has_kernel_state] = true
+                byval[arg.codegen.i] = true
             end
         end
     end

@@ -34,17 +34,11 @@ struct RuntimeMethodInstance
 end
 
 function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance;
-                      ctx::LLVM.Context, state::Type=Nothing)
+                      ctx::LLVM.Context)
     types = if rt.llvm_types === nothing
         LLVMType[convert(LLVMType, typ; ctx, allow_boxed=true) for typ in rt.types]
     else
         rt.llvm_types(ctx)
-    end
-
-    # if we're running post-optimization, prepend the kernel state to the argument list
-    if state !== Nothing
-        T_state = convert(LLVMType, state; ctx)
-        pushfirst!(types, T_state)
     end
 
     return_type = if rt.llvm_return_type === nothing
