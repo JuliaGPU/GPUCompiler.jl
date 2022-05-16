@@ -137,7 +137,7 @@ function mangle_param(t, substitutions)
 
         str
     elseif isa(t, Integer)
-        "Li$(t)E"
+        t > 0 ? "Li$(t)E" : "Lin$(abs(t))E"
     else
         tn = safe_name(t)
         "$(length(tn))$tn"
