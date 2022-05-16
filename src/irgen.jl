@@ -139,7 +139,11 @@ function mangle_param(t, substitutions)
     elseif isa(t, Integer)
         t > 0 ? "Li$(t)E" : "Lin$(abs(t))E"
     else
-        tn = safe_name(t)
+        tn = safe_name(t)   # TODO: actually does support digits...
+        if startswith(tn, r"\d")
+            # C++ classes cannot start with a digit, so mangling doesn't support it
+            tn = "_$(tn)"
+        end
         "$(length(tn))$tn"
     end
 end
