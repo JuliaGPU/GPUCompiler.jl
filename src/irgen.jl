@@ -109,7 +109,10 @@ end
 function mangle_param(t, substitutions)
     t == Nothing && return "v"
 
-    if isa(t, DataType) || isa(t, Core.Function)
+    if isa(t, DataType) && t <: Ptr
+        tn = mangle_param(eltype(t), substitutions)
+        "P$tn"
+    elseif isa(t, DataType) || isa(t, Core.Function)
         tn = safe_name(t)
 
         # handle substitutions
