@@ -109,7 +109,10 @@ end
 function mangle_param(t, substitutions)
     t == Nothing && return "v"
 
-    if isa(t, DataType) || isa(t, Core.Function)
+    if isa(t, DataType) && t <: Ptr
+        tn = mangle_param(eltype(t), substitutions)
+        "P$tn"
+    elseif isa(t, DataType) || isa(t, Core.Function)
         tn = safe_name(t)
 
         # handle substitutions
@@ -134,9 +137,13 @@ function mangle_param(t, substitutions)
 
         str
     elseif isa(t, Integer)
-        "Li$(t)E"
+        t > 0 ? "Li$(t)E" : "Lin$(abs(t))E"
     else
-        tn = safe_name(t)
+        tn = safe_name(t)   # TODO: actually does support digits...
+        if startswith(tn, r"\d")
+            # C++ classes cannot start with a digit, so mangling doesn't support it
+            tn = "_$(tn)"
+        end
         "$(length(tn))$tn"
     end
 end
