@@ -220,37 +220,8 @@ function InferenceState(result::InferenceResult, cached::Symbol, interp::GPUInte
     src = retrieve_code_info(result.linfo)
     src === nothing && return nothing
     validate_code_in_debug_mode(result.linfo, src, "lowered")
-    validate_globalrefs(interp, result.linfo, src)
+    check_julia_ir(interp, result.linfo, src)
     return InferenceState(result, src, cached, interp)
-end
-
-function validate_globalrefs(interp, mi, src)
-    function validate(x)
-        if x isa Expr
-            return Expr(x.head, validate.(x.args))
-        elseif x isa GlobalRef
-            Base.isbindingresolved(x.mod, x.name) || return
-            # XXX: when does this happen? do we miss any cases by bailing out early?
-            #      why doesn't calling `Base.resolve(x, force=true)` work?
-            if !Base.isdefined(x.mod, x.name)
-                throw(KernelError(interp.job, "using undefined global: $(x.mod).$(x.name)"))
-            end
-            if !Base.isconst(x.mod, x.name)
-                throw(KernelError(interp.job, "using mutable global: $(x.mod).$(x.name)"))
-            end
-            # XXX: can we use KernelError? and make the validation conditional? both are
-            #      complicated by the fact that we don't have the CompilerJob here,
-            #      and that inference results can be cached across jobs.
-
-            # TODO: perform more validation? e.g. disallow Arrays and other CPU values?
-            #       probably requires an interface, so again access to the CompilerJob
-            #       (as a CPU-back-end would still support such values).
-        end
-    end
-
-    validate.(src.code)
-
-    return
 end
 
 
