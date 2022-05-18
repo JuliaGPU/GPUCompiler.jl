@@ -170,30 +170,28 @@ using Core.Compiler:
     AbstractInterpreter, InferenceResult, InferenceParams, InferenceState, OptimizationParams
 
 struct GPUInterpreter <: AbstractInterpreter
+    job::CompilerJob
+
     global_cache::CodeCache
     method_table::Union{Nothing,Core.MethodTable}
 
     # Cache of inference results for this particular interpreter
     local_cache::Vector{InferenceResult}
-    # The world age we're working inside of
-    world::UInt
 
     # Parameters for inference and optimization
     inf_params::InferenceParams
     opt_params::OptimizationParams
 
-    function GPUInterpreter(cache::CodeCache, mt::Union{Nothing,Core.MethodTable}, world::UInt)
-        @assert world <= Base.get_world_counter()
+    function GPUInterpreter(job::CompilerJob, cache::CodeCache, mt::Union{Nothing,Core.MethodTable})
+        @assert job.source.world <= Base.get_world_counter()
 
         return new(
+            job,
             cache,
             mt,
 
             # Initially empty cache
             Vector{InferenceResult}(),
-
-            # world age counter
-            world,
 
             # parameters for inference and optimization
             InferenceParams(unoptimize_throw_blocks=false),
@@ -205,9 +203,10 @@ end
 
 Core.Compiler.InferenceParams(interp::GPUInterpreter) = interp.inf_params
 Core.Compiler.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
-Core.Compiler.get_world_counter(interp::GPUInterpreter) = interp.world
+Core.Compiler.get_world_counter(interp::GPUInterpreter) = interp.job.source.world
 Core.Compiler.get_inference_cache(interp::GPUInterpreter) = interp.local_cache
-Core.Compiler.code_cache(interp::GPUInterpreter) = WorldView(interp.global_cache, interp.world)
+Core.Compiler.code_cache(interp::GPUInterpreter) =
+    WorldView(interp.global_cache, Core.Compiler.get_world_counter(interp))
 
 # No need to do any locking since we're not putting our results into the runtime cache
 Core.Compiler.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
@@ -221,11 +220,11 @@ function InferenceState(result::InferenceResult, cached::Symbol, interp::GPUInte
     src = retrieve_code_info(result.linfo)
     src === nothing && return nothing
     validate_code_in_debug_mode(result.linfo, src, "lowered")
-    validate_globalrefs(result.linfo, src)
+    validate_globalrefs(interp, result.linfo, src)
     return InferenceState(result, src, cached, interp)
 end
 
-function validate_globalrefs(mi, src)
+function validate_globalrefs(interp, mi, src)
     function validate(x)
         if x isa Expr
             return Expr(x.head, validate.(x.args))
@@ -234,10 +233,10 @@ function validate_globalrefs(mi, src)
             # XXX: when does this happen? do we miss any cases by bailing out early?
             #      why doesn't calling `Base.resolve(x, force=true)` work?
             if !Base.isdefined(x.mod, x.name)
-                error("using undefined global: $(x.mod).$(x.name)")
+                throw(KernelError(interp.job, "using undefined global: $(x.mod).$(x.name)"))
             end
             if !Base.isconst(x.mod, x.name)
-                error("using mutable global: $(x.mod).$(x.name)")
+                throw(KernelError(interp.job, "using mutable global: $(x.mod).$(x.name)"))
             end
             # XXX: can we use KernelError? and make the validation conditional? both are
             #      complicated by the fact that we don't have the CompilerJob here,
@@ -270,14 +269,14 @@ if isdefined(Base.Experimental, Symbol("@overlay"))
 using Core.Compiler: OverlayMethodTable
 if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION >= v"1.9.0-DEV.120"
 Core.Compiler.method_table(interp::GPUInterpreter) =
-    OverlayMethodTable(interp.world, interp.method_table)
+    OverlayMethodTable(Core.Compiler.get_world_counter(interp), interp.method_table)
 else
 Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
-    OverlayMethodTable(interp.world, interp.method_table)
+    OverlayMethodTable(Core.Compiler.get_world_counter(interp), interp.method_table)
 end
 else
 Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
-    WorldOverlayMethodTable(interp.world)
+    WorldOverlayMethodTable(Core.Compiler.get_world_counter(interp))
 end
 
 
