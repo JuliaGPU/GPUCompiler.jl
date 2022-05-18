@@ -213,6 +213,48 @@ Core.Compiler.code_cache(interp::GPUInterpreter) = WorldView(interp.global_cache
 Core.Compiler.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 Core.Compiler.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
+import Core.Compiler: retrieve_code_info, validate_code_in_debug_mode, InferenceState
+# Replace usage sites of `retrieve_code_info`, OptimizationState is one such use, but in all
+# interesting use-cases it is derived from an InferenceState. There is a third one in
+# `typeinf_ext` in case the module forbids inference.
+function InferenceState(result::InferenceResult, cached::Symbol, interp::GPUInterpreter)
+    src = retrieve_code_info(result.linfo)
+    src === nothing && return nothing
+    validate_code_in_debug_mode(result.linfo, src, "lowered")
+    validate_globalrefs(result.linfo, src)
+    return InferenceState(result, src, cached, interp)
+end
+
+function validate_globalrefs(mi, src)
+    function validate(x)
+        if x isa Expr
+            return Expr(x.head, validate.(x.args))
+        elseif x isa GlobalRef
+            Base.isbindingresolved(x.mod, x.name) || return
+            # XXX: when does this happen? do we miss any cases by bailing out early?
+            #      why doesn't calling `Base.resolve(x, force=true)` work?
+            if !Base.isdefined(x.mod, x.name)
+                error("using undefined global: $(x.mod).$(x.name)")
+            end
+            if !Base.isconst(x.mod, x.name)
+                error("using mutable global: $(x.mod).$(x.name)")
+            end
+            # XXX: can we use KernelError? and make the validation conditional? both are
+            #      complicated by the fact that we don't have the CompilerJob here,
+            #      and that inference results can be cached across jobs.
+
+            # TODO: perform more validation? e.g. disallow Arrays and other CPU values?
+            #       probably requires an interface, so again access to the CompilerJob
+            #       (as a CPU-back-end would still support such values).
+        end
+    end
+
+    validate.(src.code)
+
+    return
+end
+
+
 function Core.Compiler.add_remark!(interp::GPUInterpreter, sv::InferenceState, msg)
     @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
 end
