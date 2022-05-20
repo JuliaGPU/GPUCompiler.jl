@@ -204,12 +204,15 @@ process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 # state (possibly indirectly) via the `kernel_state_pointer` function.
 kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
 
+# Does the target need to pass kernel arguments by value?
+needs_byval(@nospecialize(job::CompilerJob)) = true
+
 # early processing of the newly identified LLVM kernel function
 function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                         entry::LLVM.Function)
     ctx = context(mod)
 
-    if job.source.kernel
+    if job.source.kernel && needs_byval(job)
         # pass all bitstypes by value; by default Julia passes aggregates by reference
         # (this improves performance, and is mandated by certain back-ends like SPIR-V).
         args = classify_arguments(job, eltype(llvmtype(entry)))
