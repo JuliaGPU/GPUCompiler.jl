@@ -341,6 +341,37 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
     return args
 end
 
+function classify_fields(julia::DataType, llvm::LLVMType)
+    nfields = fieldcount(julia)
+    fieldoffsets = [fieldoffset(julia, i) for i in 1:nfields]
+    fieldsizes = similar(fieldoffsets)
+    for i in 1:nfields
+        field_start = fieldoffsets[i]
+        field_end = i == nfields ? sizeof(julia) : fieldoffsets[i+1]
+        fieldsizes[i] = field_end - field_start
+    end
+    fieldsizes
+
+    args = []
+    codegen_i = 1
+    for source_i in 1:nfields
+        source_name = fieldname(julia, source_i)
+        source_typ = fieldtype(julia, source_i)
+        if fieldsizes[source_i] == 0
+            push!(args, (; typ=source_typ, name=source_name))
+            continue
+        end
+
+        # NOTE: a cc doesn't make sense here, so the lack of codegen field should be checked
+
+        codegen_typ = elements(llvm)[codegen_i]
+        push!(args, (typ=source_typ, name=source_name, codegen=(typ=codegen_typ, i=codegen_i)))
+        codegen_i += 1
+    end
+
+    return args
+end
+
 if VERSION >= v"1.7.0-DEV.204"
     function is_immutable_datatype(T::Type)
         isa(T,DataType) && !Base.ismutabletype(T)
