@@ -308,33 +308,75 @@ end
     GHOST       # not passed
 end
 
+function method_argnames(m::Method)
+    argnames = ccall(:jl_uncompress_argnames, Vector{Symbol}, (Any,), m.slot_syms)
+    isempty(argnames) && return argnames
+    return argnames[1:m.nargs]
+end
+
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
     source_sig = typed_signature(job)
 
     source_types = [source_sig.parameters...]
+    source_method = only(method_matches(typed_signature(job); job.source.world)).method
+    source_arguments = method_argnames(source_method)
 
     codegen_types = parameters(codegen_ft)
 
     args = []
     codegen_i = 1
     for (source_i, source_typ) in enumerate(source_types)
+        source_name = source_arguments[min(source_i, length(source_arguments))]
+        # NOTE: in case of varargs, we have fewer arguments than parameters
+
         if isghosttype(source_typ) || Core.Compiler.isconstType(source_typ)
-            push!(args, (cc=GHOST, typ=source_typ))
+            push!(args, (cc=GHOST, typ=source_typ, name=source_name))
             continue
         end
 
         codegen_typ = codegen_types[codegen_i]
         if codegen_typ isa LLVM.PointerType && !issized(eltype(codegen_typ))
-            push!(args, (cc=MUT_REF, typ=source_typ,
+            push!(args, (cc=MUT_REF, typ=source_typ, name=source_name,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         elseif codegen_typ isa LLVM.PointerType && issized(eltype(codegen_typ)) &&
                !(source_typ <: Ptr) && !(source_typ <: Core.LLVMPtr)
-            push!(args, (cc=BITS_REF, typ=source_typ,
+            push!(args, (cc=BITS_REF, typ=source_typ, name=source_name,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         else
-            push!(args, (cc=BITS_VALUE, typ=source_typ,
+            push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         end
+        codegen_i += 1
+    end
+
+    return args
+end
+
+function classify_fields(julia::DataType, llvm::LLVMType)
+    nfields = fieldcount(julia)
+    fieldoffsets = [fieldoffset(julia, i) for i in 1:nfields]
+    fieldsizes = similar(fieldoffsets)
+    for i in 1:nfields
+        field_start = fieldoffsets[i]
+        field_end = i == nfields ? sizeof(julia) : fieldoffsets[i+1]
+        fieldsizes[i] = field_end - field_start
+    end
+    fieldsizes
+
+    args = []
+    codegen_i = 1
+    for source_i in 1:nfields
+        source_name = fieldname(julia, source_i)
+        source_typ = fieldtype(julia, source_i)
+        if fieldsizes[source_i] == 0
+            push!(args, (; typ=source_typ, name=source_name))
+            continue
+        end
+
+        # NOTE: a cc doesn't make sense here, so the lack of codegen field should be checked
+
+        codegen_typ = elements(llvm)[codegen_i]
+        push!(args, (typ=source_typ, name=source_name, codegen=(typ=codegen_typ, i=codegen_i)))
         codegen_i += 1
     end
 
