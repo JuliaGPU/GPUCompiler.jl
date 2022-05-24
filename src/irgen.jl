@@ -45,8 +45,10 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     for f in functions(mod)
         LLVM.isintrinsic(f) && continue
         llvmfn = LLVM.name(f)
+        # XXX: simplify this by only renaming definitions, not declarations?
         startswith(llvmfn, "julia.") && continue # Julia intrinsics
         startswith(llvmfn, "llvm.") && continue # unofficial LLVM intrinsics
+        startswith(llvmfn, "air.") && continue # Metal AIR intrinsics
         llvmfn′ = safe_name(llvmfn)
         if llvmfn != llvmfn′
             @assert !haskey(functions(mod), llvmfn′)

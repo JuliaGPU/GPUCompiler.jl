@@ -21,6 +21,9 @@ include("ptx.jl")
 include("spirv.jl")
 include("gcn.jl")
 include("bpf.jl")
+if Sys.isapple() && Base.thisminor(VERSION) == v"1.8"
+    include("metal.jl")
+end
 include("examples.jl")
 
 haskey(ENV, "CI") && GPUCompiler.timings()
