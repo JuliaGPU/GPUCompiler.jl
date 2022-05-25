@@ -171,7 +171,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     global current_job
     current_job = job
 
-    ModulePassManager() do pm
+    @dispose pm=ModulePassManager() begin
         addTargetPasses!(pm, tm, triple)
         addOptimizationPasses!(pm)
         run!(pm, mod)
@@ -182,7 +182,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     # XXX: why doesn't the barrier noop pass work here?
 
     # lower intrinsics
-    ModulePassManager() do pm
+    @dispose pm=ModulePassManager() begin
         addTargetPasses!(pm, tm, triple)
 
         if !uses_julia_runtime(job)
@@ -252,7 +252,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     # part of the LateLowerGCFrame pass) aren't collected properly.
     #
     # these might not always be safe, as Julia's IR metadata isn't designed for IPO.
-    ModulePassManager() do pm
+    @dispose pm=ModulePassManager() begin
         addTargetPasses!(pm, tm, triple)
 
         # simplify function calls that don't use the returned value
@@ -263,9 +263,9 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
     # compare to Clang by using the pass manager builder APIs:
     #LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
-    #ModulePassManager() do pm
+    #@dispose pm=ModulePassManager() begin
     #    addTargetPasses!(pm, tm, triple)
-    #    PassManagerBuilder() do pmb
+    #    PassManager@dispose pmb=Builder() begin
     #        optlevel!(pmb, 2)
     #        populate!(pm, pmb)
     #    end
@@ -354,7 +354,7 @@ function lower_gc_frame!(fun::LLVM.Function)
             sz = ops[2]
 
             # replace with PTX alloc_obj
-            Builder(ctx) do builder
+            @dispose builder=Builder(ctx) begin
                 position!(builder, call)
                 ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz])
                 replace_uses!(call, ptr)

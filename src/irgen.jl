@@ -74,7 +74,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         (; compiled[method_instance].ci, func, specfunc)
 
     # minimal required optimization
-    @timeit_debug to "rewrite" ModulePassManager() do pm
+    @timeit_debug to "rewrite" @dispose pm=ModulePassManager() begin
         global current_job
         current_job = job
 
@@ -209,10 +209,9 @@ function lower_throw!(mod::LLVM.Module)
                 call = user(use)::LLVM.CallInst
 
                 # replace the throw with a PTX-compatible exception
-                let builder = Builder(ctx)
+                @dispose builder=Builder(ctx) begin
                     position!(builder, call)
                     emit_exception!(builder, name, call)
-                    dispose(builder)
                 end
 
                 # remove the call
@@ -514,7 +513,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 
     # emit IR performing the "conversions"
     new_args = LLVM.Value[]
-    Builder(ctx) do builder
+    @dispose builder=Builder(ctx) begin
         entry = BasicBlock(new_f, "entry"; ctx)
         position!(builder, entry)
 
@@ -727,7 +726,7 @@ function add_kernel_state!(mod::LLVM.Module)
     # update uses of the new function, modifying call sites to include the kernel state
     function rewrite_uses!(f)
         # update uses
-        Builder(ctx) do builder
+        @dispose builder=Builder(ctx) begin
             for use in uses(f)
                 val = user(use)
                 if val isa LLVM.CallBase && called_value(val) == f
@@ -796,7 +795,7 @@ function lower_kernel_state!(fun::LLVM.Function)
         state_intr = functions(mod)["julia.gpu.state_getter"]
         state_arg = nothing # only look-up when needed
 
-        Builder(ctx) do builder
+        @dispose builder=Builder(ctx) begin
             for use in uses(state_intr)
                 inst = user(use)
                 @assert inst isa LLVM.CallInst
@@ -861,7 +860,7 @@ end
 
 # run-time equivalent
 function kernel_state_value(state)
-    Context() do ctx
+    @dispose ctx=Context() begin
         T_state = convert(LLVMType, state; ctx)
 
         # create function
@@ -872,7 +871,7 @@ function kernel_state_value(state)
         state_intr = kernel_state_intr(mod, T_state)
 
         # generate IR
-        Builder(ctx) do builder
+        @dispose builder=Builder(ctx) begin
             entry = BasicBlock(llvm_f, "entry"; ctx)
             position!(builder, entry)
 

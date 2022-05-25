@@ -237,7 +237,7 @@ const __llvm_initialized = Ref(false)
 
     # mark everything internal except for the entry and any exported global variables.
     # this makes sure that the optimizer can, e.g., touch function signatures.
-    ModulePassManager() do pm
+    @dispose pm=ModulePassManager() begin
         # NOTE: this needs to happen after linking libraries to remove unused functions,
         #       but before deferred codegen so that all kernels remain available.
         exports = String[entry_fn]
@@ -300,7 +300,7 @@ const __llvm_initialized = Ref(false)
                 # insert a pointer to the function everywhere the entry is used
                 T_ptr = convert(LLVMType, Ptr{Cvoid}; ctx)
                 for call in worklist[dyn_job]
-                    Builder(ctx) do builder
+                    @dispose builder=Builder(ctx) begin
                         position!(builder, call)
                         fptr = ptrtoint!(builder, dyn_entry, T_ptr)
                         replace_uses!(call, fptr)
@@ -331,7 +331,7 @@ const __llvm_initialized = Ref(false)
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
-                do_deferred_codegen && ModulePassManager() do pm
+                do_deferred_codegen && @dispose pm=ModulePassManager() begin
                     # inline and optimize the call to e deferred code. in particular we want
                     # to remove unnecessary alloca's created by pass-by-ref semantics.
                     instruction_combining!(pm)
@@ -355,7 +355,7 @@ const __llvm_initialized = Ref(false)
         @timeit_debug to "clean-up" begin
             # we can only clean-up now, as optimization may lower or introduce calls to
             # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
-            ModulePassManager() do pm
+            @dispose pm=ModulePassManager() begin
                 # eliminate all unused internal functions
                 global_optimizer!(pm)
                 global_dce!(pm)

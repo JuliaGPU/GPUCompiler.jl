@@ -140,7 +140,7 @@ const gc_bits = 0x3 # FIXME
 
 # get the type tag of a type at run-time
 @generated function type_tag(::Val{type_name}) where type_name
-    Context() do ctx
+    @dispose ctx=Context() begin
         T_tag = convert(LLVMType, tag_type; ctx)
         T_ptag = LLVM.PointerType(T_tag)
 
@@ -155,7 +155,7 @@ const gc_bits = 0x3 # FIXME
                             LLVM.FunctionType(T_pjlvalue))
 
         # generate IR
-        Builder(ctx) do builder
+        @dispose builder=Builder(ctx) begin
             entry = BasicBlock(llvm_f, "entry"; ctx)
             position!(builder, entry)
 

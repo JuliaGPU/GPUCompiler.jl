@@ -146,7 +146,7 @@ end
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     tm = llvm_machine(job.target)
-    ModulePassManager() do pm
+    @dispose pm=ModulePassManager() begin
         add_library_info!(pm, triple(mod))
         add_transform_info!(pm, tm)
 
@@ -301,7 +301,7 @@ function hide_unreachable!(fun::LLVM.Function)
                 # TODO: `unreachable; unreachable`
             catch ex
                 isa(ex, UndefRefError) || rethrow(ex)
-                let builder = Builder(ctx)
+                @dispose builder=Builder(ctx) begin
                     position!(builder, bb)
 
                     # find the strict predecessors to this block
@@ -328,8 +328,6 @@ function hide_unreachable!(fun::LLVM.Function)
                         end
                     end
                     push!(worklist, bb => fallthrough)
-
-                    dispose(builder)
                 end
             end
         end
@@ -387,10 +385,9 @@ function hide_trap!(mod::LLVM.Module)
         for use in uses(trap)
             val = user(use)
             if isa(val, LLVM.CallInst)
-                let builder = Builder(ctx)
+                @dispose builder=Builder(ctx) begin
                     position!(builder, val)
                     call!(builder, exit)
-                    dispose(builder)
                 end
                 unsafe_delete!(LLVM.parent(val), val)
                 changed = true

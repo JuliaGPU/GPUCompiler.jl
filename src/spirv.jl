@@ -78,7 +78,7 @@ end
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
-    ModulePassManager() do pm
+    @dispose pm=ModulePassManager() begin
         # SPIR-V does not support trap, and has no mechanism to abort compute kernels
         # (OpKill is only available in fragment execution mode)
         add!(pm, ModulePass("RemoveTrap", rm_trap!))
@@ -263,7 +263,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
     # emit IR performing the "conversions"
     new_args = Vector{LLVM.Value}()
-    Builder(ctx) do builder
+    @dispose builder=Builder(ctx) begin
         entry = BasicBlock(new_f, "entry"; ctx)
         position!(builder, entry)
 
@@ -312,7 +312,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
     # clean-up
     # NOTE: byval wrapping happens very late, after optimization
-    ModulePassManager() do pm
+    @dispose pm=ModulePassManager() begin
         # merge GEPs
         instruction_combining!(pm)
 
