@@ -74,10 +74,10 @@ function emit_function!(mod, @nospecialize(job::CompilerJob), f, method; ctx::Co
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
-    pm = ModulePassManager()
-    strip_dead_prototypes!(pm)
-    run!(pm, new_mod)
-    dispose(pm)
+    @dispose pm=ModulePassManager() begin
+        strip_dead_prototypes!(pm)
+        run!(pm, new_mod)
+    end
 
     temp_name = LLVM.name(meta.entry)
     link!(mod, new_mod)

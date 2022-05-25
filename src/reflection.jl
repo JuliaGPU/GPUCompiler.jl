@@ -41,7 +41,7 @@ end
 
 #
 # Compat shims
-# 
+#
 
 include("reflection_compat.jl")
 

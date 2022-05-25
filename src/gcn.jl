@@ -85,7 +85,7 @@ function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
     datalayout!(mod, julia_datalayout(job.target))
 
     tm = llvm_machine(job.target)
-    ModulePassManager() do pm
+    @dispose pm=ModulePassManager() begin
         add_library_info!(pm, triple(mod))
         add_transform_info!(pm, tm)
 
@@ -120,10 +120,9 @@ function lower_throw_extra!(mod::LLVM.Module)
                     call = user(use)::LLVM.CallInst
 
                     # replace the throw with a trap
-                    let builder = Builder(ctx)
+                    @dispose builder=Builder(ctx) begin
                         position!(builder, call)
                         emit_exception!(builder, f_name, call)
-                        dispose(builder)
                     end
 
                     # remove the call
@@ -170,7 +169,7 @@ function fix_alloca_addrspace!(fn::LLVM.Function)
                 addrspace(ty) == alloca_as && continue
 
                 new_insn = nothing
-                Builder(ctx) do builder
+                @dispose builder=Builder(ctx) begin
                     position!(builder, insn)
                     _alloca = alloca!(builder, ety, name(insn))
                     new_insn = addrspacecast!(builder, _alloca, ty)

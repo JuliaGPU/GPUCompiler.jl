@@ -3,7 +3,7 @@
 # final preparations for the module to be compiled to machine code
 # these passes should not be run when e.g. compiling to write to disk.
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    let pm = ModulePassManager()
+    @dispose pm=ModulePassManager() begin
         global current_job
         current_job = job
 
@@ -15,7 +15,6 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         strip_dead_prototypes!(pm)
 
         run!(pm, mod)
-        dispose(pm)
     end
 
     return
