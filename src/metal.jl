@@ -203,11 +203,11 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     end
 
     clone_into!(new_f, f; value_map, changes, type_mapper)
-    replace_uses!(f, new_f) # to update metadata
-    @assert isempty(uses(f))
 
     # remove the old function
     fn = LLVM.name(f)
+    @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 
