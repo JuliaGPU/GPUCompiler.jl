@@ -439,6 +439,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     ctx = context(mod)
     ft = eltype(llvmtype(f))
     @compiler_assert LLVM.return_type(ft) == LLVM.VoidType(ctx) job
+    @timeit_debug to "lower byval" begin
 
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
@@ -557,6 +558,8 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     LLVM.name!(new_f, fn)
 
     return new_f
+
+    end
 end
 
 

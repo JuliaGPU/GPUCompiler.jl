@@ -404,7 +404,7 @@ end
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
                           strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
     if validate
-        @timeit_debug to "validation" begin
+        @timeit_debug to "Validation" begin
             check_invocation(job)
             check_ir(job, ir)
         end
@@ -412,7 +412,7 @@ end
 
     # NOTE: strip after validation to get better errors
     if strip
-        @timeit_debug to "strip debug info" strip_debuginfo!(ir)
+        @timeit_debug to "Debug info removal" strip_debuginfo!(ir)
     end
 
     @timeit_debug to "LLVM back-end" begin
