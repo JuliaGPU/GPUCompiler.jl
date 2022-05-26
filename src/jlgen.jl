@@ -182,7 +182,8 @@ struct GPUInterpreter <: AbstractInterpreter
     inf_params::InferenceParams
     opt_params::OptimizationParams
 
-    function GPUInterpreter(cache::CodeCache, mt::Union{Nothing,Core.MethodTable}, world::UInt)
+
+    function GPUInterpreter(cache::CodeCache, mt::Union{Nothing,Core.MethodTable}, world::UInt, ip::InferenceParams, op::OptimizationParams)
         @assert world <= Base.get_world_counter()
 
         return new(
@@ -196,9 +197,8 @@ struct GPUInterpreter <: AbstractInterpreter
             world,
 
             # parameters for inference and optimization
-            InferenceParams(unoptimize_throw_blocks=false),
-            VERSION >= v"1.8.0-DEV.486" ? OptimizationParams() :
-                                          OptimizationParams(unoptimize_throw_blocks=false),
+            ip,
+            op
         )
     end
 end
