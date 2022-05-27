@@ -21,6 +21,7 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
     blocks_per_sm::Union{Nothing,Int} = nothing
     maxregs::Union{Nothing,Int} = nothing
+    always_inline::Bool = false
 end
 
 function Base.hash(target::PTXCompilerTarget, h::UInt)
@@ -35,6 +36,7 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.maxthreads, h)
     h = hash(target.blocks_per_sm, h)
     h = hash(target.maxregs, h)
+    h = hash(target.always_inline, h)
 
     h
 end
@@ -74,6 +76,7 @@ function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
     job.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.target.maxthreads)")
     job.target.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.target.blocks_per_sm)")
     job.target.maxregs !== nothing && print(io, ", maxregs=$(job.target.maxregs)")
+    job.target.always_inline !== nothing && print(io, ", always_inline=$(job.target.always_inline)")
 end
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
@@ -85,6 +88,20 @@ runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
     "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)" *
        "-debuginfo=$(Int(llvm_debug_info(job)))" *
        "-exitable=$(job.target.exitable)"
+
+function optimization_params(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
+    kwargs = NamedTuple()
+
+    if VERSION < v"1.8.0-DEV.486"
+        kwargs = (kwargs..., unoptimize_throw_blocks=false)
+    end
+
+    if job.target.always_inline
+        kwargs = (kwargs..., inline_cost_threshold=typemax(Int))
+    end
+
+    return OptimizationParams(;kwargs...)
+end
 
 function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
     ctx = context(mod)
