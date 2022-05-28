@@ -6,45 +6,22 @@ on:
   pull_request:
   workflow_dispatch:
 jobs:
-  test:
-    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }} - assertions=${{ matrix.assertions }}
+  # released versions, downloaded as binaries
+  binary_test:
+    name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.6', '1.7', '^1.8.0-beta3', 'nightly']
+        version: ['1.6', '1.7', '^1.8.0-beta3']
         os: [ubuntu-latest, macOS-latest, windows-latest]
         arch: [x64]
-        assertions: [false]
-        include:
-          # special test with LLVM assertions enabled
-          # TODO: enable this across all versions
-          #       (needs julia-actions/setup-julia support)
-          - os: ubuntu-latest
-            arch: x64
-            version: '1.7'
-            assertions: true
-          - os: ubuntu-latest
-            arch: x64
-            version: '1.8'
-            assertions: true
     steps:
       - uses: actions/checkout@v2
       - uses: julia-actions/setup-julia@v1
-        if: ${{ ! matrix.assertions }}
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
-      - name: Download Julia with assertions
-        if: ${{ matrix.assertions }}
-        env:
-          version: ${{ matrix.version }}
-          arch: ${{ matrix.arch }}
-        run: |
-          wget https://julialangnightlies.s3.amazonaws.com/assert_bin/linux/$arch/$version/julia-latest-linux64.tar.gz
-          tar -xvzf julia-latest-linux64.tar.gz
-          rm -rf julia-latest-linux64.tar.gz
-          echo $PWD/julia-*/bin >> $GITHUB_PATH
       - uses: actions/cache@v1
         env:
           cache-name: cache-artifacts
@@ -55,11 +32,48 @@ jobs:
             ${{ runner.os }}-test-${{ env.cache-name }}-
             ${{ runner.os }}-test-
             ${{ runner.os }}-
-      - uses: julia-actions/julia-buildpkg@latest
-      - run: |
-          git config --global user.name Tester
-          git config --global user.email te@st.er
-      - uses: julia-actions/julia-runtest@latest
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v1
+        with:
+          file: lcov.info
+
+  # development versions, built from source (with assertions enabled)
+  # XXX: skip 1.6 as that requires gfortran, which isn't available on macOS runners
+  # XXX: can we even perform Windows builds like this (i.e., without mingw/cygwin)?
+  source_test:
+    name: Julia ${{ matrix.branch }} - ${{ matrix.os }} - ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ['release-1.7', 'release-1.8', 'master']
+        os: [ubuntu-latest, macOS-latest]
+        arch: [x64]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/checkout@v2
+        with:
+          repository: 'JuliaLang/julia'
+          ref: ${{ matrix.branch }}
+          path: 'julia'
+      - name: Compile Julia
+        run: |
+          make -C julia -j $(nproc) FORCE_ASSERTIONS=1 LLVM_ASSERTIONS=1 JULIA_PRECOMPILE=0
+          echo $PWD/julia/usr/bin >> $GITHUB_PATH
+      - uses: actions/cache@v1
+        env:
+          cache-name: cache-artifacts
+        with:
+          path: ~/.julia/artifacts
+          key: ${{ runner.os }}-test-${{ env.cache-name }}-${{ hashFiles('**/Project.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-test-${{ env.cache-name }}-
+            ${{ runner.os }}-test-
+            ${{ runner.os }}-
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
       - uses: julia-actions/julia-processcoverage@v1
       - uses: codecov/codecov-action@v1
         with:
