@@ -126,13 +126,23 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true,
         ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false, ctx, kwargs...)
         if VERSION >= v"1.9.0-DEV.516"
             ts_mod = ThreadSafeModule(ir; ctx)
-            # N.B. jl_dump_function_ir will `Libc.free` the passed-in pointer
-            value_ptr = reinterpret(Ptr{jl_llvmf_dump}, Libc.malloc(sizeof(jl_llvmf_dump)))
-            unsafe_store!(value_ptr, jl_llvmf_dump(ts_mod.ref, meta.entry.ref))
-            GC.@preserve ir ts_mod ctx begin
-                ccall(:jl_dump_function_ir, Ref{String},
-                      (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
-                      value_ptr, !raw, dump_module, debuginfo)
+            if VERSION >= v"1.9.0-DEV.670"
+                value = Ref(jl_llvmf_dump(ts_mod.ref, meta.entry.ref))
+                GC.@preserve ir ts_mod ctx value begin
+                    value_ptr = Base.unsafe_convert(Ptr{jl_llvmf_dump}, value)
+                    ccall(:jl_dump_function_ir, Ref{String},
+                          (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
+                          value_ptr, !raw, dump_module, debuginfo)
+                end
+            else
+                # N.B. jl_dump_function_ir will `Libc.free` the passed-in pointer
+                value_ptr = reinterpret(Ptr{jl_llvmf_dump}, Libc.malloc(sizeof(jl_llvmf_dump)))
+                unsafe_store!(value_ptr, jl_llvmf_dump(ts_mod.ref, meta.entry.ref))
+                GC.@preserve ir ts_mod ctx begin
+                    ccall(:jl_dump_function_ir, Ref{String},
+                          (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
+                          value_ptr, !raw, dump_module, debuginfo)
+                end
             end
         else
             ccall(:jl_dump_function_ir, Ref{String},
