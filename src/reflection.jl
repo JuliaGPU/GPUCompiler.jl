@@ -124,21 +124,23 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true,
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     str = JuliaContext() do ctx
         ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false, ctx, kwargs...)
-        if VERSION >= v"1.9.0-DEV.516"
+        @static if VERSION >= v"1.9.0-DEV.516"
             ts_mod = ThreadSafeModule(ir; ctx)
             if VERSION >= v"1.9.0-DEV.670"
-                value = Ref(jl_llvmf_dump(ts_mod.ref, meta.entry.ref))
-                GC.@preserve ir ts_mod ctx value begin
+                entry_fn = meta.entry
+                GC.@preserve ts_mod entry_fn begin
+                    value = Ref(jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
                     value_ptr = Base.unsafe_convert(Ptr{jl_llvmf_dump}, value)
                     ccall(:jl_dump_function_ir, Ref{String},
                           (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
                           value_ptr, !raw, dump_module, debuginfo)
                 end
             else
-                # N.B. jl_dump_function_ir will `Libc.free` the passed-in pointer
-                value_ptr = reinterpret(Ptr{jl_llvmf_dump}, Libc.malloc(sizeof(jl_llvmf_dump)))
-                unsafe_store!(value_ptr, jl_llvmf_dump(ts_mod.ref, meta.entry.ref))
-                GC.@preserve ir ts_mod ctx begin
+                entry_fn = meta.entry
+                GC.@preserve ts_mod entry_fn begin
+                    # N.B. jl_dump_function_ir will `Libc.free` the passed-in pointer
+                    value_ptr = reinterpret(Ptr{jl_llvmf_dump}, Libc.malloc(sizeof(jl_llvmf_dump)))
+                    unsafe_store!(value_ptr, jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
                     ccall(:jl_dump_function_ir, Ref{String},
                           (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
                           value_ptr, !raw, dump_module, debuginfo)

@@ -297,7 +297,7 @@ module LazyCodegen
                 push!(argexprs, argexpr)
             end
 
-            T_jlvalue = LLVM.StructType(LLVMType[],; ctx)
+            T_jlvalue = LLVM.StructType(LLVMType[]; ctx)
             T_prjlvalue = LLVM.PointerType(T_jlvalue, #= AddressSpace::Tracked =# 10)
 
             for (source_i, source_typ) in enumerate(argtypes)
