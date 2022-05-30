@@ -326,7 +326,7 @@ function _lookup_fun(mi, min_world, max_world)
 end
 
 function compile_method_instance(@nospecialize(job::CompilerJob),
-                                 method_instance::MethodInstance; ctx::Context)
+                                 method_instance::MethodInstance; ctx::JuliaContextType)
     # populate the cache
     cache = ci_cache(job)
     mt = method_table(job)
@@ -362,7 +362,24 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
 
     # generate IR
     GC.@preserve lookup_cb begin
-        native_code = if VERSION >= v"1.9.0-DEV.115"
+        native_code = if VERSION >= v"1.9.0-DEV.516"
+            mod = LLVM.Module("start"; ctx=unwrap_context(ctx))
+
+            # configure the module
+            triple!(mod, llvm_triple(job.target))
+            if julia_datalayout(job.target) !== nothing
+                datalayout!(mod, julia_datalayout(job.target))
+            end
+            flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+                Metadata(ConstantInt(4; ctx=unwrap_context(ctx)))
+            flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+                Metadata(ConstantInt(DEBUG_METADATA_VERSION(); ctx=unwrap_context(ctx)))
+
+            ts_mod = ThreadSafeModule(mod; ctx)
+            ccall(:jl_create_native, Ptr{Cvoid},
+                  (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint),
+                  [method_instance], ts_mod, Ref(params), #=extern policy=# 1)
+        elseif VERSION >= v"1.9.0-DEV.115"
             ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
                   [method_instance], ctx, Ref(params), #=extern policy=# 1)
@@ -378,10 +395,23 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
                   [method_instance], params, #=extern policy=# 1)
         end
         @assert native_code != C_NULL
-        llvm_mod_ref = ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
-                             (Ptr{Cvoid},), native_code)
+        llvm_mod_ref = if VERSION >= v"1.9.0-DEV.516"
+            ccall(:jl_get_llvm_module, LLVM.API.LLVMOrcThreadSafeModuleRef,
+                  (Ptr{Cvoid},), native_code)
+        else
+            ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
+                  (Ptr{Cvoid},), native_code)
+        end
         @assert llvm_mod_ref != C_NULL
-        llvm_mod = LLVM.Module(llvm_mod_ref)
+        if VERSION >= v"1.9.0-DEV.516"
+            llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref)
+            llvm_mod = nothing
+            llvm_ts_mod() do mod
+                llvm_mod = mod
+            end
+        else
+            llvm_mod = LLVM.Module(llvm_mod_ref)
+        end
     end
     if !(Sys.ARCH == :x86 || Sys.ARCH == :x86_64)
         cache_gbl = nothing
@@ -426,10 +456,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         end
     end
 
-    # configure the module
-    triple!(llvm_mod, llvm_triple(job.target))
-    if julia_datalayout(job.target) !== nothing
-        datalayout!(llvm_mod, julia_datalayout(job.target))
+    if VERSION < v"1.9.0-DEV.516"
+        # configure the module
+        triple!(llvm_mod, llvm_triple(job.target))
+        if julia_datalayout(job.target) !== nothing
+            datalayout!(llvm_mod, julia_datalayout(job.target))
+        end
     end
 
     return llvm_mod, compiled

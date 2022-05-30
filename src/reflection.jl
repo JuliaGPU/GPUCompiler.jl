@@ -99,6 +99,12 @@ InteractiveUtils.code_lowered(err::InvalidIRError; kwargs...) = code_lowered(err
 InteractiveUtils.code_typed(err::InvalidIRError; kwargs...) = code_typed(err.job; kwargs...)
 InteractiveUtils.code_warntype(err::InvalidIRError; kwargs...) = code_warntype(err.job; kwargs...)
 
+# For VERSION >= v"1.9.0-DEV.516"
+struct jl_llvmf_dump
+    TSM::LLVM.API.LLVMOrcThreadSafeModuleRef
+    F::LLVM.API.LLVMValueRef
+end
+
 """
     code_llvm([io], job; optimize=true, raw=false, dump_module=false)
 
@@ -118,9 +124,33 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true,
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     str = JuliaContext() do ctx
         ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false, ctx, kwargs...)
-        ccall(:jl_dump_function_ir, Ref{String},
-              (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
-              meta.entry, !raw, dump_module, debuginfo)
+        @static if VERSION >= v"1.9.0-DEV.516"
+            ts_mod = ThreadSafeModule(ir; ctx)
+            if VERSION >= v"1.9.0-DEV.672"
+                entry_fn = meta.entry
+                GC.@preserve ts_mod entry_fn begin
+                    value = Ref(jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
+                    ccall(:jl_dump_function_ir, Ref{String},
+                          (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
+                          value, !raw, dump_module, debuginfo)
+                end
+            else
+                entry_fn = meta.entry
+                GC.@preserve ts_mod entry_fn begin
+                    # N.B. jl_dump_function_ir will `Libc.free` the passed-in pointer
+                    value_ptr = reinterpret(Ptr{jl_llvmf_dump},
+                                            Libc.malloc(sizeof(jl_llvmf_dump)))
+                    unsafe_store!(value_ptr, jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
+                    ccall(:jl_dump_function_ir, Ref{String},
+                          (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
+                          value_ptr, !raw, dump_module, debuginfo)
+                end
+            end
+        else
+            ccall(:jl_dump_function_ir, Ref{String},
+                  (LLVM.API.LLVMValueRef, Bool, Bool, Ptr{UInt8}),
+                  meta.entry, !raw, dump_module, debuginfo)
+        end
     end
     highlight(io, str, "llvm")
 end

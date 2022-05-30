@@ -178,6 +178,15 @@ function Base.isequal(a::CompilerJob, b::CompilerJob)
 end
 
 
+## contexts
+
+if VERSION >= v"1.9.0-DEV.516"
+    const JuliaContextType = ThreadSafeContext
+else
+    const JuliaContextType = Context
+end
+
+
 ## interfaces and fallback definitions
 
 # Has the runtime available and does not require special handling

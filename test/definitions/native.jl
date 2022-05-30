@@ -278,8 +278,8 @@ module LazyCodegen
 
 
         # Note this follows: emit_call_specfun_other
-        JuliaContext() do ctx
-
+        JuliaContext() do ts_ctx
+            ctx = GPUCompiler.unwrap_context(ts_ctx)
             if !isghosttype(F) && !Core.Compiler.isconstType(F)
                 isboxed = GPUCompiler.deserves_argbox(F)
                 argexpr = :(func)
@@ -297,7 +297,7 @@ module LazyCodegen
                 push!(argexprs, argexpr)
             end
 
-            T_jlvalue = LLVM.StructType(LLVMType[],;ctx)
+            T_jlvalue = LLVM.StructType(LLVMType[]; ctx)
             T_prjlvalue = LLVM.PointerType(T_jlvalue, #= AddressSpace::Tracked =# 10)
 
             for (source_i, source_typ) in enumerate(argtypes)
