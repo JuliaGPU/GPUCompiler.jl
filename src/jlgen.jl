@@ -370,6 +370,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
             if julia_datalayout(job.target) !== nothing
                 datalayout!(mod, julia_datalayout(job.target))
             end
+            flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+                Metadata(ConstantInt(4; ctx=unwrap_context(ctx)))
+            flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+                Metadata(ConstantInt(DEBUG_METADATA_VERSION(); ctx=unwrap_context(ctx)))
 
             ts_mod = ThreadSafeModule(mod; ctx)
             ccall(:jl_create_native, Ptr{Cvoid},
