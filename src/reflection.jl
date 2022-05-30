@@ -130,16 +130,16 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true,
                 entry_fn = meta.entry
                 GC.@preserve ts_mod entry_fn begin
                     value = Ref(jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
-                    value_ptr = Base.unsafe_convert(Ptr{jl_llvmf_dump}, value)
                     ccall(:jl_dump_function_ir, Ref{String},
                           (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
-                          value_ptr, !raw, dump_module, debuginfo)
+                          value, !raw, dump_module, debuginfo)
                 end
             else
                 entry_fn = meta.entry
                 GC.@preserve ts_mod entry_fn begin
                     # N.B. jl_dump_function_ir will `Libc.free` the passed-in pointer
-                    value_ptr = reinterpret(Ptr{jl_llvmf_dump}, Libc.malloc(sizeof(jl_llvmf_dump)))
+                    value_ptr = reinterpret(Ptr{jl_llvmf_dump},
+                                            Libc.malloc(sizeof(jl_llvmf_dump)))
                     unsafe_store!(value_ptr, jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
                     ccall(:jl_dump_function_ir, Ref{String},
                           (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
