@@ -126,7 +126,7 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true,
         ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false, ctx, kwargs...)
         @static if VERSION >= v"1.9.0-DEV.516"
             ts_mod = ThreadSafeModule(ir; ctx)
-            if VERSION >= v"1.9.0-DEV.670"
+            if VERSION >= v"1.9.0-DEV.672"
                 entry_fn = meta.entry
                 GC.@preserve ts_mod entry_fn begin
                     value = Ref(jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
