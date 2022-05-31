@@ -109,7 +109,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     entry_fn = LLVM.name(entry)
 
     if job.source.kernel
-        add_address_spaces!(job, mod, entry)
+        add_address_spaces!(mod, entry)
     end
 
     return functions(mod)[entry_fn]
@@ -148,10 +148,9 @@ end
 # generic pointer removal
 #
 # every pointer argument (e.g. byref objs) to a kernel needs an address space attached.
-function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
+function add_address_spaces!(mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
     ft = eltype(llvmtype(f))
-    @compiler_assert LLVM.return_type(ft) == LLVM.VoidType(ctx) job
 
     function remapType(src)
         # TODO: recurse in structs
@@ -203,6 +202,45 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     end
 
     clone_into!(new_f, f; value_map, changes, type_mapper)
+
+    # update calls to overloaded intrinsic, re-mangling their names
+    # XXX: shouldn't clone_into! do this?
+    LLVM.@dispose builder=Builder(ctx) begin
+        for bb in blocks(new_f), inst in instructions(bb)
+            if inst isa LLVM.CallBase
+                callee_f = called_value(inst)
+                LLVM.isintrinsic(callee_f) || continue
+                intr = Intrinsic(callee_f)
+                isoverloaded(intr) || continue
+
+                # get an appropriately-overloaded intrinsic instantiation
+                # XXX: apparently it differs per intrinsics which arguments to take into
+                #      consideration when generating an overload? for example, with memcpy
+                #      the trailing i1 argument is not included in the overloaded name.
+                intr_f = if intr == Intrinsic("llvm.memcpy")
+                    LLVM.Function(mod, intr, llvmtype.(arguments(inst)[1:end-1]))
+                else
+                    error("Unsupported intrinsic; please file an issue.")
+                end
+
+                # create a call to the new intrinsic
+                # TODO: wrap setCalledFunction instead of using an IRBuilder
+                position!(builder, inst)
+                new_inst = if inst isa LLVM.CallInst
+                    call!(builder, intr_f, arguments(inst), operand_bundles(inst))
+                else
+                    # TODO: invoke and callbr
+                    error("Rewrite of $(typeof(inst))-based calls is not implemented: $inst")
+                end
+                callconv!(new_inst, callconv(inst))
+
+                # replace the old call
+                replace_uses!(inst, new_inst)
+                @assert isempty(uses(inst))
+                unsafe_delete!(LLVM.parent(inst), inst)
+            end
+        end
+    end
 
     # remove the old function
     fn = LLVM.name(f)

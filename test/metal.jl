@@ -1,4 +1,4 @@
-using Metal_LLVM_Tools_jll
+using Metal_LLVM_Tools_jll, LLVM
 
 include("definitions/metal.jl")
 
@@ -29,6 +29,26 @@ end
     # for kernels, every pointer argument needs to take an address space
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Tuple{Int}}; kernel=true))
     @test occursin(r"@.*julia.*kernel.*\(({ i64 }|\[1 x i64\]) addrspace\(1\)\*", ir)
+end
+
+@testset "byref aggregates with memcpy" begin
+    ir = """
+        declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1 immarg)
+
+        define void @kernel(i8* %0, i8* %1) {
+        entry:
+            call void @llvm.memcpy.p0i8.p0i8.i64(i8* %0, i8* %1, i64 0, i1 false)
+            ret void
+        }
+    """
+    Context() do ctx
+        mod = parse(LLVM.Module, ir; ctx)
+        f = functions(mod)["kernel"]
+        GPUCompiler.add_address_spaces!(mod, f)
+        LLVM.verify(mod)
+    end
+    return
+
 end
 
 @testset "byref primitives" begin
