@@ -214,13 +214,17 @@ function add_address_spaces!(mod::LLVM.Module, f::LLVM.Function)
                 isoverloaded(intr) || continue
 
                 # get an appropriately-overloaded intrinsic instantiation
-                # XXX: apparently it differs per intrinsics which arguments to take into
-                #      consideration when generating an overload? for example, with memcpy
-                #      the trailing i1 argument is not included in the overloaded name.
+                # NOTE: the overload types differs from the argument types
                 intr_f = if intr == Intrinsic("llvm.memcpy")
                     LLVM.Function(mod, intr, llvmtype.(arguments(inst)[1:end-1]))
+                elseif intr == Intrinsic("llvm.lifetime.start") ||
+                       intr == Intrinsic("llvm.lifetime.end")
+                    LLVM.Function(mod, intr, [llvmtype(arguments(inst)[end])])
                 else
-                    error("Unsupported intrinsic; please file an issue.")
+                    # TODO: use matchIntrinsicSignature to do this generically
+                    error("""Unsupported intrinsic call:
+                                  $inst.
+                             Please file an issue with at https://github.com/JuliaGPU/GPUCompiler.jl""")
                 end
 
                 # create a call to the new intrinsic
