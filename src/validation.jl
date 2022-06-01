@@ -32,7 +32,7 @@ function check_method(@nospecialize(job::CompilerJob))
     if job.source.kernel
         cache = ci_cache(job)
         mt = method_table(job)
-        interp = GPUInterpreter(cache, mt, world)
+        interp = GPUInterpreter(job, cache, mt)
         rt = return_type(only(ms); interp)
 
         if rt != Nothing
@@ -102,6 +102,55 @@ struct InvalidIRError <: Exception
     errors::Vector{IRError}
 end
 
+# Julia IR
+
+const UNDEFINED_GLOBAL = "use of an undefined global binding"
+const MUTABLE_GLOBAL   = "use of a mutable global binding"
+
+function check_julia_ir(interp, mi, src)
+    # pseudo (single-frame) backtrace pointing to a source code location
+    function backtrace(i)
+        loc = src.linetable[i]
+        [StackTraces.StackFrame(loc.method, loc.file, loc.line, mi, false, false, C_NULL)]
+    end
+
+    function check(i, x, errors::Vector{IRError})
+        if x isa Expr
+            for y in x.args
+                check(i, y, errors)
+            end
+        elseif x isa GlobalRef
+            Base.isbindingresolved(x.mod, x.name) || return
+            # XXX: when does this happen? do we miss any cases by bailing out early?
+            #      why doesn't calling `Base.resolve(x, force=true)` work?
+            if !Base.isdefined(x.mod, x.name)
+               push!(errors, (UNDEFINED_GLOBAL, backtrace(i), x))
+            end
+            if !Base.isconst(x.mod, x.name)
+                push!(errors, (MUTABLE_GLOBAL, backtrace(i), x))
+            end
+
+            # TODO: make the validation conditional, but make sure we don't cache invalid IR
+
+            # TODO: perform more validation? e.g. disallow Arrays and other CPU values?
+        end
+
+        return
+    end
+
+    errors = IRError[]
+    for (i, x) in enumerate(src.code)
+        check(i, x, errors)
+    end
+    if !isempty(errors)
+        throw(InvalidIRError(interp.job, errors))
+    end
+
+    return
+end
+
+# LLVM IR
+
 const RUNTIME_FUNCTION = "call to the Julia runtime"
 const UNKNOWN_FUNCTION = "call to an unknown function"
 const POINTER_FUNCTION = "call through a literal pointer"
@@ -117,6 +166,8 @@ function Base.showerror(io::IO, err::InvalidIRError)
                 print(io, " (call to ", meta, ")")
             elseif kind == DELAYED_BINDING
                 print(io, " (use of '", meta, "')")
+            else
+                print(io, " (", meta, ")")
             end
         end
         Base.show_backtrace(io, bt)
@@ -132,8 +183,8 @@ function Base.showerror(io::IO, err::InvalidIRError)
     return
 end
 
-function check_ir(job, args...)
-    errors = check_ir!(job, IRError[], args...)
+function check_llvm_ir(job, args...)
+    errors = check_llvm_ir!(job, IRError[], args...)
     unique!(errors)
     if !isempty(errors)
         throw(InvalidIRError(job, errors))
@@ -142,18 +193,18 @@ function check_ir(job, args...)
     return
 end
 
-function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module)
+function check_llvm_ir!(job, errors::Vector{IRError}, mod::LLVM.Module)
     for f in functions(mod)
-        check_ir!(job, errors, f)
+        check_llvm_ir!(job, errors, f)
     end
 
     return errors
 end
 
-function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function)
+function check_llvm_ir!(job, errors::Vector{IRError}, f::LLVM.Function)
     for bb in blocks(f), inst in instructions(bb)
         if isa(inst, LLVM.CallInst)
-            check_ir!(job, errors, inst)
+            check_llvm_ir!(job, errors, inst)
         end
     end
 
@@ -162,7 +213,7 @@ end
 
 const libjulia = Ref{Ptr{Cvoid}}(C_NULL)
 
-function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
+function check_llvm_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
     bt = backtrace(inst)
     dest = called_value(inst)
     if isa(dest, LLVM.Function)

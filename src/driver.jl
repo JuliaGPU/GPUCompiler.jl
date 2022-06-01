@@ -411,7 +411,7 @@ end
     if validate
         @timeit_debug to "Validation" begin
             check_invocation(job)
-            check_ir(job, ir)
+            check_llvm_ir(job, ir)
         end
     end
 
