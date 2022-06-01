@@ -308,17 +308,5 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
 
-    # clean-up
-    # NOTE: byval wrapping happens very late, after optimization
-    @dispose pm=ModulePassManager() begin
-        # merge GEPs
-        instruction_combining!(pm)
-
-        # fold the entry bb into the rest of the function
-        cfgsimplification!(pm)
-
-        run!(pm, mod)
-    end
-
     return new_f
 end
