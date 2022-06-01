@@ -463,10 +463,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
             arg.cc != GHOST
         end
         for arg in args
-            if arg.cc == BITS_REF
-                # NOTE: +1 since this pass runs after introducing the kernel state
-                byval[arg.codegen.i] = true
-            end
+            byval[arg.codegen.i] = (arg.cc == BITS_REF)
         end
     end
 

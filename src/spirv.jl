@@ -237,9 +237,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
             arg.cc != GHOST
         end
         for arg in args
-            if arg.cc == BITS_REF
-                byval[arg.codegen.i] = true
-            end
+            byval[arg.codegen.i] = (arg.cc == BITS_REF)
         end
     end
 
