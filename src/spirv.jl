@@ -262,7 +262,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     # emit IR performing the "conversions"
     new_args = Vector{LLVM.Value}()
     @dispose builder=Builder(ctx) begin
-        entry = BasicBlock(new_f, "entry"; ctx)
+        entry = BasicBlock(new_f, "conversion"; ctx)
         position!(builder, entry)
 
         # perform argument conversions

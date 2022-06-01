@@ -516,7 +516,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     # emit IR performing the "conversions"
     new_args = LLVM.Value[]
     @dispose builder=Builder(ctx) begin
-        entry = BasicBlock(new_f, "entry"; ctx)
+        entry = BasicBlock(new_f, "conversion"; ctx)
         position!(builder, entry)
 
         # perform argument conversions
