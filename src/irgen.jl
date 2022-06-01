@@ -469,7 +469,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 
     # fixup metadata
     #
-    # Julia emits invariant.load and const TBAA metadta on loads from pointer args,
+    # Julia emits invariant.load and const TBAA metadata on loads from pointer args,
     # which is invalid now that we have materialized the byval.
     for (i, param) in enumerate(parameters(f))
         if byval[i]
