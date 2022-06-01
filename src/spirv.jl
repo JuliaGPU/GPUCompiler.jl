@@ -237,9 +237,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
             arg.cc != GHOST
         end
         for arg in args
-            if arg.cc == BITS_REF
-                byval[arg.codegen.i] = true
-            end
+            byval[arg.codegen.i] = (arg.cc == BITS_REF)
         end
     end
 
@@ -264,7 +262,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     # emit IR performing the "conversions"
     new_args = Vector{LLVM.Value}()
     @dispose builder=Builder(ctx) begin
-        entry = BasicBlock(new_f, "entry"; ctx)
+        entry = BasicBlock(new_f, "conversion"; ctx)
         position!(builder, entry)
 
         # perform argument conversions
@@ -309,18 +307,6 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     replace_metadata_uses!(f, new_f)
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
-
-    # clean-up
-    # NOTE: byval wrapping happens very late, after optimization
-    @dispose pm=ModulePassManager() begin
-        # merge GEPs
-        instruction_combining!(pm)
-
-        # fold the entry bb into the rest of the function
-        cfgsimplification!(pm)
-
-        run!(pm, mod)
-    end
 
     return new_f
 end

@@ -463,16 +463,13 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
             arg.cc != GHOST
         end
         for arg in args
-            if arg.cc == BITS_REF
-                # NOTE: +1 since this pass runs after introducing the kernel state
-                byval[arg.codegen.i] = true
-            end
+            byval[arg.codegen.i] = (arg.cc == BITS_REF)
         end
     end
 
     # fixup metadata
     #
-    # Julia emits invariant.load and const TBAA metadta on loads from pointer args,
+    # Julia emits invariant.load and const TBAA metadata on loads from pointer args,
     # which is invalid now that we have materialized the byval.
     for (i, param) in enumerate(parameters(f))
         if byval[i]
@@ -519,7 +516,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     # emit IR performing the "conversions"
     new_args = LLVM.Value[]
     @dispose builder=Builder(ctx) begin
-        entry = BasicBlock(new_f, "entry"; ctx)
+        entry = BasicBlock(new_f, "conversion"; ctx)
         position!(builder, entry)
 
         # perform argument conversions
