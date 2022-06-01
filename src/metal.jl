@@ -109,7 +109,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     entry_fn = LLVM.name(entry)
 
     if job.source.kernel
-        add_address_spaces!(mod, entry)
+        add_address_spaces!(job, mod, entry)
     end
 
     return functions(mod)[entry_fn]
@@ -147,24 +147,51 @@ end
 
 # generic pointer removal
 #
-# every pointer argument (e.g. byref objs) to a kernel needs an address space attached.
-function add_address_spaces!(mod::LLVM.Module, f::LLVM.Function)
+# every pointer argument (i.e. byref objs) to a kernel needs an address space attached.
+# this pass rewrites pointers to reference arguments to be located in address space 1.
+#
+# NOTE: this pass only rewrites byref objs, not plain pointers being passed; the user is
+# responsible for making sure these pointers have an address space attached (using LLVMPtr).
+#
+# NOTE: this pass also only rewrites pointers _without_ address spaces, which requires it to
+# be executed after optimization (where Julia's address spaces are stripped). If we ever
+# want to execute it earlier, adapt remapType to rewrite all pointer types.
+function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
     ft = eltype(llvmtype(f))
 
+    # find the byref parameters
+    byref = BitVector(undef, length(parameters(ft)))
+    let args = classify_arguments(job, ft)
+        filter!(args) do arg
+            arg.cc != GHOST
+        end
+        for arg in args
+            byref[arg.codegen.i] = (arg.cc == BITS_REF)
+        end
+    end
+
     function remapType(src)
-        # TODO: recurse in structs
+        # TODO: cache?
+        # TODO: recurse in structs?
+        # TODO: when wrapping non-AS1 pointers, shouldn't the parent object use the same AS?
         dst = if src isa LLVM.PointerType && addrspace(src) == 0
             LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
         else
             src
         end
-        # TODO: cache
         return dst
     end
 
     # generate the new function type & definition
-    new_types = LLVMType[remapType(typ) for typ in parameters(ft)]
+    new_types = LLVMType[]
+    for (i, param) in enumerate(parameters(ft))
+        if byref[i]
+            push!(new_types, remapType(param::LLVM.PointerType))
+        else
+            push!(new_types, param)
+        end
+    end
     new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
@@ -172,78 +199,43 @@ function add_address_spaces!(mod::LLVM.Module, f::LLVM.Function)
         LLVM.name!(new_arg, LLVM.name(arg))
     end
 
-    # map the parameters
-    value_map = Dict{LLVM.Value, LLVM.Value}(
-        param => new_param for (param, new_param) in zip(parameters(f), parameters(new_f))
-    )
-    value_map[f] = new_f
+    # we cannot simply remap the function arguments, because that will not propagate the
+    # address space changes across, e.g, bitcasts (the dest would still be in AS 0).
+    # using a type remapper on the other hand changes too much, including unrelated insts.
+    # so instead, we load the arguments in stack slots and dereference them so that we can
+    # keep on using the original IR that assumed pointers without address spaces
+    new_args = LLVM.Value[]
+    @dispose builder=Builder(ctx) begin
+        entry = BasicBlock(new_f, "conversion"; ctx)
+        position!(builder, entry)
 
-    # before D96531 (part of LLVM 13), clone_into! wants to duplicate debug metadata
-    # when the functions are part of the same module. that is invalid, because it
-    # results in desynchronized debug intrinsics (GPUCompiler#284), so remove those.
-    if LLVM.version() < v"13"
-        removals = LLVM.Instruction[]
-        for bb in blocks(f), inst in instructions(bb)
-            if inst isa LLVM.CallInst && LLVM.name(called_value(inst)) == "llvm.dbg.declare"
-                push!(removals, inst)
+        # perform argument conversions
+        for (i, param) in enumerate(parameters(ft))
+            if byref[i]
+                # load the argument in a stack slot
+                val = load!(builder, parameters(new_f)[i])
+                ptr = alloca!(builder, eltype(param))
+                store!(builder, val, ptr)
+                push!(new_args, ptr)
+            else
+                push!(new_args, parameters(new_f)[i])
+            end
+            for attr in collect(parameter_attributes(f, i))
+                push!(parameter_attributes(new_f, i), attr)
             end
         end
-        for inst in removals
-            @assert isempty(uses(inst))
-            unsafe_delete!(LLVM.parent(inst), inst)
-        end
-        changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
-    else
-        changes = LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly
-    end
 
-    function type_mapper(typ)
-        remapType(typ)
-    end
+        # map the arguments
+        value_map = Dict{LLVM.Value, LLVM.Value}(
+            param => new_args[i] for (i,param) in enumerate(parameters(f))
+        )
 
-    clone_into!(new_f, f; value_map, changes, type_mapper)
+        value_map[f] = new_f
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
-    # update calls to overloaded intrinsic, re-mangling their names
-    # XXX: shouldn't clone_into! do this?
-    LLVM.@dispose builder=Builder(ctx) begin
-        for bb in blocks(new_f), inst in instructions(bb)
-            if inst isa LLVM.CallBase
-                callee_f = called_value(inst)
-                LLVM.isintrinsic(callee_f) || continue
-                intr = Intrinsic(callee_f)
-                isoverloaded(intr) || continue
-
-                # get an appropriately-overloaded intrinsic instantiation
-                # NOTE: the overload types differs from the argument types
-                intr_f = if intr == Intrinsic("llvm.memcpy")
-                    LLVM.Function(mod, intr, llvmtype.(arguments(inst)[1:end-1]))
-                elseif intr == Intrinsic("llvm.lifetime.start") ||
-                       intr == Intrinsic("llvm.lifetime.end")
-                    LLVM.Function(mod, intr, [llvmtype(arguments(inst)[end])])
-                else
-                    # TODO: use matchIntrinsicSignature to do this generically
-                    error("""Unsupported intrinsic call:
-                                  $inst.
-                             Please file an issue with at https://github.com/JuliaGPU/GPUCompiler.jl""")
-                end
-
-                # create a call to the new intrinsic
-                # TODO: wrap setCalledFunction instead of using an IRBuilder
-                position!(builder, inst)
-                new_inst = if inst isa LLVM.CallInst
-                    call!(builder, intr_f, arguments(inst), operand_bundles(inst))
-                else
-                    # TODO: invoke and callbr
-                    error("Rewrite of $(typeof(inst))-based calls is not implemented: $inst")
-                end
-                callconv!(new_inst, callconv(inst))
-
-                # replace the old call
-                replace_uses!(inst, new_inst)
-                @assert isempty(uses(inst))
-                unsafe_delete!(LLVM.parent(inst), inst)
-            end
-        end
+        # fall through
+        br!(builder, blocks(new_f)[2])
     end
 
     # remove the old function
@@ -252,6 +244,16 @@ function add_address_spaces!(mod::LLVM.Module, f::LLVM.Function)
     replace_metadata_uses!(f, new_f)
     unsafe_delete!(mod, f)
     LLVM.name!(new_f, fn)
+
+    # clean-up after this pass (which runs after optimization)
+    @dispose pm=ModulePassManager() begin
+        cfgsimplification!(pm)
+        scalar_repl_aggregates!(pm)
+        early_cse!(pm)
+        instruction_combining!(pm)
+
+        run!(pm, mod)
+    end
 
     return new_f
 end
