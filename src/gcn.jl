@@ -63,12 +63,14 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
 end
 
 function optimize!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
-    # we have to fake our target early in the pipeline because Julia's
-    # optimization passes weren't designed for a non-0 stack addrspace, and the
-    # AMDGPU target is very strict about which addrspaces are permitted for
-    # various code patterns
-    triple!(mod, llvm_triple(NativeCompilerTarget()))
-    datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
+    @static if VERSION < v"1.9.0-DEV.1018"
+        # we have to fake our target early in the pipeline because Julia's
+        # optimization passes weren't designed for a non-0 stack addrspace, and the
+        # AMDGPU target is very strict about which addrspaces are permitted for
+        # various code patterns
+        triple!(mod, llvm_triple(NativeCompilerTarget()))
+        datalayout!(mod, julia_datalayout(NativeCompilerTarget()))
+    end
 
     invoke(optimize!, Tuple{CompilerJob, LLVM.Module}, job, mod)
 end
@@ -80,18 +82,20 @@ end
 # 2. We don't want any chance of messing with Julia's optimizations, since they
 #    eliminate target-unsafe IR patterns
 function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
-    # revert back to the AMDGPU target
-    triple!(mod, llvm_triple(job.target))
-    datalayout!(mod, julia_datalayout(job.target))
+    @static if VERSION < v"1.9.0-DEV.1018"
+        # revert back to the AMDGPU target
+        triple!(mod, llvm_triple(job.target))
+        datalayout!(mod, julia_datalayout(job.target))
 
-    tm = llvm_machine(job.target)
-    @dispose pm=ModulePassManager() begin
-        add_library_info!(pm, triple(mod))
-        add_transform_info!(pm, tm)
+        tm = llvm_machine(job.target)
+        @dispose pm=ModulePassManager() begin
+            add_library_info!(pm, triple(mod))
+            add_transform_info!(pm, tm)
 
-        add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
+            add!(pm, FunctionPass("FixAllocaAddrspace", fix_alloca_addrspace!))
 
-        run!(pm, mod)
+            run!(pm, mod)
+        end
     end
 end
 
