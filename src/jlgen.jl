@@ -2,7 +2,7 @@
 
 ## cache
 
-using Core.Compiler: CodeInstance, MethodInstance
+using Core.Compiler: CodeInstance, MethodInstance, InferenceParams, OptimizationParams
 
 struct CodeCache
     dict::Dict{MethodInstance,Vector{CodeInstance}}
@@ -39,7 +39,8 @@ end
 
 Base.empty!(cc::CodeCache) = empty!(cc.dict)
 
-const GLOBAL_CI_CACHE = CodeCache()
+const GLOBAL_CI_CACHES = Dict{Tuple{DataType, InferenceParams, OptimizationParams}, CodeCache}()
+const GLOBAL_CI_CACHES_LOCK = ReentrantLock()
 
 
 ## method invalidations

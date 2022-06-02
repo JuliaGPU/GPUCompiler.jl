@@ -265,7 +265,14 @@ link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
 # the codeinfo cache to use
-ci_cache(@nospecialize(job::CompilerJob)) = GLOBAL_CI_CACHE
+function ci_cache(@nospecialize(job::CompilerJob))
+    lock(GLOBAL_CI_CACHES_LOCK) do
+        cache = get!(GLOBAL_CI_CACHES, (typeof(job.target), inference_params(job), optimization_params(job))) do
+            CodeCache()
+        end
+        return cache
+    end
+end
 
 # the method table to use
 method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
