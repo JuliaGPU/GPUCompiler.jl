@@ -73,12 +73,8 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     if job.source.kernel
         entry = pass_by_reference!(job, mod, entry)
 
-        arguments = add_input_arguments!(job, mod, entry)
+        add_input_arguments!(job, mod, entry)
         entry = LLVM.functions(mod)[entry_fn]
-
-        add_argument_metadata!(job, mod, entry, arguments)
-
-        add_module_metadata!(job, mod)
     end
 
     return functions(mod)[entry_fn]
@@ -92,7 +88,11 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     entry_fn = LLVM.name(entry)
 
     if job.source.kernel
-        add_address_spaces!(job, mod, entry)
+        entry = add_address_spaces!(job, mod, entry)
+
+        add_argument_metadata!(job, mod, entry)
+
+        add_module_metadata!(job, mod)
     end
 
     return functions(mod)[entry_fn]
@@ -527,7 +527,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         unsafe_delete!(mod, intr)
     end
 
-    return used_intrinsics
+    return
 end
 
 
@@ -538,7 +538,7 @@ end
 # TODO: remove metadata emission infrastructure from GPUCompiler
 
 function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                entry::LLVM.Function, used_intrinsics::Vector)
+                                entry::LLVM.Function)
     ctx = context(mod)
 
     ## argument info
@@ -593,17 +593,11 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     end
 
     # Create metadata for argument intrinsics last
-    for (i, intr_fn) in enumerate(used_intrinsics)
+    for intr_arg in parameters(entry)[i:end]
         arg_info = Metadata[]
+
         push!(arg_info, Metadata(ConstantInt(Int32(length(parameters(entry))-i); ctx)))
-        push!(arg_info, MDString("air." * kernel_intrinsics[intr_fn].air_name; ctx))
-
-        push!(arg_info, MDString("air.arg_type_name"; ctx))
-        push!(arg_info, MDString(kernel_intrinsics[intr_fn].air_typ; ctx))
-
-        # NOTE: this is optional
-        push!(arg_info, MDString("air.arg_name"; ctx))
-        push!(arg_info, MDString(kernel_intrinsics[intr_fn].air_name; ctx))
+        push!(arg_info, MDString("air." * LLVM.name(intr_arg); ctx))
 
         arg_info = MDNode(arg_info; ctx)
         push!(arg_infos, arg_info)
