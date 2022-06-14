@@ -312,42 +312,31 @@ end
     GHOST       # not passed
 end
 
-function method_argnames(m::Method)
-    argnames = ccall(:jl_uncompress_argnames, Vector{Symbol}, (Any,), m.slot_syms)
-    isempty(argnames) && return argnames
-    return argnames[1:m.nargs]
-end
-
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
     source_sig = typed_signature(job)
 
     source_types = [source_sig.parameters...]
-    source_method = only(method_matches(typed_signature(job); job.source.world)).method
-    source_arguments = method_argnames(source_method)
 
     codegen_types = parameters(codegen_ft)
 
     args = []
     codegen_i = 1
     for (source_i, source_typ) in enumerate(source_types)
-        source_name = source_arguments[min(source_i, length(source_arguments))]
-        # NOTE: in case of varargs, we have fewer arguments than parameters
-
         if isghosttype(source_typ) || Core.Compiler.isconstType(source_typ)
-            push!(args, (cc=GHOST, typ=source_typ, name=source_name))
+            push!(args, (cc=GHOST, typ=source_typ))
             continue
         end
 
         codegen_typ = codegen_types[codegen_i]
         if codegen_typ isa LLVM.PointerType && !issized(eltype(codegen_typ))
-            push!(args, (cc=MUT_REF, typ=source_typ, name=source_name,
+            push!(args, (cc=MUT_REF, typ=source_typ,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         elseif codegen_typ isa LLVM.PointerType && issized(eltype(codegen_typ)) &&
                !(source_typ <: Ptr) && !(source_typ <: Core.LLVMPtr)
-            push!(args, (cc=BITS_REF, typ=source_typ, name=source_name,
+            push!(args, (cc=BITS_REF, typ=source_typ,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         else
-            push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name,
+            push!(args, (cc=BITS_VALUE, typ=source_typ,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         end
         codegen_i += 1
