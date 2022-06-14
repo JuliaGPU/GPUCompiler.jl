@@ -139,20 +139,14 @@ struct CompilerJob{T,P,F}
     params::P
     entry_abi::Symbol
 
-    # metadata gathered during compilation
-    meta::Dict{Symbol,Any}
-
-    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec,
-                         params::AbstractCompilerParams, entry_abi::Symbol)
+    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams, entry_abi::Symbol)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
-        new{typeof(target), typeof(params), typeof(source)}(
-            target, source, params, entry_abi, Dict{Symbol,Any}())
+        new{typeof(target), typeof(params), typeof(source)}(target, source, params, entry_abi)
     end
 end
-CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec,
-            params::AbstractCompilerParams; entry_abi=:specfunc) =
+CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams; entry_abi=:specfunc) =
     CompilerJob(target, source, params, entry_abi)
 
 Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
@@ -162,19 +156,12 @@ function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
 end
 
-# make it possible to key on CompilerJobs, while ignoring the metadata
 function Base.hash(job::CompilerJob, h::UInt)
     h = hash(job.target, h)
     h = hash(job.source, h)
     h = hash(job.params, h)
     h = hash(job.entry_abi, h)
     h
-end
-function Base.isequal(a::CompilerJob, b::CompilerJob)
-    a.target == b.target &&
-    a.source == b.source &&
-    a.params == b.params &&
-    a.entry_abi == b.entry_abi
 end
 
 
