@@ -155,9 +155,10 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     end
 
     function remapType(src)
-        # TODO: cache?
-        # TODO: recurse in structs?
-        # TODO: when wrapping non-AS1 pointers, shouldn't the parent object use the same AS?
+        # TODO: shouldn't we recurse into structs here, making sure the parent object's
+        #       address space matches the contained one? doesn't matter right now as we
+        #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
+        #       device addrss space (i.e. no mismatch between parent and field possible)
         dst = if src isa LLVM.PointerType && addrspace(src) == 0
             LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
         else
@@ -376,7 +377,6 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     used_intrinsics = filter(keys(kernel_intrinsics)) do intr_fn
         haskey(functions(mod), intr_fn)
     end |> collect
-    # TODO: Figure out how to not be inefficient with these changes
     nargs = length(used_intrinsics)
 
     # determine which functions need these arguments
@@ -404,8 +404,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     end
 
     # add the arguments
-    # NOTE: we could be more fine-grained, only adding the specific intrinsics used by this function.
-    #       not sure if that's worth it though.
+    # NOTE: we don't need to be fine-grained here, as unused args will be removed during opt
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in worklist
         fn = LLVM.name(f)
@@ -534,8 +533,6 @@ end
 # argument metadata generation
 #
 # module metadata is used to identify buffers that are passed as kernel arguments.
-
-# TODO: remove metadata emission infrastructure from GPUCompiler
 
 function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 entry::LLVM.Function)
