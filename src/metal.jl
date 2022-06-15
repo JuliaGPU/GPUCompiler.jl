@@ -565,12 +565,13 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         md = Metadata[]
 
         # argument index
-        push!(md, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
+        @assert arg.codegen.i == i
+        push!(md, Metadata(ConstantInt(Int32(i-1); ctx)))
 
         push!(md, MDString("air.buffer"; ctx))
 
         push!(md, MDString("air.location_index"; ctx))
-        push!(md, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
+        push!(md, Metadata(ConstantInt(Int32(i-1); ctx)))
 
         # XXX: unknown
         push!(md, Metadata(ConstantInt(Int32(1); ctx)))
@@ -603,7 +604,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
 
         arg_info = Metadata[]
 
-        push!(arg_info, Metadata(ConstantInt(Int32(length(parameters(entry))-i); ctx)))
+        push!(arg_info, Metadata(ConstantInt(Int32(i-1); ctx)))
         push!(arg_info, MDString("air.$intr_fn" ; ctx))
 
         push!(arg_info, MDString("air.arg_type_name" ; ctx))
@@ -611,6 +612,8 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
 
         arg_info = MDNode(arg_info; ctx)
         push!(arg_infos, arg_info)
+
+        i += 1
     end
     arg_infos = MDNode(arg_infos; ctx)
 
