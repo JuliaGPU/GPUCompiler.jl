@@ -339,15 +339,13 @@ for intr in [
         "dispatch_quadgroups_per_threadgroup", "dispatch_simdgroups_per_threadgroup",
         "quadgroup_index_in_threadgroup", "quadgroups_per_threadgroup",
         "simdgroup_index_in_threadgroup", "simdgroups_per_threadgroup",
-        "thread_index_in_quadgroup", "thread_index_in_simdgroup", "thread_index_in_threadgroup",
-        "thread_execution_width", "threads_per_simdgroup"],
-    (intr_typ, air_typ, julia_typ) in [
-        ("i32",   "uint",  UInt32),
-        ("i16",   "ushort",  UInt16),
+        "thread_index_in_quadgroup", "thread_index_in_simdgroup",
+        "thread_index_in_threadgroup", "thread_execution_width", "threads_per_simdgroup"],
+    (llvm_typ, julia_typ) in [
+        ("i32",  UInt32),
+        ("i16",  UInt16),
     ]
-    push!(kernel_intrinsics,
-          "julia.air.$intr.$intr_typ" =>
-          (air_intr="$intr.$air_typ", air_typ, air_name=intr, julia_typ))
+    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" =>  (name=intr, typ=julia_typ))
 end
 for intr in [
         "dispatch_threads_per_threadgroup",
@@ -355,17 +353,27 @@ for intr in [
         "thread_position_in_grid", "thread_position_in_threadgroup",
         "threadgroup_position_in_grid", "threadgroups_per_grid",
         "threads_per_grid", "threads_per_threadgroup"],
-    (intr_typ, air_typ, julia_typ) in [
-        ("i32",   "uint",  UInt32),
-        ("v2i32", "uint2", NTuple{2, VecElement{UInt32}}),
-        ("v3i32", "uint3", NTuple{3, VecElement{UInt32}}),
-        ("i16",   "ushort",  UInt16),
-        ("v2i16", "ushort2", NTuple{2, VecElement{UInt16}}),
-        ("v3i16", "ushort3", NTuple{3, VecElement{UInt16}}),
+    (llvm_typ, julia_typ) in [
+        ("i32",   UInt32),
+        ("v2i32", NTuple{2, VecElement{UInt32}}),
+        ("v3i32", NTuple{3, VecElement{UInt32}}),
+        ("i16",   UInt16),
+        ("v2i16", NTuple{2, VecElement{UInt16}}),
+        ("v3i16", NTuple{3, VecElement{UInt16}}),
     ]
-    push!(kernel_intrinsics,
-          "julia.air.$intr.$intr_typ" =>
-          (air_intr="$intr.$air_typ", air_typ, air_name=intr, julia_typ))
+    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" => (name=intr, typ=julia_typ))
+end
+
+function argument_type_name(typ)
+    if typ isa LLVM.IntegerType && width(typ) == 16
+        "ushort"
+    elseif typ isa LLVM.IntegerType && width(typ) == 32
+        "uint"
+    elseif typ isa LLVM.VectorType
+         argument_type_name(eltype(typ)) * string(Int(size(typ)))
+    else
+        error("Cannot encode unknown type `$typ`")
+    end
 end
 
 function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
@@ -414,7 +422,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         new_param_types = LLVMType[parameters(ft)...]
 
         for intr_fn in used_intrinsics
-            llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].julia_typ; ctx)
+            llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].typ; ctx)
             push!(new_param_types, llvm_typ)
         end
         new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_param_types)
@@ -424,7 +432,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             LLVM.name!(new_arg, LLVM.name(arg))
         end
         for (intr_fn, new_arg) in zip(used_intrinsics, parameters(new_f)[end-nargs+1:end])
-            LLVM.name!(new_arg, kernel_intrinsics[intr_fn].air_name)
+            LLVM.name!(new_arg, kernel_intrinsics[intr_fn].name)
         end
 
         workmap[f] = new_f
@@ -557,12 +565,13 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         md = Metadata[]
 
         # argument index
-        push!(md, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
+        @assert arg.codegen.i == i
+        push!(md, Metadata(ConstantInt(Int32(i-1); ctx)))
 
         push!(md, MDString("air.buffer"; ctx))
 
         push!(md, MDString("air.location_index"; ctx))
-        push!(md, Metadata(ConstantInt(Int32(arg.codegen.i-1); ctx)))
+        push!(md, Metadata(ConstantInt(Int32(i-1); ctx)))
 
         # XXX: unknown
         push!(md, Metadata(ConstantInt(Int32(1); ctx)))
@@ -591,13 +600,20 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
 
     # Create metadata for argument intrinsics last
     for intr_arg in parameters(entry)[i:end]
+        intr_fn = LLVM.name(intr_arg)
+
         arg_info = Metadata[]
 
-        push!(arg_info, Metadata(ConstantInt(Int32(length(parameters(entry))-i); ctx)))
-        push!(arg_info, MDString("air." * LLVM.name(intr_arg); ctx))
+        push!(arg_info, Metadata(ConstantInt(Int32(i-1); ctx)))
+        push!(arg_info, MDString("air.$intr_fn" ; ctx))
+
+        push!(arg_info, MDString("air.arg_type_name" ; ctx))
+        push!(arg_info, MDString(argument_type_name(llvmtype(intr_arg)); ctx))
 
         arg_info = MDNode(arg_info; ctx)
         push!(arg_infos, arg_info)
+
+        i += 1
     end
     arg_infos = MDNode(arg_infos; ctx)
 
