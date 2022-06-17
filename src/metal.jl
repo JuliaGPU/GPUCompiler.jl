@@ -100,6 +100,8 @@ end
 
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMObjectFile)
+    strip_debuginfo!(mod)  # XXX: is this needed?
+
     # translate to metallib
     input = tempname(cleanup=false) * ".bc"
     translated = tempname(cleanup=false) * ".metallib"
