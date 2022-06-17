@@ -147,6 +147,9 @@ function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module)
         check_ir!(job, errors, f)
     end
 
+    # custom validation
+    append!(errors, validate_module(job, mod))
+
     return errors
 end
 
