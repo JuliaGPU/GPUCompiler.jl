@@ -63,6 +63,21 @@ function process_entry!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
     return entry
 end
 
+function validate_module(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
+    errors = IRError[]
+
+    T_double = LLVM.DoubleType(context(mod))
+
+    for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
+        if llvmtype(inst) == T_double || any(param->llvmtype(param) == T_double, operands(inst))
+            bt = backtrace(inst)
+            push!(errors, ("use of double floating-point value", bt, inst))
+        end
+    end
+
+    return errors
+end
+
 # TODO: why is this done in finish_module? maybe just in process_entry?
 function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module, entry::LLVM.Function)
     entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)

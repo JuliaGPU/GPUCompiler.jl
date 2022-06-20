@@ -243,6 +243,9 @@ end
 # post-Julia optimization processing of the module
 optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
+# whether an LLVM function is valid for this back-end
+validate_module(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]
+
 # finalization of the module, before deferred codegen and optimization
 function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
     return entry
