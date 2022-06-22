@@ -1,5 +1,7 @@
 # The content of this file should be upstreamed to Julia proper
 
+using InteractiveUtils: highlighting
+
 function method_instances(@nospecialize(tt::Type), world::UInt=Base.get_world_counter())
     return map(Core.Compiler.specialize_method, method_matches(tt; world))
 end
