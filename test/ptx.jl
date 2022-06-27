@@ -174,6 +174,32 @@ end
 end
 end
 
+@testset "always_inline" begin
+    @eval f_expensive(x) = $(foldl((e, _) -> :(sink($e) + sink(x)), 1:100; init=:x))
+    function g(x)
+        f_expensive(x)
+        return
+    end
+    function h(x)
+        f_expensive(x)
+        return
+    end
+
+    asm = sprint(io->ptx_code_native(io, g, Tuple{Int64}; kernel=true))
+    @test occursin(r"\.func .*julia_f_expensive", asm)
+
+    asm = sprint(io->ptx_code_native(io, g, Tuple{Int64};
+                                     kernel=true, always_inline=true))
+    @test !occursin(r"\.func .*julia_f_expensive", asm)
+
+    asm = sprint(io->ptx_code_native(io, h, Tuple{Int64};
+                                     kernel=true, always_inline=true))
+    @test !occursin(r"\.func .*julia_f_expensive", asm)
+
+    asm = sprint(io->ptx_code_native(io, h, Tuple{Int64}; kernel=true))
+    @test occursin(r"\.func .*julia_f_expensive", asm)
+end
+
 @testset "child function reuse" begin
     # bug: depending on a child function from multiple parents resulted in
     #      the child only being present once

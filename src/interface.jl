@@ -192,7 +192,7 @@ isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
 get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(ci_cache(job), method_table(job), job.source.world)
+    GPUInterpreter(ci_cache(job), method_table(job), job.source.world, inference_params(job), optimization_params(job))
 
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime
@@ -265,10 +265,33 @@ link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
 # the codeinfo cache to use
-ci_cache(@nospecialize(job::CompilerJob)) = GLOBAL_CI_CACHE
+function ci_cache(@nospecialize(job::CompilerJob))
+    lock(GLOBAL_CI_CACHES_LOCK) do
+        cache = get!(GLOBAL_CI_CACHES, (typeof(job.target), inference_params(job), optimization_params(job))) do
+            CodeCache()
+        end
+        return cache
+    end
+end
 
 # the method table to use
 method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
+
+# the inference parameters to use when constructing the GPUInterpreter
+function inference_params(@nospecialize(job::CompilerJob))
+    return InferenceParams(;unoptimize_throw_blocks=false)
+end
+
+# the optimization parameters to use when constructing the GPUInterpreter
+function optimization_params(@nospecialize(job::CompilerJob))
+    kwargs = NamedTuple()
+
+    if VERSION < v"1.8.0-DEV.486"
+        kwargs = (kwargs..., unoptimize_throw_blocks=false)
+    end
+
+    return OptimizationParams(;kwargs...)
+end
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))
