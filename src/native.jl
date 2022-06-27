@@ -8,7 +8,9 @@ Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
     cpu::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
     features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
     always_inline::Bool=false # will mark the job function as always inline
-    jlruntime::Bool=true # Use Julia runtime for throwing errors, instead of the GPUCompiler support
+    jlruntime::Bool=true
+    reloc::LLVM.API.LLVMRelocMode=LLVM.API.LLVMRelocDefault
+    extern::Bool=false # Use Julia runtime for throwing errors, instead of the GPUCompiler support
 end
 
 llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
@@ -17,8 +19,9 @@ function llvm_machine(target::NativeCompilerTarget)
     triple = llvm_triple(target)
 
     t = Target(triple=triple)
-
-    tm = TargetMachine(t, triple, target.cpu, target.features)
+    optlevel = LLVM.API.LLVMCodeGenLevelDefault
+    reloc = target.reloc
+    tm = TargetMachine(t, triple, target.cpu, target.features, optlevel = optlevel, reloc = reloc)
     asm_verbosity!(tm, true)
 
     return tm
@@ -31,6 +34,9 @@ function process_entry!(job::CompilerJob{NativeCompilerTarget}, mod::LLVM.Module
     end
     invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 end
+
+GPUCompiler.extern_policy(job::CompilerJob{NativeCompilerTarget,P} where P) =
+    job.target.extern
 
 ## job
 

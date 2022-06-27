@@ -361,9 +361,11 @@ const __llvm_initialized = Ref(false)
             # we can only clean-up now, as optimization may lower or introduce calls to
             # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
             @dispose pm=ModulePassManager() begin
+                add!(pm, ModulePass("ExternalizeJuliaGlobals", externalize_julia_globals!))
                 # eliminate all unused internal functions
                 global_optimizer!(pm)
                 global_dce!(pm)
+                add!(pm, ModulePass("InternalizeJuliaGlobals", internalize_julia_globals!))
                 strip_dead_prototypes!(pm)
 
                 # merge constants (such as exception messages)
@@ -427,4 +429,37 @@ end
     end
 
     return code, ()
+end
+
+
+function externalize_julia_globals!(mod::LLVM.Module)
+    changed = false
+    for gbl in LLVM.globals(mod)
+        if LLVM.linkage(gbl) == LLVM.API.LLVMInternalLinkage &&
+           typeof(LLVM.initializer(gbl)) <: LLVM.PointerNull &&
+           (startswith(LLVM.name(gbl), "jl_global") ||
+            startswith(LLVM.name(gbl), "jl_sym"))
+            LLVM.linkage!(gbl, LLVM.API.LLVMExternalLinkage)
+            LLVM.initializer!(gbl, nothing)
+            LLVM.extinit!(gbl, true)
+            changed = true
+        end
+    end
+    changed
+end
+# And reset the back later
+function internalize_julia_globals!(mod::LLVM.Module)
+    changed = false
+    for gbl in LLVM.globals(mod)
+        if LLVM.linkage(gbl) == LLVM.API.LLVMExternalLinkage &&
+           LLVM.initializer(gbl) === nothing &&
+           (startswith(LLVM.name(gbl), "jl_global") ||
+            startswith(LLVM.name(gbl), "jl_sym"))
+            LLVM.extinit!(gbl, false)
+            LLVM.initializer!(gbl, null(eltype(llvmtype(gbl))))
+            LLVM.linkage!(gbl, LLVM.API.LLVMInternalLinkage)
+            changed = true
+        end
+    end
+    changed
 end

@@ -335,7 +335,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     if ci_cache_lookup(cache, method_instance, job.source.world, typemax(Cint)) === nothing
         ci_cache_populate(interp, cache, mt, method_instance, job.source.world, typemax(Cint))
     end
-
+    extern = extern_policy(job) ? 2 : 1
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
     method_instances = []
@@ -379,21 +379,21 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
             ts_mod = ThreadSafeModule(mod; ctx)
             ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint),
-                  [method_instance], ts_mod, Ref(params), #=extern policy=# 1)
+                  [method_instance], ts_mod, Ref(params), #=extern policy=# extern)
         elseif VERSION >= v"1.9.0-DEV.115"
             ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
-                  [method_instance], ctx, Ref(params), #=extern policy=# 1)
+                  [method_instance], ctx, Ref(params), #=extern policy=# extern)
         elseif VERSION >= v"1.8.0-DEV.661"
             @assert ctx == JuliaContext()
             ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Ptr{Base.CodegenParams}, Cint),
-                  [method_instance], Ref(params), #=extern policy=# 1)
+                  [method_instance], Ref(params), #=extern policy=# extern)
         else
             @assert ctx == JuliaContext()
             ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Base.CodegenParams, Cint),
-                  [method_instance], params, #=extern policy=# 1)
+                  [method_instance], params, #=extern policy=# extern)
         end
         @assert native_code != C_NULL
         llvm_mod_ref = if VERSION >= v"1.9.0-DEV.516"

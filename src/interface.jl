@@ -303,3 +303,5 @@ function llvm_debug_info(@nospecialize(job::CompilerJob))
         LLVM.API.LLVMDebugEmissionKindFullDebug
     end
 end
+
+extern_policy(::CompilerJob) = false
