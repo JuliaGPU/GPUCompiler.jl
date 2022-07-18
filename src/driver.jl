@@ -319,7 +319,7 @@ const __llvm_initialized = Ref(false)
         @compiler_assert isempty(uses(dyn_marker)) job
         unsafe_delete!(ir, dyn_marker)
     end
-
+    
     @timeit_debug to "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.source.kernel
@@ -332,7 +332,7 @@ const __llvm_initialized = Ref(false)
         if optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir)
-
+        
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
@@ -355,24 +355,24 @@ const __llvm_initialized = Ref(false)
 
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
-        end
 
-        @timeit_debug to "clean-up" begin
-            # we can only clean-up now, as optimization may lower or introduce calls to
-            # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
-            @dispose pm=ModulePassManager() begin
-                # eliminate all unused internal functions
-                global_optimizer!(pm)
-                global_dce!(pm)
-                strip_dead_prototypes!(pm)
+            @timeit_debug to "clean-up" begin
+                # we can only clean-up now, as optimization may lower or introduce calls to
+                # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
+                @dispose pm=ModulePassManager() begin
+                    # eliminate all unused internal functions
+                    global_optimizer!(pm)
+                    global_dce!(pm)
+                    strip_dead_prototypes!(pm)
 
-                # merge constants (such as exception messages)
-                constant_merge!(pm)
+                    # merge constants (such as exception messages)
+                    constant_merge!(pm)
 
-                run!(pm, ir)
+                    run!(pm, ir)
+                end
             end
         end
-
+        
         # finish the module
         #
         # we want to finish the module after optimization, so we cannot do so during
