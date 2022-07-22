@@ -23,6 +23,7 @@ The following keyword arguments are supported:
 - `libraries`: link the GPU runtime and `libdevice` libraries (if required)
 - `deferred_codegen`: resolve deferred compiler invocations (if required)
 - `optimize`: optimize the code (default: true)
+- `cleanup`: run cleanup passes on the code (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
 - `validate`: validate the generated IR before emitting machine code (default: true)
 - `only_entry`: only keep the entry function, remove all others (default: false).
@@ -32,14 +33,15 @@ Other keyword arguments can be found in the documentation of [`cufunction`](@ref
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true,
-                 optimize::Bool=true, strip::Bool=false, validate::Bool=true,
-                 only_entry::Bool=false, ctx::Union{JuliaContextType,Nothing}=nothing)
+                 optimize::Bool=true, cleanup::Bool=true, strip::Bool=false,
+                 validate::Bool=true, only_entry::Bool=false,
+                 ctx::Union{JuliaContextType,Nothing}=nothing)
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
 
     return codegen(target, job;
-                   libraries, deferred_codegen, optimize, strip, validate, only_entry, ctx)
+                   libraries, deferred_codegen, optimize, cleanup, strip, validate, only_entry, ctx)
 end
 
 # transitionary feature to deal versions of Julia that rely on a global context
@@ -83,8 +85,8 @@ unwrap_context(ctx::Context) = ctx
 
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                 strip::Bool=false, validate::Bool=true, only_entry::Bool=false,
-                 parent_job::Union{Nothing, CompilerJob}=nothing,
+                 cleanup::Bool=true, strip::Bool=false, validate::Bool=true,
+                 only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob}=nothing,
                  ctx::Union{JuliaContextType,Nothing}=nothing)
     ## Julia IR
 
@@ -110,7 +112,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                      Use a JuliaContext instead.""")
         end
 
-        ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, only_entry, ctx)
+        ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, cleanup, only_entry, ctx)
 
         if output == :llvm
             if strip
@@ -199,7 +201,7 @@ const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance);
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                           only_entry::Bool=false, ctx::JuliaContextType)
+                           cleanup::Bool=true, only_entry::Bool=false, ctx::JuliaContextType)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -319,7 +321,7 @@ const __llvm_initialized = Ref(false)
         @compiler_assert isempty(uses(dyn_marker)) job
         unsafe_delete!(ir, dyn_marker)
     end
-
+    
     @timeit_debug to "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.source.kernel
@@ -332,7 +334,7 @@ const __llvm_initialized = Ref(false)
         if optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir)
-
+        
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
@@ -357,22 +359,24 @@ const __llvm_initialized = Ref(false)
             entry = functions(ir)[entry_fn]
         end
 
-        @timeit_debug to "clean-up" begin
-            # we can only clean-up now, as optimization may lower or introduce calls to
-            # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
-            @dispose pm=ModulePassManager() begin
-                # eliminate all unused internal functions
-                global_optimizer!(pm)
-                global_dce!(pm)
-                strip_dead_prototypes!(pm)
+        if cleanup
+            @timeit_debug to "clean-up" begin
+                # we can only clean-up now, as optimization may lower or introduce calls to
+                # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
+                @dispose pm=ModulePassManager() begin
+                    # eliminate all unused internal functions
+                    global_optimizer!(pm)
+                    global_dce!(pm)
+                    strip_dead_prototypes!(pm)
 
-                # merge constants (such as exception messages)
-                constant_merge!(pm)
+                    # merge constants (such as exception messages)
+                    constant_merge!(pm)
 
-                run!(pm, ir)
+                    run!(pm, ir)
+                end
             end
         end
-
+        
         # finish the module
         #
         # we want to finish the module after optimization, so we cannot do so during
