@@ -1,3 +1,9 @@
+if VERSION >= v"1.9.0-DEV.1018"
+@inline sink_gcn(i) = sink(i, Val(5))
+else
+@inline sink_gcn(i) = sink(i, Val(0))
+end
+
 @testset "GCN" begin
 
 @test GCNCompilerTarget(dev_isa="gfx900") == GCNCompilerTarget("gfx900")
@@ -19,15 +25,17 @@ include("definitions/gcn.jl")
     @test occursin("amdgpu_kernel", ir)
 end
 
+if VERSION < v"1.9.0-DEV.1018"
 @testset "alloca addrspace" begin
     function kernel(i)
-        sink(i) # sink provides an alloca in addrspace 0
+        sink(i, Val(0)) # sink provides an alloca in addrspace 0
         return
     end
 
     ir = sprint(io->gcn_code_llvm(io, kernel, Tuple{Int64}; dump_module=true))
     @test occursin(r"alloca i64, (align 8, )?addrspace\(5\)$"m, ir)
     @test !occursin(r"alloca i64(, align \d)?$"m, ir)
+end
 end
 
 end
@@ -57,7 +65,7 @@ end
 @testset "child functions" begin
     # we often test using @noinline child functions, so test whether these survive
     # (despite not having side-effects)
-    @noinline child(i) = sink(i)
+    @noinline child(i) = sink_gcn(i)
     function parent(i)
         child(i)
         return
@@ -69,7 +77,7 @@ end
 end
 
 @testset "kernel functions" begin
-    @noinline nonentry(i) = sink(i)
+    @noinline nonentry(i) = sink_gcn(i)
     function entry(i)
         nonentry(i)
         return
@@ -85,7 +93,7 @@ end
     # bug: depending on a child function from multiple parents resulted in
     #      the child only being present once
 
-    @noinline child(i) = sink(i)
+    @noinline child(i) = sink_gcn(i)
     function parent1(i)
         child(i)
         return
@@ -106,8 +114,8 @@ end
 @testset "child function reuse bis" begin
     # bug: similar, but slightly different issue as above
     #      in the case of two child functions
-    @noinline child1(i) = sink(i)
-    @noinline child2(i) = sink(i+1)
+    @noinline child1(i) = sink_gcn(i)
+    @noinline child2(i) = sink_gcn(i+1)
     function parent1(i)
         child1(i) + child2(i)
         return
