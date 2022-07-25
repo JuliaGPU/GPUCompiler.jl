@@ -113,12 +113,12 @@ const DYNAMIC_CALL     = "dynamic function invocation"
 function Base.showerror(io::IO, err::InvalidIRError)
     print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
     for (kind, bt, meta) in err.errors
-        print(io, "\nReason: unsupported $kind")
+        printstyled(io, "\nReason: unsupported $kind"; color=:red)
         if meta !== nothing
             if kind == RUNTIME_FUNCTION || kind == UNKNOWN_FUNCTION || kind == POINTER_FUNCTION || kind == DYNAMIC_CALL
-                print(io, " (call to ", meta, ")")
+                printstyled(io, " (call to ", meta, ")"; color=:red)
             elseif kind == DELAYED_BINDING
-                print(io, " (use of '", meta, "')")
+                printstyled(io, " (use of '", meta, "')"; color=:red)
             end
         end
         Base.show_backtrace(io, bt)
@@ -128,7 +128,7 @@ function Base.showerror(io::IO, err::InvalidIRError)
     printstyled(
         io,
         ": catch this exception as `err` and call `code_typed(err; interactive = true)` to",
-        " introspect the erronous code";
+        " introspect the erronous code with Cthulhu.jl";
         color = :cyan,
     )
     return
