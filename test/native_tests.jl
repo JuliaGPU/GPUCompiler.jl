@@ -549,12 +549,13 @@ precompile_test_harness("Inference caching") do load_path
         import GPUCompiler
         using PrecompileTools
 
-        function kernel()
+        function kernel(A, x)
+            A[1] = x
             return
         end
 
         let
-            job, _ = NativeCompiler.create_job(kernel, ())
+            job, _ = NativeCompiler.create_job(kernel, (Vector{Int}, Int))
             GPUCompiler.code_typed(job)
         end
         
@@ -578,20 +579,30 @@ precompile_test_harness("Inference caching") do load_path
             job, _ = NativeCompiler.create_job(identity, (Int,))
             GPUCompiler.ci_cache_token(job)
         end
-        ci = isdefined(identity_mi, :cache) ? identity_mi.cache : nothing
-        while ci !== nothing
-            @test ci.owner !== token
-            ci = isdefined(ci, :next) ? ci.next : nothing
-        end
+        @test !check_presence(identity_mi, token)
 
         using InferenceCaching
 
         # Check that kernel survived
-        kernel_mi = GPUCompiler.methodinstance(typeof(InferenceCaching.kernel), Tuple{})
+        kernel_mi = GPUCompiler.methodinstance(typeof(InferenceCaching.kernel), Tuple{Vector{Int}, Int})
         @test check_presence(kernel_mi, token)
 
         # check that identity survived
         @test check_presence(identity_mi, token)
+
+        GPUCompiler.enable_cache!()
+        @test GPUCompiler.disk_cache() == true
+
+        job, _ = NativeCompiler.create_job(InferenceCaching.kernel, (Vector{Int}, Int))
+        @assert job.source == kernel_mi
+        ci = GPUCompiler.ci_cache_lookup(GPUCompiler.ci_cache(job), job.source, job.world, job.world)
+        @assert ci !== nothing
+        @assert ci.inferred !== nothing
+        path = GPUCompiler.cache_file(ci, job.config)
+        @test path !== nothing
+        @test !ispath(path)
+        NativeCompiler.cached_execution(InferenceCaching.kernel, (Vector{Int}, Int))
+        @test ispath(path)
     end
 end
 

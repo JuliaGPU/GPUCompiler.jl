@@ -9,7 +9,9 @@ using ExprTools: splitdef, combinedef
 
 using Libdl
 
+using Serialization
 using Scratch: @get_scratch!
+using Preferences
 
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo

@@ -71,4 +71,22 @@ function code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     end
 end
 
+const runtime_cache = Dict{Any, Any}()
+
+function compiler(job)
+    JuliaContext() do ctx
+        GPUCompiler.compile(:asm, job, validate=false)
+    end
+end
+
+function linker(job, asm)
+    asm
+end
+
+# simulates cached codegen
+function cached_execution(@nospecialize(func), @nospecialize(types); kwargs...)
+    job, kwargs = create_job(func, types; kwargs...)
+    GPUCompiler.cached_compilation(runtime_cache, job.source, job.config, compiler, linker)
+end
+
 end
