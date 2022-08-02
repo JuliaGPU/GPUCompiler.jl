@@ -1,0 +1,3 @@
+[GPUCompiler]
+disk_cache = true
+cache_key = "test"
