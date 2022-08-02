@@ -29,4 +29,18 @@ include("examples.jl")
 
 haskey(ENV, "CI") && GPUCompiler.timings()
 
+@testset "Disk cache" begin
+    @test GPUCompiler.disk_cache == false
+
+    cmd = Base.julia_cmd()
+    if Base.JLOptions().project != C_NULL
+        cmd = `$cmd --project=$(unsafe_string(Base.JLOptions().project))`
+    end
+
+    withenv("JULIA_LOAD_PATH" => "$(get(ENV, "JULIA_LOAD_PATH", "")):$(joinpath(@__DIR__, "CacheEnv"))") do
+        @test success(pipeline(`$cmd cache.jl true`, stderr=stderr, stdout=stdout))
+        @test success(pipeline(`$cmd cache.jl false`, stderr=stderr, stdout=stdout))
+    end
+end
+
 end

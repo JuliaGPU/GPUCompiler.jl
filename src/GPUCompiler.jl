@@ -9,7 +9,9 @@ using ExprTools: splitdef, combinedef
 
 using Libdl
 
+using Serialization
 using Scratch: @get_scratch!
+using Preferences
 
 include("utils.jl")
 
