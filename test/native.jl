@@ -82,7 +82,8 @@ end
     end
 
     @testset "Advanced database" begin
-        foo(x) = sum(exp(fill(x, 10, 10)))
+        @noinline inner(x) = x+1
+        foo(x) = sum(inner, fill(x, 10, 10))
 
         job, _ = native_job(foo, (Float64,))
         JuliaContext() do ctx
@@ -94,10 +95,10 @@ end
             mis = filter(mi->mi.def == meth, keys(meta.compiled))
             @test length(mis) == 1
 
-            expfloat = filter(keys(meta.compiled)) do mi
-                mi.def in methods(Base.exp) && mi.specTypes == Tuple{typeof(Base.exp), Float64}
+            inner_methods = filter(keys(meta.compiled)) do mi
+                mi.def in methods(inner) && mi.specTypes == Tuple{typeof(inner), Float64}
             end
-            @test length(expfloat) == 1
+            @test length(inner_methods) == 1
         end
     end
 end
