@@ -39,7 +39,7 @@ cread(io) = cread1(io) * cread1(io)
             T = @async begin
                 GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term)
             end
-            lines = cread(out)
+            lines = replace(cread(out), r"\e\[[0-9;]*[a-zA-Z]"=>"") # without ANSI escape codes
             @test contains(lines, "identity(x)")
             write(in, 'q')
             wait(T)
