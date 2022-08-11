@@ -297,7 +297,11 @@ function ci_cache_populate(interp, cache, mt, mi, min_world, max_world)
     # to avoid the need to re-infer, set that field here.
     ci = Core.Compiler.getindex(wvc, mi)
     if ci !== nothing && ci.inferred === nothing
-        ci.inferred = src
+        @static if VERSION >= v"1.9.0-DEV.1115"
+            @atomic ci.inferred = src
+        else
+            ci.inferred = src
+        end
     end
 
     return ci
