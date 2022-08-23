@@ -32,6 +32,20 @@ end
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.target.dev_isa)$(job.target.features)"
 
+function optimization_params(@nospecialize(job::CompilerJob{GCNCompilerTarget}))
+    kwargs = NamedTuple()
+
+    if VERSION < v"1.8.0-DEV.486"
+        kwargs = (kwargs..., unoptimize_throw_blocks=false)
+    end
+
+    #if job.target.always_inline
+        kwargs = (kwargs..., inline_cost_threshold=typemax(Int))
+    #end
+
+    return OptimizationParams(;kwargs...)
+end
+
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
 
