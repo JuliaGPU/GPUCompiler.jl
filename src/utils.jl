@@ -59,11 +59,19 @@ end
 macro locked(ex)
     def = splitdef(ex)
     def[:body] = quote
-        ccall(:jl_typeinf_begin, Cvoid, ())
+        if VERSION >= v"1.9.0-DEV.1308"
+            ccall(:jl_typeinf_lock_begin, Cvoid, ())
+        else
+            ccall(:jl_typeinf_begin, Cvoid, ())
+        end
         try
             $(def[:body])
         finally
-            ccall(:jl_typeinf_end, Cvoid, ())
+            if VERSION >= v"1.9.0-DEV.1308"
+                ccall(:jl_typeinf_lock_end, Cvoid, ())
+            else
+                ccall(:jl_typeinf_end, Cvoid, ())
+            end
         end
     end
     esc(combinedef(def))
@@ -73,11 +81,19 @@ end
 macro unlocked(ex)
     def = splitdef(ex)
     def[:body] = quote
-        ccall(:jl_typeinf_end, Cvoid, ())
+        if VERSION >= v"1.9.0-DEV.1308"
+            ccall(:jl_typeinf_lock_end, Cvoid, ())
+        else
+            ccall(:jl_typeinf_end, Cvoid, ())
+        end
         try
             $(def[:body])
         finally
-            ccall(:jl_typeinf_begin, Cvoid, ())
+            if VERSION >= v"1.9.0-DEV.1308"
+                ccall(:jl_typeinf_lock_begin, Cvoid, ())
+            else
+                ccall(:jl_typeinf_begin, Cvoid, ())
+            end
         end
     end
     esc(combinedef(def))
