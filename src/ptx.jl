@@ -409,7 +409,6 @@ function hide_trap!(mod::LLVM.Module)
                         LLVM.EnumAttribute("inaccessiblememonly", 0; ctx),
                         LLVM.EnumAttribute("writeonly", 0; ctx), # can we do readnone?
                         LLVM.EnumAttribute("noreturn", 0; ctx)))
-                 end
                 end
                 unsafe_delete!(LLVM.parent(val), val)
                 changed = true
