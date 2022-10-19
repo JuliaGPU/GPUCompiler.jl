@@ -404,7 +404,11 @@ function hide_trap!(mod::LLVM.Module)
             if isa(val, LLVM.CallInst)
                 @dispose builder=Builder(ctx) begin
                     position!(builder, val)
-                    call!(builder, exit)
+                    c = call!(builder, exit)
+                    callsite_attribute!(c, (
+                        LLVM.EnumAttribute("inaccessiblememonly", 0; ctx),
+                        LLVM.EnumAttribute("writeonly", 0; ctx), # can we do readnone?
+                        LLVM.EnumAttribute("noreturn", 0; ctx)))
                 end
                 unsafe_delete!(LLVM.parent(val), val)
                 changed = true
