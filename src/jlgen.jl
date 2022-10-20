@@ -47,7 +47,7 @@ const GLOBAL_CI_CACHES_LOCK = ReentrantLock()
 
 function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
     # make sure the invalidation callback is attached to the method instance
-    callback(mi, max_world) = invalidate(cache, mi, max_world)
+    callback(mi, max_world) = invalidate_code_cache(cache, mi, max_world)
     if !isdefined(mi, :callbacks)
         mi.callbacks = Any[callback]
     elseif !in(callback, mi.callbacks)
@@ -59,7 +59,7 @@ function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodI
 end
 
 # invalidation (like invalidate_method_instance, but for our cache)
-function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, seen=Set{MethodInstance}())
+function invalidate_code_cache(cache::CodeCache, replaced::MethodInstance, max_world, seen=Set{MethodInstance}())
     push!(seen, replaced)
 
     cis = get(cache.dict, replaced, nothing)
@@ -76,12 +76,16 @@ function invalidate(cache::CodeCache, replaced::MethodInstance, max_world, seen=
 
     # recurse to all backedges to update their valid range also
     if isdefined(replaced, :backedges)
-        backedges = replaced.backedges
+        backedges = filter(replaced.backedges) do @nospecialize(mi)
+            mi isa MethodInstance || return false #  might be `Type` object representing an `invoke` signature
+            return mi ∉ seen
+        end
+
         # Don't touch/empty backedges `invalidate_method_instance` in C will do that later
         # replaced.backedges = Any[]
 
-        for mi in filter(!in(seen), backedges)
-            invalidate(cache, mi, max_world, seen)
+        for mi in backedges
+            invalidate_code_cache(cache, mi::MethodInstance, max_world, seen)
         end
     end
 end
