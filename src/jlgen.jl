@@ -5,7 +5,7 @@
 using Core.Compiler: CodeInstance, MethodInstance, InferenceParams, OptimizationParams
 
 struct CodeCache
-    dict::Dict{MethodInstance,Vector{CodeInstance}}
+    dict::IdDict{MethodInstance,Vector{CodeInstance}}
 
     CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
 end
