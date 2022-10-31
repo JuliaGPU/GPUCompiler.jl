@@ -361,13 +361,17 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
 
     # set-up the compiler interface
     debug_info_kind = llvm_debug_info(job)
-    params = Base.CodegenParams(;
+    cgparams = (;
         track_allocations  = false,
         code_coverage      = false,
         prefer_specsig     = true,
         gnu_pubnames       = false,
         debug_info_kind    = Cint(debug_info_kind),
         lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
+    @static if VERSION >= v"1.9.0-DEV.1660"
+        cgparams = merge(cgparams, (;safepoint_on_entry = false))
+    end
+    params = Base.CodegenParams(;cgparams...)
 
     # generate IR
     GC.@preserve lookup_cb begin
