@@ -243,6 +243,17 @@ Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
     WorldOverlayMethodTable(interp.world)
 end
 
+# semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
+@static if VERSION >= v"1.9.0-DEV.1248"
+function Core.Compiler.concrete_eval_eligible(interp::GPUInterpreter,
+    @nospecialize(f), result::Core.Compiler.MethodCallResult, arginfo::Core.Compiler.ArgInfo)
+    ret = @invoke Core.Compiler.concrete_eval_eligible(interp::AbstractInterpreter,
+        f::Any, result::Core.Compiler.MethodCallResult, arginfo::Core.Compiler.ArgInfo)
+    ret === false && return nothing
+    return ret
+end
+end
+
 
 ## world view of the cache
 

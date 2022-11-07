@@ -445,6 +445,28 @@ end
     @test occursin("ret i64 1", ir)
 end
 
+@testset "#366: semi-concrete interpretation + overlay methods = dynamic dispatch" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..method_table
+        using StaticArrays
+
+        function kernel(width, height)
+            xy = SVector{2, Float32}(0.5f0, 0.5f0)
+            res = SVector{2, UInt32}(width, height)
+            floor.(UInt32, max.(0f0, xy) .* res)
+            return
+        end
+
+        GPUCompiler.@override method_table Base.isnan(x::Float32) =
+            (ccall("extern __nv_isnanf", llvmcall, Int32, (Cfloat,), x)) != 0
+    end
+
+    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{Int, Int}; debuginfo=:none))
+    @test !occursin("apply_generic", ir)
+    @test occursin("llvm.floor", ir)
+end
+
 ############################################################################################
 
 end
