@@ -1,6 +1,11 @@
 is_precompiling() = ccall(:jl_generating_output, Cint, ()) != 0
 struct NativeCompilerParams <: AbstractCompilerParams end
 
+"""
+Copied from the testing env, returns the unique job for this function
+
+TODO: is this right? What are params supposed to be
+"""
 function native_job(@nospecialize(f_type), @nospecialize(types); kernel::Bool=false, entry_abi=:specfunc, kwargs...)
     source = FunctionSpec(f_type, Base.to_tuple_type(types), kernel)
     target = NativeCompilerTarget(always_inline=true)
@@ -8,16 +13,12 @@ function native_job(@nospecialize(f_type), @nospecialize(types); kernel::Bool=fa
     CompilerJob(target, source, params, entry_abi), kwargs
 end
 
-g(x) = 12
-
+"""
+Given a function and param types caches the function to the global cache
+"""
 function precompile_native(F, tt)
     job, _ = native_job(F, tt)
-    @show job.source.world
-    @show Base.get_world_counter()
     method_instance, _ = GPUCompiler.emit_julia(job)
-    @show hash(method_instance)
-    precompile(g, (Int, ))
-    @show Base.get_world_counter()
     # populate the cache
     cache = GPUCompiler.ci_cache(job)
     mt = GPUCompiler.method_table(job)
@@ -27,25 +28,31 @@ function precompile_native(F, tt)
     end
 end
 
+"""
+Reloads Global Cache from global variable which stores the previous
+cached results
+"""
 function reload_cache()
     if !is_precompiling()
+        # MY_CACHE already only has infinite ranges at this point
         merge!(GPUCompiler.GLOBAL_CI_CACHES, MY_CACHE);
-        # have to go through and kill anthing that has a finite range
     end
 end
 
-f(x) = 2
-precompile_native(f, (Int, ))
-f(x) = 4
-precompile_native(f, (Int, ))
+"""
+Takes a snapshot of the current status of the cache
 
+The cache returned is a deep copy with finite world age endings removed
+"""
 function snapshot()
-    new_cache = IdDict()
+    cleaned_cache_to_save = IdDict()
     for key in keys(GPUCompiler.GLOBAL_CI_CACHES)
-        new_cache[key] = GPUCompiler.CodeCache(GPUCompiler.GLOBAL_CI_CACHES[key])
+        # Will only keep those elements with infinite ranges
+        cleaned_cache_to_save[key] = GPUCompiler.CodeCache(GPUCompiler.GLOBAL_CI_CACHES[key])
     end
-    return new_cache
+    return cleaned_cache_to_save
 end
 
+# Do I need to put this in a function?
 const MY_CACHE = snapshot()
 my_cache = nothing
