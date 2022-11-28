@@ -653,7 +653,7 @@ function add_kernel_state!(mod::LLVM.Module)
                 end
             end
         end
-        return nothing
+        return nothing # do not claim responsibility
     end
     for (f, new_f) in workmap
         # use a value mapper for rewriting function arguments
