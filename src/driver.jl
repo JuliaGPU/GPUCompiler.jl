@@ -56,7 +56,7 @@ end
 # to work around this mess, and still present a reasonably unified API, we introduce the
 # JuliaContext helper below, which returns a local context on Julia 1.9, and the global
 # unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
-# this helper to a regular `Contxet()` call.
+# this helper to a regular `Context()` call.
 function JuliaContext()
     if VERSION >= v"1.9.0-DEV.115"
         # Julia 1.9 knows how to deal with arbitrary contexts
