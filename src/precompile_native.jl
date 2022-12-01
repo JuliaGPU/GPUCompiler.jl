@@ -1,6 +1,6 @@
 is_precompiling() = ccall(:jl_generating_output, Cint, ()) != 0
 struct NativeCompilerParams <: AbstractCompilerParams end
-
+const MY_CACHE = IdDict()
 """
 Copied from the testing env, returns the unique job for this function
 
@@ -17,6 +17,7 @@ end
 Given a function and param types caches the function to the global cache
 """
 function precompile_native(F, tt)
+    println("HERE")
     job, _ = native_job(F, tt)
     method_instance, _ = GPUCompiler.emit_julia(job)
     # populate the cache
@@ -34,6 +35,8 @@ cached results
 """
 function reload_cache()
     if !is_precompiling()
+        println("reload cache")
+        @show MY_CACHE
         # MY_CACHE already only has infinite ranges at this point
         merge!(GPUCompiler.GLOBAL_CI_CACHES, MY_CACHE);
     end
@@ -45,14 +48,20 @@ Takes a snapshot of the current status of the cache
 The cache returned is a deep copy with finite world age endings removed
 """
 function snapshot()
+    println("CALLING SNAPSHOT")
     cleaned_cache_to_save = IdDict()
     for key in keys(GPUCompiler.GLOBAL_CI_CACHES)
+        println("key: ", key)
         # Will only keep those elements with infinite ranges
         cleaned_cache_to_save[key] = GPUCompiler.CodeCache(GPUCompiler.GLOBAL_CI_CACHES[key])
     end
-    return cleaned_cache_to_save
+    global MY_CACHE #technically don't need the global
+    #empty insert
+    empty!(MY_CACHE)
+    merge!(MY_CACHE, cleaned_cache_to_save)
+    @show MY_CACHE
 end
 
 # Do I need to put this in a function?
-const MY_CACHE = snapshot()
-my_cache = nothing
+#const MY_CACHE = snapshot()
+#my_cache = nothing

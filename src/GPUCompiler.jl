@@ -48,10 +48,23 @@ include("precompile.jl")
 include("precompile_native.jl")
 _precompile_()
 
+# Users of CUDA.jl will need there own partial cache ( why we need keys)
+#=
+Have a big cache, can load a package after already cached code, what should we 
+be putting into the cache after loading package. Need to change how caching works
+so we can filter correctly.
+
+Where a function came: package it came from (who entered this thing originally into our cache)
+=#
+# could be done here
 function __init__()
+    println("init called")
+    @show MY_CACHE
     if !is_precompiling()
         @show MY_CACHE
         reload_cache()
+    else
+        atexit(snapshot) # might have to do outside the init
     end
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
 end
