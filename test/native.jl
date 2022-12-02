@@ -192,6 +192,16 @@ end
     @test occursin(r"call fastcc .+ @julia", ir)
 end
 
+@testset "function entry safepoint emission" begin
+    ir = sprint(io->native_code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true))
+    @test !occursin("%safepoint", ir)
+
+    @static if VERSION >= v"1.9.0-DEV.1660"
+        ir = sprint(io->native_code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true))
+        @test occursin("%safepoint", ir)
+    end
+end
+
 end
 
 ############################################################################################
