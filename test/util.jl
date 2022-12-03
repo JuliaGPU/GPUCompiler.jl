@@ -54,7 +54,10 @@ module TestRuntime
     report_exception_frame(idx, func, file, line) = return
 end
 
-struct TestCompilerParams <: AbstractCompilerParams end
+struct TestCompilerParams <: AbstractCompilerParams
+    entry_safepoint::Bool
+end
+TestCompilerParams() = TestCompilerParams(false)
 GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
 
 

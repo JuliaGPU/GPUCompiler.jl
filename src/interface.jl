@@ -198,6 +198,10 @@ get_interpreter(@nospecialize(job::CompilerJob)) =
 # if not, calls to throw will be replaced with calls to the GPU runtime
 can_throw(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 
+# does this target support loading from Julia safepoints?
+# if not, safepoints at function entry will not be emitted
+can_safepoint(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
+
 # generate a string that represents the type of compilation, for selecting a compiled
 # instance of the runtime library. this slug should encode everything that affects
 # the generated code of this compiler job (with exception of the function source)

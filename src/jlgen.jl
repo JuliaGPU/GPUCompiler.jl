@@ -380,7 +380,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         debug_info_kind    = Cint(debug_info_kind),
         lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
     @static if VERSION >= v"1.9.0-DEV.1660"
-        cgparams = merge(cgparams, (;safepoint_on_entry = false))
+        cgparams = merge(cgparams, (;safepoint_on_entry = can_safepoint(job)))
     end
     params = Base.CodegenParams(;cgparams...)
 
