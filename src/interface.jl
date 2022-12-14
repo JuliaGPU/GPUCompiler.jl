@@ -132,25 +132,27 @@ with a calling convention of the first argument being the function itself (to su
 the second argument being a pointer to a vector of boxed Julia values and the third argument
 being the number of values, the return value will also be boxed. The `:func` abi
 will internally call the `:specfunc` abi, but is generally easier to invoke directly.
+`always_inline` specifies if the Julia front-end should inline all functions into one if possible.
 """
 struct CompilerJob{T,P,F}
     target::T
     source::F
     params::P
     entry_abi::Symbol
+    always_inline::Bool
 
-    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams, entry_abi::Symbol)
+    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams, entry_abi::Symbol, always_inline=true)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
-        new{typeof(target), typeof(params), typeof(source)}(target, source, params, entry_abi)
+        new{typeof(target), typeof(params), typeof(source)}(target, source, params, entry_abi, always_inline)
     end
 end
-CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams; entry_abi=:specfunc) =
-    CompilerJob(target, source, params, entry_abi)
+CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams; entry_abi=:specfunc, always_inline=false) =
+    CompilerJob(target, source, params, entry_abi, always_inline)
 
 Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
-    CompilerJob(job.target, source, job.params, job.entry_abi)
+    CompilerJob(job.target, source, job.params, job.entry_abi, job.always_inline)
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
@@ -292,6 +294,10 @@ function optimization_params(@nospecialize(job::CompilerJob))
 
     if VERSION < v"1.8.0-DEV.486"
         kwargs = (kwargs..., unoptimize_throw_blocks=false)
+    end
+
+    if job.always_inline
+        kwargs = (kwargs..., inline_cost_threshold=typemax(Int))
     end
 
     return OptimizationParams(;kwargs...)

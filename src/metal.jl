@@ -11,7 +11,7 @@ Base.@kwdef struct MetalCompilerTarget <: AbstractCompilerTarget
 end
 
 function Base.hash(target::MetalCompilerTarget, h::UInt)
-    hash(target.macos, h)
+    h = hash(target.macos, h)
 end
 
 source_code(target::MetalCompilerTarget) = "text"
