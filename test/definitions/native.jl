@@ -21,9 +21,10 @@ GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.params.en
 
 function native_job(@nospecialize(f_type), @nospecialize(types);
                     kernel::Bool=false, entry_abi=:specfunc, entry_safepoint::Bool=false,
-                    always_inline=false, llvm_always_inline=true, kwargs...)
+                    always_inline=false, llvm_always_inline=true, jlruntime::Bool=false,
+                    kwargs...)
     source = FunctionSpec(f_type, Base.to_tuple_type(types), kernel)
-    target = NativeCompilerTarget(;llvm_always_inline)
+    target = NativeCompilerTarget(; llvm_always_inline, jlruntime)
     params = TestCompilerParams(entry_safepoint)
     CompilerJob(target, source, params, entry_abi, always_inline), kwargs
 end
@@ -253,7 +254,9 @@ module LazyCodegen
 
     import GPUCompiler: deferred_codegen_jobs
     @generated function deferred_codegen(f::F, ::Val{tt}) where {F,tt}
-        job, _ = native_job(F, tt)
+        # XXX: do we actually require the Julia runtime?
+        #      with jlruntime=false, we reach an unreachable.
+        job, _ = native_job(F, tt; jlruntime=true)
 
         addr = get_trampoline(job)
         trampoline = pointer(addr)
