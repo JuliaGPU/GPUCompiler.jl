@@ -38,34 +38,6 @@ if VERSION < v"1.9.0-DEV.1018"
 end
 end
 
-@testset "always_inline" begin
-    @eval f_expensive(x) = $(foldl((e, _) -> :(sink($e) + sink(x)), 1:100; init=:x))
-    function g(x)
-        f_expensive(x)
-        return
-    end
-    function h(x)
-        f_expensive(x)
-        return
-    end
-
-    ir = sprint(io->gcn_code_llvm(io, g, Tuple{Int64}; dump_module=true,
-                                  kernel=true))
-    @test occursin(r"^define.*julia_f_expensive"m, ir)
-
-    ir = sprint(io->gcn_code_llvm(io, g, Tuple{Int64}; dump_module=true,
-                                  kernel=true, always_inline=true))
-    @test !occursin(r"^define.*julia_f_expensive"m, ir)
-
-    ir = sprint(io->gcn_code_llvm(io, h, Tuple{Int64}; dump_module=true,
-                                  kernel=true, always_inline=true))
-    @test !occursin(r"^define.*julia_f_expensive"m, ir)
-
-    ir = sprint(io->gcn_code_llvm(io, h, Tuple{Int64}; dump_module=true,
-                                  kernel=true))
-    @test occursin(r"^define.*julia_f_expensive"m, ir)
-end
-
 end
 
 ############################################################################################
