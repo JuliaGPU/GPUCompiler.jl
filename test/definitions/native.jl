@@ -19,11 +19,13 @@ end
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.params.entry_safepoint
 
-function native_job(@nospecialize(f_type), @nospecialize(types); kernel::Bool=false, entry_abi=:specfunc, entry_safepoint::Bool=false, kwargs...)
+function native_job(@nospecialize(f_type), @nospecialize(types);
+                    kernel::Bool=false, entry_abi=:specfunc, entry_safepoint::Bool=false,
+                    always_inline=false, llvm_always_inline=true, kwargs...)
     source = FunctionSpec(f_type, Base.to_tuple_type(types), kernel)
-    target = NativeCompilerTarget(always_inline=true)
+    target = NativeCompilerTarget(;llvm_always_inline)
     params = TestCompilerParams(entry_safepoint)
-    CompilerJob(target, source, params, entry_abi), kwargs
+    CompilerJob(target, source, params, entry_abi, always_inline), kwargs
 end
 
 function native_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)

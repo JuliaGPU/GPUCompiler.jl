@@ -41,12 +41,11 @@ function ptx_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                  minthreads=nothing, maxthreads=nothing, blocks_per_sm=nothing,
                  maxregs=nothing, always_inline=false, kwargs...)
     source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
-    target = PTXCompilerTarget(cap=v"7.0",
-                               minthreads=minthreads, maxthreads=maxthreads,
-                               blocks_per_sm=blocks_per_sm, maxregs=maxregs,
-                               always_inline=always_inline)
+    target = PTXCompilerTarget(;cap=v"7.0",
+                               minthreads, maxthreads,
+                               blocks_per_sm, maxregs)
     params = TestCompilerParams()
-    CompilerJob(target, source, params), kwargs
+    CompilerJob(target, source, params; always_inline), kwargs
 end
 
 function ptx_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)
