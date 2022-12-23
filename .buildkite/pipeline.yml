@@ -65,8 +65,9 @@ steps:
                 println("+++ :julia: Running tests")
                 Pkg.test("Metal"; coverage=true)'
     agents:
-      queue: "juliagpu"
-      metal: "*"
+      queue: "juliaecosystem"
+      os: "macos"
+      arch: "aarch64"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 120
 
