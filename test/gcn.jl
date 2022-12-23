@@ -155,9 +155,8 @@ end
     gcn_code_native(devnull, kernel, Tuple{Float64})
 end
 
-@test_broken "exception arguments"
-#= FIXME: _ZNK4llvm14TargetLowering20scalarizeVectorStoreEPNS_11StoreSDNodeERNS_12SelectionDAGE
-@testset "exception arguments" begin
+# FIXME: _ZNK4llvm14TargetLowering20scalarizeVectorStoreEPNS_11StoreSDNodeERNS_12SelectionDAGE
+false && @testset "exception arguments" begin
     function kernel(a)
         unsafe_store!(a, trunc(Int, unsafe_load(a)))
         return
@@ -165,11 +164,9 @@ end
 
     gcn_code_native(devnull, kernel, Tuple{Ptr{Float64}})
 end
-=#
 
-@test_broken "GC and TLS lowering"
-#= FIXME: in function julia_inner_18528 void (%jl_value_t addrspace(10)*): invalid addrspacecast
-@testset "GC and TLS lowering" begin
+# FIXME: in function julia_inner_18528 void (%jl_value_t addrspace(10)*): invalid addrspacecast
+false && @testset "GC and TLS lowering" begin
     @eval mutable struct PleaseAllocate
         y::Csize_t
     end
@@ -206,7 +203,6 @@ end
 
     @test !occursin("gpu_gc_pool_alloc", asm)
 end
-=#
 
 @testset "float boxes" begin
     function kernel(a,b)
