@@ -321,7 +321,7 @@ const __llvm_initialized = Ref(false)
         @compiler_assert isempty(uses(dyn_marker)) job
         unsafe_delete!(ir, dyn_marker)
     end
-    
+
     @timeit_debug to "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.source.kernel
@@ -334,7 +334,7 @@ const __llvm_initialized = Ref(false)
         if optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir)
-        
+
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
@@ -376,7 +376,7 @@ const __llvm_initialized = Ref(false)
                 end
             end
         end
-        
+
         # finish the module
         #
         # we want to finish the module after optimization, so we cannot do so during
