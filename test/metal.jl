@@ -85,7 +85,7 @@ end
 
 ############################################################################################
 
-@testset "asm" begin
+Sys.isapple() && @testset "asm" begin
 
 @testset "smoke test" begin
     kernel() = return

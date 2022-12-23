@@ -9,12 +9,6 @@ using ExprTools: splitdef, combinedef
 
 using Libdl
 
-const to = TimerOutput()
-
-timings() = (TimerOutputs.print_timer(to); println())
-
-enable_timings() = (TimerOutputs.enable_debug_timings(GPUCompiler); return)
-
 include("utils.jl")
 
 # compiler interface and implementations

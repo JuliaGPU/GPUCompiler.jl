@@ -402,7 +402,7 @@ const __llvm_initialized = Ref(false)
             end
         end
 
-        if ccall(:jl_is_debugbuild, Cint, ()) == 1
+        if should_verify()
             @timeit_debug to "verification" verify(ir)
         end
     end
