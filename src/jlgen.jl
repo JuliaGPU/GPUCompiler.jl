@@ -379,7 +379,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
         gnu_pubnames       = false,
         debug_info_kind    = Cint(debug_info_kind),
         lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
-    @static if VERSION >= v"1.9.0-DEV.1660"
+    @static if v"1.9.0-DEV.1660" <= VERSION < v"1.9.0-beta1" || VERSION >= v"1.10-"
         cgparams = merge(cgparams, (;safepoint_on_entry = can_safepoint(job)))
     end
     params = Base.CodegenParams(;cgparams...)
