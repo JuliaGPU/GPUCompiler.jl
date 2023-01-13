@@ -99,6 +99,10 @@ InteractiveUtils.code_lowered(err::InvalidIRError; kwargs...) = code_lowered(err
 InteractiveUtils.code_typed(err::InvalidIRError; kwargs...) = code_typed(err.job; kwargs...)
 InteractiveUtils.code_warntype(err::InvalidIRError; kwargs...) = code_warntype(err.job; kwargs...)
 
+InteractiveUtils.code_lowered(err::KernelError; kwargs...) = code_lowered(err.job; kwargs...)
+InteractiveUtils.code_typed(err::KernelError; kwargs...) = code_typed(err.job; kwargs...)
+InteractiveUtils.code_warntype(err::KernelError; kwargs...) = code_warntype(err.job; kwargs...)
+
 # For VERSION >= v"1.9.0-DEV.516"
 struct jl_llvmf_dump
     TSM::LLVM.API.LLVMOrcThreadSafeModuleRef
