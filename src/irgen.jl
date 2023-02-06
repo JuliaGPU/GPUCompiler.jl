@@ -265,14 +265,11 @@ function emit_exception!(builder, name, inst)
     # report the exception
     if Base.JLOptions().debug_level >= 1
         name = globalstring_ptr!(builder, name, "exception")
-        c = if Base.JLOptions().debug_level == 1
+        if Base.JLOptions().debug_level == 1
             call!(builder, Runtime.get(:report_exception), [name])
         else
             call!(builder, Runtime.get(:report_exception_name), [name])
         end
-        callsite_attribute!(c, (
-            LLVM.EnumAttribute("inaccessiblememonly", 0; ctx),
-            LLVM.EnumAttribute("writeonly", 0; ctx)))
     end
 
     # report each frame
@@ -290,10 +287,7 @@ function emit_exception!(builder, name, inst)
     end
 
     # signal the exception
-    c = call!(builder, Runtime.get(:signal_exception))
-    callsite_attribute!(c, (
-        LLVM.EnumAttribute("inaccessiblememonly", 0; ctx),
-        LLVM.EnumAttribute("writeonly", 0; ctx)))
+    call!(builder, Runtime.get(:signal_exception))
 
     emit_trap!(job, builder, mod, inst)
 end
