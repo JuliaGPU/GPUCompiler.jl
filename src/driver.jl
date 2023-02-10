@@ -25,7 +25,7 @@ The following keyword arguments are supported:
 - `optimize`: optimize the code (default: true)
 - `cleanup`: run cleanup passes on the code (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
-- `validate`: validate the generated IR before emitting machine code (default: true)
+- `validate`: enable optional validation of input and outputs (default: true)
 - `only_entry`: only keep the entry function, remove all others (default: false).
   This option is only for internal use, to implement reflection's `dump_module`.
 
@@ -90,7 +90,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  ctx::Union{JuliaContextType,Nothing}=nothing)
     ## Julia IR
 
-    mi, mi_meta = emit_julia(job)
+    mi, mi_meta = emit_julia(job; validate)
 
     if output == :julia
         return mi, mi_meta
@@ -112,7 +112,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                      Use a JuliaContext instead.""")
         end
 
-        ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, cleanup, only_entry, ctx)
+        ir, ir_meta = emit_llvm(job, mi; libraries, deferred_codegen, optimize, cleanup, only_entry, validate, ctx)
 
         if output == :llvm
             if strip
@@ -148,8 +148,11 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     end
 end
 
-@locked function emit_julia(@nospecialize(job::CompilerJob))
-    @timeit_debug to "validation" check_method(job)
+@locked function emit_julia(@nospecialize(job::CompilerJob); validate::Bool=true)
+    @timeit_debug to "Validation" begin
+        check_method(job)   # not optional
+        validate && check_invocation(job)
+    end
 
     @timeit_debug to "Julia front-end" begin
 
@@ -201,7 +204,8 @@ const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob), @nospecialize(method_instance);
                            libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
-                           cleanup::Bool=true, only_entry::Bool=false, ctx::JuliaContextType)
+                           cleanup::Bool=true, only_entry::Bool=false, validate::Bool=true,
+                           ctx::JuliaContextType)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -293,8 +297,10 @@ const __llvm_initialized = Ref(false)
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(deferred_jobs, dyn_job) do
-                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; optimize=false,
-                                               deferred_codegen=false, parent_job=job, ctx)
+                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; validate=false,
+                                               optimize=false,
+                                               deferred_codegen=false,
+                                               parent_job=job, ctx)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     @assert context(dyn_ir) == unwrap_context(ctx)
@@ -407,18 +413,17 @@ const __llvm_initialized = Ref(false)
         end
     end
 
+    if validate
+        @timeit_debug to "Validation" begin
+            check_ir(job, ir)
+        end
+    end
+
     return ir, (; entry, compiled)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
                           strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
-    if validate
-        @timeit_debug to "Validation" begin
-            check_invocation(job)
-            check_ir(job, ir)
-        end
-    end
-
     # NOTE: strip after validation to get better errors
     if strip
         @timeit_debug to "Debug info removal" strip_debuginfo!(ir)

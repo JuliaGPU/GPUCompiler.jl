@@ -88,7 +88,7 @@ end
         job, _ = native_job(foo, (Float64,))
         JuliaContext() do ctx
             # shouldn't segfault
-            ir, meta = GPUCompiler.compile(:llvm, job; ctx)
+            ir, meta = GPUCompiler.compile(:llvm, job; ctx, validate=false)
 
             meth = only(methods(foo, (Float64,)))
 
