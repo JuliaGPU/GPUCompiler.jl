@@ -297,7 +297,7 @@ const __llvm_initialized = Ref(false)
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(deferred_jobs, dyn_job) do
-                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; validate,
+                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; validate=false,
                                                optimize=false,
                                                deferred_codegen=false,
                                                parent_job=job, ctx)
