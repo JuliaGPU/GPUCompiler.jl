@@ -3,6 +3,17 @@
 using Core.Compiler: retrieve_code_info, CodeInfo, MethodInstance, SSAValue, SlotNumber, ReturnNode
 using Base: _methods_by_ftype
 
+function function_instance(ft)
+    if isdefined(ft, :instance)
+        return ft.instance
+    else
+        # dealing with a closure, for which we cannot construct an instance.
+        # however, we only use this in the context of method errors, where
+        # we really only care about the type of the function, so do something invalid:
+        Ref{ft}()[]
+    end
+end
+
 # generated function that crafts a custom code info to call the actual compiler.
 # this gives us the flexibility to insert manual back edges for automatic recompilation.
 #
@@ -14,8 +25,10 @@ const specialization_counter = Ref{UInt}(0)
     sig = Tuple{f, tt.parameters...}
     # XXX: instead of typemax(UInt) we should use the world-age of the fspec
     mthds = _methods_by_ftype(sig, -1, typemax(UInt))
+    method_error = :(throw(MethodError($(function_instance(f)), job.source.tt)))
+    mthds === nothing && return method_error
     Base.isdispatchtuple(tt) || return(:(error("$tt is not a dispatch tuple")))
-    length(mthds) == 1 || return (:(throw(MethodError(job.source.f,job.source.tt))))
+    length(mthds) == 1 || return method_error
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi)::CodeInfo
