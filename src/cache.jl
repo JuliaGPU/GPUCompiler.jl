@@ -14,13 +14,13 @@ function function_instance(ft)
     end
 end
 
-# generated function that crafts a custom code info to call the actual compiler.
-# this gives us the flexibility to insert manual back edges for automatic recompilation.
-#
-# we also increment a global specialization counter and pass it along to index the cache.
+# generated function that returns an increasing id for each specialization of a function.
+# this can be used to index a compilation cache, and only recompile kernels when necessary.
 
 const specialization_counter = Ref{UInt}(0)
-@generated function specialization_id(job::CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}) where {f,tt}
+function specialization_id_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}}) where {f,tt}
+    @nospecialize
+
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
     # XXX: instead of typemax(UInt) we should use the world-age of the fspec
@@ -54,12 +54,8 @@ const specialization_counter = Ref{UInt}(0)
     #      underlying C methods -- which GPUCompiler does, so everything Just Works.
 
     # prepare the slots
-    new_ci.slotnames = Symbol[Symbol("#self#"), :cache, :job, :compiler, :linker]
-    new_ci.slotflags = UInt8[0x00 for i = 1:5]
-    cache = SlotNumber(2)
-    job = SlotNumber(3)
-    compiler = SlotNumber(4)
-    linker = SlotNumber(5)
+    new_ci.slotnames = Symbol[Symbol("#self#"), :job]
+    new_ci.slotflags = UInt8[0x00 for i = 1:2]
 
     # call the compiler
     push!(new_ci.code, ReturnNode(id))
@@ -73,6 +69,20 @@ const specialization_counter = Ref{UInt}(0)
     #       has as advantage that we see the name of the kernel in the backtraces.
 
     return new_ci
+end
+
+@eval function specialization_id(job)
+    $(Expr(:meta, :generated_only))
+    $(Expr(:meta,
+            :generated,
+            Expr(:new,
+                Core.GeneratedFunctionStub,
+                :specialization_id_generator,
+                Any[:specialization_id, :job],
+                Any[],
+                @__LINE__,
+                QuoteNode(Symbol(@__FILE__)),
+                true)))
 end
 
 const cache_lock = ReentrantLock()
