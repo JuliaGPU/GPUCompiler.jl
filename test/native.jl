@@ -102,18 +102,21 @@ end
     end
 
     @testset "cached compilation" begin
-        kernel(i) = i+1
+        @gensym child kernel
+        @eval @noinline $child(i) = sink(i)
+        @eval $kernel(i) = $child(i)+1
 
         # smoke test
-        job, _ = native_job(kernel, (Int64,))
+        job, _ = native_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
-        @test contains(ir, "add i64 %0, 1")
+        @test contains(ir, "add i64 %1, 1")
 
         # basic redefinition
-        kernel(i) = i+2
+        @eval $kernel(i) = $child(i)+2
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
-        @test contains(ir, "add i64 %0, 2")
+        @test contains(ir, "add i64 %1, 2")
 
+        # cached_compilation interface
         invocations = Ref(0)
         function compiler(job)
             invocations[] += 1
@@ -121,33 +124,60 @@ end
             return ir
         end
         linker(job, compiled) = compiled
-
         cache = Dict()
 
         # initial compilation
         ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
-        @test contains(ir, "add i64 %0, 2")
+        @test contains(ir, "add i64 %1, 2")
         @test invocations[] == 1
         @test length(cache) == 1
 
         # cached compilation
         ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
-        @test contains(ir, "add i64 %0, 2")
+        @test contains(ir, "add i64 %1, 2")
         @test invocations[] == 1
         @test length(cache) == 1
 
         # redefinition
-        kernel(i) = i+3
+        @eval $kernel(i) = $child(i)+3
         ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
-        @test contains(ir, "add i64 %0, 3")
+        @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
         @test length(cache) == 2
 
         # cached compilation
         ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
-        @test contains(ir, "add i64 %0, 3")
+        @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
         @test length(cache) == 2
+
+        # redefining child functions
+        @eval @noinline $child(i) = sink(i)+1
+        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        @test invocations[] == 3
+        @test length(cache) == 3
+
+        # cached compilation
+        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        @test invocations[] == 3
+        @test length(cache) == 3
+
+        # tasks running in the background should keep on using the old version
+        c1, c2 = Condition(), Condition()
+        function background()
+            notify(c1)
+            wait(c2)    # wait for redefinition
+            GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        end
+        t = @async background()
+        wait(c1)        # make sure the task has started
+        @eval $kernel(i) = $child(i)+4
+        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        @test contains(ir, "add i64 %1, 4")
+        notify(c2)      # wake up the task
+        ir = fetch(t)
+        @test_broken contains(ir, "add i64 %1, 3")
+        # BUG: tasks see the new definition, while they should be running in a set world
     end
 end
 
@@ -183,7 +213,7 @@ end
     parent(i) = child(i)
 
     ir = sprint(io->native_code_llvm(io, parent, Tuple{Int}))
-    @test occursin(r"call .+ @julia_child_", ir)
+    @test occursin(r"call .+ @julia.+child.+", ir)
 end
 
 @testset "sysimg" begin
