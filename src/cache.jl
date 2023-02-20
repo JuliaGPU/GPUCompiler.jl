@@ -49,6 +49,8 @@ function job_world_generator(world::UInt, source, self,
     resize!(new_ci.linetable, 1)                # see note below
     empty!(new_ci.ssaflags)
     new_ci.ssavaluetypes = 0
+    new_ci.min_world = world
+    new_ci.max_world = typemax(UInt)
     new_ci.edges = MethodInstance[mi]
     # XXX: setting this edge does not give us proper method invalidation, see
     #      JuliaLang/julia#34962 which demonstrates we also need to "call" the kernel.
@@ -98,9 +100,9 @@ function job_world_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionS
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi)::CodeInfo
 
-    # we don't know the world age that this generator was requested to run in, so use
+    # XXX: we don't know the world age that this generator was requested to run in, so use
     # the current world (we cannot use the mi's world because that doesn't update when
-    # called functions are changed)
+    # called functions are changed). this isn't correct, but should be close.
     world = Base.get_world_counter()
 
     # prepare a new code info
@@ -110,6 +112,8 @@ function job_world_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionS
     resize!(new_ci.linetable, 1)                # see note below
     empty!(new_ci.ssaflags)
     new_ci.ssavaluetypes = 0
+    new_ci.min_world = world
+    new_ci.max_world = typemax(UInt)
     new_ci.edges = MethodInstance[mi]
     # XXX: setting this edge does not give us proper method invalidation, see
     #      JuliaLang/julia#34962 which demonstrates we also need to "call" the kernel.

@@ -176,8 +176,7 @@ end
         @test contains(ir, "add i64 %1, 4")
         notify(c2)      # wake up the task
         ir = fetch(t)
-        @test_broken contains(ir, "add i64 %1, 3")
-        # BUG: tasks see the new definition, while they should be running in a set world
+        @test contains(ir, "add i64 %1, 3")
     end
 end
 
