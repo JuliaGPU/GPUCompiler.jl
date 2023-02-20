@@ -17,6 +17,66 @@ end
 # generated function that returns an increasing id for each specialization of a function.
 # this can be used to index a compilation cache, and only recompile kernels when necessary.
 
+if VERSION >= v"1.10.0-DEV.649"  # JuliaLang/julia#48611
+
+function specialization_id_ex(world, source, ex)
+    stub = Core.GeneratedFunctionStub(identity, Core.svec(:specialization_id, :job), Core.svec())
+    stub(world, source, ex)
+end
+
+function specialization_id_generator(world::UInt, source, self,
+                                     job::Type{<:CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}}) where {f,tt}
+    @nospecialize
+
+    # get a hold of the method and code info of the kernel function
+    sig = Tuple{f, tt.parameters...}
+    mthds = _methods_by_ftype(sig, -1, world)
+    method_error = :(throw(MethodError($(function_instance(f)), job.source.tt, $world)))
+    mthds === nothing && return specialization_id_ex(world, source, method_error)
+    Base.isdispatchtuple(tt) || return specialization_id_ex(world, source, :(error("$tt is not a dispatch tuple")))
+    length(mthds) == 1 || return specialization_id_ex(world, source, method_error)
+    mtypes, msp, m = mthds[1]
+    mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
+    ci = retrieve_code_info(mi, world)::CodeInfo
+
+    # prepare a new code info
+    new_ci = copy(ci)
+    empty!(new_ci.code)
+    empty!(new_ci.codelocs)
+    resize!(new_ci.linetable, 1)                # see note below
+    empty!(new_ci.ssaflags)
+    new_ci.ssavaluetypes = 0
+    new_ci.edges = MethodInstance[mi]
+    # XXX: setting this edge does not give us proper method invalidation, see
+    #      JuliaLang/julia#34962 which demonstrates we also need to "call" the kernel.
+    #      invoking `code_llvm` also does the necessary codegen, as does calling the
+    #      underlying C methods -- which GPUCompiler does, so everything Just Works.
+
+    # prepare the slots
+    new_ci.slotnames = Symbol[Symbol("#self#"), :job]
+    new_ci.slotflags = UInt8[0x00 for i = 1:2]
+
+    # call the compiler
+    push!(new_ci.code, ReturnNode(world))
+    push!(new_ci.ssaflags, 0x00)   # Julia's native compilation pipeline (and its verifier) expects `ssaflags` to be the same length as `code`
+    push!(new_ci.codelocs, 1)   # see note below
+    new_ci.ssavaluetypes += 1
+
+    # NOTE: we keep the first entry of the original linetable, and use it for location info
+    #       on the call to check_cache. we can't not have a codeloc (using 0 causes
+    #       corruption of the back trace), and reusing the target function's info
+    #       has as advantage that we see the name of the kernel in the backtraces.
+
+    return new_ci
+end
+
+@eval function specialization_id(job)
+    $(Expr(:meta, :generated_only))
+    $(Expr(:meta, :generated, specialization_id_generator))
+end
+
+else
+
 const specialization_counter = Ref{UInt}(0)
 function specialization_id_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}}) where {f,tt}
     @nospecialize
@@ -83,6 +143,8 @@ end
                 @__LINE__,
                 QuoteNode(Symbol(@__FILE__)),
                 true)))
+end
+
 end
 
 const cache_lock = ReentrantLock()
