@@ -14,17 +14,20 @@ function function_instance(ft)
     end
 end
 
-# generated function that returns an increasing id for each specialization of a function.
-# this can be used to index a compilation cache, and only recompile kernels when necessary.
+# generated function that returns the world age of a compilation job. this can be used to
+# drive compilation, e.g. by using it as a key for a cache, as the age will change when a
+# function or any called function is redefined.
 
-if VERSION >= v"1.10.0-DEV.649"  # JuliaLang/julia#48611
+if VERSION >= v"1.10.0-DEV.649"
 
-function specialization_id_ex(world, source, ex)
-    stub = Core.GeneratedFunctionStub(identity, Core.svec(:specialization_id, :job), Core.svec())
+# on 1.10 (JuliaLang/julia#48611) the generated function knows which world it was invoked in
+
+function job_world_ex(world, source, ex)
+    stub = Core.GeneratedFunctionStub(identity, Core.svec(:job_world, :job), Core.svec())
     stub(world, source, ex)
 end
 
-function specialization_id_generator(world::UInt, source, self,
+function job_world_generator(world::UInt, source, self,
                                      job::Type{<:CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}}) where {f,tt}
     @nospecialize
 
@@ -32,9 +35,9 @@ function specialization_id_generator(world::UInt, source, self,
     sig = Tuple{f, tt.parameters...}
     mthds = _methods_by_ftype(sig, -1, world)
     method_error = :(throw(MethodError($(function_instance(f)), job.source.tt, $world)))
-    mthds === nothing && return specialization_id_ex(world, source, method_error)
-    Base.isdispatchtuple(tt) || return specialization_id_ex(world, source, :(error("$tt is not a dispatch tuple")))
-    length(mthds) == 1 || return specialization_id_ex(world, source, method_error)
+    mthds === nothing && return job_world_ex(world, source, method_error)
+    Base.isdispatchtuple(tt) || return job_world_ex(world, source, :(error("$tt is not a dispatch tuple")))
+    length(mthds) == 1 || return job_world_ex(world, source, method_error)
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi, world)::CodeInfo
@@ -56,7 +59,7 @@ function specialization_id_generator(world::UInt, source, self,
     new_ci.slotnames = Symbol[Symbol("#self#"), :job]
     new_ci.slotflags = UInt8[0x00 for i = 1:2]
 
-    # call the compiler
+    # return the world
     push!(new_ci.code, ReturnNode(world))
     push!(new_ci.ssaflags, 0x00)   # Julia's native compilation pipeline (and its verifier) expects `ssaflags` to be the same length as `code`
     push!(new_ci.codelocs, 1)   # see note below
@@ -70,15 +73,17 @@ function specialization_id_generator(world::UInt, source, self,
     return new_ci
 end
 
-@eval function specialization_id(job)
+@eval function job_world(job)
     $(Expr(:meta, :generated_only))
-    $(Expr(:meta, :generated, specialization_id_generator))
+    $(Expr(:meta, :generated, job_world_generator))
 end
 
 else
 
-const specialization_counter = Ref{UInt}(0)
-function specialization_id_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}}) where {f,tt}
+# on older versions of Julia we fall back to looking up the current world. this may be wrong
+# when the generator is invoked in a different world (TODO: when does this happen?)
+
+function job_world_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}}) where {f,tt}
     @nospecialize
 
     # get a hold of the method and code info of the kernel function
@@ -93,12 +98,10 @@ function specialization_id_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,F
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi)::CodeInfo
 
-    # generate a unique id to represent this specialization
-    # TODO: just use the lower world age bound in which this code info is valid.
-    #       (the method instance doesn't change when called functions are changed).
-    #       but how to get that? the ci here always has min/max world 1/-1.
-    # XXX: don't use `objectid(ci)` here, apparently it can alias (or the CI doesn't change?)
-    id = (specialization_counter[] += 1)
+    # we don't know the world age that this generator was requested to run in, so use
+    # the current world (we cannot use the mi's world because that doesn't update when
+    # called functions are changed)
+    world = Base.get_world_counter()
 
     # prepare a new code info
     new_ci = copy(ci)
@@ -117,8 +120,8 @@ function specialization_id_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,F
     new_ci.slotnames = Symbol[Symbol("#self#"), :job]
     new_ci.slotflags = UInt8[0x00 for i = 1:2]
 
-    # call the compiler
-    push!(new_ci.code, ReturnNode(id))
+    # return the world
+    push!(new_ci.code, ReturnNode(world))
     push!(new_ci.ssaflags, 0x00)   # Julia's native compilation pipeline (and its verifier) expects `ssaflags` to be the same length as `code`
     push!(new_ci.codelocs, 1)   # see note below
     new_ci.ssavaluetypes += 1
@@ -131,14 +134,14 @@ function specialization_id_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,F
     return new_ci
 end
 
-@eval function specialization_id(job)
+@eval function job_world(job)
     $(Expr(:meta, :generated_only))
     $(Expr(:meta,
             :generated,
             Expr(:new,
                 Core.GeneratedFunctionStub,
-                :specialization_id_generator,
-                Any[:specialization_id, :job],
+                :job_world_generator,
+                Any[:job_world, :job],
                 Any[],
                 @__LINE__,
                 QuoteNode(Symbol(@__FILE__)),
@@ -152,8 +155,8 @@ function cached_compilation(cache::AbstractDict,
                             @nospecialize(job::CompilerJob),
                             compiler::Function, linker::Function)
     # XXX: CompilerJob contains a world age, so can't be respecialized.
-    #      have specialization_id take a f/tt and return a world to construct a CompilerJob?
-    key = hash(job, specialization_id(job))
+    #      have job_world take a f/tt and return a world to construct a CompilerJob?
+    key = hash(job, job_world(job))
     force_compilation = compile_hook[] !== nothing
 
     # XXX: by taking the hash, we index the compilation cache directly with the world age.
