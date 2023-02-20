@@ -22,45 +22,44 @@ cread(io) = cread1(io) * cread1(io)
 
     @test only(GPUCompiler.code_lowered(job)) isa Core.CodeInfo
 
-    CI, rt = only(GPUCompiler.code_typed(job))
+    ci, rt = only(GPUCompiler.code_typed(job))
     @test rt === Int
 
-    IR = sprint(io->GPUCompiler.code_warntype(io, job))
-    @test contains(IR, "MethodInstance for identity")
+    ir = sprint(io->GPUCompiler.code_warntype(io, job))
+    @test contains(ir, "MethodInstance for identity")
 
-    IR = sprint(io->GPUCompiler.code_llvm(io, job))
-    @test contains(IR, "julia_identity")
+    ir = sprint(io->GPUCompiler.code_llvm(io, job))
+    @test contains(ir, "julia_identity")
 
-    ASM = sprint(io->GPUCompiler.code_native(io, job))
-    @test contains(ASM, "julia_identity")
+    asm = sprint(io->GPUCompiler.code_native(io, job))
+    @test contains(asm, "julia_identity")
 
     if test_interactive
         fake_terminal() do term, in, out, err
-            T = @async begin
+            t = @async begin
                 GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term, annotate_source=false)
             end
             lines = replace(cread(out), r"\e\[[0-9;]*[a-zA-Z]"=>"") # without ANSI escape codes
             @test contains(lines, "identity(x)")
             write(in, 'q')
-            wait(T)
+            wait(t)
         end
     end
 end
 
-
-@testset "Compilation" begin
-    @testset "Callable structs" begin
+@testset "compilation" begin
+    @testset "callable structs" begin
         struct MyCallable end
         (::MyCallable)(a, b) = a+b
 
-        (CI, rt) = native_code_typed(MyCallable(), (Int, Int), kernel=false)[1]
-        @test CI.slottypes[1] == Core.Compiler.Const(MyCallable())
+        (ci, rt) = native_code_typed(MyCallable(), (Int, Int), kernel=false)[1]
+        @test ci.slottypes[1] == Core.Compiler.Const(MyCallable())
 
-        (CI, rt) = native_code_typed(typeof(MyCallable()), (Int, Int), kernel=false)[1]
-        @test CI.slottypes[1] == Core.Compiler.Const(MyCallable())
+        (ci, rt) = native_code_typed(typeof(MyCallable()), (Int, Int), kernel=false)[1]
+        @test ci.slottypes[1] == Core.Compiler.Const(MyCallable())
     end
 
-    @testset "Compilation database" begin
+    @testset "compilation database" begin
         @noinline inner(x) = x+1
         function outer(x)
             return inner(x)
@@ -81,7 +80,7 @@ end
         end
     end
 
-    @testset "Advanced database" begin
+    @testset "advanced database" begin
         @noinline inner(x) = x+1
         foo(x) = sum(inner, fill(x, 10, 10))
 
@@ -100,6 +99,55 @@ end
             end
             @test length(inner_methods) == 1
         end
+    end
+
+    @testset "cached compilation" begin
+        kernel(i) = i+1
+
+        # smoke test
+        job, _ = native_job(kernel, (Int64,))
+        ir = sprint(io->GPUCompiler.code_llvm(io, job))
+        @test contains(ir, "add i64 %0, 1")
+
+        # basic redefinition
+        kernel(i) = i+2
+        ir = sprint(io->GPUCompiler.code_llvm(io, job))
+        @test contains(ir, "add i64 %0, 2")
+
+        invocations = Ref(0)
+        function compiler(job)
+            invocations[] += 1
+            ir = sprint(io->GPUCompiler.code_llvm(io, job))
+            return ir
+        end
+        linker(job, compiled) = compiled
+
+        cache = Dict()
+
+        # initial compilation
+        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        @test contains(ir, "add i64 %0, 2")
+        @test invocations[] == 1
+        @test length(cache) == 1
+
+        # cached compilation
+        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        @test contains(ir, "add i64 %0, 2")
+        @test invocations[] == 1
+        @test length(cache) == 1
+
+        # redefinition
+        kernel(i) = i+3
+        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        @test contains(ir, "add i64 %0, 3")
+        @test invocations[] == 2
+        @test length(cache) == 2
+
+        # cached compilation
+        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        @test contains(ir, "add i64 %0, 3")
+        @test invocations[] == 2
+        @test length(cache) == 2
     end
 end
 
