@@ -8,7 +8,7 @@ using GPUCompiler
 
 using LLVM, LLVM.Interop
 
-include("util.jl")
+include("testhelpers.jl")
 
 @testset "GPUCompiler" begin
 
@@ -16,6 +16,7 @@ GPUCompiler.reset_runtime()
 
 GPUCompiler.enable_timings()
 
+include("util.jl")
 include("native.jl")
 include("ptx.jl")
 include("spirv.jl")

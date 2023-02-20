@@ -1,7 +1,7 @@
 using GPUCompiler
 
 if !@isdefined(TestRuntime)
-    include("../util.jl")
+    include("../testhelpers.jl")
 end
 
 
