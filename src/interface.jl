@@ -103,7 +103,7 @@ function Base.getproperty(@nospecialize(spec::FunctionSpec), sym::Symbol)
 end
 
 function signature(@nospecialize(spec::FunctionSpec))
-    fn = something(spec.name, nameof(spec.f))
+    fn = something(spec.name, spec.f.name.mt == Symbol.name.mt ? nameof(spec.f) : spec.f.name.mt.name)
     args = join(spec.tt.parameters, ", ")
     return "$fn($(join(spec.tt.parameters, ", ")))"
 end
