@@ -64,43 +64,32 @@ export FunctionSpec
 struct FunctionSpec{F,TT}
     f::Type{F}
     tt::Type{TT}
+    world::UInt
+
     kernel::Bool
     name::Union{Nothing,String}
-    world_age::UInt
 end
 
 
 function Base.hash(spec::FunctionSpec, h::UInt)
     h = hash(spec.f, h)
     h = hash(spec.tt, h)
+    h = hash(spec.world, h)
+
     h = hash(spec.kernel, h)
     h = hash(spec.name, h)
-    h = hash(spec.world_age, h)
     h
 end
 
 # put the function and argument types in typevars
 # so that we can access it from generated functions
-# XXX: the default value of 0xffffffffffffffff is a hack, because we don't properly perform
-#      world age intersection when querying the compilation cache. once we do, callers
-#      should probably provide the world age of the calling code (!= the current world age)
-#      so that querying the cache from, e.g. `cufuncton` is a fully static operation.
-FunctionSpec(f::Type, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
-    FunctionSpec{f,tt}(f, tt, kernel, name, world_age)
+FunctionSpec(f::Type, tt::Type, world::Integer=Base.get_world_counter();
+             kernel=true, name=nothing) =
+    FunctionSpec{f, tt}(f, tt, world, kernel, name)
 
-FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
-    FunctionSpec(Core.Typeof(f), tt, kernel, name, world_age)
-
-function Base.getproperty(@nospecialize(spec::FunctionSpec), sym::Symbol)
-    if sym == :world
-        # NOTE: this isn't used by the call to `hash` in `check_cache`,
-        #       so we still use the raw world age there.
-        age = spec.world_age
-        return age == -1%UInt ? Base.get_world_counter() : age
-    else
-        return getfield(spec, sym)
-    end
-end
+FunctionSpec(spec::FunctionSpec; f=spec.f, tt=spec.tt, world=spec.world,
+                                 kernel=spec.kernel, name=spec.name) =
+    FunctionSpec(f, tt, world; kernel, name)
 
 function signature(@nospecialize(spec::FunctionSpec))
     fn = something(spec.name, spec.f.name.mt == Symbol.name.mt ? nameof(spec.f) : spec.f.name.mt.name)

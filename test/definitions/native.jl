@@ -19,11 +19,11 @@ end
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.params.entry_safepoint
 
-function native_job(@nospecialize(f_type), @nospecialize(types);
+function native_job(@nospecialize(func), @nospecialize(types);
                     kernel::Bool=false, entry_abi=:specfunc, entry_safepoint::Bool=false,
                     always_inline=false, llvm_always_inline=true, jlruntime::Bool=false,
                     kwargs...)
-    source = FunctionSpec(f_type, Base.to_tuple_type(types), kernel)
+    source = FunctionSpec(typeof(func), Base.to_tuple_type(types); kernel)
     target = NativeCompilerTarget(; llvm_always_inline, jlruntime)
     params = TestCompilerParams(entry_safepoint)
     CompilerJob(target, source, params, entry_abi, always_inline), kwargs
@@ -253,10 +253,15 @@ module LazyCodegen
     end
 
     import GPUCompiler: deferred_codegen_jobs
-    @generated function deferred_codegen(f::F, ::Val{tt}) where {F,tt}
+    import ..TestCompilerParams
+    @generated function deferred_codegen(f::F, ::Val{tt}, ::Val{world}) where {F,tt,world}
+        # manual version of native_job because we have a function type and world age
+        source = FunctionSpec(F, Base.to_tuple_type(tt), world; kernel=false)
+        target = NativeCompilerTarget(; jlruntime=true, llvm_always_inline=true)
         # XXX: do we actually require the Julia runtime?
         #      with jlruntime=false, we reach an unreachable.
-        job, _ = native_job(F, tt; jlruntime=true)
+        params = TestCompilerParams()
+        job = CompilerJob(target, source, params; entry_abi=:specfunc)
 
         addr = get_trampoline(job)
         trampoline = pointer(addr)
@@ -352,10 +357,12 @@ module LazyCodegen
         end
     end
 
+    import GPUCompiler: get_world
     @inline function call_delayed(f::F, args...) where F
         tt = Tuple{map(Core.Typeof, args)...}
         rt = Core.Compiler.return_type(f, tt)
-        ptr = deferred_codegen(f, Val(tt))
+        world = get_world(F, tt)
+        ptr = deferred_codegen(f, Val(tt), Val(world))
         abi_call(ptr, rt, tt, f, args...)
     end
 end

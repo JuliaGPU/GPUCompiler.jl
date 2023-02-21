@@ -1,43 +1,62 @@
 # compilation cache
 
+export get_world
+
 using Core.Compiler: retrieve_code_info, CodeInfo, MethodInstance, SSAValue, SlotNumber, ReturnNode
 using Base: _methods_by_ftype
-
-function function_instance(ft)
-    if isdefined(ft, :instance)
-        return ft.instance
-    else
-        # dealing with a closure, for which we cannot construct an instance.
-        # however, we only use this in the context of method errors, where
-        # we really only care about the type of the function, so do something invalid:
-        Ref{ft}()[]
-    end
-end
 
 # generated function that returns the world age of a compilation job. this can be used to
 # drive compilation, e.g. by using it as a key for a cache, as the age will change when a
 # function or any called function is redefined.
 
+
+"""
+    get_world(f, tt)
+
+A special function that returns the world age in which the current definition of function
+`f`, invoked with argument types `tt`, is defined. This can be used to cache compilation
+results:
+
+    compilation_cache = Dict()
+    function cache_compilation(f, tt)
+        world = get_world(f, tt)
+        get!(compilation_cache, (f, tt, world)) do
+            # compile
+        end
+    end
+
+What makes this function special is that it is a generated function, returning a constant,
+whose result is automatically invalidated when the function `f` (or any called function)
+is redefined. This makes this query ideally suited for hot code, where you want to avoid
+a costly look-up of the current world age on every invocation.
+
+!!! warning
+
+    Due to a bug in Julia, JuliaLang/julia#34962, this function's results are only
+    guaranteed to be correctly invalidated when the target function `f` is executed or
+    processed by codegen (e.g., by calling `code_llvm`).
+"""
+get_world
+
 if VERSION >= v"1.10.0-DEV.649"
 
 # on 1.10 (JuliaLang/julia#48611) the generated function knows which world it was invoked in
 
-function job_world_ex(world, source, ex)
-    stub = Core.GeneratedFunctionStub(identity, Core.svec(:job_world, :job), Core.svec())
+function _generated_ex(world, source, ex)
+    stub = Core.GeneratedFunctionStub(identity, Core.svec(:get_world, :job), Core.svec())
     stub(world, source, ex)
 end
 
-function job_world_generator(world::UInt, source, self,
-                                     job::Type{<:CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}}) where {f,tt}
+function get_world_generator(world::UInt, source, self, ::Type{Type{f}}, ::Type{Type{tt}}) where {f, tt}
     @nospecialize
 
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
     mthds = _methods_by_ftype(sig, -1, world)
-    method_error = :(throw(MethodError($(function_instance(f)), job.source.tt, $world)))
-    mthds === nothing && return job_world_ex(world, source, method_error)
-    Base.isdispatchtuple(tt) || return job_world_ex(world, source, :(error("$tt is not a dispatch tuple")))
-    length(mthds) == 1 || return job_world_ex(world, source, method_error)
+    method_error = :(throw(MethodError(f, tt, $world)))
+    mthds === nothing && return _generated_ex(world, source, method_error)
+    Base.isdispatchtuple(tt) || return _generated_ex(world, source, :(error("$tt is not a dispatch tuple")))
+    length(mthds) == 1 || return _generated_ex(world, source, method_error)
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi, world)::CodeInfo
@@ -58,8 +77,8 @@ function job_world_generator(world::UInt, source, self,
     #      underlying C methods -- which GPUCompiler does, so everything Just Works.
 
     # prepare the slots
-    new_ci.slotnames = Symbol[Symbol("#self#"), :job]
-    new_ci.slotflags = UInt8[0x00 for i = 1:2]
+    new_ci.slotnames = Symbol[Symbol("#self#"), :f, :tt]
+    new_ci.slotflags = UInt8[0x00 for i = 1:3]
 
     # return the world
     push!(new_ci.code, ReturnNode(world))
@@ -75,9 +94,9 @@ function job_world_generator(world::UInt, source, self,
     return new_ci
 end
 
-@eval function job_world(job)
+@eval function get_world(f, tt)
     $(Expr(:meta, :generated_only))
-    $(Expr(:meta, :generated, job_world_generator))
+    $(Expr(:meta, :generated, get_world_generator))
 end
 
 else
@@ -85,14 +104,14 @@ else
 # on older versions of Julia we fall back to looking up the current world. this may be wrong
 # when the generator is invoked in a different world (TODO: when does this happen?)
 
-function job_world_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionSpec{f,tt}}}) where {f,tt}
+function get_world_generator(self, ::Type{Type{f}}, ::Type{Type{tt}}) where {f, tt}
     @nospecialize
 
     # get a hold of the method and code info of the kernel function
     sig = Tuple{f, tt.parameters...}
     # XXX: instead of typemax(UInt) we should use the world-age of the fspec
     mthds = _methods_by_ftype(sig, -1, typemax(UInt))
-    method_error = :(throw(MethodError($(function_instance(f)), job.source.tt)))
+    method_error = :(throw(MethodError(f, tt)))
     mthds === nothing && return method_error
     Base.isdispatchtuple(tt) || return(:(error("$tt is not a dispatch tuple")))
     length(mthds) == 1 || return method_error
@@ -121,8 +140,8 @@ function job_world_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionS
     #      underlying C methods -- which GPUCompiler does, so everything Just Works.
 
     # prepare the slots
-    new_ci.slotnames = Symbol[Symbol("#self#"), :job]
-    new_ci.slotflags = UInt8[0x00 for i = 1:2]
+    new_ci.slotnames = Symbol[Symbol("#self#"), :f, :tt]
+    new_ci.slotflags = UInt8[0x00 for i = 1:3]
 
     # return the world
     push!(new_ci.code, ReturnNode(world))
@@ -138,14 +157,14 @@ function job_world_generator(self, job::Type{<:CompilerJob{<:Any,<:Any,FunctionS
     return new_ci
 end
 
-@eval function job_world(job)
+@eval function get_world(f, tt)
     $(Expr(:meta, :generated_only))
     $(Expr(:meta,
-            :generated,
-            Expr(:new,
+           :generated,
+           Expr(:new,
                 Core.GeneratedFunctionStub,
-                :job_world_generator,
-                Any[:job_world, :job],
+                :get_world_generator,
+                Any[:get_world, :f, :tt],
                 Any[],
                 @__LINE__,
                 QuoteNode(Symbol(@__FILE__)),
@@ -158,9 +177,7 @@ const cache_lock = ReentrantLock()
 function cached_compilation(cache::AbstractDict,
                             @nospecialize(job::CompilerJob),
                             compiler::Function, linker::Function)
-    # XXX: CompilerJob contains a world age, so can't be respecialized.
-    #      have job_world take a f/tt and return a world to construct a CompilerJob?
-    key = hash(job, job_world(job))
+    key = hash(job)
     force_compilation = compile_hook[] !== nothing
 
     # XXX: by taking the hash, we index the compilation cache directly with the world age.

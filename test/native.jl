@@ -54,9 +54,6 @@ end
 
         (ci, rt) = native_code_typed(MyCallable(), (Int, Int), kernel=false)[1]
         @test ci.slottypes[1] == Core.Compiler.Const(MyCallable())
-
-        (ci, rt) = native_code_typed(typeof(MyCallable()), (Int, Int), kernel=false)[1]
-        @test ci.slottypes[1] == Core.Compiler.Const(MyCallable())
     end
 
     @testset "compilation database" begin
@@ -113,6 +110,7 @@ end
 
         # basic redefinition
         @eval $kernel(i) = $child(i)+2
+        job, _ = native_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
         @test contains(ir, "add i64 %1, 2")
 
@@ -140,6 +138,7 @@ end
 
         # redefinition
         @eval $kernel(i) = $child(i)+3
+        job, _ = native_job(eval(kernel), (Int64,))
         ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
         @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
@@ -153,6 +152,7 @@ end
 
         # redefining child functions
         @eval @noinline $child(i) = sink(i)+1
+        job, _ = native_job(eval(kernel), (Int64,))
         ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
         @test invocations[] == 3
         @test length(cache) == 3
@@ -164,14 +164,15 @@ end
 
         # tasks running in the background should keep on using the old version
         c1, c2 = Condition(), Condition()
-        function background()
+        function background(job)
             notify(c1)
             wait(c2)    # wait for redefinition
             GPUCompiler.cached_compilation(cache, job, compiler, linker)
         end
-        t = @async background()
+        t = @async background(job)
         wait(c1)        # make sure the task has started
         @eval $kernel(i) = $child(i)+4
+        job, _ = native_job(eval(kernel), (Int64,))
         ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
         @test contains(ir, "add i64 %1, 4")
         notify(c2)      # wake up the task

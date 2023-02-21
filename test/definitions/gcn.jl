@@ -9,7 +9,7 @@ end
 
 function gcn_job(@nospecialize(func), @nospecialize(types);
                  kernel::Bool=false, always_inline=false, kwargs...)
-    source = FunctionSpec(typeof(func), Base.to_tuple_type(types), kernel)
+    source = FunctionSpec(typeof(func), Base.to_tuple_type(types); kernel)
     target = GCNCompilerTarget(dev_isa="gfx900")
     params = TestCompilerParams()
     CompilerJob(target, source, params; always_inline), kwargs
