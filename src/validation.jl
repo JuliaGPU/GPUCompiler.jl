@@ -18,6 +18,18 @@ function return_type(m::Core.MethodMatch; interp::AbstractInterpreter)
     return something(ty, Any)
 end
 
+# create a MethodError from a function type
+# TODO: fix upstream
+function MethodError(ft::Type, tt::Type, world::Integer=typemax(UInt))
+    f = if isdefined(ft, :instance)
+        ft.instance
+    else
+        # HACK: dealing with a closure or something... let's do somthing really invalid,
+        #       which works because MethodError doesn't actually use the function
+        Ref{ft}()[]
+    end
+    Base.MethodError(f, tt, world)
+end
 
 function check_method(@nospecialize(job::CompilerJob))
     isa(job.source.ft, Core.Builtin) &&
@@ -26,15 +38,7 @@ function check_method(@nospecialize(job::CompilerJob))
     # get the method
     ms = method_matches(typed_signature(job); job.source.world)
     if length(ms) != 1
-        # we only have a function type, but MethodError needs an instance...
-        f = if isdefined(job.source.ft, :instance)
-            job.source.ft.instance
-        else
-            # HACK: dealing with a closure or something... let's do somthing really invalid,
-            #       which works because MethodError doesn't actually use the function
-            Ref{job.source.ft}()[]
-        end
-        throw(MethodError(f, job.source.tt, job.source.world))
+        throw(MethodError(job.source.ft, job.source.tt, job.source.world))
     end
 
     # kernels can't return values
