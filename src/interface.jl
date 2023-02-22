@@ -69,7 +69,7 @@ struct FunctionSpec
     kernel::Bool
     name::Union{Nothing,String}
 
-    FunctionSpec(f::Type, tt::Type, world::Integer=Base.get_world_counter();
+    FunctionSpec(f::Type, tt::Type, world::Integer=get_world(f, tt);
                  kernel=true, name=nothing) =
         new(f, tt, world, kernel, name)
 end

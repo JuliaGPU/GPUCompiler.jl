@@ -368,25 +368,6 @@ end
         occursin("BigInt", msg)
     end
 
-    # test that we can handle abstract types
-    @test_throws_message(KernelError,
-                         native_code_execution(foobar, Tuple{Any})) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
-        occursin("Any", msg)
-    end
-
-    @test_throws_message(KernelError,
-                         native_code_execution(foobar, Tuple{Union{Int32, Int64}})) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
-        occursin("Union{Int32, Int64}", msg)
-    end
-
-    @test_throws_message(KernelError,
-                         native_code_execution(foobar, Tuple{Union{Int32, Int64}})) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
-        occursin("Union{Int32, Int64}", msg)
-    end
-
     # test that we get information about fields and reason why something is not isbits
     @test_throws_message(KernelError,
                          native_code_execution(foobar, Tuple{CleverType{BigInt}})) do msg

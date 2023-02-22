@@ -1,7 +1,5 @@
 # compilation cache
 
-export get_world
-
 using Core.Compiler: retrieve_code_info, CodeInfo, MethodInstance, SSAValue, SlotNumber, ReturnNode
 using Base: _methods_by_ftype
 
@@ -174,14 +172,33 @@ end
 end
 
 const cache_lock = ReentrantLock()
+
+"""
+    cached_compilation(cache::Dict, job::CompilerJob, compiler, linker)
+
+Compile `job` using `compiler` and `linker`, and store the result in `cache`.
+
+The `cache` argument should be a dictionary that can be indexed using a `UInt` and store
+whatever the `linker` function returns. The `compiler` function should take a `CompilerJob`
+and return data that can be cached across sessions (e.g., LLVM IR). This data is then
+forwarded, along with the `CompilerJob`, to the `linker` function which is allowed to create
+session-dependent objects (e.g., a `CuModule`).
+"""
 function cached_compilation(cache::AbstractDict,
                             @nospecialize(job::CompilerJob),
                             compiler::Function, linker::Function)
+    # NOTE: it is OK to index the compilation cache directly with the compilation job, i.e.,
+    #       using a world age instead of intersecting world age ranges, because we expect
+    #       that the world age is aquired through calling `get_world` and thus will only
+    #       ever change when the kernel function is redefined.
+    #
+    #       if we ever want to be able to index the cache using a compilation job that
+    #       contains a more recent world age, yet still return an older cached object that
+    #       would still be valid, we'd need the cache to store world ranges instead and
+    #       use an invalidation callback to add upper bounds to entries.
     key = hash(job)
-    force_compilation = compile_hook[] !== nothing
 
-    # XXX: by taking the hash, we index the compilation cache directly with the world age.
-    #      that's wrong; we should perform an intersection with the entry its bounds.
+    force_compilation = compile_hook[] !== nothing
 
     # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
     lock(cache_lock)
