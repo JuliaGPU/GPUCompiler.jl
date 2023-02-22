@@ -91,14 +91,21 @@ function Base.hash(spec::FunctionSpec, h::UInt)
 end
 
 function signature(@nospecialize(spec::FunctionSpec))
-    fn = something(spec.name, spec.ft.name.mt == Symbol.name.mt ? nameof(spec.ft) : spec.ft.name.mt.name)
+    fn = if spec.name !== nothing
+        spec.name
+    elseif spec.ft.name.mt == Symbol.name.mt
+        # uses shared method table, so name is not unique to this function type
+        nameof(spec.ft)
+    else
+        spec.ft.name.mt.name
+    end
     args = join(spec.tt.parameters, ", ")
     return "$fn($(join(spec.tt.parameters, ", ")))"
 end
 
 function Base.show(io::IO, @nospecialize(spec::FunctionSpec))
     spec.kernel ? print(io, "kernel ") : print(io, "function ")
-    print(io, signature(spec))
+    print(io, signature(spec), " in world ", spec.world)
 end
 
 
