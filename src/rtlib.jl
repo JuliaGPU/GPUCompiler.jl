@@ -65,8 +65,8 @@ end
 
 function emit_function!(mod, @nospecialize(job::CompilerJob), f, method; ctx::JuliaContextType)
     tt = Base.to_tuple_type(method.types)
-    new_mod, meta = codegen(:llvm, similar(job, FunctionSpec(f, tt, job.source.world;
-                                                             kernel=false));
+    source = FunctionSpec(f, tt, job.source.world; kernel=false)
+    new_mod, meta = codegen(:llvm, CompilerJob(job; source);
                             optimize=false, libraries=false, validate=false, ctx)
     ft = eltype(llvmtype(meta.entry))
     expected_ft = convert(LLVM.FunctionType, method; ctx=context(new_mod))
@@ -103,7 +103,7 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
     # derive a job that represents the runtime itself (notably with kernel=false).
     source = FunctionSpec(typeof(identity), Tuple{Nothing}, job.source.world;
                           kernel=false, name=nothing)
-    job = CompilerJob(job.target, source, job.params)
+    job = CompilerJob(source, job.target, job.params)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)

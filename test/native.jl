@@ -500,6 +500,7 @@ end
     @test call_real(1.0+im) == 1.0
 
     # Test ABI removal
+    # XXX: this relies on llvm_always_inline, which it shouldn't
     ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
     @test !occursin("alloca", ir)
 

@@ -55,7 +55,5 @@ module TestRuntime
 end
 
 struct TestCompilerParams <: AbstractCompilerParams
-    entry_safepoint::Bool
 end
-TestCompilerParams() = TestCompilerParams(false)
 GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime

@@ -7,7 +7,13 @@ end
 
 # create a native test compiler, and generate reflection methods for it
 
-NativeCompilerJob = CompilerJob{NativeCompilerTarget,TestCompilerParams}
+struct NativeCompilerParams <: AbstractCompilerParams
+    entry_safepoint::Bool
+    NativeCompilerParams(entry_safepoint::Bool=false) = new(entry_safepoint)
+end
+GPUCompiler.runtime_module(::CompilerJob{<:Any,NativeCompilerParams}) = TestRuntime
+
+NativeCompilerJob = CompilerJob{NativeCompilerTarget,NativeCompilerParams}
 
 # local method table for device functions
 @static if isdefined(Base.Experimental, Symbol("@overlay"))
@@ -19,14 +25,13 @@ end
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.params.entry_safepoint
 
-function native_job(@nospecialize(func), @nospecialize(types);
-                    kernel::Bool=false, entry_abi=:specfunc, entry_safepoint::Bool=false,
-                    always_inline=false, llvm_always_inline=true, jlruntime::Bool=false,
+function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
+                    entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
                     kwargs...)
     source = FunctionSpec(typeof(func), Base.to_tuple_type(types); kernel)
-    target = NativeCompilerTarget(; llvm_always_inline, jlruntime)
-    params = TestCompilerParams(entry_safepoint)
-    CompilerJob(target, source, params, entry_abi, always_inline), kwargs
+    target = NativeCompilerTarget()
+    params = NativeCompilerParams(entry_safepoint)
+    CompilerJob(source, target, params; entry_abi, always_inline), kwargs
 end
 
 function native_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)
@@ -253,15 +258,15 @@ module LazyCodegen
     end
 
     import GPUCompiler: deferred_codegen_jobs
-    import ..TestCompilerParams
+    import ..NativeCompilerParams
     @generated function deferred_codegen(f::F, ::Val{tt}, ::Val{world}) where {F,tt,world}
         # manual version of native_job because we have a function type and world age
         source = FunctionSpec(F, Base.to_tuple_type(tt), world; kernel=false)
         target = NativeCompilerTarget(; jlruntime=true, llvm_always_inline=true)
         # XXX: do we actually require the Julia runtime?
         #      with jlruntime=false, we reach an unreachable.
-        params = TestCompilerParams()
-        job = CompilerJob(target, source, params; entry_abi=:specfunc)
+        params = NativeCompilerParams()
+        job = CompilerJob(source, target, params)
 
         addr = get_trampoline(job)
         trampoline = pointer(addr)

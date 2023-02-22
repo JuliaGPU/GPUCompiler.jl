@@ -61,15 +61,23 @@ export FunctionSpec
 
 # what we'll be compiling
 
-struct FunctionSpec{F,TT}
-    f::Type{F}
-    tt::Type{TT}
+struct FunctionSpec
+    f::Type
+    tt::Type
     world::UInt
 
     kernel::Bool
     name::Union{Nothing,String}
+
+    FunctionSpec(f::Type, tt::Type, world::Integer=Base.get_world_counter();
+                 kernel=true, name=nothing) =
+        new(f, tt, world, kernel, name)
 end
 
+# copy constructor
+FunctionSpec(spec::FunctionSpec; f=spec.f, tt=spec.tt, world=spec.world,
+                                 kernel=spec.kernel, name=spec.name) =
+    FunctionSpec(f, tt, world; kernel, name)
 
 function Base.hash(spec::FunctionSpec, h::UInt)
     h = hash(spec.f, h)
@@ -78,18 +86,9 @@ function Base.hash(spec::FunctionSpec, h::UInt)
 
     h = hash(spec.kernel, h)
     h = hash(spec.name, h)
-    h
+
+    return h
 end
-
-# put the function and argument types in typevars
-# so that we can access it from generated functions
-FunctionSpec(f::Type, tt::Type, world::Integer=Base.get_world_counter();
-             kernel=true, name=nothing) =
-    FunctionSpec{f, tt}(f, tt, world, kernel, name)
-
-FunctionSpec(spec::FunctionSpec; f=spec.f, tt=spec.tt, world=spec.world,
-                                 kernel=spec.kernel, name=spec.name) =
-    FunctionSpec(f, tt, world; kernel, name)
 
 function signature(@nospecialize(spec::FunctionSpec))
     fn = something(spec.name, spec.f.name.mt == Symbol.name.mt ? nameof(spec.f) : spec.f.name.mt.name)
@@ -110,49 +109,60 @@ export CompilerJob
 # a specific invocation of the compiler, bundling everything needed to generate code
 
 """
-    CompilerJob(target, source, params, entry_abi)
+    CompilerJob(source, target, params; entry_abi=:specfunc, always_inline=false)
 
-Construct a `CompilerJob` for `source` that will be used to drive compilation for
-the given `target` and `params`. The `entry_abi` can be either `:specfunc` the default,
-or `:func`. `:specfunc` expects the arguments to be passed in registers, simple
-return values are returned in registers as well, and complex return values are returned
-on the stack using `sret`, the calling convention is `fastcc`. The `:func` abi is simpler
-with a calling convention of the first argument being the function itself (to support closures),
-the second argument being a pointer to a vector of boxed Julia values and the third argument
-being the number of values, the return value will also be boxed. The `:func` abi
-will internally call the `:specfunc` abi, but is generally easier to invoke directly.
-`always_inline` specifies if the Julia front-end should inline all functions into one if possible.
+Construct a `CompilerJob` for `source` that will be used to drive compilation for the given
+`target` and `params`.
+
+The `entry_abi` can be either `:specfunc` the default, or `:func`. `:specfunc` expects the
+arguments to be passed in registers, simple return values are returned in registers as well,
+and complex return values are returned on the stack using `sret`, the calling convention is
+`fastcc`. The `:func` abi is simpler with a calling convention of the first argument being
+the function itself (to support closures), the second argument being a pointer to a vector
+of boxed Julia values and the third argument being the number of values, the return value
+will also be boxed. The `:func` abi will internally call the `:specfunc` abi, but is
+generally easier to invoke directly.
+
+`always_inline` specifies if the Julia front-end should inline all functions into one if
+possible.
 """
-struct CompilerJob{T,P,F}
+struct CompilerJob{T,P}
     target::T
-    source::F
     params::P
+    source::FunctionSpec
+
     entry_abi::Symbol
     always_inline::Bool
 
-    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams, entry_abi::Symbol, always_inline=true)
+    function CompilerJob(source::FunctionSpec,
+                         target::AbstractCompilerTarget,
+                         params::AbstractCompilerParams;
+                         entry_abi::Symbol=:specfunc, always_inline=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
-        new{typeof(target), typeof(params), typeof(source)}(target, source, params, entry_abi, always_inline)
+        new{typeof(target), typeof(params)}(target, params, source, entry_abi, always_inline)
     end
 end
-CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams; entry_abi=:specfunc, always_inline=false) =
-    CompilerJob(target, source, params, entry_abi, always_inline)
 
-Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
-    CompilerJob(job.target, source, job.params, job.entry_abi, job.always_inline)
+# copy constructor
+CompilerJob(job::CompilerJob; source=job.source, target=job.target, params=job.params,
+            entry_abi=job.entry_abi, always_inline=job.always_inline) =
+    CompilerJob(source, target, params; entry_abi, always_inline)
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
 end
 
 function Base.hash(job::CompilerJob, h::UInt)
-    h = hash(job.target, h)
     h = hash(job.source, h)
+    h = hash(job.target, h)
     h = hash(job.params, h)
+
     h = hash(job.entry_abi, h)
-    h
+    h = hash(job.always_inline, h)
+
+    return h
 end
 
 

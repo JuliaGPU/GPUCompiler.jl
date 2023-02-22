@@ -19,7 +19,7 @@ function main()
     source = FunctionSpec(typeof(kernel), Tuple{})
     target = NativeCompilerTarget()
     params = TestCompilerParams()
-    job = CompilerJob(target, source, params)
+    job = CompilerJob(source, target, params)
 
     println(GPUCompiler.compile(:asm, job)[1])
 end

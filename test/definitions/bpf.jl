@@ -12,7 +12,7 @@ function bpf_job(@nospecialize(func), @nospecialize(types);
     source = FunctionSpec(typeof(func), Base.to_tuple_type(types); kernel)
     target = BPFCompilerTarget()
     params = TestCompilerParams()
-    CompilerJob(target, source, params; always_inline), kwargs
+    CompilerJob(source, target, params; always_inline), kwargs
 end
 
 function bpf_code_llvm(@nospecialize(func), @nospecialize(types); kwargs...)

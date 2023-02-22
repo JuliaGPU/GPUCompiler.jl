@@ -301,10 +301,10 @@ const __llvm_initialized = Ref(false)
                 # get a job in the appopriate world
                 dyn_job = if dyn_val isa CompilerJob
                     dyn_spec = FunctionSpec(dyn_val.source; world=job.source.world)
-                    similar(dyn_val, dyn_spec)
+                    CompilerJob(dyn_val; source=dyn_spec)
                 elseif dyn_val isa FunctionSpec
                     dyn_spec = FunctionSpec(dyn_val; world=job.source.world)
-                    similar(job, dyn_spec)
+                    CompilerJob(job; source=dyn_spec)
                 else
                     error("invalid deferred job type $(typeof(dyn_val))")
                 end

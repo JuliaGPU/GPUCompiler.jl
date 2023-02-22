@@ -12,7 +12,7 @@ function gcn_job(@nospecialize(func), @nospecialize(types);
     source = FunctionSpec(typeof(func), Base.to_tuple_type(types); kernel)
     target = GCNCompilerTarget(dev_isa="gfx900")
     params = TestCompilerParams()
-    CompilerJob(target, source, params; always_inline), kwargs
+    CompilerJob(source, target, params; always_inline), kwargs
 end
 
 function gcn_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)
