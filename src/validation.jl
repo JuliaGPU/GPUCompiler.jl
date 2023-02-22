@@ -25,8 +25,17 @@ function check_method(@nospecialize(job::CompilerJob))
 
     # get the method
     ms = method_matches(typed_signature(job); job.source.world)
-    isempty(ms)   && throw(KernelError(job, "no method found"))
-    length(ms)!=1 && throw(KernelError(job, "no unique matching method"))
+    if length(ms) != 1
+        # we only have a function type, but MethodError needs an instance...
+        f = if isdefined(job.source.ft, :instance)
+            job.source.ft.instance
+        else
+            # HACK: dealing with a closure or something... let's do somthing really invalid,
+            #       which works because MethodError doesn't actually use the function
+            Ref{job.source.ft}()[]
+        end
+        throw(MethodError(f, job.source.tt, job.source.world))
+    end
 
     # kernels can't return values
     if job.source.kernel
