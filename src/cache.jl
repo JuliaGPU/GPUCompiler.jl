@@ -48,13 +48,29 @@ end
 function get_world_generator(world::UInt, source, self, ::Type{Type{f}}, ::Type{Type{tt}}) where {f, tt}
     @nospecialize
 
-    # get a hold of the method and code info of the kernel function
+    # look up the method
     sig = Tuple{f, tt.parameters...}
-    mthds = _methods_by_ftype(sig, -1, world)
+    min_world = Ref{UInt}(typemin(UInt))
+    max_world = Ref{UInt}(typemax(UInt))
+    has_ambig = Ptr{Int32}(C_NULL)  # don't care about ambiguous results
+    mthds = if VERSION >= v"1.7.0-DEV.1297"
+        Base._methods_by_ftype(sig, #=mt=# nothing, #=lim=# -1,
+                               world, #=ambig=# false,
+                               min_world, max_world, has_ambig)
+        # XXX: use the correct method table to support overlaying kernels
+    else
+        Base._methods_by_ftype(sig, #=lim=# -1,
+                               world, #=ambig=# false,
+                               min_world, max_world, has_ambig)
+    end
+
+    # check the validity of the method matches
     method_error = :(throw(MethodError(f, tt, $world)))
     mthds === nothing && return _generated_ex(world, source, method_error)
     Base.isdispatchtuple(tt) || return _generated_ex(world, source, :(error("$tt is not a dispatch tuple")))
     length(mthds) == 1 || return _generated_ex(world, source, method_error)
+
+    # look up the method and code instance
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi, world)::CodeInfo
@@ -66,8 +82,8 @@ function get_world_generator(world::UInt, source, self, ::Type{Type{f}}, ::Type{
     resize!(new_ci.linetable, 1)                # see note below
     empty!(new_ci.ssaflags)
     new_ci.ssavaluetypes = 0
-    new_ci.min_world = world
-    new_ci.max_world = typemax(UInt)
+    new_ci.min_world = min_world[]
+    new_ci.max_world = max_world[]
     new_ci.edges = MethodInstance[mi]
     # XXX: setting this edge does not give us proper method invalidation, see
     #      JuliaLang/julia#34962 which demonstrates we also need to "call" the kernel.
@@ -105,14 +121,30 @@ else
 function get_world_generator(self, ::Type{Type{f}}, ::Type{Type{tt}}) where {f, tt}
     @nospecialize
 
-    # get a hold of the method and code info of the kernel function
+    # look up the method
     sig = Tuple{f, tt.parameters...}
-    # XXX: instead of typemax(UInt) we should use the world-age of the fspec
-    mthds = _methods_by_ftype(sig, -1, typemax(UInt))
+    min_world = Ref{UInt}(typemin(UInt))
+    max_world = Ref{UInt}(typemax(UInt))
+    has_ambig = Ptr{Int32}(C_NULL)  # don't care about ambiguous results
+    mthds = if VERSION >= v"1.7.0-DEV.1297"
+        Base._methods_by_ftype(sig, #=mt=# nothing, #=lim=# -1,
+                               #=world=# typemax(UInt), #=ambig=# false,
+                               min_world, max_world, has_ambig)
+        # XXX: use the correct method table to support overlaying kernels
+    else
+        Base._methods_by_ftype(sig, #=lim=# -1,
+                               #=world=# typemax(UInt), #=ambig=# false,
+                               min_world, max_world, has_ambig)
+    end
+    # XXX: using world=-1 is wrong, but the current world isn't exposed to this generator
+
+    # check the validity of the method matches
     method_error = :(throw(MethodError(f, tt)))
     mthds === nothing && return method_error
     Base.isdispatchtuple(tt) || return(:(error("$tt is not a dispatch tuple")))
     length(mthds) == 1 || return method_error
+
+    # look up the method and code instance
     mtypes, msp, m = mthds[1]
     mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
     ci = retrieve_code_info(mi)::CodeInfo
@@ -129,8 +161,8 @@ function get_world_generator(self, ::Type{Type{f}}, ::Type{Type{tt}}) where {f, 
     resize!(new_ci.linetable, 1)                # see note below
     empty!(new_ci.ssaflags)
     new_ci.ssavaluetypes = 0
-    new_ci.min_world = world
-    new_ci.max_world = typemax(UInt)
+    new_ci.min_world = min_world[]
+    new_ci.max_world = max_world[]
     new_ci.edges = MethodInstance[mi]
     # XXX: setting this edge does not give us proper method invalidation, see
     #      JuliaLang/julia#34962 which demonstrates we also need to "call" the kernel.
