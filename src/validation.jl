@@ -13,8 +13,7 @@ function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
     return methods
 end
 
-function return_type(m::Core.MethodMatch;
-                     interp = Core.Compiler.NativeInterpreter(world))
+function return_type(m::Core.MethodMatch; interp::AbstractInterpreter)
     ty = Core.Compiler.typeinf_type(interp, m.method, m.spec_types, m.sparams)
     return something(ty, Any)
 end
