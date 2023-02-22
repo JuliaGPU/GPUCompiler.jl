@@ -62,25 +62,25 @@ export FunctionSpec
 # what we'll be compiling
 
 struct FunctionSpec
-    f::Type
+    ft::Type
     tt::Type
     world::UInt
 
     kernel::Bool
     name::Union{Nothing,String}
 
-    FunctionSpec(f::Type, tt::Type, world::Integer=get_world(f, tt);
+    FunctionSpec(ft::Type, tt::Type, world::Integer=get_world(ft, tt);
                  kernel=true, name=nothing) =
-        new(f, tt, world, kernel, name)
+        new(ft, tt, world, kernel, name)
 end
 
 # copy constructor
-FunctionSpec(spec::FunctionSpec; f=spec.f, tt=spec.tt, world=spec.world,
+FunctionSpec(spec::FunctionSpec; ft=spec.ft, tt=spec.tt, world=spec.world,
                                  kernel=spec.kernel, name=spec.name) =
-    FunctionSpec(f, tt, world; kernel, name)
+    FunctionSpec(ft, tt, world; kernel, name)
 
 function Base.hash(spec::FunctionSpec, h::UInt)
-    h = hash(spec.f, h)
+    h = hash(spec.ft, h)
     h = hash(spec.tt, h)
     h = hash(spec.world, h)
 
@@ -91,7 +91,7 @@ function Base.hash(spec::FunctionSpec, h::UInt)
 end
 
 function signature(@nospecialize(spec::FunctionSpec))
-    fn = something(spec.name, spec.f.name.mt == Symbol.name.mt ? nameof(spec.f) : spec.f.name.mt.name)
+    fn = something(spec.name, spec.ft.name.mt == Symbol.name.mt ? nameof(spec.ft) : spec.ft.name.mt.name)
     args = join(spec.tt.parameters, ", ")
     return "$fn($(join(spec.tt.parameters, ", ")))"
 end

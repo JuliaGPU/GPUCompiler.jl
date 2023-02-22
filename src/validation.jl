@@ -21,7 +21,8 @@ end
 
 
 function check_method(@nospecialize(job::CompilerJob))
-    isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
+    isa(job.source.ft, Core.Builtin) &&
+        throw(KernelError(job, "function is not a generic function"))
 
     # get the method
     ms = method_matches(typed_signature(job); job.source.world)

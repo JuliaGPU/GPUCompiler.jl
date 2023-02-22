@@ -199,9 +199,9 @@ Base.@ccallable Ptr{Cvoid} function deferred_codegen(ptr::Ptr{Cvoid})
     ptr
 end
 
-@generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
+@generated function deferred_codegen(::Val{ft}, ::Val{tt}) where {ft,tt}
     id = length(deferred_codegen_jobs) + 1
-    deferred_codegen_jobs[id] = FunctionSpec(f, tt)
+    deferred_codegen_jobs[id] = FunctionSpec(ft, tt)
 
     pseudo_ptr = reinterpret(Ptr{Cvoid}, id)
     quote
