@@ -165,8 +165,8 @@ function addOptimizationPasses!(pm, opt_level=2)
 end
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    triple = llvm_triple(job.target)
-    tm = llvm_machine(job.target)
+    triple = llvm_triple(job.cfg.target)
+    tm = llvm_machine(job.cfg.target)
 
     global current_job
     current_job = job
@@ -189,7 +189,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
         end
 
-        if job.source.kernel
+        if job.cfg.kernel
             # GC lowering is the last pass that may introduce calls to the runtime library,
             # and thus additional uses of the kernel state intrinsic.
             # TODO: now that all kernel state-related passes are being run here, merge some?
@@ -298,7 +298,7 @@ function cpu_features!(mod::LLVM.Module)
         # determine whether this back-end supports FMA on this type
         has_fma = if haskey(argtyps, typnam)
             typ = argtyps[typnam]
-            have_fma(job.target, typ)
+            have_fma(job.cfg.target, typ)
         else
             # warn?
             false

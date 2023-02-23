@@ -63,10 +63,10 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, @nospecialize(job::CompilerJob), f, method; ctx::JuliaContextType)
+function emit_function!(mod, config::CompilerConfig, f, method, world; ctx::JuliaContextType)
     tt = Base.to_tuple_type(method.types)
-    source = FunctionSpec(f, tt, job.source.world; kernel=false)
-    new_mod, meta = codegen(:llvm, CompilerJob(job; source);
+    source = FunctionSpec(f, tt, world)
+    new_mod, meta = codegen(:llvm, CompilerJob(config, source);
                             optimize=false, libraries=false, validate=false, ctx)
     ft = eltype(llvmtype(meta.entry))
     expected_ft = convert(LLVM.FunctionType, method; ctx=context(new_mod))
@@ -101,9 +101,7 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
 
     # the compiler job passed into here is identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
-    source = FunctionSpec(typeof(identity), Tuple{Nothing}, job.source.world;
-                          kernel=false, name=nothing)
-    job = CompilerJob(source, job.target, job.params)
+    config = CompilerConfig(job.cfg; kernel=false)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
@@ -112,7 +110,7 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
         else
             method.def
         end
-        emit_function!(mod, job, typeof(def), method; ctx)
+        emit_function!(mod, config, typeof(def), method, job.src.world; ctx)
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again

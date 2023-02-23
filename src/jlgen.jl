@@ -373,8 +373,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     cache = ci_cache(job)
     mt = method_table(job)
     interp = get_interpreter(job)
-    if ci_cache_lookup(cache, method_instance, job.source.world, job.source.world) === nothing
-        ci_cache_populate(interp, cache, mt, method_instance, job.source.world, job.source.world)
+    if ci_cache_lookup(cache, method_instance, job.src.world, job.src.world) === nothing
+        ci_cache_populate(interp, cache, mt, method_instance, job.src.world, job.src.world)
     end
 
     # create a callback to look-up function in our cache,
@@ -389,7 +389,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     else
         _cache[] = cache
         _method_instances[] = method_instances
-        _world[] = job.source.world
+        _world[] = job.src.world
         lookup_cb = @cfunction(_lookup_fun, Any, (Any, UInt, UInt))
     end
 
@@ -413,9 +413,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
             mod = LLVM.Module("start"; ctx=unwrap_context(ctx))
 
             # configure the module
-            triple!(mod, llvm_triple(job.target))
-            if julia_datalayout(job.target) !== nothing
-                datalayout!(mod, julia_datalayout(job.target))
+            triple!(mod, llvm_triple(job.cfg.target))
+            if julia_datalayout(job.cfg.target) !== nothing
+                datalayout!(mod, julia_datalayout(job.cfg.target))
             end
             flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
                 Metadata(ConstantInt(Int32(4); ctx=unwrap_context(ctx)))
@@ -426,33 +426,33 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
             if VERSION >= v"1.10.0-DEV.645" || v"1.9.0-beta4.23" <= VERSION < v"1.10-"
                 ccall(:jl_create_native, Ptr{Cvoid},
                       (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t),
-                      [method_instance], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.source.world)
+                      [method_instance], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.src.world)
             elseif VERSION >= v"1.10.0-DEV.204" || v"1.9.0-alpha1.55" <= VERSION < v"1.10-"
-                @in_world job.source.world ccall(:jl_create_native, Ptr{Cvoid},
+                @in_world job.src.world ccall(:jl_create_native, Ptr{Cvoid},
                       (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint),
                       [method_instance], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0)
-            elseif VERSION >= v"1.10.0-DEV.75" || v"1.9.0-alpha1.33" <= VERSION < v"1.10-"
-                @in_world job.source.world ccall(:jl_create_native, Ptr{Cvoid},
+            elseif VERSION >= v"1.10.0-DEV.75"
+                @in_world job.src.world ccall(:jl_create_native, Ptr{Cvoid},
                       (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint),
                       [method_instance], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0)
             else
-                @in_world job.source.world ccall(:jl_create_native, Ptr{Cvoid},
+                @in_world job.src.world ccall(:jl_create_native, Ptr{Cvoid},
                       (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint),
                       [method_instance], ts_mod, Ref(params), CompilationPolicyExtern)
 
             end
         elseif VERSION >= v"1.9.0-DEV.115"
-            @in_world job.source.world ccall(:jl_create_native, Ptr{Cvoid},
+            @in_world job.src.world ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
                   [method_instance], ctx, Ref(params), CompilationPolicyExtern)
         elseif VERSION >= v"1.8.0-DEV.661"
             @assert ctx == JuliaContext()
-            @in_world job.source.world ccall(:jl_create_native, Ptr{Cvoid},
+            @in_world job.src.world ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Ptr{Base.CodegenParams}, Cint),
                   [method_instance], Ref(params), CompilationPolicyExtern)
         else
             @assert ctx == JuliaContext()
-            @in_world job.source.world ccall(:jl_create_native, Ptr{Cvoid},
+            @in_world job.src.world ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Base.CodegenParams, Cint),
                   [method_instance], params, CompilationPolicyExtern)
         end
@@ -482,7 +482,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
     # process all compiled method instances
     compiled = Dict()
     for mi in method_instances
-        ci = ci_cache_lookup(cache, mi, job.source.world, job.source.world)
+        ci = ci_cache_lookup(cache, mi, job.src.world, job.src.world)
         ci === nothing && continue
 
         # get the function index
@@ -522,9 +522,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
 
     if VERSION < v"1.9.0-DEV.516"
         # configure the module
-        triple!(llvm_mod, llvm_triple(job.target))
-        if julia_datalayout(job.target) !== nothing
-            datalayout!(llvm_mod, julia_datalayout(job.target))
+        triple!(llvm_mod, llvm_triple(job.cfg.target))
+        if julia_datalayout(job.cfg.target) !== nothing
+            datalayout!(llvm_mod, julia_datalayout(job.cfg.target))
         end
     end
 

@@ -141,8 +141,8 @@ forwarded, along with the `CompilerJob`, to the `linker` function which is allow
 session-dependent objects (e.g., a `CuModule`).
 """
 function cached_compilation(cache::AbstractDict,
-                            @nospecialize(job::CompilerJob),
-                            compiler::Function, linker::Function)
+                            @nospecialize(cfg::CompilerConfig),
+                            ft::Type, tt::Type, compiler::Function, linker::Function)
     # NOTE: it is OK to index the compilation cache directly with the compilation job, i.e.,
     #       using a world age instead of intersecting world age ranges, because we expect
     #       that the world age is aquired through calling `get_world` and thus will only
@@ -152,7 +152,8 @@ function cached_compilation(cache::AbstractDict,
     #       contains a more recent world age, yet still return an older cached object that
     #       would still be valid, we'd need the cache to store world ranges instead and
     #       use an invalidation callback to add upper bounds to entries.
-    key = hash(job)
+    world = get_world(ft, tt)
+    key = hash((ft, tt, world, cfg))
 
     force_compilation = compile_hook[] !== nothing
 
@@ -162,6 +163,9 @@ function cached_compilation(cache::AbstractDict,
         obj = get(cache, key, nothing)
         if obj === nothing || force_compilation
             asm = nothing
+
+            src = FunctionSpec(ft, tt, world)
+            job = CompilerJob(cfg, src)
 
             # compile
             if asm === nothing

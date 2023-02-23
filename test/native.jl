@@ -123,42 +123,42 @@ end
         end
         linker(job, compiled) = compiled
         cache = Dict()
+        ft = typeof(eval(kernel))
+        tt = Tuple{Int64}
 
         # initial compilation
-        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        ir = GPUCompiler.cached_compilation(cache, job.cfg, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 2")
         @test invocations[] == 1
         @test length(cache) == 1
 
         # cached compilation
-        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        ir = GPUCompiler.cached_compilation(cache, job.cfg, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 2")
         @test invocations[] == 1
         @test length(cache) == 1
 
         # redefinition
         @eval $kernel(i) = $child(i)+3
-        job, _ = native_job(eval(kernel), (Int64,))
-        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        ir = GPUCompiler.cached_compilation(cache, job.cfg, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
         @test length(cache) == 2
 
         # cached compilation
-        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        ir = GPUCompiler.cached_compilation(cache, job.cfg, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
         @test length(cache) == 2
 
         # redefining child functions
         @eval @noinline $child(i) = sink(i)+1
-        job, _ = native_job(eval(kernel), (Int64,))
-        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        ir = GPUCompiler.cached_compilation(cache, job.cfg, ft, tt, compiler, linker)
         @test invocations[] == 3
         @test length(cache) == 3
 
         # cached compilation
-        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        ir = GPUCompiler.cached_compilation(cache, job.cfg, ft, tt, compiler, linker)
         @test invocations[] == 3
         @test length(cache) == 3
 
@@ -167,13 +167,12 @@ end
         function background(job)
             notify(c1)
             wait(c2)    # wait for redefinition
-            GPUCompiler.cached_compilation(cache, job, compiler, linker)
+            GPUCompiler.cached_compilation(cache, job.cfg, ft, tt, compiler, linker)
         end
         t = @async background(job)
         wait(c1)        # make sure the task has started
         @eval $kernel(i) = $child(i)+4
-        job, _ = native_job(eval(kernel), (Int64,))
-        ir = GPUCompiler.cached_compilation(cache, job, compiler, linker)
+        ir = GPUCompiler.cached_compilation(cache, job.cfg, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 4")
         notify(c2)      # wake up the task
         ir = fetch(t)

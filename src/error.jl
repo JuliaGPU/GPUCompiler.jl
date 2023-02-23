@@ -14,7 +14,7 @@ struct KernelError <: Exception
 end
 
 function Base.showerror(io::IO, err::KernelError)
-    println(io, "GPU compilation of ", err.job.source, " failed")
+    println(io, "GPU compilation of ", err.job.src, " failed")
     println(io, "KernelError: $(err.message)")
     println(io)
     println(io, something(err.help, "Try inspecting the generated code with any of the @device_code_... macros."))

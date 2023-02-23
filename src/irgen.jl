@@ -3,7 +3,7 @@
 function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance;
                ctx::JuliaContextType)
     mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance; ctx)
-    if job.entry_abi === :specfunc
+    if job.cfg.entry_abi === :specfunc
         entry_fn = compiled[method_instance].specfunc
     else
         entry_fn = compiled[method_instance].func
@@ -24,7 +24,7 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
 
             # remove the non-specialized jfptr functions
             # TODO: Do we need to remove these?
-            if job.entry_abi === :specfunc
+            if job.cfg.entry_abi === :specfunc
                 if startswith(LLVM.name(llvmf), "jfptr_")
                     unsafe_delete!(mod, llvmf)
                 end
@@ -60,14 +60,11 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     end
 
     # rename and process the entry point
-    if job.source.name !== nothing
-        LLVM.name!(entry, safe_name(string("julia_", job.source.name)))
-    end
-    if job.source.kernel
-        LLVM.name!(entry, mangle_call(entry, job.source.tt))
+    if job.cfg.kernel
+        LLVM.name!(entry, mangle_call(entry, job.src.tt))
     end
     entry = process_entry!(job, mod, entry)
-    if job.entry_abi === :specfunc
+    if job.cfg.entry_abi === :specfunc
         func = compiled[method_instance].func
         specfunc = LLVM.name(entry)
     else
@@ -546,7 +543,7 @@ function add_kernel_state!(mod::LLVM.Module)
 
     # check if we even need a kernel state argument
     state = kernel_state_type(job)
-    @assert job.source.kernel
+    @assert job.cfg.kernel
     if state === Nothing
         return false
     end

@@ -68,7 +68,7 @@ end
 
 
 function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
-    tm = llvm_machine(job.target)
+    tm = llvm_machine(job.cfg.target)
 
     return String(emit(tm, mod, format))
 end

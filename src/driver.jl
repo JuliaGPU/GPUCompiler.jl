@@ -159,11 +159,11 @@ end
         # get the method instance
         sig = typed_signature(job)
         meth = if VERSION >= v"1.10.0-DEV.65"
-            Base._which(sig; world=job.source.world).method
+            Base._which(sig; world=job.src.world).method
         elseif VERSION >= v"1.7.0-DEV.435"
-            Base._which(sig, job.source.world).method
+            Base._which(sig, job.src.world).method
         else
-            ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, job.source.world)
+            ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, job.src.world)
         end
 
         (ti, env) = ccall(:jl_type_intersection_with_env, Any,
@@ -172,7 +172,7 @@ end
         meth = Base.func_for_method_checked(meth, ti, env)
 
         method_instance = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
-                      (Any, Any, Any, UInt), meth, ti, env, job.source.world)
+                      (Any, Any, Any, UInt), meth, ti, env, job.src.world)
 
         for var in env
             if var isa TypeVar
@@ -183,7 +183,7 @@ end
 
     # ensure that the returned method instance is valid in the compilation world.
     # otherwise, `jl_create_native` won't actually emit any code.
-    @assert method_instance.def.primary_world <= job.source.world <= method_instance.def.deleted_world
+    @assert method_instance.def.primary_world <= job.src.world <= method_instance.def.deleted_world
 
     return method_instance, ()
 end
@@ -227,7 +227,7 @@ const __llvm_initialized = Ref(false)
 
     @timeit_debug to "IR generation" begin
         ir, compiled = irgen(job, method_instance; ctx)
-        if job.entry_abi === :specfunc
+        if job.cfg.entry_abi === :specfunc
             entry_fn = compiled[method_instance].specfunc
         else
             entry_fn = compiled[method_instance].func
@@ -300,11 +300,11 @@ const __llvm_initialized = Ref(false)
 
                 # get a job in the appopriate world
                 dyn_job = if dyn_val isa CompilerJob
-                    dyn_spec = FunctionSpec(dyn_val.source; world=job.source.world)
-                    CompilerJob(dyn_val; source=dyn_spec)
+                    dyn_src = FunctionSpec(dyn_val.src; world=job.src.world)
+                    CompilerJob(dyn_val.cfg, dyn_src)
                 elseif dyn_val isa FunctionSpec
-                    dyn_spec = FunctionSpec(dyn_val; world=job.source.world)
-                    CompilerJob(job; source=dyn_spec)
+                    dyn_src = FunctionSpec(dyn_val; world=job.src.world)
+                    CompilerJob(job.cfg, dyn_src)
                 else
                     error("invalid deferred job type $(typeof(dyn_val))")
                 end
@@ -349,7 +349,7 @@ const __llvm_initialized = Ref(false)
 
     @timeit_debug to "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
-        if job.source.kernel
+        if job.cfg.kernel
             push!(metadata(ir)["julia.kernel"], MDNode([entry]; ctx=unwrap_context(ctx)))
 
             # IDEA: save all jobs, not only kernels, and save other attributes

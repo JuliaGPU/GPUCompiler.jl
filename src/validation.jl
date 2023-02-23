@@ -32,22 +32,22 @@ function MethodError(ft::Type, tt::Type, world::Integer=typemax(UInt))
 end
 
 function check_method(@nospecialize(job::CompilerJob))
-    isa(job.source.ft, Core.Builtin) &&
+    isa(job.src.ft, Core.Builtin) &&
         throw(KernelError(job, "function is not a generic function"))
 
     # get the method
-    ms = method_matches(typed_signature(job); job.source.world)
+    ms = method_matches(typed_signature(job); job.src.world)
     if length(ms) != 1
-        throw(MethodError(job.source.ft, job.source.tt, job.source.world))
+        throw(MethodError(job.src.ft, job.src.tt, job.src.world))
     end
 
     # kernels can't return values
-    if job.source.kernel
+    if job.cfg.kernel
         cache = ci_cache(job)
         mt = method_table(job)
         ip = inference_params(job)
         op = optimization_params(job)
-        interp = GPUInterpreter(cache, mt, job.source.world, ip, op)
+        interp = GPUInterpreter(cache, mt, job.src.world, ip, op)
         rt = return_type(only(ms); interp)
 
         if rt != Nothing
@@ -124,7 +124,7 @@ const DELAYED_BINDING  = "use of an undefined name"
 const DYNAMIC_CALL     = "dynamic function invocation"
 
 function Base.showerror(io::IO, err::InvalidIRError)
-    print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
+    print(io, "InvalidIRError: compiling ", err.job.src, " resulted in invalid LLVM IR")
     for (kind, bt, meta) in err.errors
         printstyled(io, "\nReason: unsupported $kind"; color=:red)
         if meta !== nothing

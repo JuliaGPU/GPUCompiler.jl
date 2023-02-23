@@ -25,7 +25,7 @@ end
 
 function process_entry!(job::CompilerJob{NativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
-    if job.target.llvm_always_inline
+    if job.cfg.target.llvm_always_inline
         push!(function_attributes(entry), EnumAttribute("alwaysinline", 0; ctx))
     end
     invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
@@ -33,5 +33,5 @@ end
 
 ## job
 
-runtime_slug(job::CompilerJob{NativeCompilerTarget}) = "native_$(job.target.cpu)-$(hash(job.target.features))$(job.target.jlruntime ? "-jlrt" : "")"
-uses_julia_runtime(job::CompilerJob{NativeCompilerTarget}) = job.target.jlruntime
+runtime_slug(job::CompilerJob{NativeCompilerTarget}) = "native_$(job.cfg.target.cpu)-$(hash(job.cfg.target.features))$(job.cfg.target.jlruntime ? "-jlrt" : "")"
+uses_julia_runtime(job::CompilerJob{NativeCompilerTarget}) = job.cfg.target.jlruntime

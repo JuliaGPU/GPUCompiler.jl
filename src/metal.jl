@@ -35,7 +35,7 @@ needs_byval(job::CompilerJob{MetalCompilerTarget}) = false
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{MetalCompilerTarget}) = "metal-macos$(job.target.macos)"
+runtime_slug(job::CompilerJob{MetalCompilerTarget}) = "metal-macos$(job.cfg.target.macos)"
 
 isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
@@ -55,7 +55,7 @@ end
 function process_entry!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
-    if job.source.kernel
+    if job.cfg.kernel
         # calling convention
         callconv!(entry, LLVMMETALKERNELCallConv)
     end
@@ -85,7 +85,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     ctx = context(mod)
     entry_fn = LLVM.name(entry)
 
-    if job.source.kernel
+    if job.cfg.kernel
         entry = pass_by_reference!(job, mod, entry)
 
         add_input_arguments!(job, mod, entry)
@@ -102,7 +102,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     ctx = context(mod)
     entry_fn = LLVM.name(entry)
 
-    if job.source.kernel
+    if job.cfg.kernel
         entry = add_address_spaces!(job, mod, entry)
 
         add_argument_metadata!(job, mod, entry)
