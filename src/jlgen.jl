@@ -400,9 +400,21 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
                 Metadata(ConstantInt(DEBUG_METADATA_VERSION(); ctx=unwrap_context(ctx)))
 
             ts_mod = ThreadSafeModule(mod; ctx)
-            ccall(:jl_create_native, Ptr{Cvoid},
-                  (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint),
-                  [method_instance], ts_mod, Ref(params), #=extern policy=# 1)
+            # 1.9.0-alpha1.55 added external_linkage
+            # 1.9.0-alpha1.33 added imaging_mode
+            # 1.9.0-beta4.23 added world
+            if VERSION >= v"1.9.0-beta4.23"
+                ccall(:jl_create_native, Ptr{Cvoid},
+                  (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams},
+                   Cint, Cint, Cint, Csize_t),
+                  [method_instance], ts_mod, Ref(params),
+                  #=extern policy=# 1, #=imaging mode=# 0,  #=external linkage=# 0,
+                  Base.get_world_counter()) # TODO: Fixme
+            else
+                ccall(:jl_create_native, Ptr{Cvoid},
+                    (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint),
+                    [method_instance], ts_mod, Ref(params), #=extern policy=# 1)
+            end
         elseif VERSION >= v"1.9.0-DEV.115"
             ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
