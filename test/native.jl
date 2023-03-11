@@ -35,9 +35,9 @@ cread(io) = cread1(io) * cread1(io)
     @test contains(ASM, "julia_identity")
 
     if test_interactive
-        fake_terminal() do term, in, out
+        fake_terminal() do term, in, out, err
             T = @async begin
-                GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term)
+                GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term, annotate_source=false)
             end
             lines = replace(cread(out), r"\e\[[0-9;]*[a-zA-Z]"=>"") # without ANSI escape codes
             @test contains(lines, "identity(x)")
