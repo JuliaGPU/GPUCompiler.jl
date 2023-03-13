@@ -1,7 +1,7 @@
 using GPUCompiler
 
 if !@isdefined(TestRuntime)
-    include("../util.jl")
+    include("../testhelpers.jl")
 end
 
 
@@ -9,10 +9,10 @@ end
 
 function bpf_job(@nospecialize(func), @nospecialize(types);
                  kernel::Bool=false, always_inline=false, kwargs...)
-    source = FunctionSpec(func, Base.to_tuple_type(types), kernel)
+    source = FunctionSpec(typeof(func), Base.to_tuple_type(types); kernel)
     target = BPFCompilerTarget()
     params = TestCompilerParams()
-    CompilerJob(target, source, params; always_inline), kwargs
+    CompilerJob(source, target, params; always_inline), kwargs
 end
 
 function bpf_code_llvm(@nospecialize(func), @nospecialize(types); kwargs...)

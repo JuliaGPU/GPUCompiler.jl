@@ -61,56 +61,51 @@ export FunctionSpec
 
 # what we'll be compiling
 
-struct FunctionSpec{F,TT}
-    f::Type{F}
-    tt::Type{TT}
+struct FunctionSpec
+    ft::Type
+    tt::Type
+    world::UInt
+
     kernel::Bool
     name::Union{Nothing,String}
-    world_age::UInt
+
+    FunctionSpec(ft::Type, tt::Type, world::Integer=get_world(ft, tt);
+                 kernel=true, name=nothing) =
+        new(ft, tt, world, kernel, name)
 end
 
+# copy constructor
+FunctionSpec(spec::FunctionSpec; ft=spec.ft, tt=spec.tt, world=spec.world,
+                                 kernel=spec.kernel, name=spec.name) =
+    FunctionSpec(ft, tt, world; kernel, name)
 
 function Base.hash(spec::FunctionSpec, h::UInt)
-    h = hash(spec.f, h)
+    h = hash(spec.ft, h)
     h = hash(spec.tt, h)
+    h = hash(spec.world, h)
+
     h = hash(spec.kernel, h)
     h = hash(spec.name, h)
-    h = hash(spec.world_age, h)
-    h
-end
 
-# put the function and argument types in typevars
-# so that we can access it from generated functions
-# XXX: the default value of 0xffffffffffffffff is a hack, because we don't properly perform
-#      world age intersection when querying the compilation cache. once we do, callers
-#      should probably provide the world age of the calling code (!= the current world age)
-#      so that querying the cache from, e.g. `cufuncton` is a fully static operation.
-FunctionSpec(f::Type, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
-    FunctionSpec{f,tt}(f, tt, kernel, name, world_age)
-
-FunctionSpec(f, tt=Tuple{}, kernel=true, name=nothing, world_age=-1%UInt) =
-    FunctionSpec(Core.Typeof(f), tt, kernel, name, world_age)
-
-function Base.getproperty(@nospecialize(spec::FunctionSpec), sym::Symbol)
-    if sym == :world
-        # NOTE: this isn't used by the call to `hash` in `check_cache`,
-        #       so we still use the raw world age there.
-        age = spec.world_age
-        return age == -1%UInt ? Base.get_world_counter() : age
-    else
-        return getfield(spec, sym)
-    end
+    return h
 end
 
 function signature(@nospecialize(spec::FunctionSpec))
-    fn = something(spec.name, nameof(spec.f))
+    fn = if spec.name !== nothing
+        spec.name
+    elseif spec.ft.name.mt == Symbol.name.mt
+        # uses shared method table, so name is not unique to this function type
+        nameof(spec.ft)
+    else
+        spec.ft.name.mt.name
+    end
     args = join(spec.tt.parameters, ", ")
     return "$fn($(join(spec.tt.parameters, ", ")))"
 end
 
 function Base.show(io::IO, @nospecialize(spec::FunctionSpec))
     spec.kernel ? print(io, "kernel ") : print(io, "function ")
-    print(io, signature(spec))
+    print(io, signature(spec), " in world ", spec.world)
 end
 
 
@@ -121,49 +116,60 @@ export CompilerJob
 # a specific invocation of the compiler, bundling everything needed to generate code
 
 """
-    CompilerJob(target, source, params, entry_abi)
+    CompilerJob(source, target, params; entry_abi=:specfunc, always_inline=false)
 
-Construct a `CompilerJob` for `source` that will be used to drive compilation for
-the given `target` and `params`. The `entry_abi` can be either `:specfunc` the default,
-or `:func`. `:specfunc` expects the arguments to be passed in registers, simple
-return values are returned in registers as well, and complex return values are returned
-on the stack using `sret`, the calling convention is `fastcc`. The `:func` abi is simpler
-with a calling convention of the first argument being the function itself (to support closures),
-the second argument being a pointer to a vector of boxed Julia values and the third argument
-being the number of values, the return value will also be boxed. The `:func` abi
-will internally call the `:specfunc` abi, but is generally easier to invoke directly.
-`always_inline` specifies if the Julia front-end should inline all functions into one if possible.
+Construct a `CompilerJob` for `source` that will be used to drive compilation for the given
+`target` and `params`.
+
+The `entry_abi` can be either `:specfunc` the default, or `:func`. `:specfunc` expects the
+arguments to be passed in registers, simple return values are returned in registers as well,
+and complex return values are returned on the stack using `sret`, the calling convention is
+`fastcc`. The `:func` abi is simpler with a calling convention of the first argument being
+the function itself (to support closures), the second argument being a pointer to a vector
+of boxed Julia values and the third argument being the number of values, the return value
+will also be boxed. The `:func` abi will internally call the `:specfunc` abi, but is
+generally easier to invoke directly.
+
+`always_inline` specifies if the Julia front-end should inline all functions into one if
+possible.
 """
-struct CompilerJob{T,P,F}
+struct CompilerJob{T,P}
     target::T
-    source::F
     params::P
+    source::FunctionSpec
+
     entry_abi::Symbol
     always_inline::Bool
 
-    function CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams, entry_abi::Symbol, always_inline=true)
+    function CompilerJob(source::FunctionSpec,
+                         target::AbstractCompilerTarget,
+                         params::AbstractCompilerParams;
+                         entry_abi::Symbol=:specfunc, always_inline=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
-        new{typeof(target), typeof(params), typeof(source)}(target, source, params, entry_abi, always_inline)
+        new{typeof(target), typeof(params)}(target, params, source, entry_abi, always_inline)
     end
 end
-CompilerJob(target::AbstractCompilerTarget, source::FunctionSpec, params::AbstractCompilerParams; entry_abi=:specfunc, always_inline=false) =
-    CompilerJob(target, source, params, entry_abi, always_inline)
 
-Base.similar(@nospecialize(job::CompilerJob), @nospecialize(source::FunctionSpec)) =
-    CompilerJob(job.target, source, job.params, job.entry_abi, job.always_inline)
+# copy constructor
+CompilerJob(job::CompilerJob; source=job.source, target=job.target, params=job.params,
+            entry_abi=job.entry_abi, always_inline=job.always_inline) =
+    CompilerJob(source, target, params; entry_abi, always_inline)
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{T})) where {T}
     print(io, "CompilerJob of ", job.source, " for ", T)
 end
 
 function Base.hash(job::CompilerJob, h::UInt)
-    h = hash(job.target, h)
     h = hash(job.source, h)
+    h = hash(job.target, h)
     h = hash(job.params, h)
+
     h = hash(job.entry_abi, h)
-    h
+    h = hash(job.always_inline, h)
+
+    return h
 end
 
 

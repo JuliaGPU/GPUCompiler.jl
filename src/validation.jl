@@ -2,31 +2,44 @@
 
 export InvalidIRError
 
-function method_matches(@nospecialize(tt::Type{<:Tuple}); world=Base.get_world_counter())
-    ms = Core.MethodMatch[]
-    for m in Base._methods_by_ftype(tt, -1, world)::Vector
-        m = m::Core.MethodMatch
-        push!(ms, m)
+# TODO: upstream
+function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
+    methods = Core.MethodMatch[]
+    matches = _methods_by_ftype(tt, -1, world)
+    matches === nothing && return methods
+    for match in matches::Vector
+        push!(methods, match::Core.MethodMatch)
     end
-
-    return ms
+    return methods
 end
 
-function return_type(m::Core.MethodMatch;
-                     interp = Core.Compiler.NativeInterpreter(world))
+function return_type(m::Core.MethodMatch; interp::AbstractInterpreter)
     ty = Core.Compiler.typeinf_type(interp, m.method, m.spec_types, m.sparams)
     return something(ty, Any)
 end
 
+# create a MethodError from a function type
+# TODO: fix upstream
+function MethodError(ft::Type, tt::Type, world::Integer=typemax(UInt))
+    f = if isdefined(ft, :instance)
+        ft.instance
+    else
+        # HACK: dealing with a closure or something... let's do somthing really invalid,
+        #       which works because MethodError doesn't actually use the function
+        Ref{ft}()[]
+    end
+    Base.MethodError(f, tt, world)
+end
 
 function check_method(@nospecialize(job::CompilerJob))
-    isa(job.source.f, Core.Builtin) && throw(KernelError(job, "function is not a generic function"))
+    isa(job.source.ft, Core.Builtin) &&
+        throw(KernelError(job, "function is not a generic function"))
 
     # get the method
-    world = job.source.world
-    ms = method_matches(typed_signature(job); world)
-    isempty(ms)   && throw(KernelError(job, "no method found"))
-    length(ms)!=1 && throw(KernelError(job, "no unique matching method"))
+    ms = method_matches(typed_signature(job); job.source.world)
+    if length(ms) != 1
+        throw(MethodError(job.source.ft, job.source.tt, job.source.world))
+    end
 
     # kernels can't return values
     if job.source.kernel
@@ -34,7 +47,7 @@ function check_method(@nospecialize(job::CompilerJob))
         mt = method_table(job)
         ip = inference_params(job)
         op = optimization_params(job)
-        interp = GPUInterpreter(cache, mt, world, ip, op)
+        interp = GPUInterpreter(cache, mt, job.source.world, ip, op)
         rt = return_type(only(ms); interp)
 
         if rt != Nothing

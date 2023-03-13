@@ -51,7 +51,7 @@ include("reflection_compat.jl")
 
 @inline function typed_signature(@nospecialize(job::CompilerJob))
     u = Base.unwrap_unionall(job.source.tt)
-    return Base.rewrap_unionall(Tuple{job.source.f, u.parameters...}, job.source.tt)
+    return Base.rewrap_unionall(Tuple{job.source.ft, u.parameters...}, job.source.tt)
 end
 
 code_lowered(@nospecialize(job::CompilerJob); kwargs...) =
@@ -312,7 +312,7 @@ Evaluates the expression `ex` and dumps all intermediate forms of code to the di
 macro device_code(ex...)
     localUnique = 1
     function hook(job::CompilerJob; dir::AbstractString)
-        name = something(job.source.name, nameof(job.source.f))
+        name = something(job.source.name, nameof(job.source.ft))
         fn = "$(name)_$(localUnique)"
         mkpath(dir)
 

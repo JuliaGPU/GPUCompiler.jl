@@ -158,7 +158,13 @@ end
 
         # get the method instance
         sig = typed_signature(job)
-        meth = which(sig)
+        meth = if VERSION >= v"1.10.0-DEV.65"
+            Base._which(sig; world=job.source.world).method
+        elseif VERSION >= v"1.7.0-DEV.435"
+            Base._which(sig, job.source.world).method
+        else
+            ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, job.source.world)
+        end
 
         (ti, env) = ccall(:jl_type_intersection_with_env, Any,
                           (Any, Any), sig, meth.sig)::Core.SimpleVector
@@ -175,6 +181,10 @@ end
         end
     end
 
+    # ensure that the returned method instance is valid in the compilation world.
+    # otherwise, `jl_create_native` won't actually emit any code.
+    @assert method_instance.def.primary_world <= job.source.world <= method_instance.def.deleted_world
+
     return method_instance, ()
 end
 
@@ -189,9 +199,9 @@ Base.@ccallable Ptr{Cvoid} function deferred_codegen(ptr::Ptr{Cvoid})
     ptr
 end
 
-@generated function deferred_codegen(::Val{f}, ::Val{tt}) where {f,tt}
+@generated function deferred_codegen(::Val{ft}, ::Val{tt}) where {ft,tt}
     id = length(deferred_codegen_jobs) + 1
-    deferred_codegen_jobs[id] = FunctionSpec(f,tt)
+    deferred_codegen_jobs[id] = FunctionSpec(ft, tt)
 
     pseudo_ptr = reinterpret(Ptr{Cvoid}, id)
     quote
@@ -286,10 +296,19 @@ const __llvm_initialized = Ref(false)
                 id = convert(Int, first(operands(call)))
 
                 global deferred_codegen_jobs
-                dyn_job = deferred_codegen_jobs[id]
-                if dyn_job isa FunctionSpec
-                    dyn_job = similar(job, dyn_job)
+                dyn_val = deferred_codegen_jobs[id]
+
+                # get a job in the appopriate world
+                dyn_job = if dyn_val isa CompilerJob
+                    dyn_spec = FunctionSpec(dyn_val.source; world=job.source.world)
+                    CompilerJob(dyn_val; source=dyn_spec)
+                elseif dyn_val isa FunctionSpec
+                    dyn_spec = FunctionSpec(dyn_val; world=job.source.world)
+                    CompilerJob(job; source=dyn_spec)
+                else
+                    error("invalid deferred job type $(typeof(dyn_val))")
                 end
+
                 push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
             end
 
