@@ -141,32 +141,34 @@ forwarded, along with the `CompilerJob`, to the `linker` function which is allow
 session-dependent objects (e.g., a `CuModule`).
 """
 function cached_compilation(cache::AbstractDict{UInt,V},
-                            @nospecialize(cfg::CompilerConfig),
+                            cfg::CompilerConfig,
                             ft::Type, tt::Type,
                             compiler::Function, linker::Function) where {V}
     # NOTE: it is OK to index the compilation cache directly with the world age, instead of
     #       intersecting world age ranges, because we the world age is aquired by calling
     #       `get_world` and thus will only change when the kernel function is redefined.
     world = get_world(ft, tt)
-    key = hash((ft, tt, world, cfg))
+    key = hash(ft)
+    key = hash(tt, key)
+    key = hash(world, key)
+    key = hash(cfg, key)
 
-    # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
+    # NOTE: no use of lock(::Function)/@lock/get! to avoid try/catch and closure overhead
     lock(cache_lock)
     obj = get(cache, key, nothing)
     unlock(cache_lock)
 
+    LLVM.Interop.assume(isassigned(compile_hook))
     if obj === nothing || compile_hook[] !== nothing
         obj = actual_compilation(cache, key, cfg, ft, tt, world, compiler, linker)::V
     end
-    return obj
+    return obj::V
 end
 
 @noinline function actual_compilation(cache::AbstractDict, key::UInt,
-                                      @nospecialize(cfg::CompilerConfig),
+                                      cfg::CompilerConfig,
                                       ft::Type, tt::Type, world,
                                       compiler::Function, linker::Function)
-    @nospecialize
-
     src = FunctionSpec(ft, tt, world)
     job = CompilerJob(cfg, src)
 
