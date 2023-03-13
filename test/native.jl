@@ -528,7 +528,12 @@ end
 
     mod = @eval module $(gensym())
         using ..GPUCompiler
-        import ..method_table
+
+        @static if isdefined(Base.Experimental, Symbol("@overlay"))
+        Base.Experimental.@MethodTable(method_table)
+        else
+        const method_table = nothing
+        end
 
         kernel() = child()
         child() = 0
@@ -536,14 +541,14 @@ end
         GPUCompiler.@override method_table child() = 1
     end
 
-    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}))
+    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}; mod.method_table))
     @test occursin("ret i64 1", ir)
 end
 
+if VERSION >= v"1.7"
 @testset "#366: semi-concrete interpretation + overlay methods = dynamic dispatch" begin
     mod = @eval module $(gensym())
         using ..GPUCompiler
-        import ..method_table
         using StaticArrays
 
         function kernel(width, height)
@@ -553,13 +558,38 @@ end
             return
         end
 
+        Base.Experimental.@MethodTable method_table
         GPUCompiler.@override method_table Base.isnan(x::Float32) =
             (ccall("extern __nv_isnanf", llvmcall, Int32, (Cfloat,), x)) != 0
     end
 
-    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{Int, Int}; debuginfo=:none))
+    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{Int, Int};
+                                     debuginfo=:none, mod.method_table))
     @test !occursin("apply_generic", ir)
     @test occursin("llvm.floor", ir)
+end
+
+@testset "JuliaLang/julia#48097: kwcall inference in the presence of overlay method" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        child(; kwargs...) = return
+        function parent()
+            child(; a=1f0, b=1.0)
+            return
+        end
+
+        Base.Experimental.@MethodTable method_table
+        Base.Experimental.@overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} =
+        return
+    end
+
+    ir = sprint(io->native_code_llvm(io, mod.parent, Tuple{};
+                                     debuginfo=:none, mod.method_table))
+    @test !occursin("jl_invoke", ir)
+    @test !occursin("apply_iterate", ir)
+    @test !occursin("inttoptr", ir)
+    @test occursin("ret void", ir)
+end
 end
 
 ############################################################################################
