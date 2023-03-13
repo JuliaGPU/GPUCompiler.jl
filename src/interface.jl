@@ -170,8 +170,8 @@ export CompilerJob
 # a specific invocation of the compiler, bundling everything needed to generate code
 
 struct CompilerJob{T,P}
-    cfg::CompilerConfig{T,P}
-    src::FunctionSpec
+    config::CompilerConfig{T,P}
+    source::FunctionSpec
 
     CompilerJob(cfg::CompilerConfig{T,P}, src::FunctionSpec) where {T,P} =
         new{T,P}(cfg, src)
@@ -205,7 +205,7 @@ isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
 get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(ci_cache(job), method_table(job), job.src.world, inference_params(job), optimization_params(job))
+    GPUInterpreter(ci_cache(job), method_table(job), job.source.world, inference_params(job), optimization_params(job))
 
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime
@@ -238,7 +238,7 @@ function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                         entry::LLVM.Function)
     ctx = context(mod)
 
-    if job.cfg.kernel && needs_byval(job)
+    if job.config.kernel && needs_byval(job)
         # pass all bitstypes by value; by default Julia passes aggregates by reference
         # (this improves performance, and is mandated by certain back-ends like SPIR-V).
         args = classify_arguments(job, eltype(llvmtype(entry)))
@@ -284,7 +284,7 @@ valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 # the codeinfo cache to use
 function ci_cache(@nospecialize(job::CompilerJob))
     lock(GLOBAL_CI_CACHES_LOCK) do
-        cache = get!(GLOBAL_CI_CACHES, (typeof(job.cfg.target), inference_params(job), optimization_params(job))) do
+        cache = get!(GLOBAL_CI_CACHES, (typeof(job.config.target), inference_params(job), optimization_params(job))) do
             CodeCache()
         end
         return cache
@@ -307,7 +307,7 @@ function optimization_params(@nospecialize(job::CompilerJob))
         kwargs = (kwargs..., unoptimize_throw_blocks=false)
     end
 
-    if job.cfg.always_inline
+    if job.config.always_inline
         kwargs = (kwargs..., inline_cost_threshold=typemax(Int))
     end
 

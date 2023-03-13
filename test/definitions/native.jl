@@ -23,7 +23,7 @@ const method_table = nothing
 end
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = method_table
-GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.cfg.params.entry_safepoint
+GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
 function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                     entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
