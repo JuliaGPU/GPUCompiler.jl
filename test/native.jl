@@ -122,7 +122,7 @@ end
             return ir
         end
         linker(job, compiled) = compiled
-        cache = Dict()
+        cache = Dict{UInt,Any}()
         ft = typeof(eval(kernel))
         tt = Tuple{Int64}
 
