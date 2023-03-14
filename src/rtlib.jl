@@ -66,7 +66,7 @@ end
 function emit_function!(mod, config::CompilerConfig, f, method, world; ctx::JuliaContextType)
     tt = Base.to_tuple_type(method.types)
     source = FunctionSpec(f, tt, world)
-    new_mod, meta = codegen(:llvm, CompilerJob(config, source);
+    new_mod, meta = codegen(:llvm, CompilerJob(source, config);
                             optimize=false, libraries=false, validate=false, ctx)
     ft = eltype(llvmtype(meta.entry))
     expected_ft = convert(LLVM.FunctionType, method; ctx=context(new_mod))

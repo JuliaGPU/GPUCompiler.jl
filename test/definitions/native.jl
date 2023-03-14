@@ -35,7 +35,7 @@ function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=fals
     target = NativeCompilerTarget()
     params = NativeCompilerParams(entry_safepoint, method_table)
     config = CompilerConfig(target, params; kernel, entry_abi, always_inline)
-    CompilerJob(config, source), kwargs
+    CompilerJob(source, config), kwargs
 end
 
 function native_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)
@@ -271,7 +271,7 @@ module LazyCodegen
         #      with jlruntime=false, we reach an unreachable.
         params = NativeCompilerParams()
         config = CompilerConfig(target, params; kernel=false)
-        job = CompilerJob(config, source)
+        job = CompilerJob(source, config)
 
         addr = get_trampoline(job)
         trampoline = pointer(addr)

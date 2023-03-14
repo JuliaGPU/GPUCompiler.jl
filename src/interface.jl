@@ -170,11 +170,11 @@ export CompilerJob
 # a specific invocation of the compiler, bundling everything needed to generate code
 
 struct CompilerJob{T,P}
-    config::CompilerConfig{T,P}
     source::FunctionSpec
+    config::CompilerConfig{T,P}
 
-    CompilerJob(cfg::CompilerConfig{T,P}, src::FunctionSpec) where {T,P} =
-        new{T,P}(cfg, src)
+    CompilerJob(src::FunctionSpec, cfg::CompilerConfig{T,P}) where {T,P} =
+        new{T,P}(src, cfg)
 end
 
 
