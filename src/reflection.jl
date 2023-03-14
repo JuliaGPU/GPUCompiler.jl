@@ -175,7 +175,7 @@ See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, dump_module::Bool=false)
     asm, meta = codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
-    highlight(io, asm, source_code(job.target))
+    highlight(io, asm, source_code(job.config.target))
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =
     code_native(stdout, job; kwargs...)
@@ -312,7 +312,7 @@ Evaluates the expression `ex` and dumps all intermediate forms of code to the di
 macro device_code(ex...)
     localUnique = 1
     function hook(job::CompilerJob; dir::AbstractString)
-        name = something(job.source.name, nameof(job.source.ft))
+        name = nameof(job.source.ft)   # TODO: nameof(::FunctionSpec), supporting function types
         fn = "$(name)_$(localUnique)"
         mkpath(dir)
 

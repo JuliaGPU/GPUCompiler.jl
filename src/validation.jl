@@ -42,7 +42,7 @@ function check_method(@nospecialize(job::CompilerJob))
     end
 
     # kernels can't return values
-    if job.source.kernel
+    if job.config.kernel
         cache = ci_cache(job)
         mt = method_table(job)
         ip = inference_params(job)

@@ -227,7 +227,7 @@ const __llvm_initialized = Ref(false)
 
     @timeit_debug to "IR generation" begin
         ir, compiled = irgen(job, method_instance; ctx)
-        if job.entry_abi === :specfunc
+        if job.config.entry_abi === :specfunc
             entry_fn = compiled[method_instance].specfunc
         else
             entry_fn = compiled[method_instance].func
@@ -300,11 +300,11 @@ const __llvm_initialized = Ref(false)
 
                 # get a job in the appopriate world
                 dyn_job = if dyn_val isa CompilerJob
-                    dyn_spec = FunctionSpec(dyn_val.source; world=job.source.world)
-                    CompilerJob(dyn_val; source=dyn_spec)
+                    dyn_src = FunctionSpec(dyn_val.source; world=job.source.world)
+                    CompilerJob(dyn_val.config, dyn_src)
                 elseif dyn_val isa FunctionSpec
-                    dyn_spec = FunctionSpec(dyn_val; world=job.source.world)
-                    CompilerJob(job; source=dyn_spec)
+                    dyn_src = FunctionSpec(dyn_val; world=job.source.world)
+                    CompilerJob(job.config, dyn_src)
                 else
                     error("invalid deferred job type $(typeof(dyn_val))")
                 end
@@ -349,7 +349,7 @@ const __llvm_initialized = Ref(false)
 
     @timeit_debug to "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
-        if job.source.kernel
+        if job.config.kernel
             push!(metadata(ir)["julia.kernel"], MDNode([entry]; ctx=unwrap_context(ctx)))
 
             # IDEA: save all jobs, not only kernels, and save other attributes

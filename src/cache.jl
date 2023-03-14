@@ -130,7 +130,7 @@ end
 const cache_lock = ReentrantLock()
 
 """
-    cached_compilation(cache::Dict, job::CompilerJob, compiler, linker)
+    cached_compilation(cache::Dict{UInt}, job::CompilerJob, compiler, linker)
 
 Compile `job` using `compiler` and `linker`, and store the result in `cache`.
 
@@ -140,46 +140,57 @@ and return data that can be cached across sessions (e.g., LLVM IR). This data is
 forwarded, along with the `CompilerJob`, to the `linker` function which is allowed to create
 session-dependent objects (e.g., a `CuModule`).
 """
-function cached_compilation(cache::AbstractDict,
-                            @nospecialize(job::CompilerJob),
-                            compiler::Function, linker::Function)
-    # NOTE: it is OK to index the compilation cache directly with the compilation job, i.e.,
-    #       using a world age instead of intersecting world age ranges, because we expect
-    #       that the world age is aquired through calling `get_world` and thus will only
-    #       ever change when the kernel function is redefined.
-    #
-    #       if we ever want to be able to index the cache using a compilation job that
-    #       contains a more recent world age, yet still return an older cached object that
-    #       would still be valid, we'd need the cache to store world ranges instead and
-    #       use an invalidation callback to add upper bounds to entries.
-    key = hash(job)
+function cached_compilation(cache::AbstractDict{UInt,V},
+                            cfg::CompilerConfig,
+                            ft::Type, tt::Type,
+                            compiler::Function, linker::Function) where {V}
+    # NOTE: it is OK to index the compilation cache directly with the world age, instead of
+    #       intersecting world age ranges, because we the world age is aquired by calling
+    #       `get_world` and thus will only change when the kernel function is redefined.
+    world = get_world(ft, tt)
+    key = hash(ft)
+    key = hash(tt, key)
+    key = hash(world, key)
+    key = hash(cfg, key)
 
-    force_compilation = compile_hook[] !== nothing
-
-    # NOTE: no use of lock(::Function)/@lock/get! to keep stack traces clean
+    # NOTE: no use of lock(::Function)/@lock/get! to avoid try/catch and closure overhead
     lock(cache_lock)
-    try
-        obj = get(cache, key, nothing)
-        if obj === nothing || force_compilation
-            asm = nothing
+    obj = get(cache, key, nothing)
+    unlock(cache_lock)
 
-            # compile
-            if asm === nothing
-                if compile_hook[] !== nothing
-                    compile_hook[](job)
-                end
+    LLVM.Interop.assume(isassigned(compile_hook))
+    if obj === nothing || compile_hook[] !== nothing
+        obj = actual_compilation(cache, key, cfg, ft, tt, world, compiler, linker)::V
+    end
+    return obj::V
+end
 
-                asm = compiler(job)
-            end
+@noinline function actual_compilation(cache::AbstractDict, key::UInt,
+                                      cfg::CompilerConfig,
+                                      ft::Type, tt::Type, world,
+                                      compiler::Function, linker::Function)
+    src = FunctionSpec(ft, tt, world)
+    job = CompilerJob(cfg, src)
 
-            # link (but not if we got here because of forced compilation)
-            if obj === nothing
-                obj = linker(job, asm)
-                cache[key] = obj
-            end
+    asm = nothing
+    # TODO: consider loading the assembly from an on-disk cache here
+
+    # compile
+    if asm === nothing
+        if compile_hook[] !== nothing
+            compile_hook[](job)
         end
+
+        asm = compiler(job)
+    end
+
+    # link (but not if we got here because of forced compilation,
+    # in which case the cache will already be populated)
+    lock(cache_lock) do
+        haskey(cache, key) && return cache[key]
+
+        obj = linker(job, asm)
+        cache[key] = obj
         obj
-    finally
-        unlock(cache_lock)
     end
 end

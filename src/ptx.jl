@@ -68,12 +68,12 @@ have_fma(@nospecialize(target::PTXCompilerTarget), T::Type) = true
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
     print(io, "PTX CompilerJob of ", job.source)
-    print(io, " for sm_$(job.target.cap.major)$(job.target.cap.minor)")
+    print(io, " for sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)")
 
-    job.target.minthreads !== nothing && print(io, ", minthreads=$(job.target.minthreads)")
-    job.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.target.maxthreads)")
-    job.target.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.target.blocks_per_sm)")
-    job.target.maxregs !== nothing && print(io, ", maxregs=$(job.target.maxregs)")
+    job.config.target.minthreads !== nothing && print(io, ", minthreads=$(job.config.target.minthreads)")
+    job.config.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.config.target.maxthreads)")
+    job.config.target.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.config.target.blocks_per_sm)")
+    job.config.target.maxregs !== nothing && print(io, ", maxregs=$(job.config.target.maxregs)")
 end
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
@@ -82,9 +82,9 @@ isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
 
 # XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
 runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
-    "ptx-sm_$(job.target.cap.major)$(job.target.cap.minor)" *
+    "ptx-sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)" *
        "-debuginfo=$(Int(llvm_debug_info(job)))" *
-       "-exitable=$(job.target.exitable)"
+       "-exitable=$(job.config.target.exitable)"
 
 function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
     ctx = context(mod)
@@ -101,10 +101,10 @@ function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod
     # it possible to 'query' these in device code, relying on LLVM to optimize the checks
     # away and generate static code. note that we only do so if there's actual uses of these
     # variables; unconditionally creating a gvar would result in duplicate declarations.
-    for (name, value) in ["sm_major"  => job.target.cap.major,
-                          "sm_minor"  => job.target.cap.minor,
-                          "ptx_major" => job.target.ptx.major,
-                          "ptx_minor" => job.target.ptx.minor]
+    for (name, value) in ["sm_major"  => job.config.target.cap.major,
+                          "sm_minor"  => job.config.target.cap.minor,
+                          "ptx_major" => job.config.target.ptx.major,
+                          "ptx_minor" => job.config.target.ptx.minor]
         if haskey(globals(mod), name)
             gv = globals(mod)[name]
             initializer!(gv, ConstantInt(LLVM.Int32Type(ctx), value))
@@ -118,7 +118,7 @@ function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
-    if job.source.kernel
+    if job.config.kernel
         if LLVM.version() >= v"8"
             # calling convention
             callconv!(entry, LLVM.API.LLVMPTXKernelCallConv)
@@ -131,7 +131,7 @@ end
 function add_lowering_passes!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                               pm::LLVM.PassManager)
     # hide `unreachable` from LLVM so that it doesn't introduce divergent control flow
-    if !job.target.unreachable
+    if !job.config.target.unreachable
         add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
     end
 
@@ -145,7 +145,7 @@ end
 
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
-    tm = llvm_machine(job.target)
+    tm = llvm_machine(job.config.target)
     @dispose pm=ModulePassManager() begin
         add_library_info!(pm, triple(mod))
         add_transform_info!(pm, tm)
@@ -182,7 +182,7 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     ctx = context(mod)
     entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
-    if job.source.kernel
+    if job.config.kernel
         # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
         entry = lower_byval(job, mod, entry)
     end
@@ -195,7 +195,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     ctx = context(mod)
     entry = invoke(finish_ir!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
-    if job.source.kernel
+    if job.config.kernel
         # add metadata annotations for the assembler to the module
 
         # property annotations
@@ -206,29 +206,29 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                               ConstantInt(Int32(1); ctx)])
 
         ## expected CTA sizes
-        if job.target.minthreads !== nothing
+        if job.config.target.minthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
-                bound = dim <= length(job.target.minthreads) ? job.target.minthreads[dim] : 1
+                bound = dim <= length(job.config.target.minthreads) ? job.config.target.minthreads[dim] : 1
                 append!(annotations, [MDString("reqntid$name"; ctx),
                                       ConstantInt(Int32(bound); ctx)])
             end
         end
-        if job.target.maxthreads !== nothing
+        if job.config.target.maxthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
-                bound = dim <= length(job.target.maxthreads) ? job.target.maxthreads[dim] : 1
+                bound = dim <= length(job.config.target.maxthreads) ? job.config.target.maxthreads[dim] : 1
                 append!(annotations, [MDString("maxntid$name"; ctx),
                                       ConstantInt(Int32(bound); ctx)])
             end
         end
 
-        if job.target.blocks_per_sm !== nothing
+        if job.config.target.blocks_per_sm !== nothing
             append!(annotations, [MDString("minctasm"; ctx),
-                                  ConstantInt(Int32(job.target.blocks_per_sm); ctx)])
+                                  ConstantInt(Int32(job.config.target.blocks_per_sm); ctx)])
         end
 
-        if job.target.maxregs !== nothing
+        if job.config.target.maxregs !== nothing
             append!(annotations, [MDString("maxnreg"; ctx),
-                                  ConstantInt(Int32(job.target.maxregs); ctx)])
+                                  ConstantInt(Int32(job.config.target.maxregs); ctx)])
         end
 
         push!(metadata(mod)["nvvm.annotations"], MDNode(annotations; ctx))
@@ -239,7 +239,7 @@ end
 
 function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     # allow overriding the debug info from CUDA.jl
-    if job.target.debuginfo
+    if job.config.target.debuginfo
         invoke(llvm_debug_info, Tuple{CompilerJob}, job)
     else
         LLVM.API.LLVMDebugEmissionKindNoDebug
@@ -373,7 +373,7 @@ function hide_trap!(mod::LLVM.Module)
 
     # inline assembly to exit a thread, hiding control flow from LLVM
     exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
-    exit = if job.target.exitable
+    exit = if job.config.target.exitable
         InlineAsm(exit_ft, "exit;", "", true)
     else
         InlineAsm(exit_ft, "trap;", "", true)
@@ -459,7 +459,7 @@ function nvvm_reflect!(fun::LLVM.Function)
             # floating-point multiply-add operations (FMAD, FFMA, or DFMA)
             ConstantInt(reflect_typ, fast_math ? 1 : 0)
         elseif reflect_arg == "__CUDA_ARCH"
-            ConstantInt(reflect_typ, job.target.cap.major*100 + job.target.cap.minor*10)
+            ConstantInt(reflect_typ, job.config.target.cap.major*100 + job.config.target.cap.minor*10)
         else
             @warn "Unknown __nvvm_reflect argument: $reflect_arg. Please file an issue."
         end

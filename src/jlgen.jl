@@ -413,9 +413,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
             mod = LLVM.Module("start"; ctx=unwrap_context(ctx))
 
             # configure the module
-            triple!(mod, llvm_triple(job.target))
-            if julia_datalayout(job.target) !== nothing
-                datalayout!(mod, julia_datalayout(job.target))
+            triple!(mod, llvm_triple(job.config.target))
+            if julia_datalayout(job.config.target) !== nothing
+                datalayout!(mod, julia_datalayout(job.config.target))
             end
             flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
                 Metadata(ConstantInt(Int32(4); ctx=unwrap_context(ctx)))
@@ -431,7 +431,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
                 @in_world job.source.world ccall(:jl_create_native, Ptr{Cvoid},
                       (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint),
                       [method_instance], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0)
-            elseif VERSION >= v"1.10.0-DEV.75" || v"1.9.0-alpha1.33" <= VERSION < v"1.10-"
+            elseif VERSION >= v"1.10.0-DEV.75"
                 @in_world job.source.world ccall(:jl_create_native, Ptr{Cvoid},
                       (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint),
                       [method_instance], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0)
@@ -522,9 +522,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob),
 
     if VERSION < v"1.9.0-DEV.516"
         # configure the module
-        triple!(llvm_mod, llvm_triple(job.target))
-        if julia_datalayout(job.target) !== nothing
-            datalayout!(llvm_mod, julia_datalayout(job.target))
+        triple!(llvm_mod, llvm_triple(job.config.target))
+        if julia_datalayout(job.config.target) !== nothing
+            datalayout!(llvm_mod, julia_datalayout(job.config.target))
         end
     end
 

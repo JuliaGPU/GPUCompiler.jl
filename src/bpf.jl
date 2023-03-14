@@ -32,4 +32,4 @@ const bpf_intrinsics = () # TODO
 isintrinsic(::CompilerJob{BPFCompilerTarget}, fn::String) = in(fn, bpf_intrinsics)
 
 valid_function_pointer(job::CompilerJob{BPFCompilerTarget}, ptr::Ptr{Cvoid}) =
-    reinterpret(UInt, ptr) in job.target.function_pointers
+    reinterpret(UInt, ptr) in job.config.target.function_pointers
