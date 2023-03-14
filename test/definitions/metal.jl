@@ -13,7 +13,7 @@ function metal_job(@nospecialize(func), @nospecialize(types);
     target = MetalCompilerTarget(; macos=v"12.2")
     params = TestCompilerParams()
     config = CompilerConfig(target, params; kernel, always_inline)
-    CompilerJob(config, source), kwargs
+    CompilerJob(source, config), kwargs
 end
 
 function metal_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)

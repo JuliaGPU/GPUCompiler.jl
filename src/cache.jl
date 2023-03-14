@@ -170,7 +170,7 @@ end
                                       ft::Type, tt::Type, world,
                                       compiler::Function, linker::Function)
     src = FunctionSpec(ft, tt, world)
-    job = CompilerJob(cfg, src)
+    job = CompilerJob(src, cfg)
 
     asm = nothing
     # TODO: consider loading the assembly from an on-disk cache here

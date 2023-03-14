@@ -13,7 +13,7 @@ function gcn_job(@nospecialize(func), @nospecialize(types);
     target = GCNCompilerTarget(dev_isa="gfx900")
     params = TestCompilerParams()
     config = CompilerConfig(target, params; kernel, always_inline)
-    CompilerJob(config, source), kwargs
+    CompilerJob(source, config), kwargs
 end
 
 function gcn_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)

@@ -46,7 +46,7 @@ function ptx_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                                blocks_per_sm, maxregs)
     params = TestCompilerParams()
     config = CompilerConfig(target, params; kernel, always_inline)
-    CompilerJob(config, source), kwargs
+    CompilerJob(source, config), kwargs
 end
 
 function ptx_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)

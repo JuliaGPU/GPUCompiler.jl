@@ -20,7 +20,7 @@ function main()
     target = NativeCompilerTarget()
     params = TestCompilerParams()
     config = CompilerConfig(target, params)
-    job = CompilerJob(config, source)
+    job = CompilerJob(source, config)
 
     println(GPUCompiler.compile(:asm, job)[1])
 end
