@@ -201,7 +201,12 @@ end
 
 @generated function deferred_codegen(::Val{ft}, ::Val{tt}) where {ft,tt}
     id = length(deferred_codegen_jobs) + 1
-    deferred_codegen_jobs[id] = FunctionSpec(ft, tt)
+    deferred_codegen_jobs[id] = FunctionSpec(ft, tt, 0)
+    # don't bother looking up the method's world, as we'll override it during codegen.
+    #
+    # this also works around an issue on <1.10, where we don't know the world age of
+    # generated functions so use the current world counter, which may be too new
+    # for the world we're compiling for.
 
     pseudo_ptr = reinterpret(Ptr{Cvoid}, id)
     quote
