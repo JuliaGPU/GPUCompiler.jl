@@ -9,6 +9,8 @@ using ExprTools: splitdef, combinedef
 
 using Libdl
 
+using Scratch: @get_scratch!
+
 include("utils.jl")
 
 # compiler interface and implementations
@@ -43,6 +45,8 @@ _precompile_()
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
+
+    global compile_cache = @get_scratch!("compiled")
 end
 
 end # module
