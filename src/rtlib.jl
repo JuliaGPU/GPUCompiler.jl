@@ -15,16 +15,6 @@ end
 # GPU run-time library
 #
 
-# get the path to a directory where we can put cache files (machine-specific, ephemeral)
-# NOTE: maybe we should use XDG_CACHE_PATH/%LOCALAPPDATA%, but other Julia cache files
-#       are put in .julia anyway so let's just follow suit for now.
-function cachedir(depot=DEPOT_PATH[1])
-    # this mimicks Base.compilecache. we can't just call the function, or we might actually
-    # _generate_ a cache file, e.g., when running with `--compiled-modules=no`.
-    entrypath, entryfile = Base.cache_file_entry(Base.PkgId(GPUCompiler))
-    abspath(depot, entrypath, entryfile)
-end
-
 
 ## higher-level functionality to work with runtime functions
 
@@ -125,30 +115,9 @@ const runtime_lock = ReentrantLock()
 
 @locked function load_runtime(@nospecialize(job::CompilerJob); ctx)
     lock(runtime_lock) do
-        # find the first existing cache directory (for when dealing with layered depots)
-        cachedirs = [cachedir(depot) for depot in DEPOT_PATH]
-        filter!(isdir, cachedirs)
-        input_dir = if isempty(cachedirs)
-            nothing
-        else
-            first(cachedirs)
-        end
-
-        # we are only guaranteed to be able to write in the current depot
-        output_dir = cachedir()
-
-        # if both aren't equal, copy pregenerated runtime libraries to our depot
-        # NOTE: we don't just lazily read from the one and write to the other, because
-        #       once we generate additional runtimes in the output dir we don't know if
-        #       it's safe to load from other layers (since those could have been invalidated)
-        if input_dir !== nothing && input_dir != output_dir
-            mkpath(dirname(output_dir))
-            cp(input_dir, output_dir)
-        end
-
         slug = runtime_slug(job)
         name = "runtime_$(slug).bc"
-        path = joinpath(output_dir, name)
+        path = joinpath(compile_cache, name)
 
         lib = try
             if ispath(path)
@@ -163,7 +132,7 @@ const runtime_lock = ReentrantLock()
 
         if lib === nothing
             @debug "Building the GPU runtime library at $path"
-            mkpath(output_dir)
+            mkpath(compile_cache)
             lib = build_runtime(job; ctx)
 
             # atomic write to disk
@@ -181,10 +150,7 @@ end
 # NOTE: call this function from global scope, so any change triggers recompilation.
 function reset_runtime()
     lock(runtime_lock) do
-        rm(cachedir(); recursive=true, force=true)
-        # create an empty cache directory. since we only ever load from the first existing cachedir,
-        # this effectively invalidates preexisting caches in lower layers of the depot.
-        mkpath(cachedir())
+        rm(compile_cache; recursive=true, force=true)
     end
 
     return
