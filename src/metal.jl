@@ -723,5 +723,8 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     air_lang_md = MDNode(air_lang_md; ctx)
     push!(metadata(mod)["air.language_version"], air_lang_md)
 
+    # set sdk version
+    sdk_version!(mod, job.config.target.macos)
+
     return
 end
