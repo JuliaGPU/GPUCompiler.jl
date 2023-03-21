@@ -436,7 +436,8 @@ function nvvm_reflect!(fun::LLVM.Function)
         end
         isa(sym, LLVM.GlobalVariable) || error("Format of __nvvm__reflect function not recognized")
         sym_op = operands(sym)[1]
-        isa(sym_op, LLVM.ConstantArray) || error("Format of __nvvm__reflect function not recognized")
+        isa(sym_op, LLVM.ConstantArray) || isa(sym_op, LLVM.ConstantDataArray) ||
+            error("Format of __nvvm__reflect function not recognized")
         chars = convert.(Ref(UInt8), collect(sym_op))
         reflect_arg = String(chars[1:end-1])
 
