@@ -15,7 +15,7 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [compat]
 ExprTools = "0.1"
-LLVM = "5"
+LLVM = "5, 4"
 Scratch = "1"
 TimerOutputs = "0.5"
 julia = "1.6"
