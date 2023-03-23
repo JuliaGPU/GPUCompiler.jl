@@ -157,7 +157,7 @@ function set_cache_key(key)
 end
 
 key(ver::VersionNumber) = "$(ver.major)_$(ver.minor)_$(ver.patch)"
-cache_path() = @get_scratch!(cache_key * "-kernels-" * key(VERSION) * "-" * key(pkg_version))
+cache_path() = @get_scratch!(cache_key * "-kernels-" * key(VERSION) * "-" * key(Base.pkgversion(@__MODULE__)))
 clear_disk_cache!() = rm(cache_path(); recursive=true, force=true)
 
 const cache_lock = ReentrantLock()
