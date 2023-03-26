@@ -127,8 +127,8 @@ end
                 true)))
 end
 
-const disk_cache = parse(Bool, @load_preference("disk_cache", "false"))
-const cache_key = @load_preference("cache_key", "")
+disk_cache() = parse(Bool, @load_preference("disk_cache", "false"))
+cache_key() = @load_preference("cache_key", "")
 
 """
     enable_cache!(state=true)
@@ -157,7 +157,7 @@ function set_cache_key(key)
 end
 
 key(ver::VersionNumber) = "$(ver.major)_$(ver.minor)_$(ver.patch)"
-cache_path() = @get_scratch!(cache_key * "-kernels-" * key(VERSION) * "-" * key(Base.pkgversion(@__MODULE__)))
+cache_path() = @get_scratch!(cache_key() * "-kernels-" * key(VERSION) * "-" * key(Base.pkgversion(@__MODULE__)))
 clear_disk_cache!() = rm(cache_path(); recursive=true, force=true)
 
 const cache_lock = ReentrantLock()
@@ -207,7 +207,7 @@ end
 
     asm = nothing
     # can we load from the disk cache?
-    if disk_cache
+    if disk_cache()
         path = joinpath(cache_path(), "$key.jls")
         if isfile(path)
             try
