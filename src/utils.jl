@@ -113,3 +113,17 @@ macro unlocked(ex)
     end
     esc(combinedef(def))
 end
+
+struct ValableVersionNumber
+    major::UInt32
+    minor::UInt32
+    patch::UInt32
+end
+function Base.convert(::Type{ValableVersionNumber}, v::VersionNumber)
+	@assert v.build == ()
+	@assert v.prerelease == ()
+	ValableVersionNumber(v.major, v.minor, v.patch)
+end
+function VersionNumber(v::ValableVersionNumber)
+	VersionNumber(v.major, v.minor, v.patch)
+end

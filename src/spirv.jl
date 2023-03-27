@@ -12,7 +12,7 @@ const SPIRV_Tools_jll = LazyModule("SPIRV_Tools_jll", UUID("6ac6d60f-d740-5983-9
 
 export SPIRVCompilerTarget
 
-Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
+struct SPIRVCompilerTarget <: AbstractCompilerTarget
 end
 
 llvm_triple(::SPIRVCompilerTarget) = Int===Int64 ? "spir64-unknown-unknown" : "spirv-unknown-unknown"

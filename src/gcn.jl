@@ -4,11 +4,15 @@
 
 export GCNCompilerTarget
 
-Base.@kwdef struct GCNCompilerTarget <: AbstractCompilerTarget
-    dev_isa::String
-    features::String=""
+struct GCNCompilerTarget <: AbstractCompilerTarget
+    dev_isa::Symbol
+    features::Symbol
 end
-GCNCompilerTarget(dev_isa; features="") = GCNCompilerTarget(dev_isa, features)
+GCNCompilerTarget(dev_isa; features="") = GCNCompilerTarget(Symbol(dev_isa), Symbol(features))
+function GCNCompilerTarget(;dev_isa=nothing, features="")
+    @assert dev_isa !== nothing
+    GCNCompilerTarget(Symbol(dev_isa), Symbol(features))
+end
 
 llvm_triple(::GCNCompilerTarget) = "amdgcn-amd-amdhsa"
 
@@ -16,8 +20,8 @@ function llvm_machine(target::GCNCompilerTarget)
     triple = llvm_triple(target)
     t = Target(triple=triple)
 
-    cpu = target.dev_isa
-    feat = target.features
+    cpu = String(target.dev_isa)
+    feat = String(target.features)
     reloc = LLVM.API.LLVMRelocPIC
     tm = TargetMachine(t, triple, cpu, feat; reloc)
     asm_verbosity!(tm, true)

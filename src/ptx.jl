@@ -5,8 +5,8 @@
 export PTXCompilerTarget
 
 Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
-    cap::VersionNumber
-    ptx::VersionNumber = v"6.0" # for compatibility with older versions of CUDA.jl
+    cap::ValableVersionNumber
+    ptx::ValableVersionNumber = v"6.0" # for compatibility with older versions of CUDA.jl
 
     # codegen quirks
     ## can we emit debug info in the PTX assembly?

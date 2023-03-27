@@ -7,7 +7,7 @@ const Metal_LLVM_Tools_jll = LazyModule("Metal_LLVM_Tools_jll", UUID("0418c028-f
 export MetalCompilerTarget
 
 Base.@kwdef struct MetalCompilerTarget <: AbstractCompilerTarget
-    macos::VersionNumber
+    macos::ValableVersionNumber
 end
 
 function Base.hash(target::MetalCompilerTarget, h::UInt)
@@ -724,7 +724,7 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(metadata(mod)["air.language_version"], air_lang_md)
 
     # set sdk version
-    sdk_version!(mod, job.config.target.macos)
+    sdk_version!(mod, VersionNumber(job.config.target.macos))
 
     return
 end
