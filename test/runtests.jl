@@ -30,7 +30,7 @@ include("examples.jl")
 haskey(ENV, "CI") && GPUCompiler.timings()
 
 @testset "Disk cache" begin
-    @test GPUCompiler.disk_cache == false
+    @test GPUCompiler.disk_cache() == false
 
     cmd = Base.julia_cmd()
     if Base.JLOptions().project != C_NULL

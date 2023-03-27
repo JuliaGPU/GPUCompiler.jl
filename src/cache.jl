@@ -227,7 +227,7 @@ end
 
         asm = compiler(job)
 
-        if disk_cache && !isfile(path)
+        if disk_cache() && !isfile(path)
             serialize(path, asm)
         end
     end

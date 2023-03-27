@@ -5,7 +5,7 @@ const TOTAL_KERNELS = 1
 
 clear = parse(Bool, ARGS[1])
 
-@test GPUCompiler.disk_cache == true
+@test GPUCompiler.disk_cache() == true
 
 if clear
     GPUCompiler.clear_disk_cache!()
