@@ -47,8 +47,11 @@ function _generated_ex(world, source, ex)
     stub(world, source, ex)
 end
 
-function get_world_generator(world::UInt, source, self, ::Type{Type{ft}}, ::Type{Type{tt}}) where {ft, tt}
+function get_world_generator(world::UInt, source, self, ft::Type, tt::Type)
     @nospecialize
+    @assert Core.Compiler.isType(ft) && Core.Compiler.isType(tt)
+    ft = ft.parameters[1]
+    tt = tt.parameters[1]
 
     # look up the method
     method_error = :(throw(MethodError(ft, tt, $world)))
@@ -118,8 +121,11 @@ else
 # on older versions of Julia we fall back to looking up the current world. this may be wrong
 # when the generator is invoked in a different world (TODO: when does this happen?)
 
-function get_world_generator(self, ::Type{Type{ft}}, ::Type{Type{tt}}) where {ft, tt}
+function get_world_generator(self, ft::Type, tt::Type)
     @nospecialize
+    @assert Core.Compiler.isType(ft) && Core.Compiler.isType(tt)
+    ft = ft.parameters[1]
+    tt = tt.parameters[1]
 
     # look up the method
     method_error = :(throw(MethodError(ft, tt)))
