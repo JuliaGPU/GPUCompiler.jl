@@ -301,7 +301,7 @@ function hide_unreachable!(fun::LLVM.Function)
                 # TODO: `unreachable; unreachable`
             catch ex
                 isa(ex, UndefRefError) || rethrow(ex)
-                @dispose builder=Builder(ctx) begin
+                @dispose builder=IRBuilder(ctx) begin
                     position!(builder, bb)
 
                     # find the strict predecessors to this block
@@ -335,7 +335,7 @@ function hide_unreachable!(fun::LLVM.Function)
 
     # apply the pending terminator rewrites
     @timeit_debug to "replace" if !isempty(worklist)
-        let builder = Builder(ctx)
+        let builder = IRBuilder(ctx)
             for (bb, fallthrough) in worklist
                 position!(builder, bb)
                 if fallthrough !== nothing
@@ -343,8 +343,8 @@ function hide_unreachable!(fun::LLVM.Function)
                 else
                     # couldn't find any other successor. this happens with functions
                     # that only contain a single block, or when the block is dead.
-                    ft = eltype(llvmtype(fun))
-                    if LLVM.return_type(ft) == LLVM.VoidType(ctx)
+                    ft = function_type(fun)
+                    if return_type(ft) == LLVM.VoidType(ctx)
                         # even though returning can lead to invalid control flow,
                         # it mostly happens with functions that just throw,
                         # and leaving the unreachable there would make the optimizer
@@ -385,9 +385,9 @@ function hide_trap!(mod::LLVM.Module)
         for use in uses(trap)
             val = user(use)
             if isa(val, LLVM.CallInst)
-                @dispose builder=Builder(ctx) begin
+                @dispose builder=IRBuilder(ctx) begin
                     position!(builder, val)
-                    call!(builder, exit)
+                    call!(builder, exit_ft, exit)
                 end
                 unsafe_delete!(LLVM.parent(val), val)
                 changed = true
@@ -415,9 +415,9 @@ function nvvm_reflect!(fun::LLVM.Function)
     # find and sanity check the nnvm-reflect function
     # TODO: also handle the llvm.nvvm.reflect intrinsic
     haskey(LLVM.functions(mod), NVVM_REFLECT_FUNCTION) || return false
-    reflect_function = LLVM.functions(mod)[NVVM_REFLECT_FUNCTION]
+    reflect_function = functions(mod)[NVVM_REFLECT_FUNCTION]
     isdeclaration(reflect_function) || error("_reflect function should not have a body")
-    reflect_typ = LLVM.return_type(eltype(llvmtype(reflect_function)))
+    reflect_typ = return_type(function_type(reflect_function))
     isa(reflect_typ, LLVM.IntegerType) || error("_reflect's return type should be integer")
 
     to_remove = []

@@ -69,7 +69,7 @@ function validate_module(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module
     T_double = LLVM.DoubleType(context(mod))
 
     for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
-        if llvmtype(inst) == T_double || any(param->llvmtype(param) == T_double, operands(inst))
+        if value_type(inst) == T_double || any(param->value_type(param) == T_double, operands(inst))
             bt = backtrace(inst)
             push!(errors, ("use of double floating-point value", bt, inst))
         end
@@ -158,7 +158,7 @@ end
 # want to execute it earlier, adapt remapType to rewrite all pointer types.
 function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
-    ft = eltype(llvmtype(f))
+    ft = function_type(f)
 
     # find the byref parameters
     byref = BitVector(undef, length(parameters(ft)))
@@ -193,7 +193,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
             push!(new_types, param)
         end
     end
-    new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_types)
+    new_ft = LLVM.FunctionType(return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
     for (arg, new_arg) in zip(parameters(f), parameters(new_f))
@@ -206,7 +206,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     # so instead, we load the arguments in stack slots and dereference them so that we can
     # keep on using the original IR that assumed pointers without address spaces
     new_args = LLVM.Value[]
-    @dispose builder=Builder(ctx) begin
+    @dispose builder=IRBuilder(ctx) begin
         entry = BasicBlock(new_f, "conversion"; ctx)
         position!(builder, entry)
 
@@ -214,7 +214,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
         for (i, param) in enumerate(parameters(ft))
             if byref[i]
                 # load the argument in a stack slot
-                val = load!(builder, parameters(new_f)[i])
+                val = load!(builder, eltype(parameters(new_ft)[i]), parameters(new_f)[i])
                 ptr = alloca!(builder, eltype(param))
                 store!(builder, val, ptr)
                 push!(new_args, ptr)
@@ -265,8 +265,8 @@ end
 # Metal doesn't support passing valuse, so we need to convert those to references instead
 function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ctx = context(mod)
-    ft = eltype(llvmtype(f))
-    @compiler_assert LLVM.return_type(ft) == LLVM.VoidType(ctx) job
+    ft = function_type(f)
+    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
 
     # generate the new function type & definition
     args = classify_arguments(job, ft)
@@ -282,7 +282,7 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
             bits_as_reference[arg.codegen.i] = false
         end
     end
-    new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_types)
+    new_ft = LLVM.FunctionType(return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
     for (i, (arg, new_arg)) in enumerate(zip(parameters(f), parameters(new_f)))
@@ -291,7 +291,7 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
 
     # emit IR performing the "conversions"
     new_args = LLVM.Value[]
-    @dispose builder=Builder(ctx) begin
+    @dispose builder=IRBuilder(ctx) begin
         entry = BasicBlock(new_f, "entry"; ctx)
         position!(builder, entry)
 
@@ -300,7 +300,8 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
             if arg.cc != GHOST
                 if bits_as_reference[arg.codegen.i]
                     # load the reference to get a value back
-                    val = load!(builder, parameters(new_f)[arg.codegen.i])
+                    val = load!(builder, eltype(parameters(new_ft)[arg.codegen.i]),
+                                parameters(new_f)[arg.codegen.i])
                     push!(new_args, val)
                 else
                     push!(new_args, parameters(new_f)[arg.codegen.i])
@@ -433,7 +434,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in worklist
         fn = LLVM.name(f)
-        ft = eltype(llvmtype(f))
+        ft = function_type(f)
         LLVM.name!(f, fn * ".orig")
         # create a new function
         new_param_types = LLVMType[parameters(ft)...]
@@ -442,7 +443,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].typ; ctx)
             push!(new_param_types, llvm_typ)
         end
-        new_ft = LLVM.FunctionType(LLVM.return_type(ft), new_param_types)
+        new_ft = LLVM.FunctionType(return_type(ft), new_param_types)
         new_f = LLVM.Function(mod, fn, new_ft)
         linkage!(new_f, linkage(f))
         for (arg, new_arg) in zip(parameters(f), parameters(new_f))
@@ -488,7 +489,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # update other uses of the old function, modifying call sites to pass the arguments
     function rewrite_uses!(f, new_f)
         # update uses
-        @dispose builder=Builder(ctx) begin
+        @dispose builder=IRBuilder(ctx) begin
             for use in uses(f)
                 val = user(use)
                 if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
@@ -496,7 +497,9 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     # forward the arguments
                     position!(builder, val)
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, new_f, [arguments(val)..., parameters(callee_f)[end-nargs+1:end]...], operand_bundles(val))
+                        call!(builder, function_type(new_f), new_f,
+                              [arguments(val)..., parameters(callee_f)[end-nargs+1:end]...],
+                              operand_bundles(val))
                     else
                         # TODO: invoke and callbr
                         error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
@@ -510,7 +513,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     # XXX: why isn't this caught by the value materializer above?
                     target = operands(val)[1]
                     @assert target == f
-                    new_val = LLVM.const_bitcast(new_f, llvmtype(val))
+                    new_val = LLVM.const_bitcast(new_f, value_type(val))
                     rewrite_uses!(val, new_val)
                     # we can't simply replace this constant expression, as it may be used
                     # as a call, taking arguments (so we need to rewrite it to pass the input arguments)
@@ -567,7 +570,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     arg_infos = Metadata[]
 
     # Iterate through arguments and create metadata for them
-    args = classify_arguments(job, eltype(llvmtype(entry)))
+    args = classify_arguments(job, function_type(entry))
     i = 1
     for arg in args
         haskey(arg, :codegen) || continue
@@ -625,7 +628,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(arg_info, MDString("air.$intr_fn" ; ctx))
 
         push!(arg_info, MDString("air.arg_type_name" ; ctx))
-        push!(arg_info, MDString(argument_type_name(llvmtype(intr_arg)); ctx))
+        push!(arg_info, MDString(argument_type_name(value_type(intr_arg)); ctx))
 
         arg_info = MDNode(arg_info; ctx)
         push!(arg_infos, arg_info)

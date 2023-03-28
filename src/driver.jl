@@ -302,7 +302,7 @@ const __llvm_initialized = Ref(false)
                 # insert a pointer to the function everywhere the entry is used
                 T_ptr = convert(LLVMType, Ptr{Cvoid}; ctx=unwrap_context(ctx))
                 for call in worklist[dyn_job]
-                    @dispose builder=Builder(unwrap_context(ctx)) begin
+                    @dispose builder=IRBuilder(unwrap_context(ctx)) begin
                         position!(builder, call)
                         fptr = ptrtoint!(builder, dyn_entry, T_ptr)
                         replace_uses!(call, fptr)
