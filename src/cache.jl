@@ -51,6 +51,8 @@ function get_world_generator(world::UInt, source, self, ::Type{Type{ft}}, ::Type
     @nospecialize
 
     # look up the method
+    method_error = :(throw(MethodError(ft, tt, $world)))
+    Base.isdispatchtuple(tt) || return _generated_ex(world, source, :(error("$tt is not a dispatch tuple")))
     sig = Tuple{ft, tt.parameters...}
     min_world = Ref{UInt}(typemin(UInt))
     max_world = Ref{UInt}(typemax(UInt))
@@ -65,11 +67,7 @@ function get_world_generator(world::UInt, source, self, ::Type{Type{ft}}, ::Type
                                world, #=ambig=# false,
                                min_world, max_world, has_ambig)
     end
-
-    # check the validity of the method matches
-    method_error = :(throw(MethodError(ft, tt, $world)))
     mthds === nothing && return _generated_ex(world, source, method_error)
-    Base.isdispatchtuple(tt) || return _generated_ex(world, source, :(error("$tt is not a dispatch tuple")))
     length(mthds) == 1 || return _generated_ex(world, source, method_error)
 
     # look up the method and code instance
@@ -124,6 +122,8 @@ function get_world_generator(self, ::Type{Type{ft}}, ::Type{Type{tt}}) where {ft
     @nospecialize
 
     # look up the method
+    method_error = :(throw(MethodError(ft, tt)))
+    Base.isdispatchtuple(tt) || return(:(error("$tt is not a dispatch tuple")))
     sig = Tuple{ft, tt.parameters...}
     min_world = Ref{UInt}(typemin(UInt))
     max_world = Ref{UInt}(typemax(UInt))
@@ -139,11 +139,7 @@ function get_world_generator(self, ::Type{Type{ft}}, ::Type{Type{tt}}) where {ft
                                min_world, max_world, has_ambig)
     end
     # XXX: using world=-1 is wrong, but the current world isn't exposed to this generator
-
-    # check the validity of the method matches
-    method_error = :(throw(MethodError(ft, tt)))
     mthds === nothing && return method_error
-    Base.isdispatchtuple(tt) || return(:(error("$tt is not a dispatch tuple")))
     length(mthds) == 1 || return method_error
 
     # look up the method and code instance
