@@ -9,7 +9,7 @@ end
 
 function spirv_job(@nospecialize(func), @nospecialize(types);
                    kernel::Bool=false, always_inline=false, kwargs...)
-    source = FunctionSpec(typeof(func), Base.to_tuple_type(types))
+    source = methodinstance(typeof(func), Base.to_tuple_type(types))
     target = SPIRVCompilerTarget()
     params = TestCompilerParams()
     config = CompilerConfig(target, params; kernel, always_inline)

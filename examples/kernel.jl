@@ -16,7 +16,7 @@ GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntim
 kernel() = nothing
 
 function main()
-    source = FunctionSpec(typeof(kernel), Tuple{})
+    source = methodinstance(typeof(kernel), Tuple{})
     target = NativeCompilerTarget()
     params = TestCompilerParams()
     config = CompilerConfig(target, params)

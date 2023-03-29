@@ -13,32 +13,19 @@ function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
     return methods
 end
 
-function return_type(m::Core.MethodMatch; interp::AbstractInterpreter)
-    ty = Core.Compiler.typeinf_type(interp, m.method, m.spec_types, m.sparams)
+function return_type(mi::MethodInstance; interp::AbstractInterpreter)
+    ty = Core.Compiler.typeinf_type(interp, mi.def, mi.specTypes, mi.sparam_vals)
     return something(ty, Any)
 end
 
-# create a MethodError from a function type
-# TODO: fix upstream
-function MethodError(ft::Type, tt::Type, world::Integer=typemax(UInt))
-    f = if isdefined(ft, :instance)
-        ft.instance
-    else
-        # HACK: dealing with a closure or something... let's do somthing really invalid,
-        #       which works because MethodError doesn't actually use the function
-        Ref{ft}()[]
-    end
-    Base.MethodError(f, tt, world)
-end
-
 function check_method(@nospecialize(job::CompilerJob))
-    isa(job.source.ft, Core.Builtin) &&
-        throw(KernelError(job, "function is not a generic function"))
+    ft = job.source.specTypes.parameters[1]
+    ft <: Core.Builtin && error("$(unsafe_function_from_type(ft)) is not a generic function")
 
-    # get the method
-    ms = method_matches(typed_signature(job); job.source.world)
-    if length(ms) != 1
-        throw(MethodError(job.source.ft, job.source.tt, job.source.world))
+    for sparam in job.source.sparam_vals
+        if sparam isa TypeVar
+            throw(KernelError(job, "method captures typevar '$sparam' (you probably use an unbound type variable)"))
+        end
     end
 
     # kernels can't return values
@@ -47,8 +34,8 @@ function check_method(@nospecialize(job::CompilerJob))
         mt = method_table(job)
         ip = inference_params(job)
         op = optimization_params(job)
-        interp = GPUInterpreter(cache, mt, job.source.world, ip, op)
-        rt = return_type(only(ms); interp)
+        interp = GPUInterpreter(cache, mt, job.world, ip, op)
+        rt = return_type(job.source; interp)
 
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
@@ -87,10 +74,14 @@ function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
 end
 
 function check_invocation(@nospecialize(job::CompilerJob))
+    sig = job.source.specTypes
+    ft = sig.parameters[1]
+    tt = Tuple{sig.parameters[2:end]...}
+
+    Base.isdispatchtuple(tt) || error("$tt is not a dispatch tuple")
+
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
-
-    sig = typed_signature(job)
 
     for (arg_i,dt) in enumerate(sig.parameters)
         isghosttype(dt) && continue

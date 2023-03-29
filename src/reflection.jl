@@ -49,35 +49,30 @@ include("reflection_compat.jl")
 # code_* replacements
 #
 
-@inline function typed_signature(@nospecialize(job::CompilerJob))
-    u = Base.unwrap_unionall(job.source.tt)
-    return Base.rewrap_unionall(Tuple{job.source.ft, u.parameters...}, job.source.tt)
+function code_lowered(@nospecialize(job::CompilerJob); kwargs...)
+    sig = job.source.specTypes  # XXX: can we just use the method instance?
+    code_lowered_by_type(sig; kwargs...)
 end
 
-code_lowered(@nospecialize(job::CompilerJob); kwargs...) =
-    code_lowered_by_type(typed_signature(job); kwargs...)
-
 function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
-    # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
-    tt = typed_signature(job)
+    sig = job.source.specTypes  # XXX: can we just use the method instance?
     if interactive
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         interp = get_interpreter(job)
         descend_code_typed = getfield(mod, :descend_code_typed)
-        descend_code_typed(tt; interp, kwargs...)
+        descend_code_typed(sig; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
-        Base.code_typed_by_type(tt; interp, kwargs...)
+        Base.code_typed_by_type(sig; interp, kwargs...)
     else
-        Base.code_typed_by_type(tt; kwargs...)
+        Base.code_typed_by_type(sig; kwargs...)
     end
 end
 
 function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
-    # TODO: use the compiler driver to get the Julia method instance (we might rewrite it)
-    tt = typed_signature(job)
+    sig = job.source.specTypes  # XXX: can we just use the method instance?
     if interactive
         @assert io == stdout
         # call Cthulhu without introducing a dependency on Cthulhu
@@ -85,12 +80,12 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         interp = get_interpreter(job)
         descend_code_warntype = getfield(mod, :descend_code_warntype)
-        descend_code_warntype(tt; interp, kwargs...)
+        descend_code_warntype(sig; interp, kwargs...)
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
-        code_warntype_by_type(io, tt; interp, kwargs...)
+        code_warntype_by_type(io, sig; interp, kwargs...)
     else
-        code_warntype_by_type(io, tt; kwargs...)
+        code_warntype_by_type(io, sig; kwargs...)
     end
 end
 code_warntype(@nospecialize(job::CompilerJob); kwargs...) = code_warntype(stdout, job; kwargs...)
@@ -312,7 +307,7 @@ Evaluates the expression `ex` and dumps all intermediate forms of code to the di
 macro device_code(ex...)
     localUnique = 1
     function hook(job::CompilerJob; dir::AbstractString)
-        name = nameof(job.source.ft)   # TODO: nameof(::FunctionSpec), supporting function types
+        name = job.source.def.name
         fn = "$(name)_$(localUnique)"
         mkpath(dir)
 

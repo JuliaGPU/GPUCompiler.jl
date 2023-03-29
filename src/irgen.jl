@@ -1,12 +1,11 @@
 # LLVM IR generation
 
-function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance;
-               ctx::JuliaContextType)
-    mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance; ctx)
+function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
+    mod, compiled = @timeit_debug to "emission" compile_method_instance(job; ctx)
     if job.config.entry_abi === :specfunc
-        entry_fn = compiled[method_instance].specfunc
+        entry_fn = compiled[job.source].specfunc
     else
-        entry_fn = compiled[method_instance].func
+        entry_fn = compiled[job.source].func
     end
 
     # clean up incompatibilities
@@ -64,19 +63,19 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
         LLVM.name!(entry, safe_name(string("julia_", job.config.name)))
     end
     if job.config.kernel
-        LLVM.name!(entry, mangle_call(entry, job.source.tt))
+        LLVM.name!(entry, mangle_call(entry, job.source.specTypes))
     end
     entry = process_entry!(job, mod, entry)
     if job.config.entry_abi === :specfunc
-        func = compiled[method_instance].func
+        func = compiled[job.source].func
         specfunc = LLVM.name(entry)
     else
         func = LLVM.name(entry)
-        specfunc = compiled[method_instance].specfunc
+        specfunc = compiled[job.source].specfunc
     end
 
-    compiled[method_instance] =
-        (; compiled[method_instance].ci, func, specfunc)
+    compiled[job.source] =
+        (; compiled[job.source].ci, func, specfunc)
 
     # minimal required optimization
     @timeit_debug to "rewrite" @dispose pm=ModulePassManager() begin
@@ -153,6 +152,7 @@ function mangle_param(t, substitutions)
     end
 end
 
+# TODO: tt is sug, drop f
 function mangle_call(f, tt)
     fn = safe_name(f)
     str = "_Z$(length(fn))$fn"
@@ -313,7 +313,7 @@ end
 end
 
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
-    source_sig = typed_signature(job)
+    source_sig = job.source.specTypes
 
     source_types = [source_sig.parameters...]
 
