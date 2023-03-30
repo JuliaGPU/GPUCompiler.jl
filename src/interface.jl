@@ -55,49 +55,6 @@ export AbstractCompilerParams
 abstract type AbstractCompilerParams end
 
 
-## function specification
-
-export FunctionSpec
-
-# what we'll be compiling
-
-struct FunctionSpec
-    ft::Type
-    tt::Type
-    world::UInt
-
-    FunctionSpec(ft::Type, tt::Type, world::Integer=get_world(ft, tt)) =
-        new(ft, tt, world)
-end
-
-# copy constructor
-FunctionSpec(spec::FunctionSpec; ft=spec.ft, tt=spec.tt, world=spec.world) =
-    FunctionSpec(ft, tt, world)
-
-function Base.hash(spec::FunctionSpec, h::UInt)
-    h = hash(spec.ft, h)
-    h = hash(spec.tt, h)
-    h = hash(spec.world, h)
-
-    return h
-end
-
-function signature(@nospecialize(spec::FunctionSpec))
-    fn = if spec.ft.name.mt == Symbol.name.mt
-        # uses shared method table, so name is not unique to this function type
-        nameof(spec.ft)
-    else
-        spec.ft.name.mt.name
-    end
-    args = join(spec.tt.parameters, ", ")
-    return "$fn($(join(spec.tt.parameters, ", ")))"
-end
-
-function Base.show(io::IO, @nospecialize(spec::FunctionSpec))
-    print(io, signature(spec), " in world ", spec.world)
-end
-
-
 ## config
 
 export CompilerConfig
@@ -178,14 +135,18 @@ end
 
 export CompilerJob
 
+using Core: MethodInstance
+
 # a specific invocation of the compiler, bundling everything needed to generate code
 
 struct CompilerJob{T,P}
-    source::FunctionSpec
+    source::MethodInstance
     config::CompilerConfig{T,P}
+    world::UInt
 
-    CompilerJob(src::FunctionSpec, cfg::CompilerConfig{T,P}) where {T,P} =
-        new{T,P}(src, cfg)
+    CompilerJob(src::MethodInstance, cfg::CompilerConfig{T,P},
+                world=tls_world_age()) where {T,P} =
+        new{T,P}(src, cfg, world)
 end
 
 
@@ -216,7 +177,8 @@ isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
 get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(ci_cache(job), method_table(job), job.source.world, inference_params(job), optimization_params(job))
+    GPUInterpreter(ci_cache(job), method_table(job), job.world,
+                   inference_params(job), optimization_params(job))
 
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime

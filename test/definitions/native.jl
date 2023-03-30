@@ -31,7 +31,7 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = TestRuntime
 function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                     entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
                     method_table=test_method_table, kwargs...)
-    source = FunctionSpec(typeof(func), Base.to_tuple_type(types))
+    source = methodinstance(typeof(func), Base.to_tuple_type(types))
     target = NativeCompilerTarget()
     params = NativeCompilerParams(entry_safepoint, method_table)
     config = CompilerConfig(target, params; kernel, entry_abi, always_inline)
@@ -264,14 +264,16 @@ module LazyCodegen
     import GPUCompiler: deferred_codegen_jobs
     import ..NativeCompilerParams
     @generated function deferred_codegen(f::F, ::Val{tt}, ::Val{world}) where {F,tt,world}
-        # manual version of native_job because we have a function type and world age
-        source = FunctionSpec(F, Base.to_tuple_type(tt), world)
+        # manual version of native_job because we have a function type
+        source = methodinstance(F, Base.to_tuple_type(tt), world)
         target = NativeCompilerTarget(; jlruntime=true, llvm_always_inline=true)
         # XXX: do we actually require the Julia runtime?
         #      with jlruntime=false, we reach an unreachable.
         params = NativeCompilerParams()
         config = CompilerConfig(target, params; kernel=false)
-        job = CompilerJob(source, config)
+        job = CompilerJob(source, config, world)
+        # XXX: invoking GPUCompiler from a generated function is not allowed!
+        #      for things to work, we need to forward the correct world, at least.
 
         addr = get_trampoline(job)
         trampoline = pointer(addr)
@@ -367,11 +369,10 @@ module LazyCodegen
         end
     end
 
-    import GPUCompiler: get_world
     @inline function call_delayed(f::F, args...) where F
         tt = Tuple{map(Core.Typeof, args)...}
         rt = Core.Compiler.return_type(f, tt)
-        world = get_world(F, tt)
+        world = GPUCompiler.codegen_world_age(F, tt)
         ptr = deferred_codegen(f, Val(tt), Val(world))
         abi_call(ptr, rt, tt, f, args...)
     end

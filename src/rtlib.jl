@@ -53,9 +53,9 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, config::CompilerConfig, f, method, world; ctx::JuliaContextType)
+function emit_function!(mod, config::CompilerConfig, f, method; ctx::JuliaContextType)
     tt = Base.to_tuple_type(method.types)
-    source = FunctionSpec(f, tt, world)
+    source = methodinstance(f, tt)
     new_mod, meta = codegen(:llvm, CompilerJob(source, config);
                             optimize=false, libraries=false, validate=false, ctx)
     ft = eltype(llvmtype(meta.entry))
@@ -100,7 +100,7 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
         else
             method.def
         end
-        emit_function!(mod, config, typeof(def), method, job.source.world; ctx)
+        emit_function!(mod, config, typeof(def), method; ctx)
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again

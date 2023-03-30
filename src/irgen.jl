@@ -1,12 +1,11 @@
 # LLVM IR generation
 
-function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInstance;
-               ctx::JuliaContextType)
-    mod, compiled = @timeit_debug to "emission" compile_method_instance(job, method_instance; ctx)
+function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
+    mod, compiled = @timeit_debug to "emission" compile_method_instance(job; ctx)
     if job.config.entry_abi === :specfunc
-        entry_fn = compiled[method_instance].specfunc
+        entry_fn = compiled[job.source].specfunc
     else
-        entry_fn = compiled[method_instance].func
+        entry_fn = compiled[job.source].func
     end
 
     # clean up incompatibilities
@@ -62,21 +61,20 @@ function irgen(@nospecialize(job::CompilerJob), method_instance::Core.MethodInst
     # rename and process the entry point
     if job.config.name !== nothing
         LLVM.name!(entry, safe_name(string("julia_", job.config.name)))
-    end
-    if job.config.kernel
-        LLVM.name!(entry, mangle_call(entry, job.source.tt))
+    elseif job.config.kernel
+        LLVM.name!(entry, mangle_sig(job.source.specTypes))
     end
     entry = process_entry!(job, mod, entry)
     if job.config.entry_abi === :specfunc
-        func = compiled[method_instance].func
+        func = compiled[job.source].func
         specfunc = LLVM.name(entry)
     else
         func = LLVM.name(entry)
-        specfunc = compiled[method_instance].specfunc
+        specfunc = compiled[job.source].specfunc
     end
 
-    compiled[method_instance] =
-        (; compiled[method_instance].ci, func, specfunc)
+    compiled[job.source] =
+        (; compiled[job.source].ci, func, specfunc)
 
     # minimal required optimization
     @timeit_debug to "rewrite" @dispose pm=ModulePassManager() begin
@@ -111,13 +109,13 @@ end
 # we generate function names that look like C++ functions, because many NVIDIA tools
 # support them, e.g., grouping different instantiations of the same kernel together.
 
-function mangle_param(t, substitutions)
+function mangle_param(t, substitutions=String[])
     t == Nothing && return "v"
 
     if isa(t, DataType) && t <: Ptr
         tn = mangle_param(eltype(t), substitutions)
         "P$tn"
-    elseif isa(t, DataType) || isa(t, Core.Function)
+    elseif isa(t, DataType)
         tn = safe_name(t)
 
         # handle substitutions
@@ -141,6 +139,30 @@ function mangle_param(t, substitutions)
         end
 
         str
+    elseif isa(t, Union)
+        tn = "Union"
+
+        # handle substitutions
+        sub = findfirst(isequal(tn), substitutions)
+        if sub === nothing
+            str = "$(length(tn))$tn"
+            push!(substitutions, tn)
+        elseif sub == 1
+            str = "S_"
+        else
+            str = "S$(sub-2)_"
+        end
+
+        # encode union types as template parameters
+        if !isempty(Base.uniontypes(t))
+            str *= "I"
+            for t in Base.uniontypes(t)
+                str *= mangle_param(t, substitutions)
+            end
+            str *= "E"
+        end
+
+        str
     elseif isa(t, Integer)
         t > 0 ? "Li$(t)E" : "Lin$(abs(t))E"
     else
@@ -153,12 +175,16 @@ function mangle_param(t, substitutions)
     end
 end
 
-function mangle_call(f, tt)
-    fn = safe_name(f)
+function mangle_sig(sig)
+    ft, tt... = sig.parameters
+
+    # mangle the function name
+    fn = safe_name(ft)
     str = "_Z$(length(fn))$fn"
 
+    # mangle each parameter
     substitutions = String[]
-    for t in tt.parameters
+    for t in tt
         str *= mangle_param(t, substitutions)
     end
 
@@ -166,9 +192,19 @@ function mangle_call(f, tt)
 end
 
 # make names safe for ptxas
-safe_name(fn::String) = replace(fn, r"[^A-Za-z0-9_]"=>"_")
-safe_name(f::Union{Core.Function,DataType}) = safe_name(String(nameof(f)))
-safe_name(f::LLVM.Function) = safe_name(LLVM.name(f))
+safe_name(fn::String) = replace(fn, r"[^A-Za-z0-9]"=>"_")
+safe_name(t::DataType) = safe_name(String(nameof(t)))
+function safe_name(t::Type{<:Function})
+    # like Base.nameof, but for function types
+    mt = t.name.mt
+    fn = if mt === Symbol.name.mt
+        # uses shared method table, so name is not unique to this function type
+        nameof(t)
+    else
+        mt.name
+    end
+    safe_name(string(fn))
+end
 safe_name(x) = safe_name(repr(x))
 
 
@@ -313,7 +349,7 @@ end
 end
 
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
-    source_sig = typed_signature(job)
+    source_sig = job.source.specTypes
 
     source_types = [source_sig.parameters...]
 

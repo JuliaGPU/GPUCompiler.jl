@@ -25,10 +25,10 @@ end
     end
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}))
-    @test occursin(r"@.*julia_kernel.+\(({ i64 }|\[1 x i64\])\* ", ir)
+    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\* ", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}; kernel=true))
-    @test occursin(r"@.*julia_kernel.+\(.*({ i64 }|\[1 x i64\]) ", ir)
+    @test occursin(r"@\w*kernel\w*\(.*({ i64 }|\[1 x i64\]) ", ir)
 end
 
 @testset "property_annotations" begin
@@ -83,10 +83,10 @@ end
     kernel() = return
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}))
-    @test any(occursin(r"@.*kernel.+\(\)", a) for a in split(ir, "\n"))
+    @test occursin(r"@\w*kernel\w*\(\)", ir)
 
     ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}; kernel=true))
-    @test any(occursin(r"@.*kernel.+\(\[1 x i64\] %state\)", a) for a in split(ir, "\n"))
+    @test occursin(r"@\w*kernel\w*\(\[1 x i64\] %state\)", ir)
 
     # state should only passed to device functions that use it
 
@@ -106,16 +106,16 @@ end
                                   kernel=true, dump_module=true))
 
     # kernel should take state argument before all else
-    @test any(occursin(r"@.*kernel.+\(\[1 x i64\] %state", a) for a in split(ir, "\n"))
+    @test occursin(r"@\w*kernel\w*\(\[1 x i64\] %state", ir)
 
     # child1 doesn't use the state
-    @test any(occursin(r"@.*child1.+\(i64", a) for a in split(ir, "\n"))
+    @test occursin(r"@\w*child1\w*\(i64", ir)
 
     # child2 does
-    @test any(occursin(r"@.*child2.+\(\[1 x i64\] %state", a) for a in split(ir, "\n"))
+    @test occursin(r"@\w*child2\w*\(\[1 x i64\] %state", ir)
 
     # can't have the unlowered intrinsic
-    @test !any(occursin("julia.gpu.state_getter", a) for a in split(ir, "\n"))
+    @test !occursin("julia.gpu.state_getter", ir)
 end
 end
 
@@ -146,9 +146,9 @@ end
     end
 
     asm = sprint(io->ptx_code_native(io, entry, Tuple{Int64}; kernel=true))
-    @test occursin(r"\.visible \.entry .*julia_entry", asm)
-    @test !occursin(r"\.visible \.func .*julia_nonentry", asm)
-    @test occursin(r"\.func .*julia_nonentry", asm)
+    @test occursin(r"\.visible \.entry \w*entry", asm)
+    @test !occursin(r"\.visible \.func \w*nonentry", asm)
+    @test occursin(r"\.func \w*nonentry", asm)
 
 @testset "property_annotations" begin
     asm = sprint(io->ptx_code_native(io, entry, Tuple{Int64}; kernel=true))
@@ -185,7 +185,7 @@ end
     end
 
     asm = sprint(io->ptx_code_native(io, parent1, Tuple{Int}))
-    @test occursin(r".func julia_.*child_", asm)
+    @test occursin(r".func \w*child_", asm)
 
     function parent2(i)
         child(i+1)
@@ -193,7 +193,7 @@ end
     end
 
     asm = sprint(io->ptx_code_native(io, parent2, Tuple{Int}))
-    @test occursin(r".func julia_.*child_", asm)
+    @test occursin(r".func \w*child_", asm)
 end
 
 @testset "child function reuse bis" begin
