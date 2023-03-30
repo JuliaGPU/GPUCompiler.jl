@@ -50,10 +50,6 @@ end
 
     # compile
     if asm === nothing
-        if compile_hook[] !== nothing
-            compile_hook[](job)
-        end
-
         asm = compiler(job)
     end
 

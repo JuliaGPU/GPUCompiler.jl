@@ -140,7 +140,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
         asm, asm_meta = emit_asm(job, ir; strip, validate, format)
 
         if output == :asm || output == :obj
-            return asm, asm_meta
+            return asm, (; asm_meta..., ir_meta..., ir)
         end
 
 

@@ -147,7 +147,7 @@ end
 
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
-    obj, _ = codegen(:obj, job; strip=!raw, only_entry=!dump_module, validate=false)
+    obj, _ = compile(:obj, job; strip=!raw, only_entry=!dump_module, validate=false)
     mktemp() do input_path, input_io
         write(input_io, obj)
         flush(input_io)
