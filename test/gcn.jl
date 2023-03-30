@@ -84,9 +84,9 @@ end
     end
 
     asm = sprint(io->gcn_code_native(io, entry, Tuple{Int64}; dump_module=true, kernel=true))
-    @test occursin(r"\.amdhsa_kernel _Z\d*julia_entry", asm)
-    @test !occursin(r"\.amdhsa_kernel _Z\d*julia_nonentry", asm)
-    @test occursin(r"\.type.*julia_nonentry_\d*,@function", asm)
+    @test occursin(r"\.amdhsa_kernel \w*entry", asm)
+    @test !occursin(r"\.amdhsa_kernel \w*nonentry", asm)
+    @test occursin(r"\.type.*\w*nonentry\w*,@function", asm)
 end
 
 @testset "child function reuse" begin

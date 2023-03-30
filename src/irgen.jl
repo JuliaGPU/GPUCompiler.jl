@@ -61,9 +61,8 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
     # rename and process the entry point
     if job.config.name !== nothing
         LLVM.name!(entry, safe_name(string("julia_", job.config.name)))
-    end
-    if job.config.kernel
-        LLVM.name!(entry, mangle_call(entry, job.source.specTypes))
+    elseif job.config.kernel
+        LLVM.name!(entry, mangle_sig(job.source.specTypes))
     end
     entry = process_entry!(job, mod, entry)
     if job.config.entry_abi === :specfunc
@@ -110,13 +109,13 @@ end
 # we generate function names that look like C++ functions, because many NVIDIA tools
 # support them, e.g., grouping different instantiations of the same kernel together.
 
-function mangle_param(t, substitutions)
+function mangle_param(t, substitutions=String[])
     t == Nothing && return "v"
 
     if isa(t, DataType) && t <: Ptr
         tn = mangle_param(eltype(t), substitutions)
         "P$tn"
-    elseif isa(t, DataType) || isa(t, Core.Function)
+    elseif isa(t, DataType)
         tn = safe_name(t)
 
         # handle substitutions
@@ -140,6 +139,30 @@ function mangle_param(t, substitutions)
         end
 
         str
+    elseif isa(t, Union)
+        tn = "Union"
+
+        # handle substitutions
+        sub = findfirst(isequal(tn), substitutions)
+        if sub === nothing
+            str = "$(length(tn))$tn"
+            push!(substitutions, tn)
+        elseif sub == 1
+            str = "S_"
+        else
+            str = "S$(sub-2)_"
+        end
+
+        # encode union types as template parameters
+        if !isempty(Base.uniontypes(t))
+            str *= "I"
+            for t in Base.uniontypes(t)
+                str *= mangle_param(t, substitutions)
+            end
+            str *= "E"
+        end
+
+        str
     elseif isa(t, Integer)
         t > 0 ? "Li$(t)E" : "Lin$(abs(t))E"
     else
@@ -152,13 +175,16 @@ function mangle_param(t, substitutions)
     end
 end
 
-# TODO: tt is sug, drop f
-function mangle_call(f, tt)
-    fn = safe_name(f)
+function mangle_sig(sig)
+    ft, tt... = sig.parameters
+
+    # mangle the function name
+    fn = safe_name(ft)
     str = "_Z$(length(fn))$fn"
 
+    # mangle each parameter
     substitutions = String[]
-    for t in tt.parameters
+    for t in tt
         str *= mangle_param(t, substitutions)
     end
 
@@ -166,9 +192,19 @@ function mangle_call(f, tt)
 end
 
 # make names safe for ptxas
-safe_name(fn::String) = replace(fn, r"[^A-Za-z0-9_]"=>"_")
-safe_name(f::Union{Core.Function,DataType}) = safe_name(String(nameof(f)))
-safe_name(f::LLVM.Function) = safe_name(LLVM.name(f))
+safe_name(fn::String) = replace(fn, r"[^A-Za-z0-9]"=>"_")
+safe_name(t::DataType) = safe_name(String(nameof(t)))
+function safe_name(t::Type{<:Function})
+    # like Base.nameof, but for function types
+    mt = t.name.mt
+    fn = if mt === Symbol.name.mt
+        # uses shared method table, so name is not unique to this function type
+        nameof(t)
+    else
+        mt.name
+    end
+    safe_name(string(fn))
+end
 safe_name(x) = safe_name(repr(x))
 
 

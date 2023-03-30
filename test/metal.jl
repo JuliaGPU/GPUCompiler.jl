@@ -24,22 +24,22 @@ end
     kernel(x) = return
 
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Tuple{Int}}))
-    @test occursin(r"@.*julia.*kernel.*\(({ i64 }|\[1 x i64\])\*", ir)
+    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\*", ir)
 
     # for kernels, every pointer argument needs to take an address space
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Tuple{Int}}; kernel=true))
-    @test occursin(r"@.*julia.*kernel.*\(({ i64 }|\[1 x i64\]) addrspace\(1\)\*", ir)
+    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\]) addrspace\(1\)\*", ir)
 end
 
 @testset "byref primitives" begin
     kernel(x) = return
 
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Int}))
-    @test occursin(r"@.*julia.*kernel.*\(i64 ", ir)
+    @test occursin(r"@\w*kernel\w*\(i64 ", ir)
 
     # for kernels, every pointer argument needs to take an address space
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Int}; kernel=true))
-    @test occursin(r"@.*julia.*kernel.*\(i64 addrspace\(1\)\*", ir)
+    @test occursin(r"@\w*kernel\w*\(i64 addrspace\(1\)\*", ir)
 end
 
 @testset "module metadata" begin
@@ -71,11 +71,11 @@ end
     end
 
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}))
-    @test occursin(r"@.*julia.*kernel.*\(.* addrspace\(1\)\* %0\)", ir)
+    @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %0\)", ir)
     @test occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
 
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true))
-    @test occursin(r"@.*julia.*kernel.*\(.* addrspace\(1\)\* %0, i32 %thread_position_in_threadgroup\)", ir)
+    @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %0, i32 %thread_position_in_threadgroup\)", ir)
     @test !occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
 end
 
@@ -94,8 +94,8 @@ Sys.isapple() && @testset "asm" begin
                                     dump_module=true, kernel=true))
     @test occursin("[header]", asm)
     @test occursin("[program]", asm)
-    @test occursin(r"name: .*julia.*kernel.*", asm)
-    @test occursin(r"define void @.*julia.*kernel.*", asm)
+    @test occursin(r"name: \w*kernel\w*", asm)
+    @test occursin(r"define void @\w*kernel\w*", asm)
 end
 
 end
