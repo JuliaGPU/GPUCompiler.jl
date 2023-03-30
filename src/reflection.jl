@@ -122,7 +122,7 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true,
                    debuginfo::Symbol=:default, dump_module::Bool=false, kwargs...)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     str = JuliaContext() do ctx
-        ir, meta = codegen(:llvm, job; optimize=optimize, strip=false, validate=false, ctx, kwargs...)
+        ir, meta = compile(:llvm, job; optimize=optimize, strip=false, validate=false, ctx, kwargs...)
         @static if VERSION >= v"1.9.0-DEV.516"
             ts_mod = ThreadSafeModule(ir; ctx)
             if VERSION >= v"1.9.0-DEV.672"
@@ -169,7 +169,7 @@ The following keyword arguments are supported:
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, dump_module::Bool=false)
-    asm, meta = codegen(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
+    asm, meta = compile(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
     highlight(io, asm, source_code(job.config.target))
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =
@@ -184,17 +184,23 @@ function emit_hooked_compilation(inner_hook, ex...)
     user_code = ex[end]
     user_kwargs = ex[1:end-1]
     quote
-        local kernels = Set()
+        # we only want to invoke the hook once for every compilation job
+        jobs = Set()
         function outer_hook(job)
-            if !in(job, kernels)
-                $inner_hook(job; $(map(esc, user_kwargs)...))
-                push!(kernels, job)
+            if !in(job, jobs)
+                # the user hook might invoke the compiler again, so disable the hook
+                old_hook = $compile_hook[]
+                try
+                    $compile_hook[] = nothing
+                    $inner_hook(job; $(map(esc, user_kwargs)...))
+                finally
+                    $compile_hook[] = old_hook
+                end
+                push!(jobs, job)
             end
         end
 
-        if $compile_hook[] !== nothing
-            error("Chaining multiple @device_code calls is unsupported")
-        end
+        # now invoke the user code with this hook in place
         try
             $compile_hook[] = outer_hook
             $(esc(user_code))
@@ -202,7 +208,7 @@ function emit_hooked_compilation(inner_hook, ex...)
             $compile_hook[] = nothing
         end
 
-        if isempty(kernels)
+        if isempty(jobs)
             error("no kernels executed while evaluating the given expression")
         end
 

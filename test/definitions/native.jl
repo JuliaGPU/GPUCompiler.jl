@@ -115,7 +115,7 @@ module LazyCodegen
             job = cc.job
 
             entry_name, jitted_mod = JuliaContext() do ctx
-                ir, meta = GPUCompiler.codegen(:llvm, job; validate=false, ctx)
+                ir, meta = GPUCompiler.compile(:llvm, job; validate=false, ctx)
                 name(meta.entry), compile!(orc, ir)
             end
 
@@ -231,7 +231,7 @@ module LazyCodegen
 
             function materialize(mr)
                 JuliaContext() do ctx
-                    ir, meta = GPUCompiler.codegen(:llvm, job; validate=false, ctx)
+                    ir, meta = GPUCompiler.compile(:llvm, job; validate=false, ctx)
 
                     # Rename entry to match target_sym
                     LLVM.name!(meta.entry, target_sym)
