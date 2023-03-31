@@ -11,7 +11,7 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
     # clean up incompatibilities
     @timeit_debug to "clean-up" begin
         for llvmf in functions(mod)
-            if VERSION < v"1.9.0-DEV.516"
+            if VERSION < v"1.9" || Base.isdebugbuild()
                 # only occurs in debug builds
                 delete!(function_attributes(llvmf),
                         EnumAttribute("sspstrong", 0; ctx=unwrap_context(ctx)))
