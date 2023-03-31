@@ -265,7 +265,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     #LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
     #@dispose pm=ModulePassManager() begin
     #    addTargetPasses!(pm, tm, triple)
-    #    PassManager@dispose pmb=Builder() begin
+    #    PassManager@dispose pmb=IRBuilder() begin
     #        optlevel!(pmb, 2)
     #        populate!(pm, pmb)
     #    end
@@ -290,7 +290,7 @@ function cpu_features!(mod::LLVM.Module)
 
     # have_fma
     for f in functions(mod)
-        ft = eltype(llvmtype(f))
+        ft = function_type(f)
         fn = LLVM.name(f)
         startswith(fn, "julia.cpu.have_fma.") || continue
         typnam = fn[20:end]
@@ -303,7 +303,7 @@ function cpu_features!(mod::LLVM.Module)
             # warn?
             false
         end
-        has_fma = ConstantInt(LLVM.return_type(ft), has_fma)
+        has_fma = ConstantInt(return_type(ft), has_fma)
 
         # substitute all uses of the intrinsic with a constant
         materialized = LLVM.Value[]
@@ -342,8 +342,8 @@ function lower_gc_frame!(fun::LLVM.Function)
     # plain alloc
     if haskey(functions(mod), "julia.gc_alloc_obj")
         alloc_obj = functions(mod)["julia.gc_alloc_obj"]
-        alloc_obj_ft = eltype(llvmtype(alloc_obj))
-        T_prjlvalue = LLVM.return_type(alloc_obj_ft)
+        alloc_obj_ft = function_type(alloc_obj)
+        T_prjlvalue = return_type(alloc_obj_ft)
         T_pjlvalue = convert(LLVMType, Any; ctx, allow_boxed=true)
 
         for use in uses(alloc_obj)
@@ -354,7 +354,7 @@ function lower_gc_frame!(fun::LLVM.Function)
             sz = ops[2]
 
             # replace with PTX alloc_obj
-            @dispose builder=Builder(ctx) begin
+            @dispose builder=IRBuilder(ctx) begin
                 position!(builder, call)
                 ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz])
                 replace_uses!(call, ptr)

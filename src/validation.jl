@@ -13,7 +13,7 @@ function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
     return methods
 end
 
-function return_type(mi::MethodInstance; interp::AbstractInterpreter)
+function typeinf_type(mi::MethodInstance; interp::AbstractInterpreter)
     ty = Core.Compiler.typeinf_type(interp, mi.def, mi.specTypes, mi.sparam_vals)
     return something(ty, Any)
 end
@@ -35,7 +35,7 @@ function check_method(@nospecialize(job::CompilerJob))
         ip = inference_params(job)
         op = optimization_params(job)
         interp = GPUInterpreter(cache, mt, job.world, ip, op)
-        rt = return_type(job.source; interp)
+        rt = typeinf_type(job.source; interp)
 
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",

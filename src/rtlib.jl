@@ -27,7 +27,7 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     # get or create a function prototype
     if haskey(functions(mod), rt.llvm_name)
         f = functions(mod)[rt.llvm_name]
-        ft = eltype(llvmtype(f))
+        ft = function_type(f)
     else
         ft = convert(LLVM.FunctionType, rt; ctx)
         f = LLVM.Function(mod, rt.llvm_name, ft)
@@ -36,8 +36,8 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     # runtime functions are written in Julia, while we're calling from LLVM,
     # this often results in argument type mismatches. try to fix some here.
     for (i,arg) in enumerate(args)
-        if llvmtype(arg) != parameters(ft)[i]
-            if (llvmtype(arg) isa LLVM.PointerType) &&
+        if value_type(arg) != parameters(ft)[i]
+            if (value_type(arg) isa LLVM.PointerType) &&
                (parameters(ft)[i] isa LLVM.IntegerType)
                 # Julia pointers are passed as integers
                 args[i] = ptrtoint!(builder, args[i], parameters(ft)[i])
@@ -47,7 +47,7 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         end
     end
 
-    call!(builder, f, args)
+    call!(builder, ft, f, args)
 end
 
 
@@ -58,10 +58,10 @@ function emit_function!(mod, config::CompilerConfig, f, method; ctx::JuliaContex
     source = methodinstance(f, tt)
     new_mod, meta = codegen(:llvm, CompilerJob(source, config);
                             optimize=false, libraries=false, validate=false, ctx)
-    ft = eltype(llvmtype(meta.entry))
+    ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method; ctx=context(new_mod))
-    if LLVM.return_type(ft) != LLVM.return_type(expected_ft)
-        error("Invalid return type for runtime function '$(method.name)': expected $(LLVM.return_type(expected_ft)), got $(LLVM.return_type(ft))")
+    if return_type(ft) != return_type(expected_ft)
+        error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
@@ -79,7 +79,7 @@ function emit_function!(mod, config::CompilerConfig, f, method; ctx::JuliaContex
     name = method.llvm_name
     if haskey(functions(mod), name)
         decl = functions(mod)[name]
-        @assert llvmtype(decl) == llvmtype(entry)
+        @assert value_type(decl) == value_type(entry)
         replace_uses!(decl, entry)
         unsafe_delete!(mod, decl)
     end

@@ -155,13 +155,13 @@ const gc_bits = 0x3 # FIXME
                             LLVM.FunctionType(T_pjlvalue))
 
         # generate IR
-        @dispose builder=Builder(ctx) begin
+        @dispose builder=IRBuilder(ctx) begin
             entry = BasicBlock(llvm_f, "entry"; ctx)
             position!(builder, entry)
 
             typ_var = bitcast!(builder, typ, T_ptag)
 
-            tag = load!(builder, typ_var)
+            tag = load!(builder, T_tag, typ_var)
 
             ret!(builder, tag)
         end
