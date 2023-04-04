@@ -60,7 +60,7 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
 
     # rename and process the entry point
     if job.config.name !== nothing
-        LLVM.name!(entry, safe_name(string("julia_", job.config.name)))
+        LLVM.name!(entry, safe_name(job.config.name))
     elseif job.config.kernel
         LLVM.name!(entry, mangle_sig(job.source.specTypes))
     end
