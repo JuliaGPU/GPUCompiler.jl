@@ -62,7 +62,7 @@ export CompilerConfig
 # the configuration of the compiler
 
 """
-    CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, entry_name=nothing,
+    CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, name=nothing,
                                    always_inline=false)
 
 Construct a `CompilerConfig` that will be used to drive compilation for the given `target`
@@ -80,7 +80,7 @@ Several keyword arguments can be used to customize the compilation process:
    pointer to a vector of boxed Julia values and the third argument being the number of
    values, the return value will also be boxed. The `:func` abi will internally call the
    `:specfunc` abi, but is generally easier to invoke directly.
-- `entry_name`: the name that will be used for the entrypoint function. If `nothing` (the
+- `name`: the name that will be used for the entrypoint function. If `nothing` (the
    default), the name will be generated automatically.
 - `always_inline` specifies if the Julia front-end should inline all functions into one if
    possible.
