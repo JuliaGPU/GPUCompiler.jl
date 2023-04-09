@@ -106,5 +106,10 @@ function snapshot_cache(LOCAL_CACHE)
     cleaned_cache_to_save = IdDict()
     for key in keys(GPUCompiler.GLOBAL_CI_CACHES)
         # Will only keep those elements with infinite ranges
+        cleaned_cache_to_save[key] = GPUCompiler.CodeCache(GPUCompiler.GLOBAL_CI_CACHES[key])
+    end
+    global MY_CACHE #technically don't need the global
+    #empty insert
+    empty!(LOCAL_CACHE)
     merge!(LOCAL_CACHE, cleaned_cache_to_save)
 end
