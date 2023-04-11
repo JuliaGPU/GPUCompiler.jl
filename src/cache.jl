@@ -131,7 +131,7 @@ disk_cache() = parse(Bool, @load_preference("disk_cache", "false"))
 function cache_key()
     major = @load_preference("cache_key", "")
     minor = get(ENV, "JULIA_GPUCOMPILER_CACHE", "")
-    string(major, "-" minor)
+    string(major, "-", minor)
 end
 
 """
