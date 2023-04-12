@@ -238,7 +238,7 @@ end
             serialize(io, asm)
             close(io)
             # atomic move
-            mv(tmppath, path, force=true)
+            Base.rename(tmppath, path, force=true)
         end
     end
 
