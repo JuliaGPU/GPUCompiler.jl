@@ -224,12 +224,15 @@ function methodinstance(ft::Type, tt::Type, world::Integer=tls_world_age())
     sig = typed_signature(ft, tt)
 
     # look-up the method
-    meth = if VERSION >= v"1.10.0-DEV.65"
-        Base._which(sig; world).method
+    if VERSION >= v"1.10.0-DEV.65"
+        meth = Base._which(sig; world).method
     elseif VERSION >= v"1.7.0-DEV.435"
-        Base._which(sig, world).method
+        meth = Base._which(sig, world).method
     else
-        ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, world)
+        meth = ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, world)
+        if meth == nothing
+            error("no unique matching method found for the specified argument types")
+        end
     end
 
     (ti, env) = ccall(:jl_type_intersection_with_env, Any,
