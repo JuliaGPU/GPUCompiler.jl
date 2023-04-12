@@ -32,7 +32,9 @@ function linker(job, asm)
 end
 
 let (job, kwargs) = native_job(kernel, Tuple{})
-    GPUCompiler.cached_compilation(runtime_cache, job, compiler, linker)
+    source = job.source
+    config = job.config
+    GPUCompiler.cached_compilation(runtime_cache, config, source.ft, source.tt, compiler, linker)
 end
 
 @test length(readdir(GPUCompiler.cache_path())) == TOTAL_KERNELS

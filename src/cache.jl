@@ -135,7 +135,7 @@ function cache_key()
 end
 
 """
-    enable_cache!(state=true)
+    enable_cache!(state::Bool=true)
 
 Activate the GPUCompiler disk cache in the current environment.
 You will need to restart your Julia environment for it to take effect.
@@ -145,8 +145,8 @@ You will need to restart your Julia environment for it to take effect.
     `cache_key` (see [`set_cache_key``](@ref)), the GPUCompiler version
     and your Julia version.
 """
-function enable_cache!(state=true)
-    @set_preferences!("disk_cache"=>state)
+function enable_cache!(state::Bool=true)
+    @set_preferences!("disk_cache"=>string(state))
 end
 
 """
@@ -232,7 +232,13 @@ end
         asm = compiler(job)
 
         if disk_cache() && !isfile(path)
-            serialize(path, asm)
+            tmppath, io = mktemp(;cleanup=false)
+            # TODO: We should add correctness checks.
+            #       Like size of data, as well as ft, tt, world, cfg
+            serialize(io, asm)
+            close(io)
+            # atomic move
+            mv(tmppath, path, force=true)
         end
     end
 
