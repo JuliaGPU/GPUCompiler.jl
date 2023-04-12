@@ -216,7 +216,7 @@ end
         if isfile(path)
             try
                 asm = deserialize(path)
-                @debug "Loading compiled kernel for $spec from $path"
+                @debug "Loading compiled kernel from $path" ft tt world cfg
             catch ex
                 @warn "Failed to load compiled kernel at $path" exception=(ex, catch_backtrace())
             end
