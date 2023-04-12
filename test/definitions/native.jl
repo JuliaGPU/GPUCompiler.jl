@@ -114,12 +114,12 @@ module LazyCodegen
             @assert !cc.compiled
             job = cc.job
 
-            name, jitted_mod = JuliaContext() do ctx
+            entry_name, jitted_mod = JuliaContext() do ctx
                 ir, meta = GPUCompiler.compile(:llvm, job; validate=false, ctx)
                 name(meta.entry), compile!(orc, ir)
             end
 
-            addr = addressin(orc, jitted_mod, name)
+            addr = addressin(orc, jitted_mod, entry_name)
             ptr  = pointer(addr)
 
             cc.compiled = true
