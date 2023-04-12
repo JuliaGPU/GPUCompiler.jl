@@ -78,9 +78,14 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
-        interp = get_interpreter(job)
-        descend_code_warntype = getfield(mod, :descend_code_warntype)
-        descend_code_warntype(sig; interp, kwargs...)
+        if VERSION < v"1.7-"
+            descend_code_typed = getfield(mod, :descend_code_typed)
+            descend_code_typed(job.source; kwargs...)
+        else
+            interp = get_interpreter(job)
+            descend_code_warntype = getfield(mod, :descend_code_warntype)
+            descend_code_warntype(sig; interp, kwargs...)
+        end
     elseif VERSION >= v"1.7-"
         interp = get_interpreter(job)
         code_warntype_by_type(io, sig; interp, kwargs...)

@@ -205,6 +205,7 @@ function safe_name(t::Type{<:Function})
     end
     safe_name(string(fn))
 end
+safe_name(::Type{Union{}}) = "Bottom"
 safe_name(x) = safe_name(repr(x))
 
 
