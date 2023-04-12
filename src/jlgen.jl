@@ -421,11 +421,23 @@ end
 ## interpreter
 
 using Core.Compiler:
-    AbstractInterpreter, InferenceResult, InferenceParams, InferenceState, OptimizationParams
+    AbstractInterpreter, InferenceResult, InferenceParams, InferenceState,
+    OptimizationParams, MethodTableView, CachedMethodTable
+
+if isdefined(Base.Experimental, Symbol("@overlay"))
+    using Core.Compiler: OverlayMethodTable
+    const GPUMethodTableView = CachedMethodTable{OverlayMethodTable}
+    const MTType = Core.MethodTable
+    get_method_table_view(world::UInt, mt::MTType) = CachedMethodTable(OverlayMethodTable(world, mt))
+else
+    const GPUMethodTableView = CachedMethodTable{WorldOverlayMethodTable}
+    const MTType = Nothing
+    get_method_table_view(world::UInt, mt::MTType) = CachedMethodTable(WorldOverlayMethodTable(world))
+end
 
 struct GPUInterpreter <: AbstractInterpreter
     global_cache::CodeCache
-    method_table::Union{Nothing,Core.MethodTable}
+    method_table::GPUMethodTableView
 
     # Cache of inference results for this particular interpreter
     local_cache::Vector{InferenceResult}
@@ -436,13 +448,14 @@ struct GPUInterpreter <: AbstractInterpreter
     inf_params::InferenceParams
     opt_params::OptimizationParams
 
-
-    function GPUInterpreter(cache::CodeCache, mt::Union{Nothing,Core.MethodTable}, world::UInt, ip::InferenceParams, op::OptimizationParams)
+    function GPUInterpreter(cache::CodeCache, mt::MTType, world::UInt, ip::InferenceParams, op::OptimizationParams)
         @assert world <= Base.get_world_counter()
+
+        method_table = get_method_table_view(world, mt)
 
         return new(
             cache,
-            mt,
+            method_table,
 
             # Initially empty cache
             Vector{InferenceResult}(),
@@ -478,18 +491,10 @@ if VERSION >= v"1.7.0-DEV.577"
 Core.Compiler.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 
-if isdefined(Base.Experimental, Symbol("@overlay"))
-using Core.Compiler: OverlayMethodTable
 if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION >= v"1.9.0-DEV.120"
-Core.Compiler.method_table(interp::GPUInterpreter) =
-    OverlayMethodTable(interp.world, interp.method_table)
+Core.Compiler.method_table(interp::GPUInterpreter) = interp.method_table
 else
-Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
-    OverlayMethodTable(interp.world, interp.method_table)
-end
-else
-Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
-    WorldOverlayMethodTable(interp.world)
+Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) = interp.method_table
 end
 
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
