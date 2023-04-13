@@ -48,13 +48,6 @@ function precompile_gpucompiler(job)
     end
 end
 
-function get_code_cache_i(i)
-    for (j, cc) in enumerate(GPUCompiler.GLOBAL_CI_CACHES)
-        if j == i
-            return cc
-        end
-    end
-end
 """
 Reloads Global Cache from global variable which stores the previous
 cached results
