@@ -1,7 +1,6 @@
 const CACHE_NAME = gensym(:CACHE) # is now a const symbol (not a variable)
 is_precompiling() = ccall(:jl_generating_output, Cint, ()) != 0
 
-struct NativeCompilerParams <: AbstractCompilerParams end
 export @declare_cache, @snapshot_cache, @reinit_cache, @get_cache
 
 macro declare_cache()
