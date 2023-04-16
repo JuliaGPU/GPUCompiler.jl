@@ -2,6 +2,7 @@ const CACHE_NAME = gensym(:CACHE) # is now a const symbol (not a variable)
 is_precompiling() = ccall(:jl_generating_output, Cint, ()) != 0
 
 export @declare_cache, @snapshot_cache, @reinit_cache, @get_cache
+export reinit_cache, snapshot_cache
 
 macro declare_cache()
     var = esc(CACHE_NAME) #this will esc variable from our const symbol
@@ -32,6 +33,10 @@ macro get_cache()
     quote
         $var
     end
+end
+
+function declare_cache()
+    return IdDict()
 end
 
 """
