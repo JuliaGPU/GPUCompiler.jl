@@ -13,6 +13,8 @@ const SPIRV_Tools_jll = LazyModule("SPIRV_Tools_jll", UUID("6ac6d60f-d740-5983-9
 export SPIRVCompilerTarget
 
 Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
+    supports_fp16::Bool = true
+    supports_fp64::Bool = true
 end
 
 llvm_triple(::SPIRVCompilerTarget) = Int===Int64 ? "spir64-unknown-unknown" : "spirv-unknown-unknown"
@@ -71,6 +73,20 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                   ConstantInt(Int32(5); ctx)]; ctx))
 
     return entry
+end
+
+function validate_module(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+    errors = IRError[]
+
+    # support for half and double depends on the target
+    if !job.config.target.supports_fp16
+        append!(errors, check_ir_values(mod, LLVM.HalfType(context(mod))))
+    end
+    if !job.config.target.supports_fp64
+        append!(errors, check_ir_values(mod, LLVM.DoubleType(context(mod))))
+    end
+
+    return errors
 end
 
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,

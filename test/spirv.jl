@@ -37,6 +37,38 @@ end
 end
 end
 
+@testset "unsupported type detection" begin
+    function kernel(ptr, val)
+        unsafe_store!(ptr, val)
+        return
+    end
+
+    ir = sprint(io->spirv_code_llvm(io, kernel, Tuple{Ptr{Float16}, Float16}; validate=true))
+    @test occursin("store half", ir)
+
+    ir = sprint(io->spirv_code_llvm(io, kernel, Tuple{Ptr{Float32}, Float32}; validate=true))
+    @test occursin("store float", ir)
+
+    ir = sprint(io->spirv_code_llvm(io, kernel, Tuple{Ptr{Float64}, Float64}; validate=true))
+    @test occursin("store double", ir)
+
+    @test_throws_message(InvalidIRError,
+                         spirv_code_llvm(devnull, kernel, Tuple{Ptr{Float16}, Float16};
+                                         supports_fp16=false, validate=true)) do msg
+        occursin("unsupported unsupported use of half value", msg) &&
+        occursin("[1] unsafe_store!", msg) &&
+        occursin(r"\[2\] .*kernel", msg)
+    end
+
+    @test_throws_message(InvalidIRError,
+                         spirv_code_llvm(devnull, kernel, Tuple{Ptr{Float64}, Float64};
+                                         supports_fp64=false, validate=true)) do msg
+        occursin("unsupported unsupported use of double value", msg) &&
+        occursin("[1] unsafe_store!", msg) &&
+        occursin(r"\[2\] .*kernel", msg)
+    end
+end
+
 end
 
 ############################################################################################

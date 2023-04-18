@@ -64,18 +64,8 @@ function process_entry!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
 end
 
 function validate_module(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
-    errors = IRError[]
-
-    T_double = LLVM.DoubleType(context(mod))
-
-    for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
-        if value_type(inst) == T_double || any(param->value_type(param) == T_double, operands(inst))
-            bt = backtrace(inst)
-            push!(errors, ("use of double floating-point value", bt, inst))
-        end
-    end
-
-    return errors
+    # Metal never supports double precision
+    check_ir_values(mod, LLVM.DoubleType(context(mod)))
 end
 
 # TODO: why is this done in finish_module? maybe just in process_entry?
