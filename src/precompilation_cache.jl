@@ -1,43 +1,107 @@
 const CACHE_NAME = gensym(:CACHE) # is now a const symbol (not a variable)
 is_precompiling() = ccall(:jl_generating_output, Cint, ()) != 0
 
-export @declare_cache, @snapshot_cache, @reinit_cache, @get_cache
-export reinit_cache, snapshot_cache
+export ci_cache_snapshot, ci_cache_delta, ci_cache_insert
 
-macro declare_cache()
-    var = esc(CACHE_NAME) #this will esc variable from our const symbol
-    quote
-        #const $esc(CACHE_NAME) function esc is executed when macro is executed, not when code is defined
-        # dollar sign means will have the value of esc cachename here
-        const $var = $IdDict()
+function ci_cache_snapshot()
+    cleaned_cache_to_save = IdDict()
+    for key in keys(GPUCompiler.GLOBAL_CI_CACHES)
+        # Will only keep those elements with infinite ranges
+        cleaned_cache_to_save[key] = GPUCompiler.CodeCache(GPUCompiler.GLOBAL_CI_CACHES[key])
+    end
+    println("cleaned cache to save")
+    @show cleaned_cache_to_save
+    return cleaned_cache_to_save
+end
+
+function ci_cache_delta(previous_snapshot)
+    current_snapshot = ci_cache_snapshot()
+    println("current snapshot")
+    @show current_snapshot
+    delta_snapshot = IdDict{Tuple{DataType, Core.Compiler.InferenceParams, Core.Compiler.OptimizationParams}, GPUCompiler.CodeCache}()
+    for (cachekey, cache) in current_snapshot
+        if cachekey in keys(previous_snapshot)
+            for (mi, civ) in cache
+                if mi in keys(previous_snapshot[cachekey])
+                    for ci in civ
+                        if !(ci in previous_snapshot[cachekey][mi])
+                            if !(cachekey in delta_snapshot)
+                                delta_snapshot[cachekey] = GPUCompiler.CodeCache()
+                                delta_snapshot[cachekey][mi] = Vector{CodeInstance}()
+                            elseif !(mi in delta_snapshot[cachekey])
+                                delta_snapshot[cachekey][mi] = Vector{CodeInstance}()
+                            end
+
+                            append!(delta_snapshot[cachekey][mi], ci)
+                        end
+                    end
+                else
+                    # this whole cache is not present in the previous snapshot, can add all
+                    if !(cachekey in delta_snapshot)
+                        delta_snapshot[cachekey] = GPUCompiler.CodeCache()
+                    end
+                    delta_snapshot[cachekey][mi] = civ
+                end
+            end
+        else
+            delta_snapshot[cachekey] = current_snapshot[cachekey]
+        end
+    end
+    println("delta snapshot")
+    @show delta_snapshot
+    return delta_snapshot
+end
+
+function ci_cache_insert(caches)
+    empty!(GPUCompiler.GLOBAL_CI_CACHES)
+    for (key, cache) in caches
+        GPUCompiler.GLOBAL_CI_CACHES[key] = GPUCompiler.CodeCache(cache)
     end
 end
 
-macro snapshot_cache()
-    var = esc(CACHE_NAME)
-    quote
-        $snapshot_cache($var)
+#=function ci_cache_insert(cache)
+    if !is_precompiling()
+        # need to merge caches at the code instance level
+        for key in keys(cache)
+            if haskey(GPUCompiler.GLOBAL_CI_CACHES, key)
+                global_cache = GPUCompiler.GLOBAL_CI_CACHES[key]
+                local_cache = cache[key]
+                for (mi, civ) in (local_cache.dict)
+                    # this should be one since there is only one range that is infinite
+                    @assert length(civ) == 1
+                    # add all code instances to global cache
+                    # could move truncating code to set index
+                    ci = civ[1]
+                    if haskey(global_cache.dict, mi)
+                        gciv = global_cache.dict[mi]
+                        # truncation cod3
+                        # sort by min world age, then make sure no age ranges overlap // this part is uneeded
+                        sort(gciv, by=x->x.min_world)
+                        if ci.min_world > gciv[length(gciv)].min_world
+                            println("invalidating mi [$mi] in world age [$(ci.min_world-1)]")
+                            println("adding ci [$ci]")
+                            invalidate_code_cache(global_cache, mi, ci.min_world - 1)
+                            Core.Compiler.setindex!(global_cache, ci, mi)
+                        else
+                            println("Should not get here?")
+                            @assert false
+                        end
+                    else
+                        println("adding method instance [$mi] code instance [$ci]")
+                        # occurs if we kill everything in the parent and then need to store in child
+                        Core.Compiler.setindex!(global_cache, ci, mi)
+                    end
+                end
+            else
+                # no conflict at cache level
+                println("no conflictt adding cache $(cache[key])")
+                GPUCompiler.GLOBAL_CI_CACHES[key] = cache[key]
+            end
+        end
+        println("global cache post insert")
+        @show GPUCompiler.GLOBAL_CI_CACHES
     end
-end
-
-macro reinit_cache()
-    var = esc(CACHE_NAME)
-    quote
-        # will need to keep track of this is CUDA so that GPUCompiler caches are not overfilled
-        $reinit_cache($var)
-    end
-end
-
-macro get_cache()
-    var = esc(CACHE_NAME)
-    quote
-        $var
-    end
-end
-
-function declare_cache()
-    return IdDict()
-end
+end=#
 
 """
 Given a function and param types caches the function to the global cache
