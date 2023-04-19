@@ -1,7 +1,7 @@
 const CACHE_NAME = gensym(:CACHE) # is now a const symbol (not a variable)
 is_precompiling() = ccall(:jl_generating_output, Cint, ()) != 0
 
-export ci_cache_snapshot, ci_cache_delta, ci_cache_insert
+export ci_cache_snapshot, ci_cache_delta, ci_cache_insert, precompile_gpucompiler
 
 function ci_cache_snapshot()
     cleaned_cache_to_save = IdDict()
@@ -9,15 +9,11 @@ function ci_cache_snapshot()
         # Will only keep those elements with infinite ranges
         cleaned_cache_to_save[key] = GPUCompiler.CodeCache(GPUCompiler.GLOBAL_CI_CACHES[key])
     end
-    println("cleaned cache to save")
-    @show cleaned_cache_to_save
     return cleaned_cache_to_save
 end
 
 function ci_cache_delta(previous_snapshot)
     current_snapshot = ci_cache_snapshot()
-    println("current snapshot")
-    @show current_snapshot
     delta_snapshot = IdDict{Tuple{DataType, Core.Compiler.InferenceParams, Core.Compiler.OptimizationParams}, GPUCompiler.CodeCache}()
     for (cachekey, cache) in current_snapshot
         if cachekey in keys(previous_snapshot)
@@ -47,19 +43,17 @@ function ci_cache_delta(previous_snapshot)
             delta_snapshot[cachekey] = current_snapshot[cachekey]
         end
     end
-    println("delta snapshot")
-    @show delta_snapshot
     return delta_snapshot
 end
 
-function ci_cache_insert(caches)
+#=function ci_cache_insert(caches)
     empty!(GPUCompiler.GLOBAL_CI_CACHES)
     for (key, cache) in caches
         GPUCompiler.GLOBAL_CI_CACHES[key] = GPUCompiler.CodeCache(cache)
     end
-end
+end=#
 
-#=function ci_cache_insert(cache)
+function ci_cache_insert(cache)
     if !is_precompiling()
         # need to merge caches at the code instance level
         for key in keys(cache)
@@ -101,7 +95,7 @@ end
         println("global cache post insert")
         @show GPUCompiler.GLOBAL_CI_CACHES
     end
-end=#
+end
 
 """
 Given a function and param types caches the function to the global cache
