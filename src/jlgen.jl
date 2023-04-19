@@ -422,17 +422,31 @@ end
 
 using Core.Compiler:
     AbstractInterpreter, InferenceResult, InferenceParams, InferenceState,
-    OptimizationParams, MethodTableView, CachedMethodTable
+    OptimizationParams, MethodTableView
 
 if isdefined(Base.Experimental, Symbol("@overlay"))
     using Core.Compiler: OverlayMethodTable
-    const GPUMethodTableView = CachedMethodTable{OverlayMethodTable}
     const MTType = Core.MethodTable
-    get_method_table_view(world::UInt, mt::MTType) = CachedMethodTable(OverlayMethodTable(world, mt))
+    if isdefined(Core.Compiler, :CachedMethodTable)
+        using Core.Compiler: CachedMethodTable
+        const GPUMethodTableView = CachedMethodTable{OverlayMethodTable}
+        get_method_table_view(world::UInt, mt::MTType) =
+            CachedMethodTable(OverlayMethodTable(world, mt))
+    else
+        const GPUMethodTableView = OverlayMethodTable
+        get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
+    end
 else
-    const GPUMethodTableView = CachedMethodTable{WorldOverlayMethodTable}
     const MTType = Nothing
-    get_method_table_view(world::UInt, mt::MTType) = CachedMethodTable(WorldOverlayMethodTable(world))
+    if isdefined(Core.Compiler, :CachedMethodTable)
+        using Core.Compiler: CachedMethodTable
+        const GPUMethodTableView = CachedMethodTable{WorldOverlayMethodTable}
+        get_method_table_view(world::UInt, mt::MTType) =
+            CachedMethodTable(WorldOverlayMethodTable(world))
+    else
+        const GPUMethodTableView = WorldOverlayMethodTable
+        get_method_table_view(world::UInt, mt::MTType) = WorldOverlayMethodTable(world)
+    end
 end
 
 struct GPUInterpreter <: AbstractInterpreter
