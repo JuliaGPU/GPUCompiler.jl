@@ -224,12 +224,15 @@ function methodinstance(ft::Type, tt::Type, world::Integer=tls_world_age())
     sig = typed_signature(ft, tt)
 
     # look-up the method
-    meth = if VERSION >= v"1.10.0-DEV.65"
-        Base._which(sig; world).method
+    if VERSION >= v"1.10.0-DEV.65"
+        meth = Base._which(sig; world).method
     elseif VERSION >= v"1.7.0-DEV.435"
-        Base._which(sig, world).method
+        meth = Base._which(sig, world).method
     else
-        ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, world)
+        meth = ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, world)
+        if meth == nothing
+            error("no unique matching method found for the specified argument types")
+        end
     end
 
     (ti, env) = ccall(:jl_type_intersection_with_env, Any,
@@ -438,11 +441,37 @@ end
 ## interpreter
 
 using Core.Compiler:
-    AbstractInterpreter, InferenceResult, InferenceParams, InferenceState, OptimizationParams
+    AbstractInterpreter, InferenceResult, InferenceParams, InferenceState,
+    OptimizationParams, MethodTableView
+
+if isdefined(Base.Experimental, Symbol("@overlay"))
+    using Core.Compiler: OverlayMethodTable
+    const MTType = Core.MethodTable
+    if isdefined(Core.Compiler, :CachedMethodTable)
+        using Core.Compiler: CachedMethodTable
+        const GPUMethodTableView = CachedMethodTable{OverlayMethodTable}
+        get_method_table_view(world::UInt, mt::MTType) =
+            CachedMethodTable(OverlayMethodTable(world, mt))
+    else
+        const GPUMethodTableView = OverlayMethodTable
+        get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
+    end
+else
+    const MTType = Nothing
+    if isdefined(Core.Compiler, :CachedMethodTable)
+        using Core.Compiler: CachedMethodTable
+        const GPUMethodTableView = CachedMethodTable{WorldOverlayMethodTable}
+        get_method_table_view(world::UInt, mt::MTType) =
+            CachedMethodTable(WorldOverlayMethodTable(world))
+    else
+        const GPUMethodTableView = WorldOverlayMethodTable
+        get_method_table_view(world::UInt, mt::MTType) = WorldOverlayMethodTable(world)
+    end
+end
 
 struct GPUInterpreter <: AbstractInterpreter
     global_cache::CodeCache
-    method_table::Union{Nothing,Core.MethodTable}
+    method_table::GPUMethodTableView
 
     # Cache of inference results for this particular interpreter
     local_cache::Vector{InferenceResult}
@@ -453,13 +482,14 @@ struct GPUInterpreter <: AbstractInterpreter
     inf_params::InferenceParams
     opt_params::OptimizationParams
 
-
-    function GPUInterpreter(cache::CodeCache, mt::Union{Nothing,Core.MethodTable}, world::UInt, ip::InferenceParams, op::OptimizationParams)
+    function GPUInterpreter(cache::CodeCache, mt::MTType, world::UInt, ip::InferenceParams, op::OptimizationParams)
         @assert world <= Base.get_world_counter()
+
+        method_table = get_method_table_view(world, mt)
 
         return new(
             cache,
-            mt,
+            method_table,
 
             # Initially empty cache
             Vector{InferenceResult}(),
@@ -495,18 +525,10 @@ if VERSION >= v"1.7.0-DEV.577"
 Core.Compiler.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 
-if isdefined(Base.Experimental, Symbol("@overlay"))
-using Core.Compiler: OverlayMethodTable
 if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION >= v"1.9.0-DEV.120"
-Core.Compiler.method_table(interp::GPUInterpreter) =
-    OverlayMethodTable(interp.world, interp.method_table)
+Core.Compiler.method_table(interp::GPUInterpreter) = interp.method_table
 else
-Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
-    OverlayMethodTable(interp.world, interp.method_table)
-end
-else
-Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) =
-    WorldOverlayMethodTable(interp.world)
+Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) = interp.method_table
 end
 
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)

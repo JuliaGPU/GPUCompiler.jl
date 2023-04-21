@@ -261,3 +261,17 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
 
     return errors
 end
+
+# helper function to check if a LLVM module uses values of a certain type
+function check_ir_values(mod::LLVM.Module, T_bad::LLVMType)
+    errors = IRError[]
+
+    for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
+        if value_type(inst) == T_bad || any(param->value_type(param) == T_bad, operands(inst))
+            bt = backtrace(inst)
+            push!(errors, ("unsupported use of $(T_bad) value", bt, inst))
+        end
+    end
+
+    return errors
+end
