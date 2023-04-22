@@ -1,8 +1,0 @@
-name = "Example"
-uuid = "3a86cd2f-4474-4e46-89c8-15adf66897e9"
-authors = ["collinw "]
-version = "0.1.0"
-
-[deps]
-GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
-SimpleGPU = "0f92ac95-628b-4f27-9a96-2faf96da70df"

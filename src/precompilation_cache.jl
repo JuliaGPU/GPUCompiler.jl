@@ -15,28 +15,28 @@ end
 function ci_cache_delta(previous_snapshot)
     current_snapshot = ci_cache_snapshot()
     delta_snapshot = IdDict{Tuple{DataType, Core.Compiler.InferenceParams, Core.Compiler.OptimizationParams}, GPUCompiler.CodeCache}()
-    for (cachekey, cache) in current_snapshot
+    for (cachekey, codecache) in current_snapshot
         if cachekey in keys(previous_snapshot)
-            for (mi, civ) in cache
-                if mi in keys(previous_snapshot[cachekey])
+            for (mi, civ) in codecache.dict
+                if mi in keys(previous_snapshot[cachekey].dict)
                     for ci in civ
-                        if !(ci in previous_snapshot[cachekey][mi])
-                            if !(cachekey in delta_snapshot)
+                        if !(ci in previous_snapshot[cachekey].dict[mi])
+                            if !(cachekey in keys(delta_snapshot))
                                 delta_snapshot[cachekey] = GPUCompiler.CodeCache()
-                                delta_snapshot[cachekey][mi] = Vector{CodeInstance}()
-                            elseif !(mi in delta_snapshot[cachekey])
-                                delta_snapshot[cachekey][mi] = Vector{CodeInstance}()
+                                delta_snapshot[cachekey].dict[mi] = Vector{CodeInstance}()
+                            elseif !(mi in keys(delta_snapshot[cachekey].dict))
+                                delta_snapshot[cachekey].dict[mi] = Vector{CodeInstance}()
                             end
 
-                            append!(delta_snapshot[cachekey][mi], ci)
+                            push!(delta_snapshot[cachekey].dict[mi], ci)
                         end
                     end
                 else
                     # this whole cache is not present in the previous snapshot, can add all
-                    if !(cachekey in delta_snapshot)
+                    if !(cachekey in keys(delta_snapshot))
                         delta_snapshot[cachekey] = GPUCompiler.CodeCache()
                     end
-                    delta_snapshot[cachekey][mi] = civ
+                    delta_snapshot[cachekey].dict[mi] = civ
                 end
             end
         else
@@ -55,11 +55,33 @@ end=#
 
 function ci_cache_insert(cache)
     if !is_precompiling()
+        #first clean the cache
+        cleaned_cache = IdDict()
+        for (key, c) in cache
+            usedCache = false
+            newCodeCache = GPUCompiler.CodeCache()
+            for (mi, civ) in c.dict
+                new_civ = Vector()
+                for ci in civ
+                    if ci.min_world <= ci.max_world
+                        push!(new_civ, ci)
+                    end
+                end
+                if length(new_civ) > 0
+                    usedCache = true
+                    newCodeCache.dict[mi] = new_civ
+                end
+            end
+            if usedCache
+                cleaned_cache[key] = newCodeCache
+            end
+        end
+
         # need to merge caches at the code instance level
-        for key in keys(cache)
+        for (key, local_cache) in cleaned_cache
             if haskey(GPUCompiler.GLOBAL_CI_CACHES, key)
                 global_cache = GPUCompiler.GLOBAL_CI_CACHES[key]
-                local_cache = cache[key]
+                #local_cache = cache[key]
                 for (mi, civ) in (local_cache.dict)
                     # this should be one since there is only one range that is infinite
                     @assert length(civ) == 1
@@ -72,8 +94,6 @@ function ci_cache_insert(cache)
                         # sort by min world age, then make sure no age ranges overlap // this part is uneeded
                         sort(gciv, by=x->x.min_world)
                         if ci.min_world > gciv[length(gciv)].min_world
-                            println("invalidating mi [$mi] in world age [$(ci.min_world-1)]")
-                            println("adding ci [$ci]")
                             invalidate_code_cache(global_cache, mi, ci.min_world - 1)
                             Core.Compiler.setindex!(global_cache, ci, mi)
                         else
@@ -81,19 +101,15 @@ function ci_cache_insert(cache)
                             @assert false
                         end
                     else
-                        println("adding method instance [$mi] code instance [$ci]")
                         # occurs if we kill everything in the parent and then need to store in child
                         Core.Compiler.setindex!(global_cache, ci, mi)
                     end
                 end
             else
                 # no conflict at cache level
-                println("no conflictt adding cache $(cache[key])")
                 GPUCompiler.GLOBAL_CI_CACHES[key] = cache[key]
             end
         end
-        println("global cache post insert")
-        @show GPUCompiler.GLOBAL_CI_CACHES
     end
 end
 
