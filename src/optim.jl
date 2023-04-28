@@ -238,7 +238,31 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         combine_mul_add!(pm)
         div_rem_pairs!(pm)
 
+        if VERSION < v"1.10.0-DEV.1144"
+            # save function attributes to work around JuliaGPU/GPUCompiler#437
+            current_attrs = Dict{String,Any}()
+            for f in functions(mod)
+                attrs = function_attributes(f)
+                length(attrs) == 0 && continue
+                current_attrs[LLVM.name(f)] = collect(attrs)
+            end
+        end
+
         run!(pm, mod)
+
+        if VERSION < v"1.10.0-DEV.1144"
+            # restore function attributes
+            for (fn, attrs) in current_attrs
+                haskey(functions(mod), fn) || continue
+                f = functions(mod)[fn]
+
+                for attr in attrs
+                    # NOTE: there's no function attributes that contain a type,
+                    #       so we can just blindly add them back
+                    push!(function_attributes(f), attr)
+                end
+            end
+        end
     end
 
     # target-specific optimizations
