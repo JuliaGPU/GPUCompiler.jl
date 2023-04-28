@@ -50,6 +50,8 @@ const LLVMMETALFUNCCallConv   = LLVM.API.LLVMCallConv(102)
 const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
 
 function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
+    ctx = context(mod)
+
     # calling convention
     for f in functions(mod)
         #callconv!(f, LLVMMETALFUNCCallConv)
@@ -70,6 +72,34 @@ function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module
             initializer!(gv, ConstantInt(LLVM.Int32Type(ctx), value))
             # change the linkage so that we can inline the value
             linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+        end
+    end
+
+    # we'll be optimizing IR before we have the AIR back-end, so we're missing out on
+    # intrinsics definitions. add some optimization-related attributes here.
+    for f in functions(mod)
+        fn = LLVM.name(f)
+
+        attrs = function_attributes(f)
+        function add_attributes(names...)
+            for name in names
+                push!(attrs, EnumAttribute(name, 0; ctx))
+            end
+        end
+
+        # synchronization
+        if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
+            add_attributes("nounwind", "convergent")
+
+        # atomics
+        elseif match(r"air.atomic.(local|global).load", fn) !== nothing
+            add_attributes("argmemonly", "nounwind", "readonly")
+        elseif match(r"air.atomic.(local|global).store", fn) !== nothing
+            add_attributes("argmemonly", "nounwind", "writeonly")
+        elseif match(r"air.atomic.(local|global).(xchg|cmpxchg)", fn) !== nothing
+            add_attributes("argmemonly", "nounwind")
+        elseif match(r"^air.atomic.(local|global).(add|sub|min|max|and|or|xor)", fn) !== nothing
+            add_attributes("argmemonly", "nounwind")
         end
     end
 end
