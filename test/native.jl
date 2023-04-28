@@ -305,6 +305,25 @@ end
     @test occursin(r"^define.*julia_f_expensive"m, ir)
 end
 
+@testset "function attributes" begin
+    @inline function convergent_barrier()
+        Base.llvmcall(("""
+            declare void @barrier() #1
+
+            define void @entry() #0 {
+                call void @barrier()
+                ret void
+            }
+
+            attributes #0 = { alwaysinline }
+            attributes #1 = { convergent }""", "entry"),
+        Nothing, Tuple{})
+    end
+
+    ir = sprint(io->native_code_llvm(io, convergent_barrier, Tuple{}; dump_module=true, raw=true))
+    @test occursin(r"attributes #. = \{ convergent \}", ir)
+end
+
 end
 
 ############################################################################################
