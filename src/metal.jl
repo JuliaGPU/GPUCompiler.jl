@@ -6,12 +6,15 @@ const Metal_LLVM_Tools_jll = LazyModule("Metal_LLVM_Tools_jll", UUID("0418c028-f
 
 export MetalCompilerTarget
 
-Base.@kwdef struct MetalCompilerTarget <: AbstractCompilerTarget
+struct MetalCompilerTarget <: AbstractCompilerTarget
     # version numbers
     macos::VersionNumber
     air::VersionNumber
     metal::VersionNumber
 end
+
+# for backwards compatibility
+MetalCompilerTarget(macos::VersionNumber) = MetalCompilerTarget(macos, v"2.4", v"2.4")
 
 function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.macos, h)
