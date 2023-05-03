@@ -40,7 +40,10 @@ include("cache.jl")
 include("execution.jl")
 include("reflection.jl")
 
+
 include("precompile.jl")
+include("precompilation_cache.jl")
+
 _precompile_()
 
 function __init__()
