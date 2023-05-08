@@ -326,8 +326,15 @@ function invalidate_code_cache(cache::CodeCache, replaced::MethodInstance, max_w
     # recurse to all backedges to update their valid range also
     if isdefined(replaced, :backedges)
         backedges = filter(replaced.backedges) do @nospecialize(mi)
-            mi isa MethodInstance || return false #  might be `Type` object representing an `invoke` signature
-            return mi ∉ seen
+            if mi isa MethodInstance
+                mi ∉ seen
+            elseif mi isa Type
+                # an `invoke` call, which is a `(sig, MethodInstance)` pair.
+                # let's ignore the `sig` and process the `MethodInstance` next.
+                false
+            else
+                error("invalid backedge")
+            end
         end
 
         # Don't touch/empty backedges `invalidate_method_instance` in C will do that later
