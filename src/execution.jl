@@ -109,22 +109,29 @@ end
                                       compiler::Function, linker::Function)
     src = methodinstance(ft, tt)
     job = CompilerJob(src, cfg, world)
+    obj = nothing
 
     # somewhat fast path: intersect the requested world age with the cached codeinstances
     cache = ci_cache(job)
-    if compile_hook[] === nothing
-        ci = ci_cache_lookup(cache, src, world, world)
-        if ci !== nothing && haskey(cache.obj_for_ci, ci)
-            return cache.obj_for_ci[ci]
-        end
+    ci = ci_cache_lookup(cache, src, world, world)
+    if ci !== nothing && haskey(cache.obj_for_ci, ci)
+        obj = cache.obj_for_ci[ci]
     end
 
     # slow path: compile and link
-    # TODO: consider loading the assembly from an on-disk cache here
-    asm = compiler(job)
-    obj = linker(job, asm)
-    ci = ci_cache_lookup(cache, src, world, world)
-    cache.obj_for_ci[ci] = obj
+    if obj === nothing || compile_hook[] !== nothing
+        # TODO: consider loading the assembly from an on-disk cache here
+        asm = compiler(job)
+
+        if obj !== nothing
+            # we got here because of a *compile* hook; don't bother linking
+            return obj
+        end
+
+        obj = linker(job, asm)
+        ci = ci_cache_lookup(cache, src, world, world)
+        cache.obj_for_ci[ci] = obj
+    end
 
     return obj
 end
