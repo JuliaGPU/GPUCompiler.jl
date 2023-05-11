@@ -55,11 +55,21 @@ function llvm_machine(target::PTXCompilerTarget)
 end
 
 # the default datalayout does not match the one in the NVPTX user guide
-llvm_datalayout(target::PTXCompilerTarget) = Int===Int64 ?
-    "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64"*
-     "-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64" :
-    "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64"*
-     "-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64"
+llvm_datalayout(target::PTXCompilerTarget) =
+    # little endian
+    "e-" *
+    # on 32-bit systems, use 32-bit pointers.
+    # on 64-bit systems, use 64-bit pointers, but prefer 32-bit indexing.
+    # this is not what the NVPTX user guide recommends, but helps for performance.
+    (Int === Int64 ? "p:64:64:64:32-" :  "p:32:32:32-") *
+    # alignment of integer types
+    "i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-" *
+    # alignment of floating point types
+    "f32:32:32-f64:64:64-" *
+    # alignment of vector types
+    "v16:16:16-v32:32:32-v64:64:64-v128:128:128-" *
+    # native integer widths
+    "n16:32:64"
 
 have_fma(@nospecialize(target::PTXCompilerTarget), T::Type) = true
 
