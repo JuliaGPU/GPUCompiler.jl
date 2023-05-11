@@ -78,7 +78,8 @@ function addOptimizationPasses!(pm, opt_level=2)
     end
     cpu_features!(pm)
     scalar_repl_aggregates!(pm)
-    instruction_simplify!(pm)
+    # SROA can duplicate PHI nodes which can block LowerSIMD
+    instruction_combining!(pm)
     jump_threading!(pm)
     correlated_value_propagation!(pm)
 
@@ -96,7 +97,7 @@ function addOptimizationPasses!(pm, opt_level=2)
     lower_simdloop!(pm) # Annotate loop marked with "loopinfo" as LLVM parallel loop
     licm!(pm)
     julia_licm!(pm)
-    loop_unswitch!(pm)
+    simple_loop_unswitch_legacy!(pm)
     licm!(pm)
     julia_licm!(pm)
     inductive_range_check_elimination!(pm)
