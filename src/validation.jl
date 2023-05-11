@@ -88,6 +88,15 @@ function check_invocation(@nospecialize(job::CompilerJob))
         Core.Compiler.isconstType(dt) && continue
         real_arg_i += 1
 
+        @static if VERSION >= v"1.7"
+            # XXX: can we support these for CPU targets?
+            if dt <: Core.OpaqueClosure
+                throw(KernelError(job, "passing an opaque closure",
+                    """Argument $arg_i to your kernel function is an opaque closure.
+                       This is a CPU-only object not supported by GPUCompiler."""))
+            end
+        end
+
         if !isbitstype(dt)
             throw(KernelError(job, "passing and using non-bitstype argument",
                 """Argument $arg_i to your kernel function is of type $dt, which is not isbits:
