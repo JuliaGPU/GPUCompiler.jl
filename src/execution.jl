@@ -81,8 +81,13 @@ function cached_compilation(cache::AbstractDict{UInt,V},
                             cfg::CompilerConfig,
                             ft::Type, tt::Type,
                             compiler::Function, linker::Function) where {V}
-    # fast path: a simple cache that's indexed by the current world age, the function and
-    #            argument types, and the compiler configuration
+    # NOTE: we index the cach both using (ft, tt, world, cfg) keys, for the fast look-up,
+    #       and using CodeInfo keys for the slow look-up. we need to cache both for
+    #       performance, but cannot use a separate private cache for the ci->obj lookup
+    #       (e.g. putting it next to the CodeInfo's in the CodeCache) because some clients
+    #       expect to be able to wipe the cache (e.g. CUDA.jl's device_reset!)
+
+    # fast path: index the cache directly for the *current* world + kernel + compiler config
 
     world = tls_world_age()
     key = hash(ft)
@@ -97,7 +102,7 @@ function cached_compilation(cache::AbstractDict{UInt,V},
 
     LLVM.Interop.assume(isassigned(compile_hook))
     if obj === nothing || compile_hook[] !== nothing
-        obj = actual_compilation(cfg, ft, tt, world, compiler, linker)::V
+        obj = actual_compilation(cfg, ft, tt, world, compiler, linker, cache)::V
         lock(cache_lock)
         cache[key] = obj
         unlock(cache_lock)
@@ -106,16 +111,19 @@ function cached_compilation(cache::AbstractDict{UInt,V},
 end
 
 @noinline function actual_compilation(cfg::CompilerConfig, ft::Type, tt::Type, world::UInt,
-                                      compiler::Function, linker::Function)
-    src = methodinstance(ft, tt)
+                                      compiler::Function, linker::Function,
+                                      cache::AbstractDict)
+    src = methodinstance(ft, tt, world)
     job = CompilerJob(src, cfg, world)
     obj = nothing
 
-    # somewhat fast path: intersect the requested world age with the cached codeinstances
-    cache = ci_cache(job)
-    ci = ci_cache_lookup(cache, src, world, world)
-    if ci !== nothing && haskey(cache.obj_for_ci, ci)
-        obj = cache.obj_for_ci[ci]
+    # somewhat fast path: find an applicable CodeInfo and see if we have compiled it before
+    ci = ci_cache_lookup(ci_cache(job), src, world, world)
+    if ci !== nothing
+        key = hash(ci)
+        if haskey(cache, key)
+            obj = cache[key]
+        end
     end
 
     # slow path: compile and link
@@ -129,8 +137,9 @@ end
         end
 
         obj = linker(job, asm)
-        ci = ci_cache_lookup(cache, src, world, world)
-        cache.obj_for_ci[ci] = obj
+        ci = ci_cache_lookup(ci_cache(job), src, world, world)
+        key = hash(ci)
+        cache[key] = obj
     end
 
     return obj

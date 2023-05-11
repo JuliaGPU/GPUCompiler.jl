@@ -130,43 +130,36 @@ end
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 2")
         @test invocations[] == 1
-        @test length(cache) == 1
 
         # cached compilation
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 2")
         @test invocations[] == 1
-        @test length(cache) == 1
 
         # redefinition
         @eval $kernel(i) = $child(i)+3
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
-        @test length(cache) == 2
 
         # cached compilation
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
-        @test length(cache) == 2
 
         # redefinition of an unrelated function
         @eval $unrelated(i) = 42
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test invocations[] == 2
-        @test length(cache) == 3
 
         # redefining child functions
         @eval @noinline $child(i) = sink(i)+1
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test invocations[] == 3
-        @test length(cache) == 4
 
         # cached compilation
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test invocations[] == 3
-        @test length(cache) == 4
 
         # tasks running in the background should keep on using the old version
         c1, c2 = Condition(), Condition()

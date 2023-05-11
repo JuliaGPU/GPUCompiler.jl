@@ -78,24 +78,17 @@ Base.@deprecate_binding FunctionSpec methodinstance
 
 using Core.Compiler: CodeInstance, MethodInstance, InferenceParams, OptimizationParams
 
-# NOTE: Julia expects the CodeCache to behave in a specific way, i.e., that it returns
-#       CodeInstance objects. However, these objects cannot store GPU code, so we need
-#       an additional dictionary to store GPU code for each CodeInstance (using a
-#       GPUCodeInstance would be cleaner, but breaks the aforementioned API requirements).
-
 struct CodeCache
-    cis_for_mi::IdDict{MethodInstance,Vector{CodeInstance}}
-    obj_for_ci::Dict{CodeInstance,Any}
+    dict::IdDict{MethodInstance,Vector{CodeInstance}}
 
-    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}(),
-                      Dict{CodeInstance,Any}())
+    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
 end
 
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
-    print(io, "CodeCache with $(mapreduce(length, +, values(cc.cis_for_mi); init=0)) entries")
-    if !isempty(cc.cis_for_mi)
+    print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries")
+    if !isempty(cc.dict)
         print(io, ": ")
-        for (mi, cis) in cc.cis_for_mi
+        for (mi, cis) in cc.dict
             println(io)
             print(io, "  ")
             show(io, mi)
@@ -118,7 +111,7 @@ function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
     end
 end
 
-Base.empty!(cc::CodeCache) = empty!(cc.cis_for_mi)
+Base.empty!(cc::CodeCache) = empty!(cc.dict)
 
 const GLOBAL_CI_CACHES = Dict{CompilerConfig, CodeCache}()
 const GLOBAL_CI_CACHES_LOCK = ReentrantLock()
@@ -135,7 +128,7 @@ function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodI
         push!(mi.callbacks, callback)
     end
 
-    cis = get!(cache.cis_for_mi, mi, CodeInstance[])
+    cis = get!(cache.dict, mi, CodeInstance[])
     push!(cis, ci)
 end
 
@@ -143,7 +136,7 @@ end
 function invalidate_code_cache(cache::CodeCache, replaced::MethodInstance, max_world, seen=Set{MethodInstance}())
     push!(seen, replaced)
 
-    cis = get(cache.cis_for_mi, replaced, nothing)
+    cis = get(cache.dict, replaced, nothing)
     if cis === nothing
         return
     end
@@ -372,7 +365,7 @@ end
 
 function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
     # check the cache
-    for ci in get!(wvc.cache.cis_for_mi, mi, CodeInstance[])
+    for ci in get!(wvc.cache.dict, mi, CodeInstance[])
         if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
             # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
             src = if ci.inferred isa Vector{UInt8}

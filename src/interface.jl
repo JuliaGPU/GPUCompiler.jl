@@ -149,6 +149,14 @@ struct CompilerJob{T,P}
         new{T,P}(src, cfg, world)
 end
 
+function Base.hash(job::CompilerJob, h::UInt)
+    h = hash(job.source, h)
+    h = hash(job.config, h)
+    h = hash(job.world, h)
+
+    return h
+end
+
 
 ## contexts
 
