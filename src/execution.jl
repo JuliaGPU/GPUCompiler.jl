@@ -100,7 +100,6 @@ function cached_compilation(cache::AbstractDict{UInt,V},
     obj = get(cache, key, nothing)
     unlock(cache_lock)
 
-    LLVM.Interop.assume(isassigned(compile_hook))
     if obj === nothing || compile_hook[] !== nothing
         obj = actual_compilation(cfg, ft, tt, world, compiler, linker, cache)::V
         lock(cache_lock)
