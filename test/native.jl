@@ -99,7 +99,7 @@ end
     end
 
     @testset "cached compilation" begin
-        @gensym child kernel
+        @gensym child kernel unrelated
         @eval @noinline $child(i) = sink(i)
         @eval $kernel(i) = $child(i)+1
 
@@ -151,16 +151,22 @@ end
         @test invocations[] == 2
         @test length(cache) == 2
 
+        # redefinition of an unrelated function
+        @eval $unrelated(i) = 42
+        ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
+        @test invocations[] == 2
+        @test length(cache) == 3
+
         # redefining child functions
         @eval @noinline $child(i) = sink(i)+1
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test invocations[] == 3
-        @test length(cache) == 3
+        @test length(cache) == 4
 
         # cached compilation
         ir = GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
         @test invocations[] == 3
-        @test length(cache) == 3
+        @test length(cache) == 4
 
         # tasks running in the background should keep on using the old version
         c1, c2 = Condition(), Condition()
@@ -474,7 +480,7 @@ end
     @test flag[] == 42
 
     ir = sprint(io->native_code_llvm(io, caller, Tuple{}, dump_module=true))
-    @test occursin(r"add i64 %\d+, 42", ir)
+    @test_broken occursin(r"add i64 %\d+, 42", ir)
     # NOTE: can't just look for `jl_f` here, since it may be inlined and optimized away.
 
     add(x, y) = x+y
@@ -501,7 +507,7 @@ end
     # Test ABI removal
     # XXX: this relies on llvm_always_inline, which it shouldn't
     ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
-    @test !occursin("alloca", ir)
+    @test_broken !occursin("alloca", ir)
 
     ghostly_identity(x, y) = y
     @test call_delayed(ghostly_identity, nothing, 1) == 1

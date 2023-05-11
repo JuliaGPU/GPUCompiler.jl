@@ -19,9 +19,10 @@ function cached_compilation(cache::AbstractDict{UInt,V},
                             cfg::CompilerConfig,
                             ft::Type, tt::Type,
                             compiler::Function, linker::Function) where {V}
-    # NOTE: we only use the codegen world age for invalidation purposes;
-    #       actual compilation happens at the current world age.
-    world = codegen_world_age(ft, tt)
+    # fast path: a simple cache that's indexed by the current world age, the function and
+    #            argument types, and the compiler configuration
+
+    world = tls_world_age()
     key = hash(ft)
     key = hash(tt, key)
     key = hash(world, key)
@@ -34,32 +35,32 @@ function cached_compilation(cache::AbstractDict{UInt,V},
 
     LLVM.Interop.assume(isassigned(compile_hook))
     if obj === nothing || compile_hook[] !== nothing
-        obj = actual_compilation(cache, key, cfg, ft, tt, compiler, linker)::V
+        obj = actual_compilation(cfg, ft, tt, world, compiler, linker)::V
+        lock(cache_lock)
+        cache[key] = obj
+        unlock(cache_lock)
     end
     return obj::V
 end
 
-@noinline function actual_compilation(cache::AbstractDict, key::UInt,
-                                      cfg::CompilerConfig, ft::Type, tt::Type,
+@noinline function actual_compilation(cfg::CompilerConfig, ft::Type, tt::Type, world::UInt,
                                       compiler::Function, linker::Function)
     src = methodinstance(ft, tt)
     job = CompilerJob(src, cfg)
 
-    asm = nothing
+    # somewhat fast path: intersect the requested world age with the cached codeinstances
+    cache = ci_cache(job)
+    ci = ci_cache_lookup(cache, src, world, world)
+    if ci !== nothing && haskey(cache.obj_for_ci, ci)
+        return cache.obj_for_ci[ci]
+    end
+
+    # slow path: compile and link
     # TODO: consider loading the assembly from an on-disk cache here
+    asm = compiler(job)
+    obj = linker(job, asm)
+    ci = ci_cache_lookup(cache, src, world, world)
+    cache.obj_for_ci[ci] = obj
 
-    # compile
-    if asm === nothing
-        asm = compiler(job)
-    end
-
-    # link (but not if we got here because of forced compilation,
-    # in which case the cache will already be populated)
-    lock(cache_lock) do
-        haskey(cache, key) && return cache[key]
-
-        obj = linker(job, asm)
-        cache[key] = obj
-        obj
-    end
+    return obj
 end
