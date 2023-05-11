@@ -46,7 +46,7 @@ end
 @noinline function actual_compilation(cfg::CompilerConfig, ft::Type, tt::Type, world::UInt,
                                       compiler::Function, linker::Function)
     src = methodinstance(ft, tt)
-    job = CompilerJob(src, cfg)
+    job = CompilerJob(src, cfg, world)
 
     # somewhat fast path: intersect the requested world age with the cached codeinstances
     cache = ci_cache(job)
