@@ -120,7 +120,7 @@ end
 
 Base.empty!(cc::CodeCache) = empty!(cc.cis_for_mi)
 
-const GLOBAL_CI_CACHES = Dict{Tuple{DataType, InferenceParams, OptimizationParams}, CodeCache}()
+const GLOBAL_CI_CACHES = Dict{CompilerConfig, CodeCache}()
 const GLOBAL_CI_CACHES_LOCK = ReentrantLock()
 
 

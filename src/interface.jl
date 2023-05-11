@@ -257,7 +257,7 @@ valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 # the codeinfo cache to use
 function ci_cache(@nospecialize(job::CompilerJob))
     lock(GLOBAL_CI_CACHES_LOCK) do
-        cache = get!(GLOBAL_CI_CACHES, (typeof(job.config.target), inference_params(job), optimization_params(job))) do
+        cache = get!(GLOBAL_CI_CACHES, job.config) do
             CodeCache()
         end
         return cache
