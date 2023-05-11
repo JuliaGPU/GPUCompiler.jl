@@ -50,9 +50,11 @@ end
 
     # somewhat fast path: intersect the requested world age with the cached codeinstances
     cache = ci_cache(job)
-    ci = ci_cache_lookup(cache, src, world, world)
-    if ci !== nothing && haskey(cache.obj_for_ci, ci)
-        return cache.obj_for_ci[ci]
+    if compile_hook[] === nothing
+        ci = ci_cache_lookup(cache, src, world, world)
+        if ci !== nothing && haskey(cache.obj_for_ci, ci)
+            return cache.obj_for_ci[ci]
+        end
     end
 
     # slow path: compile and link
