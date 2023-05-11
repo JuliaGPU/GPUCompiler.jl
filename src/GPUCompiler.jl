@@ -36,7 +36,6 @@ include("debug.jl")
 include("driver.jl")
 
 # other reusable functionality
-include("cache.jl")
 include("execution.jl")
 include("reflection.jl")
 
