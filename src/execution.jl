@@ -31,23 +31,29 @@ function split_kwargs(kwargs, kw_groups...)
 end
 
 # assign arguments to variables, handle splatting
-function assign_args!(code, args)
+function assign_args!(code, _args)
+    nargs = length(_args)
+
     # handle splatting
-    splats = map(arg -> Meta.isexpr(arg, :(...)), args)
-    args = map(args, splats) do arg, splat
-        splat ? arg.args[1] : arg
+    splats = Vector{Bool}(undef, nargs)
+    args = Vector{Any}(undef, nargs)
+    for i in 1:nargs
+        splats[i] = Meta.isexpr(_args[i], :(...))
+        args[i] = splats[i] ? _args[i].args[1] : _args[i]
     end
 
     # assign arguments to variables
-    vars = Tuple(gensym() for arg in args)
-    map(vars, args) do var,arg
-        push!(code.args, :($var = $arg))
+    vars = Vector{Symbol}(undef, nargs)
+    for i in 1:nargs
+        vars[i] = gensym()
+        push!(code.args, :($(vars[i]) = $(args[i])))
     end
 
     # convert the arguments, compile the function and call the kernel
     # while keeping the original arguments alive
-    var_exprs = map(vars, args, splats) do var, arg, splat
-         splat ? Expr(:(...), var) : var
+    var_exprs = Vector{Any}(undef, nargs)
+    for i in 1:nargs
+        var_exprs[i] = splats[i] ? Expr(:(...), vars[i]) : vars[i]
     end
 
     return vars, var_exprs
