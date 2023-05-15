@@ -90,6 +90,9 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
 
     world = tls_world_age()
     key = (objectid(src), world, cfg)
+    # NOTE: we store the MethodInstance's objectid to avoid an expensive allocation.
+    #       Base does this with a multi-level lookup, first keyed on the mi,
+    #       then a linear scan over the (typically few) entries.
 
     # NOTE: no use of lock(::Function)/@lock/get! to avoid try/catch and closure overhead
     lock(cache_lock)
