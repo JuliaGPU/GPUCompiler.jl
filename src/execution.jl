@@ -77,7 +77,7 @@ and return data that can be cached across sessions (e.g., LLVM IR). This data is
 forwarded, along with the `CompilerJob`, to the `linker` function which is allowed to create
 session-dependent objects (e.g., a `CuModule`).
 """
-function cached_compilation(cache::AbstractDict{Any,V},
+function cached_compilation(cache::AbstractDict{<:Any,V},
                             cfg::CompilerConfig,
                             ft::Type, tt::Type,
                             compiler::Function, linker::Function) where {V}
