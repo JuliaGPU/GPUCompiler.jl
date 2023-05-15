@@ -277,7 +277,7 @@ method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
 
 # the inference parameters to use when constructing the GPUInterpreter
 function inference_params(@nospecialize(job::CompilerJob))
-    return InferenceParams(;unoptimize_throw_blocks=false)
+    return CC.InferenceParams(; unoptimize_throw_blocks=false)
 end
 
 # the optimization parameters to use when constructing the GPUInterpreter
@@ -292,7 +292,7 @@ function optimization_params(@nospecialize(job::CompilerJob))
         kwargs = (kwargs..., inline_cost_threshold=typemax(Int))
     end
 
-    return OptimizationParams(;kwargs...)
+    return CC.OptimizationParams(;kwargs...)
 end
 
 # how much debuginfo to emit

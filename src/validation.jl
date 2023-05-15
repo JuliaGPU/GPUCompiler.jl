@@ -5,7 +5,7 @@ export InvalidIRError
 # TODO: upstream
 function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
     methods = Core.MethodMatch[]
-    matches = _methods_by_ftype(tt, -1, world)
+    matches = Base._methods_by_ftype(tt, -1, world)
     matches === nothing && return methods
     for match in matches::Vector
         push!(methods, match::Core.MethodMatch)
@@ -13,7 +13,7 @@ function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
     return methods
 end
 
-function typeinf_type(mi::MethodInstance; interp::AbstractInterpreter)
+function typeinf_type(mi::MethodInstance; interp::CC.AbstractInterpreter)
     ty = Core.Compiler.typeinf_type(interp, mi.def, mi.specTypes, mi.sparam_vals)
     return something(ty, Any)
 end
