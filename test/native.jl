@@ -131,51 +131,55 @@ end
         tt = Tuple{Int64}
 
         # initial compilation
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, job.config, ft, tt, compiler, linker)
+        source = methodinstance(ft, tt, Base.get_world_counter())
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test contains(ir, "add i64 %1, 2")
         @test invocations[] == 1
 
         # cached compilation
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, job.config, ft, tt, compiler, linker)
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test contains(ir, "add i64 %1, 2")
         @test invocations[] == 1
 
         # redefinition
         @eval $kernel(i) = $child(i)+3
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, job.config, ft, tt, compiler, linker)
+        source = methodinstance(ft, tt, Base.get_world_counter())
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
 
         # cached compilation
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, job.config, ft, tt, compiler, linker)
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test contains(ir, "add i64 %1, 3")
         @test invocations[] == 2
 
         # redefinition of an unrelated function
         @eval $unrelated(i) = 42
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, job.config, ft, tt, compiler, linker)
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test invocations[] == 2
 
         # redefining child functions
         @eval @noinline $child(i) = i+1
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, job.config, ft, tt, compiler, linker)
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test invocations[] == 3
 
         # cached compilation
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, job.config, ft, tt, compiler, linker)
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test invocations[] == 3
 
         # tasks running in the background should keep on using the old version
         c1, c2 = Condition(), Condition()
         function background(job)
+            local_source = methodinstance(ft, tt, Base.get_world_counter())
             notify(c1)
             wait(c2)    # wait for redefinition
-            GPUCompiler.cached_compilation(cache, job.config, ft, tt, compiler, linker)
+            GPUCompiler.cached_compilation(cache, local_source, job.config, compiler, linker)
         end
         t = @async Base.invokelatest(background, job)
         wait(c1)        # make sure the task has started
         @eval $kernel(i) = $child(i)+4
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, job.config, ft, tt, compiler, linker)
+        source = methodinstance(ft, tt, Base.get_world_counter())
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test contains(ir, "add i64 %1, 4")
         notify(c2)      # wake up the task
         ir = fetch(t)

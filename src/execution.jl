@@ -65,33 +65,31 @@ end
 const cache_lock = ReentrantLock()
 
 """
-    cached_compilation(cache::Dict{Any}, cfg::CompilerConfig, ft::Type, tt::Type,
+    cached_compilation(cache::Dict{Any}, src::MethodInstance, cfg::CompilerConfig,
                        compiler, linker)
 
-Compile a method instance, identified by its function type `ft` and argument types `tt`,
-using `compiler` and `linker`, and store the result in `cache`.
+Compile a method instance `src` with configuration `cfg`, by invoking `compiler` and
+`linker` and storing the result in `cache`.
 
-The `cache` argument should be a dictionary that can be indexed using `Any` values and store
+The `cache` argument should be a dictionary that can be indexed using any value and store
 whatever the `linker` function returns. The `compiler` function should take a `CompilerJob`
 and return data that can be cached across sessions (e.g., LLVM IR). This data is then
 forwarded, along with the `CompilerJob`, to the `linker` function which is allowed to create
 session-dependent objects (e.g., a `CuModule`).
 """
 function cached_compilation(cache::AbstractDict{<:Any,V},
-                            cfg::CompilerConfig,
-                            ft::Type, tt::Type,
+                            src::MethodInstance, cfg::CompilerConfig,
                             compiler::Function, linker::Function) where {V}
     # NOTE: we index the cach both using (mi, world, cfg) keys, for the fast look-up,
     #       and using CodeInfo keys for the slow look-up. we need to cache both for
     #       performance, but cannot use a separate private cache for the ci->obj lookup
     #       (e.g. putting it next to the CodeInfo's in the CodeCache) because some clients
-    #       expect to be able to wipe the cache (e.g. CUDA.jl's device_reset!)
+    #       expect to be able to wipe the cache (e.g. CUDA.jl's `device_reset!`)
 
     # fast path: index the cache directly for the *current* world + compiler config
 
-    mi = methodinstance(ft, tt)
     world = tls_world_age()
-    key = (mi, world, cfg)
+    key = (objectid(src), world, cfg)
 
     # NOTE: no use of lock(::Function)/@lock/get! to avoid try/catch and closure overhead
     lock(cache_lock)
@@ -99,7 +97,7 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
     unlock(cache_lock)
 
     if obj === nothing || compile_hook[] !== nothing
-        obj = actual_compilation(cache, mi, world, cfg, compiler, linker)::V
+        obj = actual_compilation(cache, src, world, cfg, compiler, linker)::V
         lock(cache_lock)
         cache[key] = obj
         unlock(cache_lock)
@@ -107,13 +105,13 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
     return obj::V
 end
 
-@noinline function actual_compilation(cache::AbstractDict, mi::MethodInstance, world::UInt,
+@noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
                                       cfg::CompilerConfig, compiler::Function, linker::Function)
-    job = CompilerJob(mi, cfg, world)
+    job = CompilerJob(src, cfg, world)
     obj = nothing
 
     # fast path: find an applicable CodeInstance and see if we have compiled it before
-    ci = ci_cache_lookup(ci_cache(job), mi, world, world)::Union{Nothing,CodeInstance}
+    ci = ci_cache_lookup(ci_cache(job), src, world, world)::Union{Nothing,CodeInstance}
     if ci !== nothing && haskey(cache, ci)
         obj = cache[ci]
     end
@@ -129,7 +127,7 @@ end
         end
 
         obj = linker(job, asm)
-        ci = ci_cache_lookup(ci_cache(job), mi, world, world)::CodeInstance
+        ci = ci_cache_lookup(ci_cache(job), src, world, world)::CodeInstance
         cache[ci] = obj
     end
 
