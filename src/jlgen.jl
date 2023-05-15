@@ -1,5 +1,7 @@
 # Julia compiler integration
 
+const CC = Core.Compiler
+
 
 ## world age lookups
 
@@ -32,8 +34,18 @@ function unsafe_function_from_type(ft::Type)
         Ref{ft}()[]
     end
 end
-function MethodError(ft::Type, tt::Type, world::Integer=typemax(UInt))
+function MethodError(ft::Type{<:Function}, tt::Type, world::Integer=typemax(UInt))
     Base.MethodError(unsafe_function_from_type(ft), tt, world)
+end
+MethodError(ft, tt, world=typemax(UInt)) = Base.MethodError(ft, tt, world)
+
+# generate a LineInfoNode for the current source code location
+macro LineInfoNode(method)
+    if VERSION >= v"1.9.0-DEV.502"
+        Core.LineInfoNode(__module__, method, __source__.file, Int32(__source__.line), Int32(0))
+    else
+        Core.LineInfoNode(__module__, method, __source__.file, __source__.line, 0)
+    end
 end
 
 """
@@ -47,31 +59,101 @@ function is redefined.
 
 If the method is not found, a `MethodError` is thrown.
 """
-function methodinstance(ft::Type, tt::Type, world::Integer=tls_world_age())
+function methodinstance(ft::Type, tt::Type, world::Integer)
     sig = typed_signature(ft, tt)
 
-    # look-up the method (like `which`, but without throwing an error)
-    # TODO: use `CC.findsup`
-    meth = if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION >= v"1.9.0-DEV.149"
-        # TODO: pass the correct `mt` argument (maybe fixes JuliaGPU/GPUCompiler.jl#208)
-        ccall(:jl_gf_invoke_lookup, Any, (Any, Any, UInt), sig, nothing, world)
+    @static if VERSION >= v"1.8"
+        match, _ = Core.Compiler._findsup(sig, nothing, world)
+        match === nothing && throw(MethodError(ft, tt, world))
+
+        mi = Core.Compiler.specialize_method(match)
     else
-        ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, world)
+        meth = ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, world)
+        meth === nothing && throw(MethodError(ft, tt, world))
+
+        (ti, env) = ccall(:jl_type_intersection_with_env, Any,
+                          (Any, Any), sig, meth.sig)::Core.SimpleVector
+
+        meth = Base.func_for_method_checked(meth, ti, env)
+
+        mi = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
+                   (Any, Any, Any, UInt), meth, ti, env, world)
     end
-    meth === nothing && throw(MethodError(ft, tt, world))
 
-    (ti, env) = ccall(:jl_type_intersection_with_env, Any,
-                      (Any, Any), sig, meth.sig)::Core.SimpleVector
-
-    meth = Base.func_for_method_checked(meth, ti, env)
-
-    mi = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
-               (Any, Any, Any, UInt), meth, ti, env, world)
-
-    return mi
+    return mi::MethodInstance
 end
 
-Base.@deprecate_binding FunctionSpec methodinstance
+if VERSION >= v"1.10.0-DEV.873"
+
+# on 1.10 (JuliaLang/julia#48611) generated functions know which world to generate code for.
+# we can use this to cache and automatically invalidate method instance look-ups.
+
+function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
+    @nospecialize
+    @assert Core.Compiler.isType(ft) && Core.Compiler.isType(tt)
+    ft = ft.parameters[1]
+    tt = tt.parameters[1]
+
+    stub = Core.GeneratedFunctionStub(identity, Core.svec(:methodinstance, :ft, :tt), Core.svec())
+
+    # look up the method
+    method_error = :(throw(MethodError(ft, tt, $world)))
+    sig = Tuple{ft, tt.parameters...}
+    min_world = Ref{UInt}(typemin(UInt))
+    max_world = Ref{UInt}(typemax(UInt))
+    has_ambig = Ptr{Int32}(C_NULL)  # don't care about ambiguous results
+    mthds = Base._methods_by_ftype(sig, #=mt=# nothing, #=lim=# -1,
+                                   world, #=ambig=# false,
+                                   min_world, max_world, has_ambig)
+    # XXX: use the correct method table to support overlaying kernels
+    mthds === nothing && return stub(world, source, method_error)
+    length(mthds) == 1 || return stub(world, source, method_error)
+
+    # look up the method and code instance
+    mtypes, msp, m = mthds[1]
+    mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
+    ci = CC.retrieve_code_info(mi, world)::CodeInfo
+
+    # prepare a new code info
+    new_ci = copy(ci)
+    empty!(new_ci.code)
+    empty!(new_ci.codelocs)
+    empty!(new_ci.linetable)
+    empty!(new_ci.ssaflags)
+    new_ci.ssavaluetypes = 0
+
+    # propagate edge metadata
+    new_ci.min_world = min_world[]
+    new_ci.max_world = max_world[]
+    new_ci.edges = MethodInstance[mi]
+
+    # prepare the slots
+    new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
+    new_ci.slotflags = UInt8[0x00 for i = 1:3]
+
+    # return the method instance
+    push!(new_ci.code, CC.ReturnNode(mi))
+    push!(new_ci.ssaflags, 0x00)
+    push!(new_ci.linetable, @LineInfoNode(methodinstance))
+    push!(new_ci.codelocs, 1)
+    new_ci.ssavaluetypes += 1
+
+    return new_ci
+end
+
+@eval function methodinstance(ft, tt)
+    $(Expr(:meta, :generated_only))
+    $(Expr(:meta, :generated, methodinstance_generator))
+end
+
+else
+
+# on older versions of Julia we have to fall back to a run-time lookup.
+# this is slower, and allocates.
+
+methodinstance(f, tt) = methodinstance(f, tt, tls_world_age())
+
+end
 
 
 ## code instance cache

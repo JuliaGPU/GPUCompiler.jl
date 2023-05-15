@@ -40,7 +40,7 @@ GPUCompiler.runtime_module(::PTXCompilerJob) = PTXTestRuntime
 function ptx_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                  minthreads=nothing, maxthreads=nothing, blocks_per_sm=nothing,
                  maxregs=nothing, always_inline=false, kwargs...)
-    source = methodinstance(typeof(func), Base.to_tuple_type(types))
+    source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = PTXCompilerTarget(;cap=v"7.0",
                                minthreads, maxthreads,
                                blocks_per_sm, maxregs)

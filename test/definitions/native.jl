@@ -31,7 +31,7 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = TestRuntime
 function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                     entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
                     method_table=test_method_table, kwargs...)
-    source = methodinstance(typeof(func), Base.to_tuple_type(types))
+    source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget()
     params = NativeCompilerParams(entry_safepoint, method_table)
     config = CompilerConfig(target, params; kernel, entry_abi, always_inline)
