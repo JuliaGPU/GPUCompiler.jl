@@ -91,22 +91,19 @@ function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
 
     stub = Core.GeneratedFunctionStub(identity, Core.svec(:methodinstance, :ft, :tt), Core.svec())
 
-    # look up the method
+    # look up the method match
     method_error = :(throw(MethodError(ft, tt, $world)))
     sig = Tuple{ft, tt.parameters...}
     min_world = Ref{UInt}(typemin(UInt))
     max_world = Ref{UInt}(typemax(UInt))
-    has_ambig = Ptr{Int32}(C_NULL)  # don't care about ambiguous results
-    mthds = Base._methods_by_ftype(sig, #=mt=# nothing, #=lim=# -1,
-                                   world, #=ambig=# false,
-                                   min_world, max_world, has_ambig)
-    # XXX: use the correct method table to support overlaying kernels
-    mthds === nothing && return stub(world, source, method_error)
-    length(mthds) == 1 || return stub(world, source, method_error)
+    match = ccall(:jl_gf_invoke_lookup_worlds, Any,
+                  (Any, Any, Csize_t, Ref{Csize_t}, Ref{Csize_t}),
+                  sig, #=mt=# nothing, world, min_world, max_world)
+    match === nothing && return stub(world, source, method_error)
 
     # look up the method and code instance
-    mtypes, msp, m = mthds[1]
-    mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
+    mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance},
+               (Any, Any, Any), match.method, match.spec_types, match.sparams)
     ci = CC.retrieve_code_info(mi, world)
 
     # prepare a new code info
