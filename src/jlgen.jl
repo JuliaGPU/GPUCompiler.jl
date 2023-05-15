@@ -5,191 +5,13 @@
 
 # `tls_world_age` should be used to look up the current world age. in most cases, this is
 # what you should use to invoke the compiler with.
-#
-# `codegen_world_age` is a special function that returns the world age in which the passed
-# method instance (identified by its function and argument types) is to be compiled. the
-# returned constant is automatically invalidated when the method is redefined, and as such
-# can be used to drive cached compilation. it is unlikely that you should use this function
-# directly, instead use `cached_compilation` which handles invalidation for you.
 
 tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
-
-if VERSION >= v"1.10.0-DEV.873"
-
-# on 1.10 (JuliaLang/julia#48611) the generated function knows which world it was invoked in
-
-function _generated_ex(world, source, ex)
-    stub = Core.GeneratedFunctionStub(identity, Core.svec(:methodinstance, :ft, :tt), Core.svec())
-    stub(world, source, ex)
-end
-
-function codegen_world_age_generator(world::UInt, source, self, ft::Type, tt::Type)
-    @nospecialize
-    @assert Core.Compiler.isType(ft) && Core.Compiler.isType(tt)
-    ft = ft.parameters[1]
-    tt = tt.parameters[1]
-
-    # validation
-    ft <: Core.Builtin && error("$(unsafe_function_from_type(ft)) is not a generic function")
-
-    # look up the method
-    method_error = :(throw(MethodError(ft, tt, $world)))
-    sig = Tuple{ft, tt.parameters...}
-    min_world = Ref{UInt}(typemin(UInt))
-    max_world = Ref{UInt}(typemax(UInt))
-    has_ambig = Ptr{Int32}(C_NULL)  # don't care about ambiguous results
-    mthds = if VERSION >= v"1.7.0-DEV.1297"
-        Base._methods_by_ftype(sig, #=mt=# nothing, #=lim=# -1,
-                               world, #=ambig=# false,
-                               min_world, max_world, has_ambig)
-        # XXX: use the correct method table to support overlaying kernels
-    else
-        Base._methods_by_ftype(sig, #=lim=# -1,
-                               world, #=ambig=# false,
-                               min_world, max_world, has_ambig)
-    end
-    mthds === nothing && return _generated_ex(world, source, method_error)
-    length(mthds) == 1 || return _generated_ex(world, source, method_error)
-
-    # look up the method and code instance
-    mtypes, msp, m = mthds[1]
-    mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
-    ci = retrieve_code_info(mi, world)::CodeInfo
-
-    # prepare a new code info
-    new_ci = copy(ci)
-    empty!(new_ci.code)
-    empty!(new_ci.codelocs)
-    resize!(new_ci.linetable, 1)                # see note below
-    empty!(new_ci.ssaflags)
-    new_ci.ssavaluetypes = 0
-    new_ci.min_world = min_world[]
-    new_ci.max_world = max_world[]
-    new_ci.edges = MethodInstance[mi]
-    # XXX: setting this edge does not give us proper method invalidation, see
-    #      JuliaLang/julia#34962 which demonstrates we also need to "call" the kernel.
-    #      invoking `code_llvm` also does the necessary codegen, as does calling the
-    #      underlying C methods -- which GPUCompiler does, so everything Just Works.
-
-    # prepare the slots
-    new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
-    new_ci.slotflags = UInt8[0x00 for i = 1:3]
-
-    # return the codegen world age
-    push!(new_ci.code, ReturnNode(world))
-    push!(new_ci.ssaflags, 0x00)   # Julia's native compilation pipeline (and its verifier) expects `ssaflags` to be the same length as `code`
-    push!(new_ci.codelocs, 1)   # see note below
-    new_ci.ssavaluetypes += 1
-
-    # NOTE: we keep the first entry of the original linetable, and use it for location info
-    #       on the call to check_cache. we can't not have a codeloc (using 0 causes
-    #       corruption of the back trace), and reusing the target function's info
-    #       has as advantage that we see the name of the kernel in the backtraces.
-
-    return new_ci
-end
-
-@eval function codegen_world_age(ft, tt)
-    $(Expr(:meta, :generated_only))
-    $(Expr(:meta, :generated, codegen_world_age_generator))
-end
-
-else
-
-# on older versions of Julia we fall back to looking up the current world. this may be wrong
-# when the generator is invoked in a different world (TODO: when does this happen?)
-
-function codegen_world_age_generator(self, ft::Type, tt::Type)
-    @nospecialize
-    @assert Core.Compiler.isType(ft) && Core.Compiler.isType(tt)
-    ft = ft.parameters[1]
-    tt = tt.parameters[1]
-
-    # validation
-    ft <: Core.Builtin && error("$(unsafe_function_from_type(ft)) is not a generic function")
-
-    # look up the method
-    method_error = :(throw(MethodError(ft, tt)))
-    sig = Tuple{ft, tt.parameters...}
-    min_world = Ref{UInt}(typemin(UInt))
-    max_world = Ref{UInt}(typemax(UInt))
-    has_ambig = Ptr{Int32}(C_NULL)  # don't care about ambiguous results
-    mthds = if VERSION >= v"1.7.0-DEV.1297"
-        Base._methods_by_ftype(sig, #=mt=# nothing, #=lim=# -1,
-                               #=world=# typemax(UInt), #=ambig=# false,
-                               min_world, max_world, has_ambig)
-        # XXX: use the correct method table to support overlaying kernels
-    else
-        Base._methods_by_ftype(sig, #=lim=# -1,
-                               #=world=# typemax(UInt), #=ambig=# false,
-                               min_world, max_world, has_ambig)
-    end
-    # XXX: using world=-1 is wrong, but the current world isn't exposed to this generator
-    mthds === nothing && return method_error
-    length(mthds) == 1 || return method_error
-
-    # look up the method and code instance
-    mtypes, msp, m = mthds[1]
-    mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance}, (Any, Any, Any), m, mtypes, msp)
-    ci = retrieve_code_info(mi)::CodeInfo
-
-    # prepare a new code info
-    new_ci = copy(ci)
-    empty!(new_ci.code)
-    empty!(new_ci.codelocs)
-    resize!(new_ci.linetable, 1)                # see note below
-    empty!(new_ci.ssaflags)
-    new_ci.ssavaluetypes = 0
-    new_ci.min_world = min_world[]
-    new_ci.max_world = max_world[]
-    new_ci.edges = MethodInstance[mi]
-    # XXX: setting this edge does not give us proper method invalidation, see
-    #      JuliaLang/julia#34962 which demonstrates we also need to "call" the kernel.
-    #      invoking `code_llvm` also does the necessary codegen, as does calling the
-    #      underlying C methods -- which GPUCompiler does, so everything Just Works.
-
-    # prepare the slots
-    new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
-    new_ci.slotflags = UInt8[0x00 for i = 1:3]
-
-    # return the current world age (which is not technically the codegen world age,
-    # but works well enough for invalidation purposes)
-    push!(new_ci.code, ReturnNode(Base.get_world_counter()))
-    push!(new_ci.ssaflags, 0x00)   # Julia's native compilation pipeline (and its verifier) expects `ssaflags` to be the same length as `code`
-    push!(new_ci.codelocs, 1)   # see note below
-    new_ci.ssavaluetypes += 1
-
-    # NOTE: we keep the first entry of the original linetable, and use it for location info
-    #       on the call to check_cache. we can't not have a codeloc (using 0 causes
-    #       corruption of the back trace), and reusing the target function's info
-    #       has as advantage that we see the name of the kernel in the backtraces.
-
-    return new_ci
-end
-
-@eval function codegen_world_age(ft, tt)
-    $(Expr(:meta, :generated_only))
-    $(Expr(:meta,
-           :generated,
-           Expr(:new,
-                Core.GeneratedFunctionStub,
-                :codegen_world_age_generator,
-                Any[:methodinstance, :ft, :tt],
-                Any[],
-                @__LINE__,
-                QuoteNode(Symbol(@__FILE__)),
-                true)))
-end
-
-end
 
 
 ## looking up method instances
 
 export methodinstance
-
-using Core.Compiler: retrieve_code_info, CodeInfo, MethodInstance, SSAValue, SlotNumber, ReturnNode
-using Base: _methods_by_ftype
 
 @inline function typed_signature(ft::Type, tt::Type)
     u = Base.unwrap_unionall(tt)
@@ -207,8 +29,18 @@ function unsafe_function_from_type(ft::Type)
         Ref{ft}()[]
     end
 end
-function MethodError(ft::Type, tt::Type, world::Integer=typemax(UInt))
+function MethodError(ft::Type{<:Function}, tt::Type, world::Integer=typemax(UInt))
     Base.MethodError(unsafe_function_from_type(ft), tt, world)
+end
+MethodError(ft, tt, world=typemax(UInt)) = Base.MethodError(ft, tt, world)
+
+# generate a LineInfoNode for the current source code location
+macro LineInfoNode(method)
+    if VERSION >= v"1.9.0-DEV.502"
+        Core.LineInfoNode(__module__, method, __source__.file, Int32(__source__.line), Int32(0))
+    else
+        Core.LineInfoNode(__module__, method, __source__.file, __source__.line, 0)
+    end
 end
 
 """
@@ -219,39 +51,104 @@ argument typed `tt`. If the `world` argument is specified, the look-up is static
 always return the same result. If the `world` argument is not specified, the look-up is
 dynamic and the returned method instance will automatically be invalidated when a relevant
 function is redefined.
+
+If the method is not found, a `MethodError` is thrown.
 """
-function methodinstance(ft::Type, tt::Type, world::Integer=tls_world_age())
+function methodinstance(ft::Type, tt::Type, world::Integer)
     sig = typed_signature(ft, tt)
 
-    # look-up the method
-    if VERSION >= v"1.10.0-DEV.65"
-        meth = Base._which(sig; world).method
-    elseif VERSION >= v"1.7.0-DEV.435"
-        meth = Base._which(sig, world).method
+    @static if VERSION >= v"1.8"
+        match, _ = CC._findsup(sig, nothing, world)
+        match === nothing && throw(MethodError(ft, tt, world))
+
+        mi = CC.specialize_method(match)
     else
         meth = ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, world)
-        if meth == nothing
-            error("no unique matching method found for the specified argument types")
-        end
+        meth === nothing && throw(MethodError(ft, tt, world))
+
+        (ti, env) = ccall(:jl_type_intersection_with_env, Any,
+                          (Any, Any), sig, meth.sig)::Core.SimpleVector
+
+        meth = Base.func_for_method_checked(meth, ti, env)
+
+        mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance},
+                   (Any, Any, Any, UInt), meth, ti, env, world)
     end
 
-    (ti, env) = ccall(:jl_type_intersection_with_env, Any,
-                      (Any, Any), sig, meth.sig)::Core.SimpleVector
-
-    meth = Base.func_for_method_checked(meth, ti, env)
-
-    method_instance = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
-                            (Any, Any, Any, UInt), meth, ti, env, world)
-
-    return method_instance
+    return mi::MethodInstance
 end
 
-Base.@deprecate_binding FunctionSpec methodinstance
+if VERSION >= v"1.10.0-DEV.873"
+
+# on 1.10 (JuliaLang/julia#48611) generated functions know which world to generate code for.
+# we can use this to cache and automatically invalidate method instance look-ups.
+
+function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
+    @nospecialize
+    @assert CC.isType(ft) && CC.isType(tt)
+    ft = ft.parameters[1]
+    tt = tt.parameters[1]
+
+    stub = Core.GeneratedFunctionStub(identity, Core.svec(:methodinstance, :ft, :tt), Core.svec())
+
+    # look up the method match
+    method_error = :(throw(MethodError(ft, tt, $world)))
+    sig = Tuple{ft, tt.parameters...}
+    min_world = Ref{UInt}(typemin(UInt))
+    max_world = Ref{UInt}(typemax(UInt))
+    match = ccall(:jl_gf_invoke_lookup_worlds, Any,
+                  (Any, Any, Csize_t, Ref{Csize_t}, Ref{Csize_t}),
+                  sig, #=mt=# nothing, world, min_world, max_world)
+    match === nothing && return stub(world, source, method_error)
+
+    # look up the method and code instance
+    mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance},
+               (Any, Any, Any), match.method, match.spec_types, match.sparams)
+    ci = CC.retrieve_code_info(mi, world)
+
+    # prepare a new code info
+    new_ci = copy(ci)
+    empty!(new_ci.code)
+    empty!(new_ci.codelocs)
+    empty!(new_ci.linetable)
+    empty!(new_ci.ssaflags)
+    new_ci.ssavaluetypes = 0
+
+    # propagate edge metadata
+    new_ci.min_world = min_world[]
+    new_ci.max_world = max_world[]
+    new_ci.edges = MethodInstance[mi]
+
+    # prepare the slots
+    new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
+    new_ci.slotflags = UInt8[0x00 for i = 1:3]
+
+    # return the method instance
+    push!(new_ci.code, CC.ReturnNode(mi))
+    push!(new_ci.ssaflags, 0x00)
+    push!(new_ci.linetable, @LineInfoNode(methodinstance))
+    push!(new_ci.codelocs, 1)
+    new_ci.ssavaluetypes += 1
+
+    return new_ci
+end
+
+@eval function methodinstance(ft, tt)
+    $(Expr(:meta, :generated_only))
+    $(Expr(:meta, :generated, methodinstance_generator))
+end
+
+else
+
+# on older versions of Julia we have to fall back to a run-time lookup.
+# this is slower, and allocates.
+
+methodinstance(f, tt) = methodinstance(f, tt, tls_world_age())
+
+end
 
 
 ## code instance cache
-
-using Core.Compiler: CodeInstance, MethodInstance, InferenceParams, OptimizationParams
 
 struct CodeCache
     dict::IdDict{MethodInstance,Vector{CodeInstance}}
@@ -288,13 +185,13 @@ end
 
 Base.empty!(cc::CodeCache) = empty!(cc.dict)
 
-const GLOBAL_CI_CACHES = Dict{Tuple{DataType, InferenceParams, OptimizationParams}, CodeCache}()
+const GLOBAL_CI_CACHES = Dict{CompilerConfig, CodeCache}()
 const GLOBAL_CI_CACHES_LOCK = ReentrantLock()
 
 
 ## method invalidations
 
-function Core.Compiler.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
+function CC.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
     # make sure the invalidation callback is attached to the method instance
     callback(mi, max_world) = invalidate_code_cache(cache, mi, max_world)
     if !isdefined(mi, :callbacks)
@@ -363,17 +260,17 @@ const GLOBAL_METHOD_TABLE = nothing
 
 const override_world = typemax(Csize_t) - 1
 
-struct WorldOverlayMethodTable <: Core.Compiler.MethodTableView
+struct WorldOverlayMethodTable <: CC.MethodTableView
     world::UInt
 end
 
-function Core.Compiler.findall(@nospecialize(sig::Type{<:Tuple}), table::WorldOverlayMethodTable; limit::Int=typemax(Int))
+function CC.findall(@nospecialize(sig::Type{<:Tuple}), table::WorldOverlayMethodTable; limit::Int=typemax(Int))
     _min_val = Ref{UInt}(typemin(UInt))
     _max_val = Ref{UInt}(typemax(UInt))
     _ambig = Ref{Int32}(0)
     ms = Base._methods_by_ftype(sig, limit, override_world, false, _min_val, _max_val, _ambig)
     if ms === false
-        return Core.Compiler.missing
+        return CC.missing
     elseif isempty(ms)
         # no override, so look in the regular world
         _min_val[] = typemin(UInt)
@@ -384,9 +281,9 @@ function Core.Compiler.findall(@nospecialize(sig::Type{<:Tuple}), table::WorldOv
         _min_val[] = table.world
     end
     if ms === false
-        return Core.Compiler.missing
+        return CC.missing
     end
-    return Core.Compiler.MethodLookupResult(ms::Vector{Any}, Core.Compiler.WorldRange(_min_val[], _max_val[]), _ambig[] != 0)
+    return CC.MethodLookupResult(ms::Vector{Any}, CC.WorldRange(_min_val[], _max_val[]), _ambig[] != 0)
 end
 
 end
@@ -427,10 +324,6 @@ end
 
 ## interpreter
 
-using Core.Compiler:
-    AbstractInterpreter, InferenceResult, InferenceParams, InferenceState,
-    OptimizationParams, MethodTableView
-
 if isdefined(Base.Experimental, Symbol("@overlay"))
     using Core.Compiler: OverlayMethodTable
     const MTType = Core.MethodTable
@@ -456,20 +349,21 @@ else
     end
 end
 
-struct GPUInterpreter <: AbstractInterpreter
+struct GPUInterpreter <: CC.AbstractInterpreter
     global_cache::CodeCache
     method_table::GPUMethodTableView
 
     # Cache of inference results for this particular interpreter
-    local_cache::Vector{InferenceResult}
+    local_cache::Vector{CC.InferenceResult}
     # The world age we're working inside of
     world::UInt
 
     # Parameters for inference and optimization
-    inf_params::InferenceParams
-    opt_params::OptimizationParams
+    inf_params::CC.InferenceParams
+    opt_params::CC.OptimizationParams
 
-    function GPUInterpreter(cache::CodeCache, mt::MTType, world::UInt, ip::InferenceParams, op::OptimizationParams)
+    function GPUInterpreter(cache::CodeCache, mt::MTType, world::UInt,
+                            ip::CC.InferenceParams, op::CC.OptimizationParams)
         @assert world <= Base.get_world_counter()
 
         method_table = get_method_table_view(world, mt)
@@ -479,7 +373,7 @@ struct GPUInterpreter <: AbstractInterpreter
             method_table,
 
             # Initially empty cache
-            Vector{InferenceResult}(),
+            Vector{CC.InferenceResult}(),
 
             # world age counter
             world,
@@ -491,39 +385,39 @@ struct GPUInterpreter <: AbstractInterpreter
     end
 end
 
-Core.Compiler.InferenceParams(interp::GPUInterpreter) = interp.inf_params
-Core.Compiler.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
-Core.Compiler.get_world_counter(interp::GPUInterpreter) = interp.world
-Core.Compiler.get_inference_cache(interp::GPUInterpreter) = interp.local_cache
-Core.Compiler.code_cache(interp::GPUInterpreter) = WorldView(interp.global_cache, interp.world)
+CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
+CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
+CC.get_world_counter(interp::GPUInterpreter) = interp.world
+CC.get_inference_cache(interp::GPUInterpreter) = interp.local_cache
+CC.code_cache(interp::GPUInterpreter) = WorldView(interp.global_cache, interp.world)
 
 # No need to do any locking since we're not putting our results into the runtime cache
-Core.Compiler.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
-Core.Compiler.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
+CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
+CC.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
-function Core.Compiler.add_remark!(interp::GPUInterpreter, sv::InferenceState, msg)
+function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
     @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
 end
 
-Core.Compiler.may_optimize(interp::GPUInterpreter) = true
-Core.Compiler.may_compress(interp::GPUInterpreter) = true
-Core.Compiler.may_discard_trees(interp::GPUInterpreter) = true
+CC.may_optimize(interp::GPUInterpreter) = true
+CC.may_compress(interp::GPUInterpreter) = true
+CC.may_discard_trees(interp::GPUInterpreter) = true
 if VERSION >= v"1.7.0-DEV.577"
-Core.Compiler.verbose_stmt_info(interp::GPUInterpreter) = false
+CC.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 
 if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION >= v"1.9.0-DEV.120"
-Core.Compiler.method_table(interp::GPUInterpreter) = interp.method_table
+CC.method_table(interp::GPUInterpreter) = interp.method_table
 else
-Core.Compiler.method_table(interp::GPUInterpreter, sv::InferenceState) = interp.method_table
+CC.method_table(interp::GPUInterpreter, sv::CC.InferenceState) = interp.method_table
 end
 
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
 @static if VERSION >= v"1.9.0-DEV.1248"
-function Core.Compiler.concrete_eval_eligible(interp::GPUInterpreter,
-    @nospecialize(f), result::Core.Compiler.MethodCallResult, arginfo::Core.Compiler.ArgInfo)
-    ret = @invoke Core.Compiler.concrete_eval_eligible(interp::AbstractInterpreter,
-        f::Any, result::Core.Compiler.MethodCallResult, arginfo::Core.Compiler.ArgInfo)
+function CC.concrete_eval_eligible(interp::GPUInterpreter,
+    @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo)
+    ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
+        f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo)
     ret === false && return nothing
     return ret
 end
@@ -534,11 +428,11 @@ end
 
 using Core.Compiler: WorldView
 
-function Core.Compiler.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
-    Core.Compiler.get(wvc, mi, nothing) !== nothing
+function CC.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
+    CC.get(wvc, mi, nothing) !== nothing
 end
 
-function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
+function CC.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
     # check the cache
     for ci in get!(wvc.cache.dict, mi, CodeInstance[])
         if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
@@ -556,36 +450,36 @@ function Core.Compiler.get(wvc::WorldView{CodeCache}, mi::MethodInstance, defaul
     return default
 end
 
-function Core.Compiler.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
-    r = Core.Compiler.get(wvc, mi, nothing)
+function CC.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
+    r = CC.get(wvc, mi, nothing)
     r === nothing && throw(KeyError(mi))
     return r::CodeInstance
 end
 
-function Core.Compiler.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
+function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
     src = if ci.inferred isa Vector{UInt8}
         ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
                 mi.def, C_NULL, ci.inferred)
     else
         ci.inferred
     end
-    Core.Compiler.setindex!(wvc.cache, ci, mi)
+    CC.setindex!(wvc.cache, ci, mi)
 end
 
 
 ## codegen/inference integration
 
 function ci_cache_populate(interp, cache, mt, mi, min_world, max_world)
-    src = Core.Compiler.typeinf_ext_toplevel(interp, mi)
+    src = CC.typeinf_ext_toplevel(interp, mi)
 
     # inference populates the cache, so we don't need to jl_get_method_inferred
     wvc = WorldView(cache, min_world, max_world)
-    @assert Core.Compiler.haskey(wvc, mi)
+    @assert CC.haskey(wvc, mi)
 
     # if src is rettyp_const, the codeinfo won't cache ci.inferred
     # (because it is normally not supposed to be used ever again).
     # to avoid the need to re-infer, set that field here.
-    ci = Core.Compiler.getindex(wvc, mi)
+    ci = CC.getindex(wvc, mi)
     if ci !== nothing && ci.inferred === nothing
         @static if VERSION >= v"1.9.0-DEV.1115"
             @atomic ci.inferred = src
@@ -599,7 +493,7 @@ end
 
 function ci_cache_lookup(cache, mi, min_world, max_world)
     wvc = WorldView(cache, min_world, max_world)
-    ci = Core.Compiler.get(wvc, mi, nothing)
+    ci = CC.get(wvc, mi, nothing)
     if ci !== nothing && ci.inferred === nothing
         # if for some reason we did end up with a codeinfo without inferred source, e.g.,
         # because of calling `Base.return_types` which only sets rettyp, pretend we didn't

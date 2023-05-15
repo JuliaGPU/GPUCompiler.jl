@@ -9,7 +9,7 @@ end
 
 function metal_job(@nospecialize(func), @nospecialize(types);
                    kernel::Bool=false, always_inline=false, kwargs...)
-    source = methodinstance(typeof(func), Base.to_tuple_type(types))
+    source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = MetalCompilerTarget(; macos=v"12.2")
     params = TestCompilerParams()
     config = CompilerConfig(target, params; kernel, always_inline)

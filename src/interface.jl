@@ -149,6 +149,14 @@ struct CompilerJob{T,P}
         new{T,P}(src, cfg, world)
 end
 
+function Base.hash(job::CompilerJob, h::UInt)
+    h = hash(job.source, h)
+    h = hash(job.config, h)
+    h = hash(job.world, h)
+
+    return h
+end
+
 
 ## contexts
 
@@ -257,7 +265,7 @@ valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 # the codeinfo cache to use
 function ci_cache(@nospecialize(job::CompilerJob))
     lock(GLOBAL_CI_CACHES_LOCK) do
-        cache = get!(GLOBAL_CI_CACHES, (typeof(job.config.target), inference_params(job), optimization_params(job))) do
+        cache = get!(GLOBAL_CI_CACHES, job.config) do
             CodeCache()
         end
         return cache
@@ -269,7 +277,7 @@ method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
 
 # the inference parameters to use when constructing the GPUInterpreter
 function inference_params(@nospecialize(job::CompilerJob))
-    return InferenceParams(;unoptimize_throw_blocks=false)
+    return CC.InferenceParams(; unoptimize_throw_blocks=false)
 end
 
 # the optimization parameters to use when constructing the GPUInterpreter
@@ -284,7 +292,7 @@ function optimization_params(@nospecialize(job::CompilerJob))
         kwargs = (kwargs..., inline_cost_threshold=typemax(Int))
     end
 
-    return OptimizationParams(;kwargs...)
+    return CC.OptimizationParams(;kwargs...)
 end
 
 # how much debuginfo to emit

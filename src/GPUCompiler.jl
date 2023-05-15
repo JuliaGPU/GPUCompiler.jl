@@ -11,6 +11,9 @@ using Libdl
 
 using Scratch: @get_scratch!
 
+const CC = Core.Compiler
+using Core: MethodInstance, CodeInstance, CodeInfo
+
 include("utils.jl")
 
 # compiler interface and implementations
@@ -36,7 +39,6 @@ include("debug.jl")
 include("driver.jl")
 
 # other reusable functionality
-include("cache.jl")
 include("execution.jl")
 include("reflection.jl")
 

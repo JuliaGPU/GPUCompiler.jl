@@ -31,7 +31,7 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = TestRuntime
 function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                     entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
                     method_table=test_method_table, kwargs...)
-    source = methodinstance(typeof(func), Base.to_tuple_type(types))
+    source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget()
     params = NativeCompilerParams(entry_safepoint, method_table)
     config = CompilerConfig(target, params; kernel, entry_abi, always_inline)
@@ -372,7 +372,7 @@ module LazyCodegen
     @inline function call_delayed(f::F, args...) where F
         tt = Tuple{map(Core.Typeof, args)...}
         rt = Core.Compiler.return_type(f, tt)
-        world = GPUCompiler.codegen_world_age(F, tt)
+        world = GPUCompiler.tls_world_age()
         ptr = deferred_codegen(f, Val(tt), Val(world))
         abi_call(ptr, rt, tt, f, args...)
     end
