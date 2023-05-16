@@ -13,6 +13,7 @@ const SPIRV_Tools_jll = LazyModule("SPIRV_Tools_jll", UUID("6ac6d60f-d740-5983-9
 export SPIRVCompilerTarget
 
 Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
+    extensions::Vector{String} = []
     supports_fp16::Bool = true
     supports_fp64::Bool = true
 end
@@ -106,12 +107,18 @@ end
         run!(pm, mod)
     end
 
+
     # translate to SPIR-V
     input = tempname(cleanup=false) * ".bc"
     translated = tempname(cleanup=false) * ".spv"
+    options = `--spirv-debug-info-version=ocl-100`
+    if !isempty(job.config.target.extensions)
+        str = join(map(ext->"+$ext", job.config.target.extensions), ",")
+        options = `$options --spirv-ext=$str`
+    end
     write(input, mod)
     SPIRV_LLVM_Translator_unified_jll.llvm_spirv() do translator
-        proc = run(ignorestatus(`$translator --spirv-debug-info-version=ocl-100 -o $translated $input`))
+        proc = run(ignorestatus(`$translator $options -o $translated $input`))
         if !success(proc)
             error("""Failed to translate LLVM code to SPIR-V.
                      If you think this is a bug, please file an issue and attach $(input).""")
