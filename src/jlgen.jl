@@ -154,7 +154,27 @@ struct CodeCache
     dict::IdDict{MethodInstance,Vector{CodeInstance}}
 
     CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
+    CodeCache(cache::CodeCache) = new(GPUCompiler.copyAndFilter(cache.dict))
 end
+
+function copyAndFilter(dict::IdDict)
+    out= IdDict()
+    for key in keys(dict)
+        useKey = true
+        # why is it an array of code instances, can there be more than 1?
+        for ci in dict[key]
+            if ci.max_world < typemax(typeof(ci.max_world))
+                useKey = false
+                break
+            end
+        end
+        if useKey
+            out[key] = dict[key]
+        end
+    end
+    return out
+end
+
 
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
     print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries")
