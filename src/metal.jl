@@ -7,8 +7,15 @@ const Metal_LLVM_Tools_jll = LazyModule("Metal_LLVM_Tools_jll", UUID("0418c028-f
 export MetalCompilerTarget
 
 Base.@kwdef struct MetalCompilerTarget <: AbstractCompilerTarget
+    # version numbers
     macos::VersionNumber
+    air::VersionNumber
+    metal::VersionNumber
 end
+
+# for backwards compatibility
+MetalCompilerTarget(macos::VersionNumber) =
+    MetalCompilerTarget(; macos, air=v"2.4", metal=v"2.4")
 
 function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.macos, h)
@@ -44,11 +51,57 @@ const LLVMMETALFUNCCallConv   = LLVM.API.LLVMCallConv(102)
 const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
 
 function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
+    ctx = context(mod)
+
     # calling convention
     for f in functions(mod)
         #callconv!(f, LLVMMETALFUNCCallConv)
         # XXX: this makes InstCombine erase kernel->func calls.
         #      do we even need this? if we do, do so in metallib-instead.
+    end
+
+    # emit the AIR and Metal version numbers as constants in the module. this makes it
+    # possible to 'query' these in device code, relying on LLVM to optimize the checks away
+    # and generate static code. note that we only do so if there's actual uses of these
+    # variables; unconditionally creating a gvar would result in duplicate declarations.
+    for (name, value) in ["air_major"   => job.config.target.air.major,
+                          "air_minor"   => job.config.target.air.minor,
+                          "metal_major" => job.config.target.metal.major,
+                          "metal_minor" => job.config.target.metal.minor]
+        if haskey(globals(mod), name)
+            gv = globals(mod)[name]
+            initializer!(gv, ConstantInt(LLVM.Int32Type(ctx), value))
+            # change the linkage so that we can inline the value
+            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+        end
+    end
+
+    # we'll be optimizing IR before we have the AIR back-end, so we're missing out on
+    # intrinsics definitions. add some optimization-related attributes here.
+    for f in functions(mod)
+        fn = LLVM.name(f)
+
+        attrs = function_attributes(f)
+        function add_attributes(names...)
+            for name in names
+                push!(attrs, EnumAttribute(name, 0; ctx))
+            end
+        end
+
+        # synchronization
+        if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
+            add_attributes("nounwind", "convergent")
+
+        # atomics
+        elseif match(r"air.atomic.(local|global).load", fn) !== nothing
+            add_attributes("argmemonly", "nounwind", "readonly")
+        elseif match(r"air.atomic.(local|global).store", fn) !== nothing
+            add_attributes("argmemonly", "nounwind", "writeonly")
+        elseif match(r"air.atomic.(local|global).(xchg|cmpxchg)", fn) !== nothing
+            add_attributes("argmemonly", "nounwind")
+        elseif match(r"^air.atomic.(local|global).(add|sub|min|max|and|or|xor)", fn) !== nothing
+            add_attributes("argmemonly", "nounwind")
+        end
     end
 end
 
@@ -701,18 +754,18 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
     # add AIR version
     air_md = Metadata[]
-    push!(air_md, Metadata(ConstantInt(Int32(2); ctx)))
-    push!(air_md, Metadata(ConstantInt(Int32(4); ctx)))
-    push!(air_md, Metadata(ConstantInt(Int32(0); ctx)))
+    push!(air_md, Metadata(ConstantInt(Int32(job.config.target.air.major); ctx)))
+    push!(air_md, Metadata(ConstantInt(Int32(job.config.target.air.minor); ctx)))
+    push!(air_md, Metadata(ConstantInt(Int32(job.config.target.air.patch); ctx)))
     air_md = MDNode(air_md; ctx)
     push!(metadata(mod)["air.version"], air_md)
 
-    # add language version
+    # add Metal language version
     air_lang_md = Metadata[]
     push!(air_lang_md, MDString("Metal"; ctx))
-    push!(air_lang_md, Metadata(ConstantInt(Int32(2); ctx)))
-    push!(air_lang_md, Metadata(ConstantInt(Int32(4); ctx)))
-    push!(air_lang_md, Metadata(ConstantInt(Int32(0); ctx)))
+    push!(air_lang_md, Metadata(ConstantInt(Int32(job.config.target.metal.major); ctx)))
+    push!(air_lang_md, Metadata(ConstantInt(Int32(job.config.target.metal.minor); ctx)))
+    push!(air_lang_md, Metadata(ConstantInt(Int32(job.config.target.metal.patch); ctx)))
     air_lang_md = MDNode(air_lang_md; ctx)
     push!(metadata(mod)["air.language_version"], air_lang_md)
 
