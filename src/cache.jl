@@ -26,7 +26,6 @@ function cached_compilation(cache::AbstractDict{UInt,V},
     key = hash(tt, key)
     key = hash(world, key)
     key = hash(cfg, key)
-
     # NOTE: no use of lock(::Function)/@lock/get! to avoid try/catch and closure overhead
     lock(cache_lock)
     obj = get(cache, key, nothing)
@@ -36,6 +35,7 @@ function cached_compilation(cache::AbstractDict{UInt,V},
     if obj === nothing || compile_hook[] !== nothing
         obj = actual_compilation(cache, key, cfg, ft, tt, compiler, linker)::V
     end
+
     return obj::V
 end
 
@@ -45,10 +45,14 @@ end
     src = methodinstance(ft, tt)
     job = CompilerJob(src, cfg)
 
+    global_cache = ci_cache(job)
     asm = nothing
-    # TODO: consider loading the assembly from an on-disk cache here
 
-    # compile
+    # read asm from persistent offline cache
+    if haskey(global_cache.asm, src)
+        asm = global_cache.asm[src]
+    end
+
     if asm === nothing
         asm = compiler(job)
     end
@@ -57,7 +61,7 @@ end
     # in which case the cache will already be populated)
     lock(cache_lock) do
         haskey(cache, key) && return cache[key]
-
+        global_cache.asm[src] = asm
         obj = linker(job, asm)
         cache[key] = obj
         obj
