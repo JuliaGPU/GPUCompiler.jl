@@ -65,7 +65,7 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     return entry
 end
 
-function validate_module(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     errors = IRError[]
 
     # support for half and double depends on the target

@@ -278,7 +278,7 @@ finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Functi
     entry
 
 # whether an LLVM function is valid for this back-end
-validate_module(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]
+validate_ir(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]
 
 # deprecated
 struct DeprecationMarker end
