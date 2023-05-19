@@ -136,7 +136,40 @@ end
 
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMObjectFile)
+    ctx = context(mod)
+
     strip_debuginfo!(mod)  # XXX: is this needed?
+
+    # hide `noreturn` function attributes, which cause issues with the back-end compiler,
+    # probably because of thread-divergent control flow as we've encountered with CUDA.
+    # note that it isn't enough to remove the function attribute, because the Metal LLVM
+    # compiler re-optimizes and will rediscover the property. to avoid this, we inline
+    # all functions that are marked noreturn, i.e., until LLVM cannot rediscover it.
+    let
+        noreturn_attr = EnumAttribute("noreturn", 0; ctx)
+        noinline_attr = EnumAttribute("noinline", 0; ctx)
+        alwaysinline_attr = EnumAttribute("alwaysinline", 0; ctx)
+
+        any_noreturn = false
+        for f in functions(mod)
+            attrs = function_attributes(f)
+            if noreturn_attr in collect(attrs)
+                delete!(attrs, noreturn_attr)
+                delete!(attrs, noinline_attr)
+                push!(attrs, alwaysinline_attr)
+                any_noreturn = true
+            end
+        end
+
+        if any_noreturn
+            @dispose pm=ModulePassManager() begin
+                always_inliner!(pm)
+                cfgsimplification!(pm)
+                instruction_combining!(pm)
+                run!(pm, mod)
+            end
+        end
+    end
 
     # translate to metallib
     input = tempname(cleanup=false) * ".bc"
