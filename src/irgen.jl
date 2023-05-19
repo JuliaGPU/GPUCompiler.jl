@@ -91,9 +91,9 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
             for arg in args
                 if arg.cc == BITS_REF
                     attr = if LLVM.version() >= v"12"
-                        TypeAttribute("byval", eltype(arg.codegen.typ); ctx)
+                        TypeAttribute("byval", eltype(arg.codegen.typ); ctx=unwrap_context(ctx))
                     else
-                        EnumAttribute("byval", 0; ctx)
+                        EnumAttribute("byval", 0; ctx=unwrap_context(ctx))
                     end
                     push!(parameter_attributes(entry, arg.codegen.i), attr)
                 end
