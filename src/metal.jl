@@ -88,10 +88,16 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     # add metadata to AIR intrinsics LLVM doesn't know about
     annotate_air_intrinsics!(job, mod)
 
+    @dispose pm=ModulePassManager() begin
+        # we emit properties (of the device and ptx isa) as private global constants,
+        # so run the optimizer so that they are inlined before the rest of the optimizer runs.
+        global_optimizer!(pm)
+    end
+
     return functions(mod)[entry_fn]
 end
 
-function validate_module(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
+function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     # Metal never supports double precision
     check_ir_values(mod, LLVM.DoubleType(context(mod)))
 end

@@ -7,6 +7,7 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
     else
         entry_fn = compiled[job.source].func
     end
+    entry = functions(mod)[entry_fn]
 
     # clean up incompatibilities
     @timeit_debug to "clean-up" begin
@@ -38,9 +39,10 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
         end
     end
 
-    # target-specific processing
-    process_module!(job, mod)
-    entry = functions(mod)[entry_fn]
+    deprecation_marker = process_module!(job, mod)
+    if deprecation_marker != DeprecationMarker()
+        Base.depwarn("GPUCompiler.process_module! is deprecated; implement GPUCompiler.finish_module! instead", :process_module)
+    end
 
     # sanitize function names
     # FIXME: Julia should do this, but apparently fails (see maleadt/LLVM.jl#201)
@@ -64,7 +66,11 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
     elseif job.config.kernel
         LLVM.name!(entry, mangle_sig(job.source.specTypes))
     end
-    entry = process_entry!(job, mod, entry)
+    deprecation_marker = process_entry!(job, mod, entry)
+    if deprecation_marker != DeprecationMarker()
+        Base.depwarn("GPUCompiler.process_entry! is deprecated; implement GPUCompiler.finish_module! instead", :process_entry)
+        entry = deprecation_marker
+    end
     if job.config.entry_abi === :specfunc
         func = compiled[job.source].func
         specfunc = LLVM.name(entry)
@@ -77,27 +83,43 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
         (; compiled[job.source].ci, func, specfunc)
 
     # minimal required optimization
-    @timeit_debug to "rewrite" @dispose pm=ModulePassManager() begin
-        global current_job
-        current_job = job
-
-        linkage!(entry, LLVM.API.LLVMExternalLinkage)
-
-        # internalize all functions, but keep exported global variables
-        exports = String[LLVM.name(entry)]
-        for gvar in globals(mod)
-            push!(exports, LLVM.name(gvar))
+    @timeit_debug to "rewrite" begin
+        if job.config.kernel && needs_byval(job)
+            # pass all bitstypes by value; by default Julia passes aggregates by reference
+            # (this improves performance, and is mandated by certain back-ends like SPIR-V).
+            args = classify_arguments(job, function_type(entry))
+            for arg in args
+                if arg.cc == BITS_REF
+                    attr = if LLVM.version() >= v"12"
+                        TypeAttribute("byval", eltype(arg.codegen.typ); ctx=unwrap_context(ctx))
+                    else
+                        EnumAttribute("byval", 0; ctx=unwrap_context(ctx))
+                    end
+                    push!(parameter_attributes(entry, arg.codegen.i), attr)
+                end
+            end
         end
-        internalize!(pm, exports)
 
-        # inline llvmcall bodies
-        always_inliner!(pm)
+        @dispose pm=ModulePassManager() begin
+            global current_job
+            current_job = job
 
-        can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
+            linkage!(entry, LLVM.API.LLVMExternalLinkage)
 
-        add_lowering_passes!(job, pm)
+            # internalize all functions, but keep exported global variables
+            exports = String[LLVM.name(entry)]
+            for gvar in globals(mod)
+                push!(exports, LLVM.name(gvar))
+            end
+            internalize!(pm, exports)
 
-        run!(pm, mod)
+            # inline llvmcall bodies
+            always_inliner!(pm)
+
+            can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
+
+            run!(pm, mod)
+        end
     end
 
     return mod, compiled
