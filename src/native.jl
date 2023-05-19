@@ -23,12 +23,14 @@ function llvm_machine(target::NativeCompilerTarget)
     return tm
 end
 
-function process_entry!(job::CompilerJob{NativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+function finish_module!(job::CompilerJob{NativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
+
     if job.config.target.llvm_always_inline
         push!(function_attributes(entry), EnumAttribute("alwaysinline", 0; ctx))
     end
-    invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+
+    return entry
 end
 
 ## job

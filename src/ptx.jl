@@ -96,16 +96,9 @@ runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
        "-debuginfo=$(Int(llvm_debug_info(job)))" *
        "-exitable=$(job.config.target.exitable)"
 
-function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
+function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                        mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
-
-    # calling convention
-    if LLVM.version() >= v"8"
-        for f in functions(mod)
-            # JuliaGPU/GPUCompiler.jl#97
-            #callconv!(f, LLVM.API.LLVMPTXDeviceCallConv)
-        end
-    end
 
     # emit the device capability and ptx isa version as constants in the module. this makes
     # it possible to 'query' these in device code, relying on LLVM to optimize the checks
@@ -122,35 +115,40 @@ function process_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod
             linkage!(gv, LLVM.API.LLVMPrivateLinkage)
         end
     end
-end
 
-function process_entry!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                        mod::LLVM.Module, entry::LLVM.Function)
-    entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+    # update calling convention
+    if LLVM.version() >= v"8"
+        for f in functions(mod)
+            # JuliaGPU/GPUCompiler.jl#97
+            #callconv!(f, LLVM.API.LLVMPTXDeviceCallConv)
+        end
+    end
+    if job.config.kernel && LLVM.version() >= v"8"
+        callconv!(entry, LLVM.API.LLVMPTXKernelCallConv)
+    end
 
     if job.config.kernel
-        if LLVM.version() >= v"8"
-            # calling convention
-            callconv!(entry, LLVM.API.LLVMPTXKernelCallConv)
+        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
+        entry = lower_byval(job, mod, entry)
+    end
+
+    @dispose pm=ModulePassManager() begin
+        # hide `unreachable` from LLVM so that it doesn't introduce divergent control flow
+        if !job.config.target.unreachable
+            add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
         end
+
+        # even if we support `unreachable`, we still prefer `exit` to `trap`
+        add!(pm, ModulePass("HideTrap", hide_trap!))
+
+        # we emit properties (of the device and ptx isa) as private global constants,
+        # so run the optimizer so that they are inlined before the rest of the optimizer runs.
+        global_optimizer!(pm)
+
+        run!(pm, mod)
     end
 
     return entry
-end
-
-function add_lowering_passes!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                              pm::LLVM.PassManager)
-    # hide `unreachable` from LLVM so that it doesn't introduce divergent control flow
-    if !job.config.target.unreachable
-        add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
-    end
-
-    # even if we support `unreachable`, we still prefer `exit` to `trap`
-    add!(pm, ModulePass("HideTrap", hide_trap!))
-
-    # we emit properties (of the device and ptx isa) as private global constants,
-    # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-    global_optimizer!(pm)
 end
 
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
@@ -187,23 +185,9 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 end
 
-function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                        mod::LLVM.Module, entry::LLVM.Function)
-    ctx = context(mod)
-    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
-
-    if job.config.kernel
-        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
-        entry = lower_byval(job, mod, entry)
-    end
-
-    return entry
-end
-
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
-    entry = invoke(finish_ir!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
 
     if job.config.kernel
         # add metadata annotations for the assembler to the module

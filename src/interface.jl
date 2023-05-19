@@ -167,7 +167,7 @@ else
 end
 
 
-## interfaces and fallback definitions
+## default definitions that can be overridden to influence GPUCompiler's behavior
 
 # Has the runtime available and does not require special handling
 uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
@@ -201,9 +201,6 @@ can_safepoint(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 # the generated code of this compiler job (with exception of the function source)
 runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
 
-# early processing of the newly generated LLVM IR module
-process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
-
 # the type of the kernel state object, or Nothing if this back-end doesn't need one.
 #
 # the generated code will be rewritten to include an object of this type as the first
@@ -213,51 +210,6 @@ kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
 
 # Does the target need to pass kernel arguments by value?
 needs_byval(@nospecialize(job::CompilerJob)) = true
-
-# early processing of the newly identified LLVM kernel function
-function process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                        entry::LLVM.Function)
-    ctx = context(mod)
-
-    if job.config.kernel && needs_byval(job)
-        # pass all bitstypes by value; by default Julia passes aggregates by reference
-        # (this improves performance, and is mandated by certain back-ends like SPIR-V).
-        args = classify_arguments(job, function_type(entry))
-        for arg in args
-            if arg.cc == BITS_REF
-                attr = if LLVM.version() >= v"12"
-                    TypeAttribute("byval", eltype(arg.codegen.typ); ctx)
-                else
-                    EnumAttribute("byval", 0; ctx)
-                end
-                push!(parameter_attributes(entry, arg.codegen.i), attr)
-            end
-        end
-    end
-
-    return entry
-end
-
-# post-Julia optimization processing of the module
-optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
-
-# whether an LLVM function is valid for this back-end
-validate_module(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]
-
-# finalization of the module, before deferred codegen and optimization
-function finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
-    return entry
-end
-
-# final processing of the IR, right before validation and machine-code generation
-function finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
-    return entry
-end
-
-add_lowering_passes!(@nospecialize(job::CompilerJob), pm::LLVM.PassManager) = return
-
-link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                undefined_fns::Vector{String}) = return
 
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
@@ -305,3 +257,25 @@ function llvm_debug_info(@nospecialize(job::CompilerJob))
         LLVM.API.LLVMDebugEmissionKindFullDebug
     end
 end
+
+
+## extension points at important stages of compilation
+
+# early extension point used to link-in external bitcode files.
+# this is typically overridden by downstream packages, to link vendor libraries.
+link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                undefined_fns::Vector{String}) = return
+
+# finalization of the module, before deferred codegen and optimization
+finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
+    entry
+
+# post-Julia optimization processing of the module
+optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
+
+# final processing of the IR, right before validation and machine-code generation
+finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
+    entry
+
+# whether an LLVM function is valid for this back-end
+validate_module(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]

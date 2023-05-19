@@ -34,32 +34,21 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
 runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) = "spirv"
 
-function process_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
-    # calling convention
+function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+    ctx = context(mod)
+
+    # update calling convention
     for f in functions(mod)
         # JuliaGPU/GPUCompiler.jl#97
         #callconv!(f, LLVM.API.LLVMSPIRFUNCCallConv)
     end
-end
-
-function process_entry!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
-
     if job.config.kernel
-        # calling convention
         callconv!(entry, LLVM.API.LLVMSPIRKERNELCallConv)
     end
 
-    return entry
-end
-
-function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    ctx = context(mod)
-    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
-
+    # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
+    #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
     if job.config.kernel
-        # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
-        #       they do support struct byval, for OpenCL, so wrap byval parameters in a struct.
         entry = wrap_byval(job, mod, entry)
     end
 

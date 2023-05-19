@@ -35,26 +35,17 @@ runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.config.target.dev
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
 
-function process_entry!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
+function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                        mod::LLVM.Module, entry::LLVM.Function)
+    @dispose pm=ModulePassManager() begin
+        add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
+        run!(pm, mod)
+    end
 
     if job.config.kernel
         # calling convention
         callconv!(entry, LLVM.API.LLVMAMDGPUKERNELCallConv)
-    end
 
-    entry
-end
-
-function add_lowering_passes!(job::CompilerJob{GCNCompilerTarget}, pm::LLVM.PassManager)
-    add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
-end
-
-function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
-                        mod::LLVM.Module, entry::LLVM.Function)
-    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
-
-    if job.config.kernel
         # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
         entry = lower_byval(job, mod, entry)
     end
