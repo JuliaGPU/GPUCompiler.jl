@@ -50,14 +50,23 @@ isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
 const LLVMMETALFUNCCallConv   = LLVM.API.LLVMCallConv(102)
 const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
 
-function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
+function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
+    entry_fn = LLVM.name(entry)
 
-    # calling convention
+    # update calling conventions
     for f in functions(mod)
         #callconv!(f, LLVMMETALFUNCCallConv)
         # XXX: this makes InstCombine erase kernel->func calls.
         #      do we even need this? if we do, do so in metallib-instead.
+    end
+    if job.config.kernel
+        callconv!(entry, LLVMMETALKERNELCallConv)
+
+        entry = pass_by_reference!(job, mod, entry)
+
+        add_input_arguments!(job, mod, entry)
+        entry = LLVM.functions(mod)[entry_fn]
     end
 
     # emit the AIR and Metal version numbers as constants in the module. this makes it
@@ -76,44 +85,10 @@ function process_module!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module
         end
     end
 
-    # we'll be optimizing IR before we have the AIR back-end, so we're missing out on
-    # intrinsics definitions. add some optimization-related attributes here.
-    for f in functions(mod)
-        fn = LLVM.name(f)
+    # add metadata to AIR intrinsics LLVM doesn't know about
+    annotate_air_intrinsics!(job, mod)
 
-        attrs = function_attributes(f)
-        function add_attributes(names...)
-            for name in names
-                push!(attrs, EnumAttribute(name, 0; ctx))
-            end
-        end
-
-        # synchronization
-        if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
-            add_attributes("nounwind", "convergent")
-
-        # atomics
-        elseif match(r"air.atomic.(local|global).load", fn) !== nothing
-            add_attributes("argmemonly", "nounwind", "readonly")
-        elseif match(r"air.atomic.(local|global).store", fn) !== nothing
-            add_attributes("argmemonly", "nounwind", "writeonly")
-        elseif match(r"air.atomic.(local|global).(xchg|cmpxchg)", fn) !== nothing
-            add_attributes("argmemonly", "nounwind")
-        elseif match(r"^air.atomic.(local|global).(add|sub|min|max|and|or|xor)", fn) !== nothing
-            add_attributes("argmemonly", "nounwind")
-        end
-    end
-end
-
-function process_entry!(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    entry = invoke(process_entry!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
-
-    if job.config.kernel
-        # calling convention
-        callconv!(entry, LLVMMETALKERNELCallConv)
-    end
-
-    return entry
+    return functions(mod)[entry_fn]
 end
 
 function validate_module(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
@@ -121,36 +96,33 @@ function validate_module(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module
     check_ir_values(mod, LLVM.DoubleType(context(mod)))
 end
 
-# TODO: why is this done in finish_module? maybe just in process_entry?
-function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module, entry::LLVM.Function)
-    entry = invoke(finish_module!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
-
-    ctx = context(mod)
-    entry_fn = LLVM.name(entry)
-
-    if job.config.kernel
-        entry = pass_by_reference!(job, mod, entry)
-
-        add_input_arguments!(job, mod, entry)
-        entry = LLVM.functions(mod)[entry_fn]
-    end
-
-    return functions(mod)[entry_fn]
-end
-
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
-    entry = invoke(finish_ir!, Tuple{CompilerJob, LLVM.Module, LLVM.Function}, job, mod, entry)
-
     ctx = context(mod)
     entry_fn = LLVM.name(entry)
 
+    # add kernel metadata
     if job.config.kernel
         entry = add_address_spaces!(job, mod, entry)
 
         add_argument_metadata!(job, mod, entry)
 
         add_module_metadata!(job, mod)
+    end
+
+    # lower LLVM intrinsics that AIR doesn't support
+    changed = false
+    for f in functions(mod)
+        changed |= lower_llvm_intrinsics!(job, f)
+    end
+    if changed
+        # lowering may have introduced additional functions marked `alwaysinline`
+        @dispose pm=ModulePassManager() begin
+            always_inliner!(pm)
+            cfgsimplification!(pm)
+            instruction_combining!(pm)
+            run!(pm, mod)
+        end
     end
 
     return functions(mod)[entry_fn]
@@ -773,4 +745,284 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     sdk_version!(mod, job.config.target.macos)
 
     return
+end
+
+
+# intrinsics handling
+#
+# we don't have a proper back-end, so we're missing out on intrinsics-related functionality.
+
+# replace LLVM intrinsics with AIR equivalents
+function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
+    isdeclaration(fun) && return false
+
+    # TODO: fastmath
+
+    mod = LLVM.parent(fun)
+    ctx = context(mod)
+    changed = false
+
+    # determine worklist
+    worklist = LLVM.CallBase[]
+    for bb in blocks(fun), inst in instructions(bb)
+        isa(inst, LLVM.CallBase) || continue
+
+        call_fun = called_value(inst)
+        isa(call_fun, LLVM.Function) || continue
+        LLVM.isintrinsic(call_fun) || continue
+
+        push!(worklist, inst)
+    end
+
+    # lower intrinsics
+    for call in worklist
+        bb = LLVM.parent(call)
+        call_fun = called_value(call)
+        call_ft = function_type(call_fun)
+        intr = LLVM.Intrinsic(call_fun)
+
+        # unsupported, but safe to remove
+        unsupported_intrinsics = LLVM.Intrinsic.([
+            "llvm.experimental.noalias.scope.decl",
+            "llvm.lifetime.start",
+            "llvm.lifetime.end",
+            "llvm.assume"
+        ])
+        if intr in unsupported_intrinsics
+            unsafe_delete!(bb, call)
+            changed = true
+        end
+
+        # intrinsics that map straight to AIR
+        mappable_intrinsics = Dict(
+            # one argument
+            LLVM.Intrinsic("llvm.abs")      => ("air.abs", true),
+            LLVM.Intrinsic("llvm.fabs")     => ("air.fabs", missing),
+            # two arguments
+            LLVM.Intrinsic("llvm.umin")     => ("air.min", false),
+            LLVM.Intrinsic("llvm.smin")     => ("air.min", true),
+            LLVM.Intrinsic("llvm.umax")     => ("air.max", false),
+            LLVM.Intrinsic("llvm.smax")     => ("air.max", true),
+            LLVM.Intrinsic("llvm.minnum")   => ("air.fmin", missing),
+            LLVM.Intrinsic("llvm.maxnum")   => ("air.fmax", missing),
+
+        )
+        if haskey(mappable_intrinsics, intr)
+            fn, signed = mappable_intrinsics[intr]
+
+            # determine type of the intrinsic
+            typ = value_type(call)
+            if typ isa LLVM.IntegerType
+                fn *= signed::Bool ? ".s" : ".u"
+                fn *= ".$(width(typ))"
+            elseif typ == LLVM.HalfType(ctx)
+                fn *= ".f16"
+            elseif typ == LLVM.FloatType(ctx)
+                fn *= ".f32"
+            elseif typ == LLVM.DoubleType(ctx)
+                fn *= ".f64"
+            else
+                error("Unsupported intrinsic type: $typ")
+            end
+
+            new_intr_ft = LLVM.FunctionType(typ, parameters(call_ft))
+            new_intr = LLVM.Function(mod, fn, new_intr_ft)
+            @dispose builder=IRBuilder(ctx) begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                new_value = call!(builder, new_intr, arguments(call))
+                replace_uses!(call, new_value)
+                unsafe_delete!(bb, call)
+                changed = true
+            end
+        end
+
+        # copysign
+        if intr == LLVM.Intrinsic("llvm.copysign")
+            arg0, arg1 = operands(call)
+            @assert value_type(arg0) == value_type(arg1)
+            typ = value_type(call)
+
+            # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
+            jltyp = if typ == LLVM.HalfType(ctx)
+                Float16
+            elseif typ == LLVM.FloatType(ctx)
+                Float32
+            elseif typ == LLVM.DoubleType(ctx)
+                Float64
+            else
+                error("Unsupported copysign type: $typ")
+            end
+
+            @dispose builder=IRBuilder(ctx) begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                # get bits
+                typ′ = LLVM.IntType(8*sizeof(jltyp); ctx)
+                arg0′ = bitcast!(builder, arg0, typ′)
+                arg1′ = bitcast!(builder, arg1, typ′)
+
+                # twiddle bits
+                sign = and!(builder, arg1′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
+                mantissa = and!(builder, arg0′, LLVM.ConstantInt(typ′, ~Base.sign_mask(jltyp)))
+                new_value = or!(builder, sign, mantissa)
+
+                new_value = bitcast!(builder, new_value, typ)
+                replace_uses!(call, new_value)
+                unsafe_delete!(bb, call)
+                changed = true
+            end
+        end
+
+        # IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
+        if intr == LLVM.Intrinsic("llvm.minimum") || intr == LLVM.Intrinsic("llvm.maximum")
+            typ = value_type(call)
+
+            # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
+            jltyp = if typ == LLVM.HalfType(ctx)
+                Float16
+            elseif typ == LLVM.FloatType(ctx)
+                Float32
+            elseif typ == LLVM.DoubleType(ctx)
+                Float64
+            else
+                error("Unsupported maximum/minimum type: $typ")
+            end
+
+            # create a function that performs the IEEE-compliant operation.
+            # normally we'd do this inline, but LLVM.jl doesn't have BB split functionality.
+            new_intr_fn = "air.minimum.f$(8*sizeof(jltyp))"
+            if haskey(functions(mod), new_intr_fn)
+                new_intr = functions(mod)[new_intr_fn]
+            else
+                new_intr = LLVM.Function(mod, new_intr_fn, LLVM.FunctionType(typ, parameters(call_ft)))
+                push!(function_attributes(new_intr), EnumAttribute("alwaysinline"; ctx))
+
+                arg0, arg1 = parameters(new_intr)
+                @assert value_type(arg0) == value_type(arg1)
+
+                bb_check_arg0 = BasicBlock(new_intr, "check_arg0"; ctx)
+                bb_nan_arg0 = BasicBlock(new_intr, "nan_arg0"; ctx)
+                bb_check_arg1 = BasicBlock(new_intr, "check_arg1"; ctx)
+                bb_nan_arg1 = BasicBlock(new_intr, "nan_arg1"; ctx)
+                bb_check_zero = BasicBlock(new_intr, "check_zero"; ctx)
+                bb_compare_zero = BasicBlock(new_intr, "compare_zero"; ctx)
+                bb_fallback = BasicBlock(new_intr, "fallback"; ctx)
+
+                @dispose builder=IRBuilder(ctx) begin
+                    # first, check if either argument is NaN, and return it if so
+
+                    position!(builder, bb_check_arg0)
+                    arg0_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, arg0, arg0)
+                    br!(builder, arg0_nan, bb_nan_arg0, bb_check_arg1)
+
+                    position!(builder, bb_nan_arg0)
+                    ret!(builder, arg0)
+
+                    position!(builder, bb_check_arg1)
+                    arg1_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, arg1, arg1)
+                    br!(builder, arg1_nan, bb_nan_arg1, bb_check_zero)
+
+                    position!(builder, bb_nan_arg1)
+                    ret!(builder, arg1)
+
+                    # then, check if both arguments are zero and have a mismatching sign.
+                    # if so, return in accordance to the intrinsic (minimum or maximum)
+
+                    position!(builder, bb_check_zero)
+
+                    typ′ = LLVM.IntType(8*sizeof(jltyp); ctx)
+                    arg0′ = bitcast!(builder, arg0, typ′)
+                    arg1′ = bitcast!(builder, arg1, typ′)
+
+                    arg0_zero = fcmp!(builder, LLVM.API.LLVMRealUEQ, arg0,
+                                      LLVM.ConstantFP(typ, zero(jltyp)))
+                    arg1_zero = fcmp!(builder, LLVM.API.LLVMRealUEQ, arg1,
+                                      LLVM.ConstantFP(typ, zero(jltyp)))
+                    args_zero = and!(builder, arg0_zero, arg1_zero)
+                    arg0_sign = and!(builder, arg0′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
+                    arg1_sign = and!(builder, arg1′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
+                    sign_mismatch = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign, arg1_sign)
+                    relevant_zero = and!(builder, args_zero, sign_mismatch)
+                    br!(builder, relevant_zero, bb_compare_zero, bb_fallback)
+
+                    position!(builder, bb_compare_zero)
+                    arg0_negative = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign,
+                                          LLVM.ConstantInt(typ′, 0))
+                    val = if intr == LLVM.Intrinsic("llvm.minimum")
+                        select!(builder, arg0_negative, arg0, arg1)
+                    else
+                        select!(builder, arg0_negative, arg1, arg0)
+                    end
+                    ret!(builder, val)
+
+                    # finally, it's safe to use the existing minnum/maxnum intrinsics
+
+                    position!(builder, bb_fallback)
+                    fallback_intr_fn = if intr == LLVM.Intrinsic("llvm.minimum")
+                        "air.fmin.f$(8*sizeof(jltyp))"
+                    else
+                        "air.fmax.f$(8*sizeof(jltyp))"
+                    end
+                    fallback_intr = if haskey(functions(mod), fallback_intr_fn)
+                        functions(mod)[fallback_intr_fn]
+                    else
+                        LLVM.Function(mod, fallback_intr_fn, LLVM.FunctionType(typ, parameters(call_ft)))
+                    end
+                    val = call!(builder, fallback_intr, collect(parameters(new_intr)))
+                    ret!(builder, val)
+                end
+            end
+
+            @dispose builder=IRBuilder(ctx) begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                new_value = call!(builder, new_intr, arguments(call))
+                replace_uses!(call, new_value)
+                unsafe_delete!(bb, call)
+                changed = true
+            end
+        end
+    end
+
+    return changed
+end
+
+# annotate AIR intrinsics with optimization-related metadata
+function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    ctx = context(mod)
+    changed = false
+
+    for f in functions(mod)
+        isdeclaration(f) || continue
+        fn = LLVM.name(f)
+
+        attrs = function_attributes(f)
+        function add_attributes(names...)
+            for name in names
+                push!(attrs, EnumAttribute(name, 0; ctx))
+            end
+            changed = true
+        end
+
+        # synchronization
+        if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
+            add_attributes("nounwind", "convergent")
+
+        # atomics
+        elseif match(r"air.atomic.(local|global).load", fn) !== nothing
+            add_attributes("argmemonly", "nounwind", "readonly")
+        elseif match(r"air.atomic.(local|global).store", fn) !== nothing
+            add_attributes("argmemonly", "nounwind", "writeonly")
+        elseif match(r"air.atomic.(local|global).(xchg|cmpxchg)", fn) !== nothing
+            add_attributes("argmemonly", "nounwind")
+        elseif match(r"^air.atomic.(local|global).(add|sub|min|max|and|or|xor)", fn) !== nothing
+            add_attributes("argmemonly", "nounwind")
+        end
+    end
+
+    return changed
 end
