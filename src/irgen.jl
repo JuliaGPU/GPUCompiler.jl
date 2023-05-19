@@ -39,6 +39,11 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
         end
     end
 
+    deprecation_marker = process_module!(job, mod)
+    if deprecation_marker != DeprecationMarker()
+        Base.depwarn("GPUCompiler.process_module! is deprecated; implement GPUCompiler.finish_module! instead", :process_module)
+    end
+
     # sanitize function names
     # FIXME: Julia should do this, but apparently fails (see maleadt/LLVM.jl#201)
     for f in functions(mod)
@@ -60,6 +65,11 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
         LLVM.name!(entry, safe_name(job.config.name))
     elseif job.config.kernel
         LLVM.name!(entry, mangle_sig(job.source.specTypes))
+    end
+    deprecation_marker = process_entry!(job, mod, entry)
+    if deprecation_marker != DeprecationMarker()
+        Base.depwarn("GPUCompiler.process_entry! is deprecated; implement GPUCompiler.finish_module! instead", :process_entry)
+        entry = deprecation_marker
     end
     if job.config.entry_abi === :specfunc
         func = compiled[job.source].func

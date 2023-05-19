@@ -262,7 +262,7 @@ end
 ## extension points at important stages of compilation
 
 # early extension point used to link-in external bitcode files.
-# this is typically overridden by downstream packages, to link vendor libraries.
+# this is typically used by downstream packages to link vendor libraries.
 link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                 undefined_fns::Vector{String}) = return
 
@@ -279,3 +279,9 @@ finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Functi
 
 # whether an LLVM function is valid for this back-end
 validate_module(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]
+
+# deprecated
+struct DeprecationMarker end
+process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = DeprecationMarker()
+process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
+    DeprecationMarker()
