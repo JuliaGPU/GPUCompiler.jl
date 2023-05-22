@@ -864,13 +864,12 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 error("Unsupported intrinsic type: $typ")
             end
 
-            new_intr_ft = LLVM.FunctionType(typ, parameters(call_ft))
-            new_intr = LLVM.Function(mod, fn, new_intr_ft)
+            new_intr = LLVM.Function(mod, fn, call_ft)
             @dispose builder=IRBuilder(ctx) begin
                 position!(builder, call)
                 debuglocation!(builder, call)
 
-                new_value = call!(builder, new_intr, arguments(call))
+                new_value = call!(builder, call_ft, new_intr, arguments(call))
                 replace_uses!(call, new_value)
                 unsafe_delete!(bb, call)
                 changed = true
@@ -936,7 +935,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             if haskey(functions(mod), new_intr_fn)
                 new_intr = functions(mod)[new_intr_fn]
             else
-                new_intr = LLVM.Function(mod, new_intr_fn, LLVM.FunctionType(typ, parameters(call_ft)))
+                new_intr = LLVM.Function(mod, new_intr_fn, call_ft)
                 push!(function_attributes(new_intr), EnumAttribute("alwaysinline"; ctx))
 
                 arg0, arg1 = parameters(new_intr)
@@ -1008,9 +1007,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     fallback_intr = if haskey(functions(mod), fallback_intr_fn)
                         functions(mod)[fallback_intr_fn]
                     else
-                        LLVM.Function(mod, fallback_intr_fn, LLVM.FunctionType(typ, parameters(call_ft)))
+                        LLVM.Function(mod, fallback_intr_fn, call_ft)
                     end
-                    val = call!(builder, fallback_intr, collect(parameters(new_intr)))
+                    val = call!(builder, call_ft, fallback_intr, collect(parameters(new_intr)))
                     ret!(builder, val)
                 end
             end
@@ -1019,7 +1018,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 position!(builder, call)
                 debuglocation!(builder, call)
 
-                new_value = call!(builder, new_intr, arguments(call))
+                new_value = call!(builder, call_ft, new_intr, arguments(call))
                 replace_uses!(call, new_value)
                 unsafe_delete!(bb, call)
                 changed = true
