@@ -561,11 +561,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob); ctx::JuliaCont
 
     # set-up the compiler interface
     debug_info_kind = llvm_debug_info(job)
+    gnu_pubnames = llvm_gnu_pubnames(job)
     cgparams = (;
         track_allocations  = false,
         code_coverage      = false,
         prefer_specsig     = true,
-        gnu_pubnames       = false,
+        gnu_pubnames       = Bool(gnu_pubnames),
         debug_info_kind    = Cint(debug_info_kind),
         lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
     @static if v"1.9.0-DEV.1660" <= VERSION < v"1.9.0-beta1" || VERSION >= v"1.10-"
