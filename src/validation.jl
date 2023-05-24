@@ -30,12 +30,7 @@ function check_method(@nospecialize(job::CompilerJob))
 
     # kernels can't return values
     if job.config.kernel
-        cache = ci_cache(job)
-        mt = method_table(job)
-        ip = inference_params(job)
-        op = optimization_params(job)
-        interp = GPUInterpreter(cache, mt, job.world, ip, op)
-        rt = typeinf_type(job.source; interp)
+        rt = typeinf_type(job.source; interp=get_interpreter(job))
 
         if rt != Nothing
             throw(KernelError(job, "kernel returns a value of type `$rt`",
