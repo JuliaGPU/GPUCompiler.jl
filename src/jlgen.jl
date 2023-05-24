@@ -350,46 +350,48 @@ else
 end
 
 struct GPUInterpreter <: CC.AbstractInterpreter
-    global_cache::CodeCache
+    world::UInt
     method_table::GPUMethodTableView
 
-    # Cache of inference results for this particular interpreter
-    local_cache::Vector{CC.InferenceResult}
-    # The world age we're working inside of
-    world::UInt
+    code_cache::CodeCache
+    inf_cache::Vector{CC.InferenceResult}
 
-    # Parameters for inference and optimization
     inf_params::CC.InferenceParams
     opt_params::CC.OptimizationParams
+end
 
-    function GPUInterpreter(cache::CodeCache, mt::MTType, world::UInt,
-                            ip::CC.InferenceParams, op::CC.OptimizationParams)
-        @assert world <= Base.get_world_counter()
+function GPUInterpreter(world::UInt=Base.get_world_counter();
+                        method_table::MTType,
+                        code_cache::CodeCache,
+                        inf_params::CC.InferenceParams,
+                        opt_params::CC.OptimizationParams)
+    @assert world <= Base.get_world_counter()
 
-        method_table = get_method_table_view(world, mt)
+    method_table = get_method_table_view(world, method_table)
+    inf_cache = Vector{CC.InferenceResult}()
 
-        return new(
-            cache,
-            method_table,
+    return GPUInterpreter(world, method_table,
+                          code_cache, inf_cache,
+                          inf_params, opt_params)
+end
 
-            # Initially empty cache
-            Vector{CC.InferenceResult}(),
-
-            # world age counter
-            world,
-
-            # parameters for inference and optimization
-            ip,
-            op
-        )
-    end
+function GPUInterpreter(interp::GPUInterpreter;
+                        world::UInt=interp.world,
+                        method_table::GPUMethodTableView=interp.method_table,
+                        code_cache::CodeCache=interp.code_cache,
+                        inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
+                        inf_params::CC.InferenceParams=interp.inf_params,
+                        opt_params::CC.OptimizationParams=interp.opt_params)
+    return GPUInterpreter(world, method_table,
+                          code_cache, inf_cache,
+                          inf_params, opt_params)
 end
 
 CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
 CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
 CC.get_world_counter(interp::GPUInterpreter) = interp.world
-CC.get_inference_cache(interp::GPUInterpreter) = interp.local_cache
-CC.code_cache(interp::GPUInterpreter) = WorldView(interp.global_cache, interp.world)
+CC.get_inference_cache(interp::GPUInterpreter) = interp.inf_cache
+CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
 
 # No need to do any locking since we're not putting our results into the runtime cache
 CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing

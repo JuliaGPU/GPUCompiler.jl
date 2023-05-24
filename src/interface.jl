@@ -185,8 +185,9 @@ isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
 get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(ci_cache(job), method_table(job), job.world,
-                   inference_params(job), optimization_params(job))
+    GPUInterpreter(job.world; method_table=method_table(job),
+                   code_cache=ci_cache(job), inf_params=inference_params(job),
+                   opt_params=optimization_params(job))
 
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime
