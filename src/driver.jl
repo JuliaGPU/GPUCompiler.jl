@@ -59,8 +59,7 @@ const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 """
     compile(target::Symbol, job::CompilerJob;
-            libraries=true, deferred_codegen=true,
-            optimize=true, strip=false, ...)
+            libraries=true, optimize=true, strip=false, ...)
 
 Compile a function `f` invoked with types `tt` for device capability `cap` to one of the
 following formats as specified by the `target` argument: `:julia` for Julia IR, `:llvm` for
@@ -68,7 +67,6 @@ LLVM IR and `:asm` for machine code.
 
 The following keyword arguments are supported:
 - `libraries`: link the GPU runtime and `libdevice` libraries (if required)
-- `deferred_codegen`: resolve deferred compiler invocations (if required)
 - `optimize`: optimize the code (default: true)
 - `cleanup`: run cleanup passes on the code (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
@@ -79,7 +77,7 @@ The following keyword arguments are supported:
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob);
-                 libraries::Bool=true, deferred_codegen::Bool=true,
+                 libraries::Bool=true, toplevel::Bool=true,
                  optimize::Bool=true, cleanup::Bool=true, strip::Bool=false,
                  validate::Bool=true, only_entry::Bool=false,
                  ctx::Union{JuliaContextType,Nothing}=nothing)
@@ -88,11 +86,11 @@ function compile(target::Symbol, @nospecialize(job::CompilerJob);
     end
 
     return codegen(target, job;
-                   libraries, deferred_codegen, optimize, cleanup, strip, validate, only_entry, ctx)
+                   libraries, toplevel, optimize, cleanup, strip, validate, only_entry, ctx)
 end
 
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
-                 libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
+                 libraries::Bool=true, toplevel::Bool=true, optimize::Bool=true,
                  cleanup::Bool=true, strip::Bool=false, validate::Bool=true,
                  only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob}=nothing,
                  ctx::Union{JuliaContextType,Nothing}=nothing)
@@ -117,7 +115,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                      Use a JuliaContext instead.""")
         end
 
-        ir, ir_meta = emit_llvm(job; libraries, deferred_codegen, optimize, cleanup, only_entry, validate, ctx)
+        ir, ir_meta = emit_llvm(job; libraries, toplevel, optimize, cleanup, only_entry, validate, ctx)
 
         if output == :llvm
             if strip
@@ -184,7 +182,7 @@ end
 const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob);
-                           libraries::Bool=true, deferred_codegen::Bool=true, optimize::Bool=true,
+                           libraries::Bool=true, toplevel::Bool=true, optimize::Bool=true,
                            cleanup::Bool=true, only_entry::Bool=false, validate::Bool=true,
                            ctx::JuliaContextType)
     if !__llvm_initialized[]
@@ -206,51 +204,15 @@ const __llvm_initialized = Ref(false)
         entry = functions(ir)[entry_fn]
     end
 
-    # always preload the runtime, and do so early; it cannot be part of any timing block
-    # because it recurses into the compiler
-    if !uses_julia_runtime(job) && libraries
-        runtime = load_runtime(job; ctx)
-        runtime_fns = LLVM.name.(defs(runtime))
-        runtime_intrinsics = ["julia.gc_alloc_obj"]
-    end
-
-    @timeit_debug to "Library linking" begin
-        if libraries
-            # target-specific libraries
-            undefined_fns = LLVM.name.(decls(ir))
-            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
-
-            # GPU run-time library
-            if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns || fn in runtime_intrinsics, undefined_fns)
-                @timeit_debug to "runtime library" link_library!(ir, runtime)
-            end
-        end
-    end
-
-    # mark everything internal except for the entry and any exported global variables.
-    # this makes sure that the optimizer can, e.g., touch function signatures.
-    @dispose pm=ModulePassManager() begin
-        # NOTE: this needs to happen after linking libraries to remove unused functions,
-        #       but before deferred codegen so that all kernels remain available.
-        exports = String[entry_fn]
-        for gvar in globals(ir)
-            if linkage(gvar) == LLVM.API.LLVMExternalLinkage
-                push!(exports, LLVM.name(gvar))
-            end
-        end
-        internalize!(pm, exports)
-        run!(pm, ir)
-    end
-
     # finalize the current module. this needs to happen before linking deferred modules,
     # since those modules have been finalized themselves, and we don't want to re-finalize.
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    do_deferred_codegen = !only_entry && deferred_codegen &&
-                          haskey(functions(ir), "deferred_codegen")
-    deferred_jobs = Dict{CompilerJob, String}(job => entry_fn)
-    if do_deferred_codegen
+    has_deferred_jobs = !only_entry && toplevel &&
+                        haskey(functions(ir), "deferred_codegen")
+    jobs = Dict{CompilerJob, String}(job => entry_fn)
+    if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
 
         # iterative compilation (non-recursive)
@@ -285,10 +247,10 @@ const __llvm_initialized = Ref(false)
             # compile and link
             for dyn_job in keys(worklist)
                 # cached compilation
-                dyn_entry_fn = get!(deferred_jobs, dyn_job) do
+                dyn_entry_fn = get!(jobs, dyn_job) do
                     dyn_ir, dyn_meta = codegen(:llvm, dyn_job; validate=false,
                                                optimize=false,
-                                               deferred_codegen=false,
+                                               toplevel=false,
                                                parent_job=job, ctx)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
@@ -317,7 +279,48 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
+    if toplevel
+        # always preload the runtime, and do so early; it cannot be part of any
+        # timing block because it recurses into the compiler
+        if !uses_julia_runtime(job) && libraries
+            runtime = load_runtime(job; ctx)
+            runtime_fns = LLVM.name.(defs(runtime))
+            runtime_intrinsics = ["julia.gc_alloc_obj"]
+        end
+
+        @timeit_debug to "Library linking" begin
+            if libraries
+                # target-specific libraries
+                undefined_fns = LLVM.name.(decls(ir))
+                @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
+
+                # GPU run-time library
+                if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
+                                                         fn in runtime_intrinsics,
+                                                   undefined_fns)
+                    @timeit_debug to "runtime library" link_library!(ir, runtime)
+                end
+            end
+        end
+    end
+
     @timeit_debug to "IR post-processing" begin
+        # mark everything internal except for entrypoints and any exported
+        # global variables. this makes sure that the optimizer can, e.g.,
+        # rewrite function signatures.
+        if toplevel
+            @dispose pm=ModulePassManager() begin
+                exports = collect(values(jobs))
+                for gvar in globals(ir)
+                    if linkage(gvar) == LLVM.API.LLVMExternalLinkage
+                        push!(exports, LLVM.name(gvar))
+                    end
+                end
+                internalize!(pm, exports)
+                run!(pm, ir)
+            end
+        end
+
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
             push!(metadata(ir)["julia.kernel"], MDNode([entry]; ctx=unwrap_context(ctx)))
@@ -333,7 +336,7 @@ const __llvm_initialized = Ref(false)
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
-                do_deferred_codegen && @dispose pm=ModulePassManager() begin
+                has_deferred_jobs && @dispose pm=ModulePassManager() begin
                     # inline and optimize the call to e deferred code. in particular we want
                     # to remove unnecessary alloca's created by pass-by-ref semantics.
                     instruction_combining!(pm)
@@ -374,14 +377,15 @@ const __llvm_initialized = Ref(false)
 
         # finish the module
         #
-        # we want to finish the module after optimization, so we cannot do so during
-        # deferred code generation. instead, process the deferred jobs here.
-        if deferred_codegen
+        # we want to finish the module after optimization, so we cannot do so
+        # during deferred code generation. instead, process the deferred jobs
+        # here.
+        if toplevel
             entry = finish_ir!(job, ir, entry)
 
-            for (deferred_job, deferred_fn) in deferred_jobs
-                deferred_job == job && continue
-                finish_ir!(deferred_job, ir, functions(ir)[deferred_fn])
+            for (job′, fn′) in jobs
+                job′ == job && continue
+                finish_ir!(job′, ir, functions(ir)[fn′])
             end
         end
 
