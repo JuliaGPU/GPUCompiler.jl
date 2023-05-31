@@ -59,9 +59,8 @@ llvm_datalayout(target::PTXCompilerTarget) =
     # little endian
     "e-" *
     # on 32-bit systems, use 32-bit pointers.
-    # on 64-bit systems, use 64-bit pointers, but prefer 32-bit indexing.
-    # this is not what the NVPTX user guide recommends, but helps for performance.
-    (Int === Int64 ? "p:64:64:64:32-" :  "p:32:32:32-") *
+    # on 64-bit systems, use 64-bit pointers.
+    (Int === Int64 ? "p:64:64:64-" :  "p:32:32:32-") *
     # alignment of integer types
     "i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-" *
     # alignment of floating point types
