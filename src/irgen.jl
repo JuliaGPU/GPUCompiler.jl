@@ -45,17 +45,13 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
     end
 
     # sanitize function names
-    # FIXME: Julia should do this, but apparently fails (see maleadt/LLVM.jl#201)
+    # FIXME: Julia should do this, but sometimes fails (see maleadt/LLVM.jl#201)
     for f in functions(mod)
-        LLVM.isintrinsic(f) && continue
+        isdeclaration(f) && continue
         llvmfn = LLVM.name(f)
-        # XXX: simplify this by only renaming definitions, not declarations?
-        startswith(llvmfn, "julia.") && continue # Julia intrinsics
-        startswith(llvmfn, "llvm.") && continue # unofficial LLVM intrinsics
-        startswith(llvmfn, "air.") && continue # Metal AIR intrinsics
         llvmfn′ = safe_name(llvmfn)
         if llvmfn != llvmfn′
-            @assert !haskey(functions(mod), llvmfn′)
+            @assert !haskey(functions(mod), llvmfn′) "Cannot rename $llvmfn to $llvmfn′, already exists"
             LLVM.name!(f, llvmfn′)
         end
     end
