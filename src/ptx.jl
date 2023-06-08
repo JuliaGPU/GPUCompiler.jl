@@ -125,12 +125,6 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 
     @dispose pm=ModulePassManager() begin
-        # structurize unreachable control flow
-        add!(pm, FunctionPass("StructurizeUnreachable", structurize_unreachable!))
-
-        # we prefer `exit` over `trap`
-        add!(pm, ModulePass("LowerTrap", lower_trap!))
-
         # we emit properties (of the device and ptx isa) as private global constants,
         # so run the optimizer so that they are inlined before the rest of the optimizer runs.
         global_optimizer!(pm)
@@ -178,6 +172,16 @@ end
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     ctx = context(mod)
+
+    @dispose pm=ModulePassManager() begin
+        # structurize unreachable control flow
+        add!(pm, FunctionPass("StructurizeUnreachable", structurize_unreachable!))
+
+        # we prefer `exit` over `trap`
+        add!(pm, ModulePass("LowerTrap", lower_trap!))
+
+        run!(pm, mod)
+    end
 
     if job.config.kernel
         # add metadata annotations for the assembler to the module
