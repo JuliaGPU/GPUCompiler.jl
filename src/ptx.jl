@@ -17,6 +17,10 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
     blocks_per_sm::Union{Nothing,Int} = nothing
     maxregs::Union{Nothing,Int} = nothing
+
+    # deprecated; remove with next major version
+    exitable::Union{Nothing,Bool} = nothing
+    unreachable::Union{Nothing,Bool} = nothing
 end
 
 function Base.hash(target::PTXCompilerTarget, h::UInt)
