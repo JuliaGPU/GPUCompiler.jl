@@ -310,6 +310,11 @@ function structurize_unreachable!(f::LLVM.Function)
     # - try cloning paths with multiple predecessors, as those may originate from
     #   differently-divergent regions
 
+    # remove `noreturn` attributes, to avoid the (minimal) optimization that
+    # happens during `prepare_execution!` undoing our work here
+    attrs = function_attributes(f)
+    delete!(attrs, EnumAttribute("noreturn", 0; ctx))
+
     # find unreachable blocks
     unreachable_blocks = Set{BasicBlock}()
     for block in blocks(f)
