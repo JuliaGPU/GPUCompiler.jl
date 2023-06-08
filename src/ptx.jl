@@ -429,6 +429,24 @@ function structurize_unreachable!(f::LLVM.Function)
                 new_paths = [path, [clone_path(path) for i in 1:length(predecessors)-1]...]
                 for (predecessor, new_path) in zip(predecessors, new_paths)
                     rewrite_edges(predecessor, path[1]=>new_path[1])
+
+                    phi = first(instructions(new_path[1]))
+                    if phi isa LLVM.PHIInst
+                        # we need to prune the phi at the start of the cloned path
+                        # so that it only has a value for the one retained predecessor
+                        # TODO: expose and use additional mutation APIs for the PHI node's
+                        #       incoming edges (e.g. `empty!`, `delete!`, etc)
+                        position!(builder, phi)
+                        new_phi = phi!(builder, value_type(phi))
+                        for i in 1:length(LLVM.incoming(phi))
+                            phi_value, phi_block = LLVM.incoming(phi)[i]
+                            if phi_block == predecessor
+                                push!(LLVM.incoming(new_phi), (phi_value, phi_block))
+                            end
+                        end
+                        replace_uses!(phi, new_phi)
+                        unsafe_delete!(new_path[1], phi)
+                    end
                 end
                 block_successors, block_predecessors = compute_control_flow()
 
