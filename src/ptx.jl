@@ -11,10 +11,6 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     # codegen quirks
     ## can we emit debug info in the PTX assembly?
     debuginfo::Bool = false
-    ## do we permit unrachable statements, which often result in divergent control flow?
-    unreachable::Bool = false
-    ## can exceptions use `exit` (which doesn't kill the GPU), or should they use `trap`?
-    exitable::Bool = false
 
     # optional properties
     minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
@@ -28,8 +24,6 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.ptx, h)
 
     h = hash(target.debuginfo, h)
-    h = hash(target.unreachable, h)
-    h = hash(target.exitable, h)
 
     h = hash(target.minthreads, h)
     h = hash(target.maxthreads, h)
@@ -92,8 +86,7 @@ isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
 # XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
 runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
     "ptx-sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)" *
-       "-debuginfo=$(Int(llvm_debug_info(job)))" *
-       "-exitable=$(job.config.target.exitable)"
+       "-debuginfo=$(Int(llvm_debug_info(job)))"
 
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
@@ -132,13 +125,11 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 
     @dispose pm=ModulePassManager() begin
-        # hide `unreachable` from LLVM so that it doesn't introduce divergent control flow
-        if !job.config.target.unreachable
-            add!(pm, FunctionPass("HideUnreachable", hide_unreachable!))
-        end
+        # structurize unreachable control flow
+        add!(pm, FunctionPass("StructurizeUnreachable", structurize_unreachable!))
 
-        # even if we support `unreachable`, we still prefer `exit` to `trap`
-        add!(pm, ModulePass("HideTrap", hide_trap!))
+        # we prefer `exit` over `trap`
+        add!(pm, ModulePass("LowerTrap", lower_trap!))
 
         # we emit properties (of the device and ptx isa) as private global constants,
         # so run the optimizer so that they are inlined before the rest of the optimizer runs.
@@ -242,138 +233,216 @@ end
 
 ## LLVM passes
 
-# HACK: this pass removes `unreachable` information from LLVM
+# structurize unreachable control flow
 #
-# `ptxas` is buggy and cannot deal with thread-divergent control flow in the presence of
-# shared memory (see JuliaGPU/CUDAnative.jl#4). avoid that by rewriting control flow to fall
-# through any other block. this is semantically invalid, but the code is unreachable anyhow
-# (and we expect it to be preceded by eg. a noreturn function, or a trap).
+# The CUDA back-end compiler ptxas needs to insert instructions that manage the harware's
+# reconvergence stack. In order to do so, it needs to identify divergent regions and
+# emit SSY and SYNC instructions:
 #
-# TODO: can LLVM do this with structured CFGs? It seems to have some support, but seemingly
-#       only to prevent introducing non-structureness during optimization (ie. the front-end
-#       is still responsible for generating structured control flow).
-function hide_unreachable!(fun::LLVM.Function)
+#   entry:
+#     // start of divergent region
+#     @%p0 bra cont;
+#     ...
+#     bra.uni cont;
+#   cont:
+#     // end of divergent region
+#     bar.sync 0;
+#
+# Meanwhile, LLVM's branch-folder and block-placement MIR passes will try to optimize the
+# block layout, e.g., by placing unlikely blocks at the end of the function:
+#
+#   entry:
+#     // start of divergent region
+#     @%p0 bra cont;
+#     @%p1 bra unlikely;
+#     bra.uni cont;
+#   cont:
+#     // end of divergent region
+#     bar.sync 0;
+#   unlikely:
+#     bra.uni cont;
+#
+# That is not a problem on the condition that the unlikely block continunes back into the
+# divergent region. However, this is not the case with unreachable control flow:
+#
+#   entry:
+#     // start of divergent region
+#     @%p0 bra cont;
+#     @%p1 bra throw;
+#     bra.uni cont;
+#   cont:
+#     // end of divergent region
+#     bar.sync 0;
+#   throw:
+#     trap;
+#   exit:
+#     ret;
+#
+# Here, the `throw` block does not have a continuation back into the divergent region.
+# This is fine by itself, because the `trap` instruction will halt execution. However,
+# it confuses `ptxas` in that the `throw` block now gets a fall-through edge to `exit`,
+# which is outside of the intended divergent region. This results in a much larger
+# divergent region, causing `bar.sync` to be executed divergently, which is not allowed.
+#
+# Note that the above may also happen with function calls that do not return, and is not
+# limited to `trap` instructions. Also note that the problem manifests predominantly on
+# Pascal hardware and earlier, as newer hardware is much more flexible in terms of
+# unstructured control flow.
+#
+# To avoid the above, we replace `unreachable` instructions with an unconditional branch
+# back into the divergent region. We identify this target by scanning for successors that
+# have a multi-way branch with one of the targets being the `unreachable` block. This is
+# complicated by the fact that basic blocks may have been merged, e.g., an `unreachable`
+# block (or any of its parents) may have multiple predecessors. In that case, we clone
+# all blocks in the path such that each one only has a single predecessor.
+function structurize_unreachable!(f::LLVM.Function)
     job = current_job::CompilerJob
-    ctx = context(fun)
+    ctx = context(f)
+
+    # TODO:
+    # - consider using branch-weight metadata to give the back-end information similar to
+    #   what the `unreachable` used to encode (although NVIDIA mentioned that block layout
+    #   shouldn't happen as `ptxas` does this all over again)
+    # - expose and use LLVM APIs to find predecessors and successors of basic blocks
+    # - alternatively, update control-flow information on-the-fly
+
+    # find unreachable blocks
+    unreachable_blocks = Set{BasicBlock}()
+    for block in blocks(f)
+        if terminator(block) isa LLVM.UnreachableInst
+            push!(unreachable_blocks, block)
+        end
+    end
+    isempty(unreachable_blocks) && return false
+
+    # find the predecessors of basic blocks
+    function compute_control_flow()
+        block_successors = Dict{BasicBlock,Set{BasicBlock}}()
+        block_predecessors = Dict{BasicBlock,Set{BasicBlock}}()
+        for block in blocks(f)
+            block_successors[block] = Set(successors(terminator(block)))
+            block_predecessors[block] = Set{BasicBlock}()
+        end
+        for (block, successors) in block_successors, successor in successors
+            push!(block_predecessors[successor], block)
+        end
+        return block_successors, block_predecessors
+    end
+    block_successors, block_predecessors = compute_control_flow()
+
     changed = false
-    @timeit_debug to "hide unreachable" begin
+    @dispose builder=IRBuilder(ctx) begin
+        # helper functions
+        function rewrite_edges(block, replacement)
+            # rewrite the outgoing edges of a basic block
+            old_target, new_target = replacement
+            old_target == new_target && return
 
-    # remove `noreturn` attributes
-    #
-    # when calling a `noreturn` function, LLVM places an `unreachable` after the call.
-    # this leads to an early `ret` from the function.
-    attrs = function_attributes(fun)
-    delete!(attrs, EnumAttribute("noreturn", 0; ctx))
+            position!(builder, block)
 
-    # build a map of basic block predecessors
-    predecessors = Dict(bb => Set{LLVM.BasicBlock}() for bb in blocks(fun))
-    @timeit_debug to "predecessors" for bb in blocks(fun)
-        insts = instructions(bb)
-        if !isempty(insts)
-            inst = last(insts)
-            if isterminator(inst)
-                for bb′ in successors(inst)
-                    push!(predecessors[bb′], bb)
-                end
+            inst = terminator(block)
+            if inst isa LLVM.BrInst && length(operands(inst)) == 3
+                # conditional branch
+                cond_val, else_bb, then_bb = operands(inst)   # XXX: reversed?
+                br!(builder, cond_val, then_bb == old_target ? new_target : then_bb,
+                                       else_bb == old_target ? new_target : else_bb)
+            elseif inst isa LLVM.BrInst && length(operands(inst)) == 1
+                # unconditional branch
+                target_bb = operands(inst)[1]
+                br!(builder, target_bb == old_target ? new_target : target_bb)
+            elseif inst isa LLVM.UnreachableInst
+                # unreachable
+                br!(builder, new_target)
+            else
+                @error "unhandled terminator" inst
             end
-        end
-    end
 
-    # scan for unreachable terminators and alternative successors
-    worklist = Pair{LLVM.BasicBlock, Union{Nothing,LLVM.BasicBlock}}[]
-    @timeit_debug to "find" for bb in blocks(fun)
-        unreachable = terminator(bb)
-        if isa(unreachable, LLVM.UnreachableInst)
-            unsafe_delete!(bb, unreachable)
+            unsafe_delete!(block, inst)
             changed = true
-
-            try
-                terminator(bb)
-                # the basic-block is still terminated properly, nothing to do
-                # (this can happen with `ret; unreachable`)
-                # TODO: `unreachable; unreachable`
-            catch ex
-                isa(ex, UndefRefError) || rethrow(ex)
-                @dispose builder=IRBuilder(ctx) begin
-                    position!(builder, bb)
-
-                    # find the strict predecessors to this block
-                    preds = collect(predecessors[bb])
-
-                    # find a fallthrough block: recursively look at predecessors
-                    # and find a successor that branches to any other block
-                    fallthrough = nothing
-                    while !isempty(preds)
-                        # find an alternative successor
-                        for pred in preds, succ in successors(terminator(pred))
-                            if succ != bb
-                                fallthrough = succ
-                                break
-                            end
-                        end
-                        fallthrough === nothing || break
-
-                        # recurse upwards
-                        old_preds = copy(preds)
-                        empty!(preds)
-                        for pred in old_preds
-                            append!(preds, predecessors[pred])
-                        end
-                    end
-                    push!(worklist, bb => fallthrough)
-                end
-            end
         end
-    end
+        function replace_unreachable(block, target)
+            # replace an unreachable block with an unconditional branch
+            position!(builder, block)
+            inst = terminator(block)
+            isa(inst, LLVM.UnreachableInst) ||
+                error("expected unreachable instruction, got $(typeof(inst)): $inst")
+            unsafe_delete!(block, inst)
+            br!(builder, target)
+            changed = true
+        end
+        function clone_path(path::Vector{BasicBlock})
+            # clone a path of basic blocks
+            new_path = BasicBlock[]
+            value_map = Dict{Value,Value}()
+            for block in reverse(path)
+                block_clone = clone(block; value_map)
+                move_after(block_clone, path[end])
+                pushfirst!(new_path, block_clone)
+                value_map[block] = block_clone
+            end
+            changed = true
+            return new_path
+        end
 
-    # apply the pending terminator rewrites
-    @timeit_debug to "replace" if !isempty(worklist)
-        let builder = IRBuilder(ctx)
-            for (bb, fallthrough) in worklist
-                position!(builder, bb)
-                if fallthrough !== nothing
-                    br!(builder, fallthrough)
+        # discover and rewrite paths that ends with an unreachable block
+        # - paths with multiple predecessors are cloned
+        # - once we find a path that starts with a multi-way branch,
+        #   rewrite the unreachable block to branch back to one of those other blocks
+        # as a result, this function is only ever called with straight paths that end
+        # in an unreachable block
+        function rewrite_path(path)
+            # look at predecessors to start of this path
+            predecessors = block_predecessors[path[1]]
+            if isempty(predecessors)
+                # we are at the entry block, so there's nothing to do
+                return
+            elseif length(predecessors) == 1
+                # we've got a single predecessor, so we can check its successors
+                candidate_successors = filter(!isequal(path[1]), block_successors[only(predecessors)])
+                if isempty(candidate_successors)
+                    # we need to ascend more
+                    rewrite_path([only(predecessors); path])
                 else
-                    # couldn't find any other successor. this happens with functions
-                    # that only contain a single block, or when the block is dead.
-                    ft = function_type(fun)
-                    if return_type(ft) == LLVM.VoidType(ctx)
-                        # even though returning can lead to invalid control flow,
-                        # it mostly happens with functions that just throw,
-                        # and leaving the unreachable there would make the optimizer
-                        # place another after the call.
-                        ret!(builder)
-                    else
-                        unreachable!(builder)
-                    end
+                    # nice, we've got a way out
+                    replace_unreachable(path[end], first(candidate_successors))
+                end
+            else
+                # we've got multiple predecessors, which means we may enter this path from
+                # differently divergent regions. clone the path to handle each one separately
+                new_paths = [path, [clone_path(path) for i in 1:length(predecessors)-1]...]
+                for (predecessor, new_path) in zip(predecessors, new_paths)
+                    rewrite_edges(predecessor, path[1]=>new_path[1])
+                end
+                block_successors, block_predecessors = compute_control_flow()
+
+                # now that we've deduplicated the paths, rewrite each one
+                for path in new_paths
+                    rewrite_path(path)
                 end
             end
         end
+
+        for block in unreachable_blocks
+            rewrite_path([block])
+        end
     end
 
-    end
     return changed
 end
 
-# HACK: this pass removes calls to `trap` and replaces them with inline assembly
-#
-# if LLVM knows we're trapping, code is marked `unreachable` (see `hide_unreachable!`).
-function hide_trap!(mod::LLVM.Module)
+# replace calls to `trap` with inline assembly calling `exit`, which isn't fatal
+function lower_trap!(mod::LLVM.Module)
     job = current_job::CompilerJob
     ctx = context(mod)
     changed = false
-    @timeit_debug to "hide trap" begin
-
-    # inline assembly to exit a thread, hiding control flow from LLVM
-    exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
-    exit = if job.config.target.exitable
-        InlineAsm(exit_ft, "exit;", "", true)
-    else
-        InlineAsm(exit_ft, "trap;", "", true)
-    end
+    @timeit_debug to "lower trap" begin
 
     if haskey(functions(mod), "llvm.trap")
         trap = functions(mod)["llvm.trap"]
+
+        # inline assembly to exit a thread
+        exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
+        exit = InlineAsm(exit_ft, "exit;", "", true)
 
         for use in uses(trap)
             val = user(use)
