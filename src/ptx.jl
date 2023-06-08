@@ -371,11 +371,20 @@ function structurize_unreachable!(f::LLVM.Function)
         function replace_unreachable(block, target)
             # replace an unreachable block with an unconditional branch
             position!(builder, block)
+
             inst = terminator(block)
             isa(inst, LLVM.UnreachableInst) ||
                 error("expected unreachable instruction, got $(typeof(inst)): $inst")
             unsafe_delete!(block, inst)
             br!(builder, target)
+
+            phi = first(instructions(target))
+            if phi isa LLVM.PHIInst
+                # we need to add a value to the successor's PHI node
+                phi_edges = LLVM.incoming(phi)
+                push!(phi_edges, (LLVM.UndefValue(value_type(phi)), block))
+            end
+
             changed = true
         end
         function clone_path(path::Vector{BasicBlock})
