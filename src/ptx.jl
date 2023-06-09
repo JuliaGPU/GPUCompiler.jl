@@ -303,6 +303,30 @@ function structurize_unreachable!(f::LLVM.Function)
     # - consider using branch-weight metadata to give the back-end information similar to
     #   what the `unreachable` used to encode (although NVIDIA mentioned that block layout
     #   just shouldn't happen, as `ptxas` does this all over again)
+    # - if unreachable blocks have been merged, we still may be jumping from different
+    #   divergent regions, potentially causing the same problem as above:
+    #     entry:
+    #       // start of divergent region 1
+    #       @%p0 bra cont1;
+    #       @%p1 bra throw;
+    #       bra.uni cont1;
+    #     cont1:
+    #       // end of divergent region 1
+    #       bar.sync 0;   // is this executed divergently?
+    #       // start of divergent region 2
+    #       @%p2 bra cont2;
+    #       @%p3 bra throw;
+    #       bra.uni cont2;
+    #     cont2:
+    #       // end of divergent region 2
+    #       ...
+    #     throw:
+    #       trap;
+    #       br throw;
+    #   if this is a problem, we probably need to clone blocks with multiple
+    #   predecessors so that there's a unique path from each region of
+    #   divergence to every `unreachable` terminator
+    # - when `ptxas` supports it, emit a `trap` instead of a branch to self
 
     # remove `noreturn` attributes, to avoid the (minimal) optimization that
     # happens during `prepare_execution!` undoing our work here
@@ -348,10 +372,6 @@ function structurize_unreachable!(f::LLVM.Function)
                     push!(phi_edges, (LLVM.UndefValue(value_type(inst)), block))
                 end
             end
-
-            # TODO: on future versions of `ptxas`, emit a `trap` instead.
-            #       that will allow us to re-optimize again, without
-            #       having to fight canonicalization.
         end
     end
 
