@@ -299,20 +299,16 @@ end
 #
 # To avoid the above, we replace `unreachable` instructions with an unconditional branch
 # back into the divergent region. We identify this target by scanning for successors that
-# have a multi-way branch with one of the targets being the `unreachable` block. This is
-# complicated by the fact that basic blocks may have been merged, e.g., an `unreachable`
-# block (or any of its parents) may have multiple predecessors. In that case, we clone
-# all blocks in the path such that each one only has a single predecessor.
+# have a multi-way branch with one of the targets being the `unreachable` block.
 function structurize_unreachable!(f::LLVM.Function)
-    job = current_job::CompilerJob
     ctx = context(f)
 
     # TODO:
     # - consider using branch-weight metadata to give the back-end information similar to
     #   what the `unreachable` used to encode (although NVIDIA mentioned that block layout
     #   shouldn't happen as `ptxas` does this all over again)
-    # - expose and use LLVM APIs to find predecessors and successors of basic blocks
-    # - alternatively, update control-flow information on-the-fly
+    # - try cloning paths with multiple predecessors, as those may originate from
+    #   differently-divergent regions
 
     # find unreachable blocks
     unreachable_blocks = Set{BasicBlock}()
@@ -323,147 +319,92 @@ function structurize_unreachable!(f::LLVM.Function)
     end
     isempty(unreachable_blocks) && return false
 
-    # find the predecessors of basic blocks
-    function compute_control_flow()
-        block_successors = Dict{BasicBlock,Set{BasicBlock}}()
-        block_predecessors = Dict{BasicBlock,Set{BasicBlock}}()
-        for block in blocks(f)
-            block_successors[block] = Set(successors(terminator(block)))
-            block_predecessors[block] = Set{BasicBlock}()
-        end
-        for (block, successors) in block_successors, successor in successors
-            push!(block_predecessors[successor], block)
-        end
-        return block_successors, block_predecessors
-    end
-    block_successors, block_predecessors = compute_control_flow()
-
     changed = false
     @dispose builder=IRBuilder(ctx) begin
         # helper functions
-        function rewrite_edges(block, replacement)
-            # rewrite the outgoing edges of a basic block
-            old_target, new_target = replacement
-            old_target == new_target && return
-
-            position!(builder, block)
-
-            inst = terminator(block)
-            if inst isa LLVM.BrInst && length(operands(inst)) == 3
-                # conditional branch
-                cond_val, else_bb, then_bb = operands(inst)   # XXX: reversed?
-                br!(builder, cond_val, then_bb == old_target ? new_target : then_bb,
-                                       else_bb == old_target ? new_target : else_bb)
-            elseif inst isa LLVM.BrInst && length(operands(inst)) == 1
-                # unconditional branch
-                target_bb = operands(inst)[1]
-                br!(builder, target_bb == old_target ? new_target : target_bb)
-            elseif inst isa LLVM.UnreachableInst
-                # unreachable
-                br!(builder, new_target)
-            else
-                @error "unhandled terminator" inst
-            end
-
-            unsafe_delete!(block, inst)
-            changed = true
-        end
-        function replace_unreachable(block, target)
-            # replace an unreachable block with an unconditional branch
+        function replace_unreachable(block, target=nothing)
+            # replace an unreachable block with a branch or return
             position!(builder, block)
 
             inst = terminator(block)
             isa(inst, LLVM.UnreachableInst) ||
                 error("expected unreachable instruction, got $(typeof(inst)): $inst")
             unsafe_delete!(block, inst)
-            br!(builder, target)
 
-            # we need to add a value to the successor's phi nodes
-            for inst in instructions(target)
-                isa(inst, LLVM.PHIInst) || break
-                phi_edges = LLVM.incoming(inst)
-                push!(phi_edges, (LLVM.UndefValue(value_type(inst)), block))
-            end
-
-            changed = true
-        end
-        function clone_path(path::Vector{BasicBlock})
-            # clone a path of basic blocks
-            new_path = BasicBlock[]
-            value_map = Dict{Value,Value}()
-            for block in reverse(path)
-                block_clone = clone(block; value_map)
-                move_after(block_clone, path[end])
-                pushfirst!(new_path, block_clone)
-                value_map[block] = block_clone
-            end
-            changed = true
-            return new_path
-        end
-
-        # discover and rewrite paths that ends with an unreachable block
-        # - paths with multiple predecessors are cloned
-        # - once we find a path that starts with a multi-way branch,
-        #   rewrite the unreachable block to branch back to one of those other blocks
-        # as a result, this function is only ever called with straight paths that end
-        # in an unreachable block
-        function rewrite_path(path)
-            # look at predecessors to start of this path
-            predecessors = block_predecessors[path[1]]
-            if isempty(predecessors)
-                # we are at the entry block, so there's nothing to do
-                return
-            elseif length(predecessors) == 1
-                # we've got a single predecessor, so we can check its successors
-                candidate_successors = filter(!isequal(path[1]), block_successors[only(predecessors)])
-                if isempty(candidate_successors)
-                    # we need to ascend more
-                    rewrite_path([only(predecessors); path])
+            if target === nothing
+                # return
+                f = LLVM.parent(block)
+                ft = function_type(f)
+                rettyp = return_type(ft)
+                if rettyp == LLVM.VoidType(ctx)
+                    ret!(builder)
                 else
-                    # nice, we've got a way out
-                    replace_unreachable(path[end], first(candidate_successors))
+                    ret!(builder, LLVM.UndefValue(rettyp))
                 end
             else
-                # we've got multiple predecessors, which means we may enter this path from
-                # differently divergent regions. clone the path to handle each one separately
-                new_paths = [path, [clone_path(path) for i in 1:length(predecessors)-1]...]
-                for (predecessor, new_path) in zip(predecessors, new_paths)
-                    rewrite_edges(predecessor, path[1]=>new_path[1])
+                # branch
+                br!(builder, target)
 
-                    # we need to prune the phi nodes at the start of the cloned path
-                    # so that they only have values for the one retained predecessor
-                    phis = LLVM.PHIInst[]
-                    for inst in instructions(new_path[1])
-                        isa(inst, LLVM.PHIInst) || break
-                        push!(phis, inst)
-                    end
-                    if !isempty(phis)
-                        for phi in phis
-                            position!(builder, phi)
-                            new_phi = phi!(builder, value_type(phi))
-                            LLVM.name!(new_phi, LLVM.name(phi))
-                            for i in 1:length(LLVM.incoming(phi))
-                                phi_value, phi_block = LLVM.incoming(phi)[i]
-                                if phi_block == predecessor
-                                    push!(LLVM.incoming(new_phi), (phi_value, phi_block))
-                                end
-                            end
-                            replace_uses!(phi, new_phi)
-                            unsafe_delete!(new_path[1], phi)
-                        end
+                # we need to add a value to the successor's phi nodes
+                for inst in instructions(target)
+                    isa(inst, LLVM.PHIInst) || break
+                    phi_edges = LLVM.incoming(inst)
+                    push!(phi_edges, (LLVM.UndefValue(value_type(inst)), block))
+                end
+            end
+
+            changed = true
+        end
+
+        function find_alternative_successor(path)
+            function analyze_predecessor(path_predecessor)
+                candidate_successors = filter(!isequal(path[1]), successors(path_predecessor))
+                if !isempty(candidate_successors)
+                    # nice, we've got a way out
+                    # XXX: is there a difference which successor we pick?
+                    return [first(candidate_successors)]
+                else
+                    # too bad, let's try to ascend
+                    if in(path_predecessor, path)
+                        return BasicBlock[]
+                    else
+                        return find_alternative_successor([path_predecessor; path])
                     end
                 end
-                block_successors, block_predecessors = compute_control_flow()
+            end
 
-                # now that we've deduplicated the paths, rewrite each one
-                for path in new_paths
-                    rewrite_path(path)
+            # look at predecessors to start of this path
+            path_predecessors = collect(predecessors(path[1]))
+            if isempty(path_predecessors)
+                # we are at the entry block, so there's nothing to do
+                return BasicBlock[]
+            elseif length(path_predecessors) == 1
+                path_predecessor = only(path_predecessors)
+                return analyze_predecessor(path_predecessor)
+            else
+                alternative_successors = Set{BasicBlock}()
+                for path_predecessor in path_predecessors
+                    union!(alternative_successors, analyze_predecessor(path_predecessor))
                 end
+                return collect(alternative_successors)
             end
         end
 
+        # TODO: branch weights, for optimizability similar to unreachable
         for block in unreachable_blocks
-            rewrite_path([block])
+            alternative_successors = find_alternative_successor([block])
+            if isempty(alternative_successors)
+                replace_unreachable(block)
+            else
+                # multiple alternative successors indicates that there's multiple paths
+                # into this unreachable block. we could try and deduplicate those paths,
+                # since it's possible that they originate from differently divergent blocks
+                # (e.g. if a throw block was deduplicated). however, that is tricky, and
+                # easily introduces loops. furthermore, it is expected that ptxas _will_
+                # support unreachable blocks in the future, so it's not worth the effort.
+                alternative_successor = first(alternative_successors)
+                replace_unreachable(block, alternative_successor)
+            end
         end
     end
 
