@@ -378,11 +378,11 @@ function structurize_unreachable!(f::LLVM.Function)
             unsafe_delete!(block, inst)
             br!(builder, target)
 
-            phi = first(instructions(target))
-            if phi isa LLVM.PHIInst
-                # we need to add a value to the successor's PHI node
-                phi_edges = LLVM.incoming(phi)
-                push!(phi_edges, (LLVM.UndefValue(value_type(phi)), block))
+            # we need to add a value to the successor's phi nodes
+            for inst in instructions(target)
+                isa(inst, LLVM.PHIInst) || break
+                phi_edges = LLVM.incoming(inst)
+                push!(phi_edges, (LLVM.UndefValue(value_type(inst)), block))
             end
 
             changed = true
@@ -430,22 +430,27 @@ function structurize_unreachable!(f::LLVM.Function)
                 for (predecessor, new_path) in zip(predecessors, new_paths)
                     rewrite_edges(predecessor, path[1]=>new_path[1])
 
-                    phi = first(instructions(new_path[1]))
-                    if phi isa LLVM.PHIInst
-                        # we need to prune the phi at the start of the cloned path
-                        # so that it only has a value for the one retained predecessor
-                        # TODO: expose and use additional mutation APIs for the PHI node's
-                        #       incoming edges (e.g. `empty!`, `delete!`, etc)
-                        position!(builder, phi)
-                        new_phi = phi!(builder, value_type(phi))
-                        for i in 1:length(LLVM.incoming(phi))
-                            phi_value, phi_block = LLVM.incoming(phi)[i]
-                            if phi_block == predecessor
-                                push!(LLVM.incoming(new_phi), (phi_value, phi_block))
+                    # we need to prune the phi nodes at the start of the cloned path
+                    # so that they only have values for the one retained predecessor
+                    phis = LLVM.PHIInst[]
+                    for inst in instructions(new_path[1])
+                        isa(inst, LLVM.PHIInst) || break
+                        push!(phis, inst)
+                    end
+                    if !isempty(phis)
+                        for phi in phis
+                            position!(builder, phi)
+                            new_phi = phi!(builder, value_type(phi))
+                            LLVM.name!(new_phi, LLVM.name(phi))
+                            for i in 1:length(LLVM.incoming(phi))
+                                phi_value, phi_block = LLVM.incoming(phi)[i]
+                                if phi_block == predecessor
+                                    push!(LLVM.incoming(new_phi), (phi_value, phi_block))
+                                end
                             end
+                            replace_uses!(phi, new_phi)
+                            unsafe_delete!(new_path[1], phi)
                         end
-                        replace_uses!(phi, new_phi)
-                        unsafe_delete!(new_path[1], phi)
                     end
                 end
                 block_successors, block_predecessors = compute_control_flow()
