@@ -243,9 +243,9 @@ end
 
 # structurize unreachable control flow
 #
-# The CUDA back-end compiler ptxas needs to insert instructions that manage the harware's
-# reconvergence stack. In order to do so, it needs to identify divergent regions and
-# emit SSY and SYNC instructions:
+# During back-end compilation, `ptxas` inserts instructions to manage the harware's
+# reconvergence stack (SSY and SYNC). In order to do so, it needs to identify
+# divergent regions:
 #
 #   entry:
 #     // start of divergent region
@@ -256,8 +256,8 @@ end
 #     // end of divergent region
 #     bar.sync 0;
 #
-# Meanwhile, LLVM's branch-folder and block-placement MIR passes will try to optimize the
-# block layout, e.g., by placing unlikely blocks at the end of the function:
+# Meanwhile, LLVM's branch-folder and block-placement MIR passes will try to optimize
+# the block layout, e.g., by placing unlikely blocks at the end of the function:
 #
 #   entry:
 #     // start of divergent region
@@ -270,8 +270,8 @@ end
 #   unlikely:
 #     bra.uni cont;
 #
-# That is not a problem on the condition that the unlikely block continunes back into the
-# divergent region. However, this is not the case with unreachable control flow:
+# That is not a problem as long as the unlikely block continunes back into the
+# divergent region. Crucially, this is not the case with unreachable control flow:
 #
 #   entry:
 #     // start of divergent region
@@ -279,36 +279,30 @@ end
 #     @%p1 bra throw;
 #     bra.uni cont;
 #   cont:
-#     // end of divergent region
 #     bar.sync 0;
 #   throw:
-#     trap;
+#     call throw_and_trap();
+#     // unreachable
 #   exit:
+#     // end of divergent region
 #     ret;
 #
-# Here, the `throw` block does not have a continuation back into the divergent region.
-# This is fine by itself, because the `trap` instruction will halt execution. However,
-# it confuses `ptxas` in that the `throw` block now gets a fall-through edge to `exit`,
-# which is outside of the intended divergent region. This results in a much larger
-# divergent region, causing `bar.sync` to be executed divergently, which is not allowed.
+# Dynamically, this is fine, because the called function does not return.
+# However, `ptxas` does not know that and adds a successor edge to the `exit`
+# block, widening the divergence range. In this example, that's not allowed, as
+# `bar.sync` cannot be executed divergently on Pascal hardware or earlier.
 #
-# Note that the above may also happen with function calls that do not return, and is not
-# limited to `trap` instructions. Also note that the problem manifests predominantly on
-# Pascal hardware and earlier, as newer hardware is much more flexible in terms of
-# unstructured control flow.
-#
-# To avoid the above, we replace `unreachable` instructions with an unconditional branch
-# back into the divergent region. We identify this target by scanning for successors that
-# have a multi-way branch with one of the targets being the `unreachable` block.
+# To avoid these fall-through successors that change the control flow,
+# we replace `unreachable` instructions with a branch to the current block
+# (or in case of entry blocks, with a return from the function). That appears
+# sufficient to allow `ptxas` to correctly identify the divergent region.
 function structurize_unreachable!(f::LLVM.Function)
     ctx = context(f)
 
     # TODO:
     # - consider using branch-weight metadata to give the back-end information similar to
     #   what the `unreachable` used to encode (although NVIDIA mentioned that block layout
-    #   shouldn't happen as `ptxas` does this all over again)
-    # - try cloning paths with multiple predecessors, as those may originate from
-    #   differently-divergent regions
+    #   just shouldn't happen, as `ptxas` does this all over again)
 
     # remove `noreturn` attributes, to avoid the (minimal) optimization that
     # happens during `prepare_execution!` undoing our work here
@@ -316,7 +310,7 @@ function structurize_unreachable!(f::LLVM.Function)
     delete!(attrs, EnumAttribute("noreturn", 0; ctx))
 
     # find unreachable blocks
-    unreachable_blocks = Set{BasicBlock}()
+    unreachable_blocks = BasicBlock[]
     for block in blocks(f)
         if terminator(block) isa LLVM.UnreachableInst
             push!(unreachable_blocks, block)
@@ -324,20 +318,17 @@ function structurize_unreachable!(f::LLVM.Function)
     end
     isempty(unreachable_blocks) && return false
 
-    changed = false
+    # rewrite the unreachable terminators
     @dispose builder=IRBuilder(ctx) begin
-        # helper functions
-        function replace_unreachable(block, target=nothing)
-            # replace an unreachable block with a branch or return
-            position!(builder, block)
-
+        entry_block = first(blocks(f))
+        for block in unreachable_blocks
             inst = terminator(block)
-            isa(inst, LLVM.UnreachableInst) ||
-                error("expected unreachable instruction, got $(typeof(inst)): $inst")
+            @assert inst isa LLVM.UnreachableInst
             unsafe_delete!(block, inst)
 
-            if target === nothing
-                # return
+            position!(builder, block)
+            if block == entry_block
+                # emit a return (entry blocks cannot have predecessors)
                 f = LLVM.parent(block)
                 ft = function_type(f)
                 rettyp = return_type(ft)
@@ -347,73 +338,24 @@ function structurize_unreachable!(f::LLVM.Function)
                     ret!(builder, LLVM.UndefValue(rettyp))
                 end
             else
-                # branch
-                br!(builder, target)
+                # emit a branch to itself
+                br!(builder, block)
 
-                # we need to add a value to the successor's phi nodes
-                for inst in instructions(target)
+                # update phi nodes
+                for inst in instructions(block)
                     isa(inst, LLVM.PHIInst) || break
                     phi_edges = LLVM.incoming(inst)
                     push!(phi_edges, (LLVM.UndefValue(value_type(inst)), block))
                 end
             end
 
-            changed = true
-        end
-
-        function find_alternative_successor(path)
-            function analyze_predecessor(path_predecessor)
-                candidate_successors = filter(!isequal(path[1]), successors(path_predecessor))
-                if !isempty(candidate_successors)
-                    # nice, we've got a way out
-                    # XXX: is there a difference which successor we pick?
-                    return [first(candidate_successors)]
-                else
-                    # too bad, let's try to ascend
-                    if in(path_predecessor, path)
-                        return BasicBlock[]
-                    else
-                        return find_alternative_successor([path_predecessor; path])
-                    end
-                end
-            end
-
-            # look at predecessors to start of this path
-            path_predecessors = collect(predecessors(path[1]))
-            if isempty(path_predecessors)
-                # we are at the entry block, so there's nothing to do
-                return BasicBlock[]
-            elseif length(path_predecessors) == 1
-                path_predecessor = only(path_predecessors)
-                return analyze_predecessor(path_predecessor)
-            else
-                alternative_successors = Set{BasicBlock}()
-                for path_predecessor in path_predecessors
-                    union!(alternative_successors, analyze_predecessor(path_predecessor))
-                end
-                return collect(alternative_successors)
-            end
-        end
-
-        # TODO: branch weights, for optimizability similar to unreachable
-        for block in unreachable_blocks
-            alternative_successors = find_alternative_successor([block])
-            if isempty(alternative_successors)
-                replace_unreachable(block)
-            else
-                # multiple alternative successors indicates that there's multiple paths
-                # into this unreachable block. we could try and deduplicate those paths,
-                # since it's possible that they originate from differently divergent blocks
-                # (e.g. if a throw block was deduplicated). however, that is tricky, and
-                # easily introduces loops. furthermore, it is expected that ptxas _will_
-                # support unreachable blocks in the future, so it's not worth the effort.
-                alternative_successor = first(alternative_successors)
-                replace_unreachable(block, alternative_successor)
-            end
+            # TODO: on future versions of `ptxas`, emit a `trap` instead.
+            #       that will allow us to re-optimize again, without
+            #       having to fight canonicalization.
         end
     end
 
-    return changed
+    return true
 end
 
 # replace calls to `trap` with inline assembly calling `exit`, which isn't fatal
