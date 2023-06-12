@@ -178,11 +178,8 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     ctx = context(mod)
 
     @dispose pm=ModulePassManager() begin
-        # structurize unreachable control flow
-        add!(pm, FunctionPass("StructurizeUnreachable", structurize_unreachable!))
-
-        # we prefer `exit` over `trap`
         add!(pm, ModulePass("LowerTrap", lower_trap!))
+        add!(pm, FunctionPass("LowerUnreachable", lower_unreachable!))
 
         run!(pm, mod)
     end
@@ -241,7 +238,38 @@ end
 
 ## LLVM passes
 
-# structurize unreachable control flow
+# replace calls to `trap` with inline assembly calling `exit`, which isn't fatal
+function lower_trap!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    ctx = context(mod)
+    changed = false
+    @timeit_debug to "lower trap" begin
+
+    if haskey(functions(mod), "llvm.trap")
+        trap = functions(mod)["llvm.trap"]
+
+        # inline assembly to exit a thread
+        exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
+        exit = InlineAsm(exit_ft, "exit;", "", true)
+
+        for use in uses(trap)
+            val = user(use)
+            if isa(val, LLVM.CallInst)
+                @dispose builder=IRBuilder(ctx) begin
+                    position!(builder, val)
+                    call!(builder, exit_ft, exit)
+                end
+                unsafe_delete!(LLVM.parent(val), val)
+                changed = true
+            end
+        end
+    end
+
+    end
+    return changed
+end
+
+# lower `unreachable` to `exit` so that the emitted PTX has correct control flow
 #
 # During back-end compilation, `ptxas` inserts instructions to manage the harware's
 # reconvergence stack (SSY and SYNC). In order to do so, it needs to identify
@@ -293,16 +321,13 @@ end
 # `bar.sync` cannot be executed divergently on Pascal hardware or earlier.
 #
 # To avoid these fall-through successors that change the control flow,
-# we replace `unreachable` instructions with a branch to the current block
-# (or in case of entry blocks, with a return from the function). That appears
-# sufficient to allow `ptxas` to correctly identify the divergent region.
-function structurize_unreachable!(f::LLVM.Function)
+# we replace `unreachable` instructions with a call to `exit`. This informs
+# `ptxas` that the thread exits, and allows it to correctly construct a CFG,
+# and consequently correctly determine the divergence regions as intended.
+function lower_unreachable!(f::LLVM.Function)
     ctx = context(f)
 
     # TODO:
-    # - consider using branch-weight metadata to give the back-end information similar to
-    #   what the `unreachable` used to encode (although NVIDIA mentioned that block layout
-    #   just shouldn't happen, as `ptxas` does this all over again)
     # - if unreachable blocks have been merged, we still may be jumping from different
     #   divergent regions, potentially causing the same problem as above:
     #     entry:
@@ -326,10 +351,10 @@ function structurize_unreachable!(f::LLVM.Function)
     #   if this is a problem, we probably need to clone blocks with multiple
     #   predecessors so that there's a unique path from each region of
     #   divergence to every `unreachable` terminator
-    # - when `ptxas` supports it, emit a `trap` instead of a branch to self
 
     # remove `noreturn` attributes, to avoid the (minimal) optimization that
-    # happens during `prepare_execution!` undoing our work here
+    # happens during `prepare_execution!` undoing our work here.
+    # this shouldn't be needed when we upstream the pass.
     attrs = function_attributes(f)
     delete!(attrs, EnumAttribute("noreturn", 0; ctx))
 
@@ -342,71 +367,23 @@ function structurize_unreachable!(f::LLVM.Function)
     end
     isempty(unreachable_blocks) && return false
 
+    # inline assembly to exit a thread
+    exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
+    exit = InlineAsm(exit_ft, "exit;", "", true)
+
     # rewrite the unreachable terminators
     @dispose builder=IRBuilder(ctx) begin
         entry_block = first(blocks(f))
         for block in unreachable_blocks
             inst = terminator(block)
             @assert inst isa LLVM.UnreachableInst
-            unsafe_delete!(block, inst)
 
-            position!(builder, block)
-            if block == entry_block
-                # emit a return (entry blocks cannot have predecessors)
-                f = LLVM.parent(block)
-                ft = function_type(f)
-                rettyp = return_type(ft)
-                if rettyp == LLVM.VoidType(ctx)
-                    ret!(builder)
-                else
-                    ret!(builder, LLVM.UndefValue(rettyp))
-                end
-            else
-                # emit a branch to itself
-                br!(builder, block)
-
-                # update phi nodes
-                for inst in instructions(block)
-                    isa(inst, LLVM.PHIInst) || break
-                    phi_edges = LLVM.incoming(inst)
-                    push!(phi_edges, (LLVM.UndefValue(value_type(inst)), block))
-                end
-            end
+            position!(builder, inst)
+            call!(builder, exit_ft, exit)
         end
     end
 
     return true
-end
-
-# replace calls to `trap` with inline assembly calling `exit`, which isn't fatal
-function lower_trap!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    ctx = context(mod)
-    changed = false
-    @timeit_debug to "lower trap" begin
-
-    if haskey(functions(mod), "llvm.trap")
-        trap = functions(mod)["llvm.trap"]
-
-        # inline assembly to exit a thread
-        exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
-        exit = InlineAsm(exit_ft, "exit;", "", true)
-
-        for use in uses(trap)
-            val = user(use)
-            if isa(val, LLVM.CallInst)
-                @dispose builder=IRBuilder(ctx) begin
-                    position!(builder, val)
-                    call!(builder, exit_ft, exit)
-                end
-                unsafe_delete!(LLVM.parent(val), val)
-                changed = true
-            end
-        end
-    end
-
-    end
-    return changed
 end
 
 # Replace occurrences of __nvvm_reflect("foo") and llvm.nvvm.reflect with an integer.

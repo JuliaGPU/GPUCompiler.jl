@@ -53,7 +53,7 @@ function _precompile_()
     ccall(:jl_generating_output, Cint, ()) == 1 || return nothing
     @assert precompile(Tuple{typeof(GPUCompiler.assign_args!),Expr,Vector{Any}})
     @assert precompile(Tuple{typeof(GPUCompiler.lower_trap!),LLVM.Module})
-    @assert precompile(Tuple{typeof(GPUCompiler.structurize_unreachable!),LLVM.Function})
+    @assert precompile(Tuple{typeof(GPUCompiler.lower_unreachable!),LLVM.Function})
     @assert precompile(Tuple{typeof(GPUCompiler.lower_gc_frame!),LLVM.Function})
     @assert precompile(Tuple{typeof(GPUCompiler.lower_throw!),LLVM.Module})
     #@assert precompile(Tuple{typeof(GPUCompiler.split_kwargs),Tuple{},Vector{Symbol},Vararg{Vector{Symbol}, N} where N})
