@@ -287,41 +287,39 @@ function hide_unreachable!(fun::LLVM.Function)
             unsafe_delete!(bb, unreachable)
             changed = true
 
-            try
-                terminator(bb)
+            if terminator(bb) !== nothing
                 # the basic-block is still terminated properly, nothing to do
                 # (this can happen with `ret; unreachable`)
                 # TODO: `unreachable; unreachable`
-            catch ex
-                isa(ex, UndefRefError) || rethrow(ex)
-                @dispose builder=IRBuilder(ctx) begin
-                    position!(builder, bb)
+            end
 
-                    # find the strict predecessors to this block
-                    preds = collect(predecessors[bb])
+            @dispose builder=IRBuilder(ctx) begin
+                position!(builder, bb)
 
-                    # find a fallthrough block: recursively look at predecessors
-                    # and find a successor that branches to any other block
-                    fallthrough = nothing
-                    while !isempty(preds)
-                        # find an alternative successor
-                        for pred in preds, succ in successors(terminator(pred))
-                            if succ != bb
-                                fallthrough = succ
-                                break
-                            end
-                        end
-                        fallthrough === nothing || break
+                # find the strict predecessors to this block
+                preds = collect(predecessors[bb])
 
-                        # recurse upwards
-                        old_preds = copy(preds)
-                        empty!(preds)
-                        for pred in old_preds
-                            append!(preds, predecessors[pred])
+                # find a fallthrough block: recursively look at predecessors
+                # and find a successor that branches to any other block
+                fallthrough = nothing
+                while !isempty(preds)
+                    # find an alternative successor
+                    for pred in preds, succ in successors(terminator(pred))
+                        if succ != bb
+                            fallthrough = succ
+                            break
                         end
                     end
-                    push!(worklist, bb => fallthrough)
+                    fallthrough === nothing || break
+
+                    # recurse upwards
+                    old_preds = copy(preds)
+                    empty!(preds)
+                    for pred in old_preds
+                        append!(preds, predecessors[pred])
+                    end
                 end
+                push!(worklist, bb => fallthrough)
             end
         end
     end
