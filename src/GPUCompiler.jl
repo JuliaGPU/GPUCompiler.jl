@@ -45,6 +45,10 @@ include("reflection.jl")
 include("precompile.jl")
 _precompile_()
 
+
+
+compile_cache = "" # defined in __init__()
+
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
 
