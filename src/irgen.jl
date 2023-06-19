@@ -773,8 +773,27 @@ function add_kernel_state!(mod::LLVM.Module)
                     @assert isempty(uses(val))
                     unsafe_delete!(LLVM.parent(val), val)
                 elseif val isa LLVM.CallBase
-                    # the function is being passed as an argument, which we'll just permit,
-                    # because we expect to have rewritten the call down the line separately.
+                    # the function is being passed as an argument. to avoid having to
+                    # rewrite the target function, instead case the rewritten function to
+                    # the old stateless type.
+                    # XXX: we won't have to do this with opaque pointers.
+                    position!(builder, val)
+                    target_ft = called_type(val)
+                    new_args = map(zip(parameters(target_ft),
+                                       arguments(val))) do (param_typ, arg)
+                        if value_type(arg) != param_typ
+                            const_bitcast(arg, param_typ)
+                        else
+                            arg
+                        end
+                    end
+                    new_val = call!(builder, called_type(val), called_value(val), new_args,
+                                    operand_bundles(val))
+                    callconv!(new_val, callconv(val))
+
+                    replace_uses!(val, new_val)
+                    @assert isempty(uses(val))
+                    unsafe_delete!(LLVM.parent(val), val)
                 elseif val isa LLVM.StoreInst
                     # the function is being stored, which again we'll permit like before.
                 elseif val isa ConstantExpr
