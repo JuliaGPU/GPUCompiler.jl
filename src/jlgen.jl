@@ -573,6 +573,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob); ctx::JuliaCont
     @static if v"1.9.0-DEV.1660" <= VERSION < v"1.9.0-beta1" || VERSION >= v"1.10-"
         cgparams = merge(cgparams, (;safepoint_on_entry = can_safepoint(job)))
     end
+    @static if VERSION >= v"1.10.0-DEV.1499"
+        cgparams = merge(cgparams, (;gcstack_arg = false))
+    end
     params = Base.CodegenParams(; cgparams...)
 
     # generate IR
