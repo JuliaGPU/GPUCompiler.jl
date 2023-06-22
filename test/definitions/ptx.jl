@@ -69,17 +69,10 @@ function ptx_code_native(io::IO, @nospecialize(func), @nospecialize(types); kwar
     GPUCompiler.code_native(io, job; kwargs...)
 end
 
-# aliases without ::IO argument
-for method in (:code_warntype, :code_llvm, :code_native)
-    ptx_method = Symbol("ptx_$(method)")
-    @eval begin
-        $ptx_method(@nospecialize(func), @nospecialize(types); kwargs...) =
-            $ptx_method(stdout, func, types; kwargs...)
-    end
-end
-
 # simulates codegen for a kernel function: validates by default
 function ptx_code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = ptx_job(func, types; kernel=true, kwargs...)
-    GPUCompiler.compile(:asm, job; kwargs...)
+    JuliaContext() do ctx
+        GPUCompiler.compile(:asm, job; kwargs...)
+    end
 end

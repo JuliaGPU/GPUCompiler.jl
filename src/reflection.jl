@@ -127,9 +127,9 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true,
                    debuginfo::Symbol=:default, dump_module::Bool=false, kwargs...)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     str = JuliaContext() do ctx
-        ir, meta = compile(:llvm, job; optimize=optimize, strip=false, validate=false, ctx, kwargs...)
+        ir, meta = compile(:llvm, job; optimize=optimize, strip=false, validate=false, kwargs...)
         @static if VERSION >= v"1.9.0-DEV.516"
-            ts_mod = ThreadSafeModule(ir; ctx)
+            ts_mod = ThreadSafeModule(ir)
             if VERSION >= v"1.9.0-DEV.672"
                 entry_fn = meta.entry
                 GC.@preserve ts_mod entry_fn begin
@@ -174,7 +174,9 @@ The following keyword arguments are supported:
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, @nospecialize(job::CompilerJob); raw::Bool=false, dump_module::Bool=false)
-    asm, meta = compile(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
+    asm, meta = JuliaContext() do ctx
+        compile(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
+    end
     highlight(io, asm, source_code(job.config.target))
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =

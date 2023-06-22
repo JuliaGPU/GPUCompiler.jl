@@ -33,18 +33,17 @@ struct RuntimeMethodInstance
     llvm_name::String
 end
 
-function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance;
-                      ctx::LLVM.Context)
+function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance)
     types = if rt.llvm_types === nothing
-        LLVMType[convert(LLVMType, typ; ctx, allow_boxed=true) for typ in rt.types]
+        LLVMType[convert(LLVMType, typ; allow_boxed=true) for typ in rt.types]
     else
-        rt.llvm_types(ctx)
+        rt.llvm_types()
     end
 
     return_type = if rt.llvm_return_type === nothing
-        convert(LLVMType, rt.return_type; ctx, allow_boxed=true)
+        convert(LLVMType, rt.return_type; allow_boxed=true)
     else
-        rt.llvm_return_type(ctx)
+        rt.llvm_return_type()
     end
 
     LLVM.FunctionType(return_type, types)
@@ -114,7 +113,7 @@ compile(:report_exception_name, Nothing, (Ptr{Cchar},))
 ## GC
 
 # FIXME: get rid of this and allow boxed types
-T_prjlvalue(ctx) = convert(LLVMType, Any; ctx, allow_boxed=true)
+T_prjlvalue() = convert(LLVMType, Any; allow_boxed=true)
 
 function gc_pool_alloc(sz::Csize_t)
     ptr = malloc(sz)
@@ -141,10 +140,10 @@ const gc_bits = 0x3 # FIXME
 # get the type tag of a type at run-time
 @generated function type_tag(::Val{type_name}) where type_name
     @dispose ctx=Context() begin
-        T_tag = convert(LLVMType, tag_type; ctx)
+        T_tag = convert(LLVMType, tag_type)
         T_ptag = LLVM.PointerType(T_tag)
 
-        T_pjlvalue = convert(LLVMType, Any; ctx, allow_boxed=true)
+        T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
 
         # create function
         llvm_f, _ = create_function(T_tag)
@@ -155,8 +154,8 @@ const gc_bits = 0x3 # FIXME
                             LLVM.FunctionType(T_pjlvalue))
 
         # generate IR
-        @dispose builder=IRBuilder(ctx) begin
-            entry = BasicBlock(llvm_f, "entry"; ctx)
+        @dispose builder=IRBuilder() begin
+            entry = BasicBlock(llvm_f, "entry")
             position!(builder, entry)
 
             typ_var = bitcast!(builder, typ, T_ptag)

@@ -22,7 +22,11 @@ function main()
     config = CompilerConfig(target, params)
     job = CompilerJob(source, config)
 
-    println(GPUCompiler.compile(:asm, job)[1])
+    output = JuliaContext() do ctx
+        GPUCompiler.compile(:asm, job)
+    end
+
+    println(output[1])
 end
 
 isinteractive() || main()

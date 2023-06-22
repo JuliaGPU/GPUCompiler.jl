@@ -70,7 +70,9 @@ end
 # simulates codegen for a kernel function: validates by default
 function native_code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = native_job(func, types; kernel=true, kwargs...)
-    GPUCompiler.compile(:asm, job; kwargs...)
+    JuliaContext() do ctx
+        GPUCompiler.compile(:asm, job; kwargs...)
+    end
 end
 
 module LazyCodegen
@@ -115,7 +117,7 @@ module LazyCodegen
             job = cc.job
 
             entry_name, jitted_mod = JuliaContext() do ctx
-                ir, meta = GPUCompiler.compile(:llvm, job; validate=false, ctx)
+                ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
                 name(meta.entry), compile!(orc, ir)
             end
 
@@ -230,8 +232,8 @@ module LazyCodegen
             sym = LLVM.API.LLVMOrcCSymbolFlagsMapPair(mangle(lljit, target_sym), flags)
 
             function materialize(mr)
-                JuliaContext() do ctx
-                    ir, meta = GPUCompiler.compile(:llvm, job; validate=false, ctx)
+                buf = JuliaContext() do ctx
+                    ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
 
                     # Rename entry to match target_sym
                     LLVM.name!(meta.entry, target_sym)
@@ -240,9 +242,11 @@ module LazyCodegen
                     buf = convert(MemoryBuffer, ir)
 
                     # 2. deserialize and wrap by a ThreadSafeModule
-                    ThreadSafeContext() do ctx
-                        mod = parse(LLVM.Module, buf; ctx=context(ctx))
-                        tsm = ThreadSafeModule(mod; ctx)
+                    ThreadSafeContext() do ts_ctx
+                        tsm = context!(context(ts_ctx)) do
+                            mod = parse(LLVM.Module, buf)
+                            ThreadSafeModule(mod)
+                        end
 
                         il = LLVM.IRTransformLayer(lljit)
                         LLVM.emit(il, mr, tsm)
@@ -301,15 +305,14 @@ module LazyCodegen
 
 
         # Note this follows: emit_call_specfun_other
-        JuliaContext() do ts_ctx
-            ctx = GPUCompiler.unwrap_context(ts_ctx)
+        JuliaContext() do ctx
             if !isghosttype(F) && !Core.Compiler.isconstType(F)
                 isboxed = GPUCompiler.deserves_argbox(F)
                 argexpr = :(func)
                 if isboxed
                     push!(ccall_types, Any)
                 else
-                    et = convert(LLVMType, func; ctx)
+                    et = convert(LLVMType, func)
                     if isa(et, LLVM.SequentialType) # et->isAggregateType
                         push!(ccall_types, Ptr{F})
                         argexpr = Expr(:call, GlobalRef(Base, :Ref), argexpr)
@@ -320,7 +323,7 @@ module LazyCodegen
                 push!(argexprs, argexpr)
             end
 
-            T_jlvalue = LLVM.StructType(LLVMType[]; ctx)
+            T_jlvalue = LLVM.StructType(LLVMType[])
             T_prjlvalue = LLVM.PointerType(T_jlvalue, #= AddressSpace::Tracked =# 10)
 
             for (source_i, source_typ) in enumerate(argtypes)
@@ -331,7 +334,7 @@ module LazyCodegen
                 argexpr = :(args[$source_i])
 
                 isboxed = GPUCompiler.deserves_argbox(source_typ)
-                et = isboxed ? T_prjlvalue : convert(LLVMType, source_typ; ctx)
+                et = isboxed ? T_prjlvalue : convert(LLVMType, source_typ)
 
                 if isboxed
                     push!(ccall_types, Any)
@@ -349,7 +352,7 @@ module LazyCodegen
                 # In theory we could set `rettype` to `T_void`, but ccall will do that for us
             # elseif jl_is_uniontype?
             elseif !GPUCompiler.deserves_retbox(rettype)
-                rt = convert(LLVMType, rettype; ctx)
+                rt = convert(LLVMType, rettype)
                 if !isa(rt, LLVM.VoidType) && GPUCompiler.deserves_sret(rettype, rt)
                     before = :(sret = Ref{$rettype}())
                     pushfirst!(argexprs, :(sret))

@@ -59,8 +59,8 @@ function _precompile_()
     #@assert precompile(Tuple{typeof(GPUCompiler.split_kwargs),Tuple{},Vector{Symbol},Vararg{Vector{Symbol}, N} where N})
     let fbody = try __lookup_kwbody__(which(GPUCompiler.compile, (Symbol,GPUCompiler.CompilerJob,))) catch missing end
         if !ismissing(fbody)
-            @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,Bool,JuliaContextType,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
-            @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,Bool,Nothing,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
+            @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,Bool,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
+            @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,Bool,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
         end
     end
 end

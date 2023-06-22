@@ -37,17 +37,10 @@ function spirv_code_native(io::IO, @nospecialize(func), @nospecialize(types); kw
     GPUCompiler.code_native(io, job; kwargs...)
 end
 
-# aliases without ::IO argument
-for method in (:code_warntype, :code_llvm, :code_native)
-    spirv_method = Symbol("spirv_$(method)")
-    @eval begin
-        $spirv_method(@nospecialize(func), @nospecialize(types); kwargs...) =
-            $spirv_method(stdout, func, types; kwargs...)
-    end
-end
-
 # simulates codegen for a kernel function: validates by default
 function spirv_code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = spirv_job(func, types; kernel=true, kwargs...)
-    GPUCompiler.compile(:asm, job; kwargs...)
+    JuliaContext() do ctx
+        GPUCompiler.compile(:asm, job; kwargs...)
+    end
 end

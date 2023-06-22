@@ -158,15 +158,6 @@ function Base.hash(job::CompilerJob, h::UInt)
 end
 
 
-## contexts
-
-if VERSION >= v"1.9.0-DEV.516"
-    const JuliaContextType = ThreadSafeContext
-else
-    const JuliaContextType = Context
-end
-
-
 ## default definitions that can be overridden to influence GPUCompiler's behavior
 
 # Has the runtime available and does not require special handling

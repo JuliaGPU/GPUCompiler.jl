@@ -1,7 +1,7 @@
 # LLVM IR generation
 
-function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
-    mod, compiled = @timeit_debug to "emission" compile_method_instance(job; ctx)
+function irgen(@nospecialize(job::CompilerJob))
+    mod, compiled = @timeit_debug to "emission" compile_method_instance(job)
     if job.config.entry_abi === :specfunc
         entry_fn = compiled[job.source].specfunc
     else
@@ -15,7 +15,7 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
             if VERSION < v"1.9" || Base.isdebugbuild()
                 # only occurs in debug builds
                 delete!(function_attributes(llvmf),
-                        EnumAttribute("sspstrong", 0; ctx=unwrap_context(ctx)))
+                        EnumAttribute("sspstrong", 0))
             end
 
             if Sys.iswindows()
@@ -87,9 +87,9 @@ function irgen(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
             for arg in args
                 if arg.cc == BITS_REF
                     attr = if LLVM.version() >= v"12"
-                        TypeAttribute("byval", eltype(arg.codegen.typ); ctx=unwrap_context(ctx))
+                        TypeAttribute("byval", eltype(arg.codegen.typ))
                     else
-                        EnumAttribute("byval", 0; ctx=unwrap_context(ctx))
+                        EnumAttribute("byval", 0)
                     end
                     push!(parameter_attributes(entry, arg.codegen.i), attr)
                 end
@@ -238,7 +238,6 @@ safe_name(x) = safe_name(repr(x))
 # exception arguments) and proper debug info to unwind the stack, this pass can go.
 function lower_throw!(mod::LLVM.Module)
     job = current_job::CompilerJob
-    ctx = context(mod)
     changed = false
     @timeit_debug to "lower throw" begin
 
@@ -269,7 +268,7 @@ function lower_throw!(mod::LLVM.Module)
                 call = user(use)::LLVM.CallInst
 
                 # replace the throw with a PTX-compatible exception
-                @dispose builder=IRBuilder(ctx) begin
+                @dispose builder=IRBuilder() begin
                     position!(builder, call)
                     emit_exception!(builder, name, call)
                 end
@@ -315,7 +314,6 @@ function emit_exception!(builder, name, inst)
     bb = position(builder)
     fun = LLVM.parent(bb)
     mod = LLVM.parent(fun)
-    ctx = context(mod)
 
     # report the exception
     if Base.JLOptions().debug_level >= 1
@@ -330,7 +328,7 @@ function emit_exception!(builder, name, inst)
     # report each frame
     if Base.JLOptions().debug_level >= 2
         rt = Runtime.get(:report_exception_frame)
-        ft = convert(LLVM.FunctionType, rt; ctx)
+        ft = convert(LLVM.FunctionType, rt)
         bt = backtrace(inst)
         for (i,frame) in enumerate(bt)
             idx = ConstantInt(parameters(ft)[1], i)
@@ -348,8 +346,7 @@ function emit_exception!(builder, name, inst)
 end
 
 function emit_trap!(@nospecialize(job::CompilerJob), builder, mod, inst)
-    ctx = context(mod)
-    trap_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
+    trap_ft = LLVM.FunctionType(LLVM.VoidType())
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]
     else
@@ -454,9 +451,8 @@ end
 # some back-ends don't support byval, or support it badly, so lower it eagerly ourselves
 # https://reviews.llvm.org/D79744
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
-    ctx = context(mod)
     ft = function_type(f)
-    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
+    @compiler_assert return_type(ft) == LLVM.VoidType() job
     @timeit_debug to "lower byval" begin
 
     # find the byval parameters
@@ -465,7 +461,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         for i in 1:length(byval)
             attrs = collect(parameter_attributes(f, i))
             byval[i] = any(attrs) do attr
-                kind(attr) == kind(EnumAttribute("byval", 0; ctx))
+                kind(attr) == kind(EnumAttribute("byval", 0))
             end
         end
     else
@@ -529,8 +525,8 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 
     # emit IR performing the "conversions"
     new_args = LLVM.Value[]
-    @dispose builder=IRBuilder(ctx) begin
-        entry = BasicBlock(new_f, "conversion"; ctx)
+    @dispose builder=IRBuilder() begin
+        entry = BasicBlock(new_f, "conversion")
         position!(builder, entry)
 
         # perform argument conversions
@@ -598,7 +594,6 @@ end
 # add a state argument to every function in the module, starting from the kernel entry point
 function add_kernel_state!(mod::LLVM.Module)
     job = current_job::CompilerJob
-    ctx = context(mod)
 
     # check if we even need a kernel state argument
     state = kernel_state_type(job)
@@ -606,7 +601,7 @@ function add_kernel_state!(mod::LLVM.Module)
     if state === Nothing
         return false
     end
-    T_state = convert(LLVMType, state; ctx)
+    T_state = convert(LLVMType, state)
 
     # intrinsic returning an opaque pointer to the kernel state.
     # this is both for extern uses, and to make this transformation a two-step process.
@@ -616,7 +611,7 @@ function add_kernel_state!(mod::LLVM.Module)
     kernels = []
     kernels_md = metadata(mod)["julia.kernel"]
     for kernel_md in operands(kernels_md)
-        push!(kernels, Value(operands(kernel_md)[1]; ctx))
+        push!(kernels, Value(operands(kernel_md)[1]))
     end
 
     # determine which functions need a kernel state argument
@@ -743,10 +738,10 @@ function add_kernel_state!(mod::LLVM.Module)
     # update uses of the new function, modifying call sites to include the kernel state
     function rewrite_uses!(f, ft)
         # update uses
-        @dispose builder=IRBuilder(ctx) begin
+        @dispose builder=IRBuilder() begin
             for use in uses(f)
                 val = user(use)
-                if val isa LLVM.CallBase && called_value(val) == f
+                if val isa LLVM.CallBase && called_operand(val) == f
                     # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
                     #       as those have a fixed argument list, passing actual arguments
                     #       in an array of objects. that doesn't matter, for now, since
@@ -787,7 +782,7 @@ function add_kernel_state!(mod::LLVM.Module)
                             arg
                         end
                     end
-                    new_val = call!(builder, called_type(val), called_value(val), new_args,
+                    new_val = call!(builder, called_type(val), called_operand(val), new_args,
                                     operand_bundles(val))
                     callconv!(new_val, callconv(val))
 
@@ -818,7 +813,6 @@ end
 function lower_kernel_state!(fun::LLVM.Function)
     job = current_job::CompilerJob
     mod = LLVM.parent(fun)
-    ctx = context(fun)
     changed = false
 
     # check if we even need a kernel state argument
@@ -832,7 +826,7 @@ function lower_kernel_state!(fun::LLVM.Function)
         state_intr = functions(mod)["julia.gpu.state_getter"]
         state_arg = nothing # only look-up when needed
 
-        @dispose builder=IRBuilder(ctx) begin
+        @dispose builder=IRBuilder() begin
             for use in uses(state_intr)
                 inst = user(use)
                 @assert inst isa LLVM.CallInst
@@ -847,7 +841,7 @@ function lower_kernel_state!(fun::LLVM.Function)
                     # find the kernel state argument. this should be the first argument of
                     # the function, but only when this function needs the state!
                     state_arg = parameters(fun)[1]
-                    T_state = convert(LLVMType, state; ctx)
+                    T_state = convert(LLVMType, state)
                     @assert value_type(state_arg) == T_state
                 end
 
@@ -866,7 +860,6 @@ end
 
 function cleanup_kernel_state!(mod::LLVM.Module)
     job = current_job::CompilerJob
-    ctx = context(mod)
     changed = false
 
     # remove the getter intrinsic
@@ -883,14 +876,12 @@ function cleanup_kernel_state!(mod::LLVM.Module)
 end
 
 function kernel_state_intr(mod::LLVM.Module, T_state)
-    ctx = context(mod)
-
     state_intr = if haskey(functions(mod), "julia.gpu.state_getter")
         functions(mod)["julia.gpu.state_getter"]
     else
         LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_state))
     end
-    push!(function_attributes(state_intr), EnumAttribute("readnone", 0; ctx))
+    push!(function_attributes(state_intr), EnumAttribute("readnone", 0))
 
     return state_intr
 end
@@ -898,7 +889,7 @@ end
 # run-time equivalent
 function kernel_state_value(state)
     @dispose ctx=Context() begin
-        T_state = convert(LLVMType, state; ctx)
+        T_state = convert(LLVMType, state)
 
         # create function
         llvm_f, _ = create_function(T_state)
@@ -909,8 +900,8 @@ function kernel_state_value(state)
         state_intr_ft = function_type(state_intr)
 
         # generate IR
-        @dispose builder=IRBuilder(ctx) begin
-            entry = BasicBlock(llvm_f, "entry"; ctx)
+        @dispose builder=IRBuilder() begin
+            entry = BasicBlock(llvm_f, "entry")
             position!(builder, entry)
 
             val = call!(builder, state_intr_ft, state_intr, Value[], "state")

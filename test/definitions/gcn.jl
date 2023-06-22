@@ -36,17 +36,10 @@ function gcn_code_native(io::IO, @nospecialize(func), @nospecialize(types); kwar
     GPUCompiler.code_native(io, job; kwargs...)
 end
 
-# aliases without ::IO argument
-for method in (:code_warntype, :code_llvm, :code_native)
-    gcn_method = Symbol("gcn_$(method)")
-    @eval begin
-        $gcn_method(@nospecialize(func), @nospecialize(types); kwargs...) =
-            $gcn_method(stdout, func, types; kwargs...)
-    end
-end
-
 # simulates codegen for a kernel function: validates by default
 function gcn_code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = gcn_job(func, types; kernel=true, kwargs...)
-    GPUCompiler.compile(:asm, job; kwargs...)
+    JuliaContext() do ctx
+        GPUCompiler.compile(:asm, job; kwargs...)
+    end
 end

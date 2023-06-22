@@ -22,14 +22,13 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     bb = position(builder)
     f = LLVM.parent(bb)
     mod = LLVM.parent(f)
-    ctx = context(mod)
 
     # get or create a function prototype
     if haskey(functions(mod), rt.llvm_name)
         f = functions(mod)[rt.llvm_name]
         ft = function_type(f)
     else
-        ft = convert(LLVM.FunctionType, rt; ctx)
+        ft = convert(LLVM.FunctionType, rt)
         f = LLVM.Function(mod, rt.llvm_name, ft)
     end
 
@@ -53,13 +52,13 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, config::CompilerConfig, f, method; ctx::JuliaContextType)
+function emit_function!(mod, config::CompilerConfig, f, method)
     tt = Base.to_tuple_type(method.types)
     source = methodinstance(f, tt)
     new_mod, meta = codegen(:llvm, CompilerJob(source, config);
-                            optimize=false, libraries=false, validate=false, ctx)
+                            optimize=false, libraries=false, validate=false)
     ft = function_type(meta.entry)
-    expected_ft = convert(LLVM.FunctionType, method; ctx=context(new_mod))
+    expected_ft = convert(LLVM.FunctionType, method)
     if return_type(ft) != return_type(expected_ft)
         error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
     end
@@ -86,8 +85,8 @@ function emit_function!(mod, config::CompilerConfig, f, method; ctx::JuliaContex
     LLVM.name!(entry, name)
 end
 
-function build_runtime(@nospecialize(job::CompilerJob); ctx)
-    mod = LLVM.Module("GPUCompiler run-time library"; ctx=unwrap_context(ctx))
+function build_runtime(@nospecialize(job::CompilerJob))
+    mod = LLVM.Module("GPUCompiler run-time library")
 
     # the compiler job passed into here is identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
@@ -100,7 +99,7 @@ function build_runtime(@nospecialize(job::CompilerJob); ctx)
         else
             method.def
         end
-        emit_function!(mod, config, typeof(def), method; ctx)
+        emit_function!(mod, config, typeof(def), method)
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again
@@ -113,7 +112,7 @@ end
 
 const runtime_lock = ReentrantLock()
 
-@locked function load_runtime(@nospecialize(job::CompilerJob); ctx)
+@locked function load_runtime(@nospecialize(job::CompilerJob))
     lock(runtime_lock) do
         slug = runtime_slug(job)
         name = "runtime_$(slug).bc"
@@ -122,7 +121,7 @@ const runtime_lock = ReentrantLock()
         lib = try
             if ispath(path)
                 open(path) do io
-                    parse(LLVM.Module, read(io); ctx=unwrap_context(ctx))
+                    parse(LLVM.Module, read(io))
                 end
             end
         catch ex
@@ -133,7 +132,7 @@ const runtime_lock = ReentrantLock()
         if lib === nothing
             @debug "Building the GPU runtime library at $path"
             mkpath(compile_cache)
-            lib = build_runtime(job; ctx)
+            lib = build_runtime(job)
 
             # atomic write to disk
             temp_path, io = mktemp(dirname(path); cleanup=false)
