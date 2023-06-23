@@ -35,8 +35,6 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) = "spirv"
 
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
-    ctx = context(mod)
-
     # update calling convention
     for f in functions(mod)
         # JuliaGPU/GPUCompiler.jl#97
@@ -55,12 +53,12 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # add module metadata
     ## OpenCL 2.0
     push!(metadata(mod)["opencl.ocl.version"],
-          MDNode([ConstantInt(Int32(2); ctx),
-                  ConstantInt(Int32(0); ctx)]; ctx))
+          MDNode([ConstantInt(Int32(2)),
+                  ConstantInt(Int32(0))]))
     ## SPIR-V 1.5
     push!(metadata(mod)["opencl.spirv.version"],
-          MDNode([ConstantInt(Int32(1); ctx),
-                  ConstantInt(Int32(5); ctx)]; ctx))
+          MDNode([ConstantInt(Int32(1)),
+                  ConstantInt(Int32(5))]))
 
     return entry
 end
@@ -70,10 +68,10 @@ function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
 
     # support for half and double depends on the target
     if !job.config.target.supports_fp16
-        append!(errors, check_ir_values(mod, LLVM.HalfType(context(mod))))
+        append!(errors, check_ir_values(mod, LLVM.HalfType()))
     end
     if !job.config.target.supports_fp64
-        append!(errors, check_ir_values(mod, LLVM.DoubleType(context(mod))))
+        append!(errors, check_ir_values(mod, LLVM.DoubleType()))
     end
 
     return errors
@@ -159,7 +157,9 @@ end
 
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
-    obj, _ = compile(:obj, job; strip=!raw, only_entry=!dump_module, validate=false)
+    obj, _ = JuliaContext() do ctx
+        compile(:obj, job; strip=!raw, only_entry=!dump_module, validate=false)
+    end
     mktemp() do input_path, input_io
         write(input_io, obj)
         flush(input_io)
@@ -229,9 +229,8 @@ end
 
 # wrap byval pointers in a single-value struct
 function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
-    ctx = context(mod)
     ft = function_type(f)::LLVM.FunctionType
-    @compiler_assert return_type(ft) == LLVM.VoidType(ctx) job
+    @compiler_assert return_type(ft) == LLVM.VoidType() job
 
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
@@ -239,7 +238,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         for i in 1:length(byval)
             attrs = collect(parameter_attributes(f, i))
             byval[i] = any(attrs) do attr
-                kind(attr) == kind(EnumAttribute("byval", 0; ctx))
+                kind(attr) == kind(EnumAttribute("byval", 0))
             end
         end
     else
@@ -257,14 +256,14 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     new_types = LLVM.LLVMType[]
     for (i, param) in enumerate(parameters(ft))
         typ = if byval[i]
-            st = LLVM.StructType([eltype(param)]; ctx)
+            st = LLVM.StructType([eltype(param)])
             LLVM.PointerType(st, addrspace(param))
         else
             param
         end
         push!(new_types, typ)
     end
-    new_ft = LLVM.FunctionType(LLVM.VoidType(ctx), new_types)
+    new_ft = LLVM.FunctionType(LLVM.VoidType(), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
     for (arg, new_arg) in zip(parameters(f), parameters(new_f))
@@ -273,8 +272,8 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
     # emit IR performing the "conversions"
     new_args = Vector{LLVM.Value}()
-    @dispose builder=IRBuilder(ctx) begin
-        entry = BasicBlock(new_f, "conversion"; ctx)
+    @dispose builder=IRBuilder() begin
+        entry = BasicBlock(new_f, "conversion")
         position!(builder, entry)
 
         # perform argument conversions
@@ -301,9 +300,9 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
             attrs = parameter_attributes(new_f, i)
             if byval[i]
                 if LLVM.version() >= v"12"
-                    push!(attrs, TypeAttribute("byval", eltype(new_types[i]); ctx))
+                    push!(attrs, TypeAttribute("byval", eltype(new_types[i])))
                 else
-                    push!(attrs, EnumAttribute("byval", 0; ctx))
+                    push!(attrs, EnumAttribute("byval", 0))
                 end
             end
         end

@@ -95,7 +95,6 @@ end
 
 function lower_throw_extra!(mod::LLVM.Module)
     job = current_job::CompilerJob
-    ctx = context(mod)
     changed = false
     @timeit_debug to "lower throw (extra)" begin
 
@@ -115,7 +114,7 @@ function lower_throw_extra!(mod::LLVM.Module)
                     call = user(use)::LLVM.CallInst
 
                     # replace the throw with a trap
-                    @dispose builder=IRBuilder(ctx) begin
+                    @dispose builder=IRBuilder() begin
                         position!(builder, call)
                         emit_exception!(builder, f_name, call)
                     end
@@ -154,7 +153,6 @@ end
 function fix_alloca_addrspace!(fn::LLVM.Function)
     changed = false
     alloca_as = 5
-    ctx = context(fn)
 
     for bb in blocks(fn)
         for insn in instructions(bb)
@@ -164,7 +162,7 @@ function fix_alloca_addrspace!(fn::LLVM.Function)
                 addrspace(ty) == alloca_as && continue
 
                 new_insn = nothing
-                @dispose builder=IRBuilder(ctx) begin
+                @dispose builder=IRBuilder() begin
                     position!(builder, insn)
                     _alloca = alloca!(builder, ety, name(insn))
                     new_insn = addrspacecast!(builder, _alloca, ty)
@@ -179,16 +177,15 @@ function fix_alloca_addrspace!(fn::LLVM.Function)
 end
 
 function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
-    ctx = context(mod)
-    trap_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
+    trap_ft = LLVM.FunctionType(LLVM.VoidType())
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]
     else
         LLVM.Function(mod, "llvm.trap", trap_ft)
     end
     if Base.libllvm_version < v"9"
-        rl_ft = LLVM.FunctionType(LLVM.Int32Type(ctx),
-                                  [LLVM.Int32Type(ctx)])
+        rl_ft = LLVM.FunctionType(LLVM.Int32Type(),
+                                  [LLVM.Int32Type()])
         rl = if haskey(functions(mod), "llvm.amdgcn.readfirstlane")
             functions(mod)["llvm.amdgcn.readfirstlane"]
         else
@@ -201,8 +198,8 @@ function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
         # this, the target will only attempt to do a "masked branch", which
         # only works on vector instructions (trap is a scalar instruction, and
         # therefore it is executed even when EXEC==0).
-        rl_val = call!(builder, rl_ft, rl, [ConstantInt(Int32(32); ctx)])
-        rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type(ctx)))
+        rl_val = call!(builder, rl_ft, rl, [ConstantInt(Int32(32))])
+        rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type()))
         store!(builder, rl_val, rl_bc)
     end
     call!(builder, trap_ft, trap)

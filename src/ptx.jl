@@ -94,8 +94,6 @@ runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
 
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
-    ctx = context(mod)
-
     # emit the device capability and ptx isa version as constants in the module. this makes
     # it possible to 'query' these in device code, relying on LLVM to optimize the checks
     # away and generate static code. note that we only do so if there's actual uses of these
@@ -106,7 +104,7 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           "ptx_minor" => job.config.target.ptx.minor]
         if haskey(globals(mod), name)
             gv = globals(mod)[name]
-            initializer!(gv, ConstantInt(LLVM.Int32Type(ctx), value))
+            initializer!(gv, ConstantInt(LLVM.Int32Type(), value))
             # change the linkage so that we can inline the value
             linkage!(gv, LLVM.API.LLVMPrivateLinkage)
         end
@@ -175,8 +173,6 @@ end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
-    ctx = context(mod)
-
     @dispose pm=ModulePassManager() begin
         add!(pm, ModulePass("LowerTrap", lower_trap!))
         add!(pm, FunctionPass("LowerUnreachable", lower_unreachable!))
@@ -191,36 +187,36 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         annotations = Metadata[entry]
 
         ## kernel metadata
-        append!(annotations, [MDString("kernel"; ctx),
-                              ConstantInt(Int32(1); ctx)])
+        append!(annotations, [MDString("kernel"),
+                              ConstantInt(Int32(1))])
 
         ## expected CTA sizes
         if job.config.target.minthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
                 bound = dim <= length(job.config.target.minthreads) ? job.config.target.minthreads[dim] : 1
-                append!(annotations, [MDString("reqntid$name"; ctx),
-                                      ConstantInt(Int32(bound); ctx)])
+                append!(annotations, [MDString("reqntid$name"),
+                                      ConstantInt(Int32(bound))])
             end
         end
         if job.config.target.maxthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
                 bound = dim <= length(job.config.target.maxthreads) ? job.config.target.maxthreads[dim] : 1
-                append!(annotations, [MDString("maxntid$name"; ctx),
-                                      ConstantInt(Int32(bound); ctx)])
+                append!(annotations, [MDString("maxntid$name"),
+                                      ConstantInt(Int32(bound))])
             end
         end
 
         if job.config.target.blocks_per_sm !== nothing
-            append!(annotations, [MDString("minctasm"; ctx),
-                                  ConstantInt(Int32(job.config.target.blocks_per_sm); ctx)])
+            append!(annotations, [MDString("minctasm"),
+                                  ConstantInt(Int32(job.config.target.blocks_per_sm))])
         end
 
         if job.config.target.maxregs !== nothing
-            append!(annotations, [MDString("maxnreg"; ctx),
-                                  ConstantInt(Int32(job.config.target.maxregs); ctx)])
+            append!(annotations, [MDString("maxnreg"),
+                                  ConstantInt(Int32(job.config.target.maxregs))])
         end
 
-        push!(metadata(mod)["nvvm.annotations"], MDNode(annotations; ctx))
+        push!(metadata(mod)["nvvm.annotations"], MDNode(annotations))
     end
 
     return entry
@@ -241,7 +237,6 @@ end
 # replace calls to `trap` with inline assembly calling `exit`, which isn't fatal
 function lower_trap!(mod::LLVM.Module)
     job = current_job::CompilerJob
-    ctx = context(mod)
     changed = false
     @timeit_debug to "lower trap" begin
 
@@ -249,13 +244,13 @@ function lower_trap!(mod::LLVM.Module)
         trap = functions(mod)["llvm.trap"]
 
         # inline assembly to exit a thread
-        exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
+        exit_ft = LLVM.FunctionType(LLVM.VoidType())
         exit = InlineAsm(exit_ft, "exit;", "", true)
 
         for use in uses(trap)
             val = user(use)
             if isa(val, LLVM.CallInst)
-                @dispose builder=IRBuilder(ctx) begin
+                @dispose builder=IRBuilder() begin
                     position!(builder, val)
                     call!(builder, exit_ft, exit)
                 end
@@ -325,8 +320,6 @@ end
 # `ptxas` that the thread exits, and allows it to correctly construct a CFG,
 # and consequently correctly determine the divergence regions as intended.
 function lower_unreachable!(f::LLVM.Function)
-    ctx = context(f)
-
     # TODO:
     # - if unreachable blocks have been merged, we still may be jumping from different
     #   divergent regions, potentially causing the same problem as above:
@@ -356,7 +349,7 @@ function lower_unreachable!(f::LLVM.Function)
     # happens during `prepare_execution!` undoing our work here.
     # this shouldn't be needed when we upstream the pass.
     attrs = function_attributes(f)
-    delete!(attrs, EnumAttribute("noreturn", 0; ctx))
+    delete!(attrs, EnumAttribute("noreturn", 0))
 
     # find unreachable blocks
     unreachable_blocks = BasicBlock[]
@@ -368,11 +361,11 @@ function lower_unreachable!(f::LLVM.Function)
     isempty(unreachable_blocks) && return false
 
     # inline assembly to exit a thread
-    exit_ft = LLVM.FunctionType(LLVM.VoidType(ctx))
+    exit_ft = LLVM.FunctionType(LLVM.VoidType())
     exit = InlineAsm(exit_ft, "exit;", "", true)
 
     # rewrite the unreachable terminators
-    @dispose builder=IRBuilder(ctx) begin
+    @dispose builder=IRBuilder() begin
         entry_block = first(blocks(f))
         for block in unreachable_blocks
             inst = terminator(block)
@@ -395,7 +388,6 @@ const NVVM_REFLECT_FUNCTION = "__nvvm_reflect"
 function nvvm_reflect!(fun::LLVM.Function)
     job = current_job::CompilerJob
     mod = LLVM.parent(fun)
-    ctx = context(fun)
     changed = false
     @timeit_debug to "nvvmreflect" begin
 

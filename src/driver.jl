@@ -19,9 +19,13 @@ export JuliaContext
 # unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
 # this helper to a regular `Context()` call.
 function JuliaContext()
-    if VERSION >= v"1.9.0-DEV.115"
+    if VERSION >= v"1.9.0-DEV.516"
+        # Julia 1.9 knows how to deal with arbitrary contexts,
+        # and uses ORC's thread safe versions.
+        ThreadSafeContext()
+    elseif VERSION >= v"1.9.0-DEV.115"
         # Julia 1.9 knows how to deal with arbitrary contexts
-        JuliaContextType()
+        Context()
     else
         # earlier versions of Julia claim so, but actually use a global context
         isboxed_ref = Ref{Bool}()
@@ -31,18 +35,33 @@ function JuliaContext()
     end
 end
 function JuliaContext(f)
-    if VERSION >= v"1.9.0-DEV.115"
-        JuliaContextType(f)
+    if VERSION >= v"1.9.0-DEV.516"
+        ts_ctx = ThreadSafeContext()
+        # for now, also activate the underlying context
+        # XXX: this is wrong; we can't expose the underlying LLVM context, but should
+        #      instead always go through the callback in order to unlock it properly.
+        #      rework this once we depend on Julia 1.9 or later.
+        ctx = context(ts_ctx)
+        activate(ctx)
+        try
+            f(ctx)
+        finally
+            deactivate(ctx)
+            dispose(ts_ctx)
+        end
+    elseif VERSION >= v"1.9.0-DEV.115"
+        Context(f)
     else
-        f(JuliaContext())
-        # we cannot dispose of the global unique context
+        ctx = JuliaContext()
+        activate(ctx)
+        try
+            f(ctx)
+        finally
+            deactivate(ctx)
+            # we cannot dispose of the global unique context
+        end
     end
 end
-
-if VERSION >= v"1.9.0-DEV.516"
-unwrap_context(ctx::ThreadSafeContext) = context(ctx)
-end
-unwrap_context(ctx::Context) = ctx
 
 
 ## compiler entrypoint
@@ -79,76 +98,62 @@ Other keyword arguments can be found in the documentation of [`cufunction`](@ref
 function compile(target::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, toplevel::Bool=true,
                  optimize::Bool=true, cleanup::Bool=true, strip::Bool=false,
-                 validate::Bool=true, only_entry::Bool=false,
-                 ctx::Union{JuliaContextType,Nothing}=nothing)
+                 validate::Bool=true, only_entry::Bool=false)
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
 
     return codegen(target, job;
-                   libraries, toplevel, optimize, cleanup, strip, validate, only_entry, ctx)
+                   libraries, toplevel, optimize, cleanup, strip, validate, only_entry)
 end
 
 function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  libraries::Bool=true, toplevel::Bool=true, optimize::Bool=true,
                  cleanup::Bool=true, strip::Bool=false, validate::Bool=true,
-                 only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob}=nothing,
-                 ctx::Union{JuliaContextType,Nothing}=nothing)
+                 only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob}=nothing)
+    if context(; throw_error=false) === nothing
+        error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
+    elseif VERSION < v"1.9.0-DEV.115" && context() != JuliaContext()
+        error("""Julia <1.9 does not suppport generating code in an arbitrary LLVM context.
+                 Use `JuliaContext()` do-block syntax to get an appropriate one.""")
+    end
+
     @timeit_debug to "Validation" begin
         check_method(job)   # not optional
         validate && check_invocation(job)
     end
 
-    temporary_context = ctx === nothing
-    if temporary_context && output == :llvm
-        # if we return IR structures, we cannot construct a temporary context
-        error("Request to return LLVM IR; please provide a context")
+
+    ## LLVM IR
+
+    ir, ir_meta = emit_llvm(job; libraries, toplevel, optimize, cleanup, only_entry, validate)
+
+    if output == :llvm
+        if strip
+            @timeit_debug to "strip debug info" strip_debuginfo!(ir)
+        end
+
+        return ir, ir_meta
     end
 
-    try
-        ## LLVM IR
 
-        if temporary_context
-            ctx = JuliaContext()
-        elseif VERSION < v"1.9.0-DEV.115" && ctx != JuliaContext()
-            error("""Julia <1.9 does not suppport generating code in an arbitrary LLVM context.
-                     Use a JuliaContext instead.""")
-        end
+    ## machine code
 
-        ir, ir_meta = emit_llvm(job; libraries, toplevel, optimize, cleanup, only_entry, validate, ctx)
-
-        if output == :llvm
-            if strip
-                @timeit_debug to "strip debug info" strip_debuginfo!(ir)
-            end
-
-            return ir, ir_meta
-        end
-
-
-        ## machine code
-
-        format = if output == :asm
-            LLVM.API.LLVMAssemblyFile
-        elseif output == :obj
-            LLVM.API.LLVMObjectFile
-        else
-            error("Unknown assembly format $output")
-        end
-        asm, asm_meta = emit_asm(job, ir; strip, validate, format)
-
-        if output == :asm || output == :obj
-            return asm, (; asm_meta..., ir_meta..., ir)
-        end
-
-
-        error("Unknown compilation output $output")
-    finally
-        if temporary_context && VERSION >= v"1.9.0-DEV.115"
-            @assert ctx != JuliaContext()
-            dispose(ctx)
-        end
+    format = if output == :asm
+        LLVM.API.LLVMAssemblyFile
+    elseif output == :obj
+        LLVM.API.LLVMObjectFile
+    else
+        error("Unknown assembly format $output")
     end
+    asm, asm_meta = emit_asm(job, ir; strip, validate, format)
+
+    if output == :asm || output == :obj
+        return asm, (; asm_meta..., ir_meta..., ir)
+    end
+
+
+    error("Unknown compilation output $output")
 end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
@@ -183,8 +188,7 @@ const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob);
                            libraries::Bool=true, toplevel::Bool=true, optimize::Bool=true,
-                           cleanup::Bool=true, only_entry::Bool=false, validate::Bool=true,
-                           ctx::JuliaContextType)
+                           cleanup::Bool=true, only_entry::Bool=false, validate::Bool=true)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -195,7 +199,7 @@ const __llvm_initialized = Ref(false)
     end
 
     @timeit_debug to "IR generation" begin
-        ir, compiled = irgen(job; ctx)
+        ir, compiled = irgen(job)
         if job.config.entry_abi === :specfunc
             entry_fn = compiled[job.source].specfunc
         else
@@ -251,10 +255,10 @@ const __llvm_initialized = Ref(false)
                     dyn_ir, dyn_meta = codegen(:llvm, dyn_job; validate=false,
                                                optimize=false,
                                                toplevel=false,
-                                               parent_job=job, ctx)
+                                               parent_job=job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
-                    @assert context(dyn_ir) == unwrap_context(ctx)
+                    @assert context(dyn_ir) == context(ir)
                     link!(ir, dyn_ir)
                     changed = true
                     dyn_entry_fn
@@ -262,9 +266,9 @@ const __llvm_initialized = Ref(false)
                 dyn_entry = functions(ir)[dyn_entry_fn]
 
                 # insert a pointer to the function everywhere the entry is used
-                T_ptr = convert(LLVMType, Ptr{Cvoid}; ctx=unwrap_context(ctx))
+                T_ptr = convert(LLVMType, Ptr{Cvoid})
                 for call in worklist[dyn_job]
-                    @dispose builder=IRBuilder(unwrap_context(ctx)) begin
+                    @dispose builder=IRBuilder() begin
                         position!(builder, call)
                         fptr = ptrtoint!(builder, dyn_entry, T_ptr)
                         replace_uses!(call, fptr)
@@ -283,7 +287,7 @@ const __llvm_initialized = Ref(false)
         # always preload the runtime, and do so early; it cannot be part of any
         # timing block because it recurses into the compiler
         if !uses_julia_runtime(job) && libraries
-            runtime = load_runtime(job; ctx)
+            runtime = load_runtime(job)
             runtime_fns = LLVM.name.(defs(runtime))
             runtime_intrinsics = ["julia.gc_alloc_obj"]
         end
@@ -323,7 +327,7 @@ const __llvm_initialized = Ref(false)
 
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
-            push!(metadata(ir)["julia.kernel"], MDNode([entry]; ctx=unwrap_context(ctx)))
+            push!(metadata(ir)["julia.kernel"], MDNode([entry]))
 
             # IDEA: save all jobs, not only kernels, and save other attributes
             #       so that we can reconstruct the CompileJob instead of setting it globally

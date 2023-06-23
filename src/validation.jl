@@ -177,7 +177,7 @@ const libjulia = Ref{Ptr{Cvoid}}(C_NULL)
 
 function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
     bt = backtrace(inst)
-    dest = called_value(inst)
+    dest = called_operand(inst)
     if isa(dest, LLVM.Function)
         fn = LLVM.name(dest)
 
@@ -273,7 +273,7 @@ function check_ir_values(mod::LLVM.Module, T_bad::LLVMType)
     for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
         if value_type(inst) == T_bad || any(param->value_type(param) == T_bad, operands(inst))
             bt = backtrace(inst)
-            push!(errors, ("unsupported use of $(T_bad) value", bt, inst))
+            push!(errors, ("unsupported use of $(string(T_bad)) value", bt, inst))
         end
     end
 

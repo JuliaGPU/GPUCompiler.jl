@@ -537,7 +537,7 @@ macro in_world(world, ex)
     end
 end
 
-function compile_method_instance(@nospecialize(job::CompilerJob); ctx::JuliaContextType)
+function compile_method_instance(@nospecialize(job::CompilerJob))
     # populate the cache
     cache = ci_cache(job)
     mt = method_table(job)
@@ -581,19 +581,20 @@ function compile_method_instance(@nospecialize(job::CompilerJob); ctx::JuliaCont
     # generate IR
     GC.@preserve lookup_cb begin
         native_code = if VERSION >= v"1.9.0-DEV.516"
-            mod = LLVM.Module("start"; ctx=unwrap_context(ctx))
+            ts_mod = ThreadSafeModule("start")
 
             # configure the module
-            triple!(mod, llvm_triple(job.config.target))
-            if julia_datalayout(job.config.target) !== nothing
-                datalayout!(mod, julia_datalayout(job.config.target))
+            ts_mod() do mod
+                triple!(mod, llvm_triple(job.config.target))
+                if julia_datalayout(job.config.target) !== nothing
+                    datalayout!(mod, julia_datalayout(job.config.target))
+                end
+                flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+                    Metadata(ConstantInt(Int32(4)))
+                flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+                    Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
             end
-            flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
-                Metadata(ConstantInt(Int32(4); ctx=unwrap_context(ctx)))
-            flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
-                Metadata(ConstantInt(DEBUG_METADATA_VERSION(); ctx=unwrap_context(ctx)))
 
-            ts_mod = ThreadSafeModule(mod; ctx)
             if VERSION >= v"1.10.0-DEV.645" || v"1.9.0-beta4.23" <= VERSION < v"1.10-"
                 ccall(:jl_create_native, Ptr{Cvoid},
                       (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t),
@@ -615,14 +616,14 @@ function compile_method_instance(@nospecialize(job::CompilerJob); ctx::JuliaCont
         elseif VERSION >= v"1.9.0-DEV.115"
             @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
-                  [job.source], ctx, Ref(params), CompilationPolicyExtern)
+                  [job.source], context(), Ref(params), CompilationPolicyExtern)
         elseif VERSION >= v"1.8.0-DEV.661"
-            @assert ctx == JuliaContext()
+            @assert context() == JuliaContext()
             @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Ptr{Base.CodegenParams}, Cint),
                   [job.source], Ref(params), CompilationPolicyExtern)
         else
-            @assert ctx == JuliaContext()
+            @assert context() == JuliaContext()
             @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Base.CodegenParams, Cint),
                   [job.source], params, CompilationPolicyExtern)
@@ -637,6 +638,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob); ctx::JuliaCont
         end
         @assert llvm_mod_ref != C_NULL
         if VERSION >= v"1.9.0-DEV.516"
+            # XXX: this is wrong; we can't expose the underlying LLVM module, but should
+            #      instead always go through the callback in order to unlock it properly.
+            #      rework this once we depend on Julia 1.9 or later.
             llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref)
             llvm_mod = nothing
             llvm_ts_mod() do mod
