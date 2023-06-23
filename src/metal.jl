@@ -98,7 +98,7 @@ end
 
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     # Metal never supports double precision
-    check_ir_values(mod, LLVM.DoubleType(context(mod)))
+    check_ir_values(mod, LLVM.DoubleType())
 end
 
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
