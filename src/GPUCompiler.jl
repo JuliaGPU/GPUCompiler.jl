@@ -52,7 +52,16 @@ compile_cache = "" # defined in __init__()
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
 
-    global compile_cache = @get_scratch!("compiled")
+    dir = @get_scratch!("compiled")
+    ## add the Julia version
+    dir = joinpath(dir, "v$(VERSION.major).$(VERSION.minor)")
+    if VERSION > v"1.9"
+        ## also add the package version
+        pkgver = Base.pkgversion(GPUCompiler)
+        dir = joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
+    end
+    mkpath(dir)
+    global compile_cache = dir
 end
 
 end # module
