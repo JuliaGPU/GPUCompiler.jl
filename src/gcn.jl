@@ -37,26 +37,7 @@ isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsic
 
 function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
-    if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm) do m, mam
-                if lower_throw_extra!(m)
-                    return no_analyses_preserved()
-                else
-                    return all_analyses_preserved()
-                end
-            end
-            analysis_managers() do lam, fam, cam, mam
-                register!(pb, lam, fam, cam, mam)
-                dispose(run!(mpm, mod, mam))
-            end
-        end
-    else
-        @dispose pm=ModulePassManager() begin
-            add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
-            run!(pm, mod)
-        end
-    end
+    lower_throw_extra!(mod)
 
     if job.config.kernel
         # calling convention

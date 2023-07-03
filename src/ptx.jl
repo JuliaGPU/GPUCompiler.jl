@@ -190,38 +190,8 @@ end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
-    if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm) do m, mam
-                if lower_trap!(m, mam)
-                    return no_analyses_preserved()
-                else
-                    return all_analyses_preserved()
-                end
-            end
-            add!(mpm, NewPMFunctionPassManager) do fpm
-                add!(fpm) do f, fam
-                    if lower_unreachable!(f, fam)
-                        return no_analyses_preserved()
-                    else
-                        return all_analyses_preserved()
-                    end
-                end
-            end
-
-            analysis_managers() do lam, fam, cam, mam
-                register!(pb, lam, fam, cam, mam)
-                dispose(run!(mpm, mod, mam))
-            end
-        end
-    else
-        @dispose pm=ModulePassManager() begin
-            add!(pm, ModulePass("LowerTrap", lower_trap!))
-            add!(pm, FunctionPass("LowerUnreachable", lower_unreachable!))
-
-            run!(pm, mod)
-        end
-    end
+    lower_trap!(m)
+    lower_unreachable!(m)
 
     if job.config.kernel
         # add metadata annotations for the assembler to the module
