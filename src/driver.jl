@@ -313,6 +313,7 @@ const __llvm_initialized = Ref(false)
         # global variables. this makes sure that the optimizer can, e.g.,
         # rewrite function signatures.
         if toplevel
+            # TODO No good api to expose internalize via newpm yet
             @dispose pm=ModulePassManager() begin
                 exports = collect(values(jobs))
                 for gvar in globals(ir)
@@ -340,20 +341,45 @@ const __llvm_initialized = Ref(false)
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
-                has_deferred_jobs && @dispose pm=ModulePassManager() begin
-                    # inline and optimize the call to e deferred code. in particular we want
-                    # to remove unnecessary alloca's created by pass-by-ref semantics.
-                    instruction_combining!(pm)
-                    always_inliner!(pm)
-                    scalar_repl_aggregates_ssa!(pm)
-                    promote_memory_to_register!(pm)
-                    gvn!(pm)
-
-                    # merge duplicate functions, since each compilation invocation emits everything
-                    # XXX: ideally we want to avoid emitting these in the first place
-                    merge_functions!(pm)
-
-                    run!(pm, ir)
+                if has_deferred_jobs
+                    if use_newpm
+                        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+                            add!(mpm, NewPMFunctionPassManager) do fpm
+                                add!(fpm, InstCombinePass())
+                            end
+                            add!(mpm, AlwaysInlinerPass())
+                            add!(mpm, NewPMFunctionPassManager) do fpm
+                                add!(fpm, SROAPass())
+                                add!(fpm, GVNPass())
+                            end
+                            add!(mpm, MergeFunctionsPass())
+                            analysis_managers() do lam, fam, cam, mam
+                                add!(fam, AAManager) do aam
+                                    add!(aam, BasicAA())
+                                    add!(aam, ScopedNoAliasAA())
+                                    add!(aam, TypeBasedAA())
+                                end
+                                register!(pb, lam, fam, cam, mam)
+                                dispose(run!(mpm, ir, mam))
+                            end
+                        end
+                    else
+                        @dispose pm=ModulePassManager() begin
+                            # inline and optimize the call to e deferred code. in particular we want
+                            # to remove unnecessary alloca's created by pass-by-ref semantics.
+                            instruction_combining!(pm)
+                            always_inliner!(pm)
+                            scalar_repl_aggregates_ssa!(pm)
+                            promote_memory_to_register!(pm)
+                            gvn!(pm)
+        
+                            # merge duplicate functions, since each compilation invocation emits everything
+                            # XXX: ideally we want to avoid emitting these in the first place
+                            merge_functions!(pm)
+        
+                            run!(pm, ir)
+                        end
+                    end
                 end
             end
 
@@ -363,18 +389,38 @@ const __llvm_initialized = Ref(false)
 
         if cleanup
             @timeit_debug to "clean-up" begin
-                # we can only clean-up now, as optimization may lower or introduce calls to
-                # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
-                @dispose pm=ModulePassManager() begin
-                    # eliminate all unused internal functions
-                    global_optimizer!(pm)
-                    global_dce!(pm)
-                    strip_dead_prototypes!(pm)
+                if use_newpm
+                    @dispose pb=PassBuilder() mpm=ModulePassManager(pb) begin
+                        add!(mpm, RecomputeGlobalsAAPass())
+                        add!(mpm, GlobalOptPass())
+                        add!(mpm, GlobalDCEPass())
+                        add!(mpm, StripDeadPrototypesPass())
+                        add!(mpm, ConstantMergePass())
+                        analysis_managers() do lam, fam, cam, mam
+                            add!(fam, AAManager) do aam
+                                add!(aam, BasicAA())
+                                add!(aam, ScopedNoAliasAA())
+                                add!(aam, TypeBasedAA())
+                                add!(aam, GlobalsAA())
+                            end
+                            register!(pb, lam, fam, cam, mam)
+                            dispose(run!(mpm, ir, mam))
+                        end
+                    end
+                else
+                    # we can only clean-up now, as optimization may lower or introduce calls to
+                    # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
+                    @dispose pm=ModulePassManager() begin
+                        # eliminate all unused internal functions
+                        global_optimizer!(pm)
+                        global_dce!(pm)
+                        strip_dead_prototypes!(pm)
 
-                    # merge constants (such as exception messages)
-                    constant_merge!(pm)
+                        # merge constants (such as exception messages)
+                        constant_merge!(pm)
 
-                    run!(pm, ir)
+                        run!(pm, ir)
+                    end
                 end
             end
         end
