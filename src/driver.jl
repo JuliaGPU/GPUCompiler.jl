@@ -390,7 +390,7 @@ const __llvm_initialized = Ref(false)
         if cleanup
             @timeit_debug to "clean-up" begin
                 if use_newpm
-                    @dispose pb=PassBuilder() mpm=ModulePassManager(pb) begin
+                    @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
                         add!(mpm, RecomputeGlobalsAAPass())
                         add!(mpm, GlobalOptPass())
                         add!(mpm, GlobalDCEPass())

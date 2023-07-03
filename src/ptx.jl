@@ -131,12 +131,23 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         entry = lower_byval(job, mod, entry)
     end
 
-    @dispose pm=ModulePassManager() begin
-        # we emit properties (of the device and ptx isa) as private global constants,
-        # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-        global_optimizer!(pm)
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, GlobalOptPass())
 
-        run!(pm, mod)
+            analysis_managers() do lam, fam, cam, mam
+                register!(pb, lam, fam, cam, mam)
+                dispose(run!(mpm, mod, mam))
+            end
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            # we emit properties (of the device and ptx isa) as private global constants,
+            # so run the optimizer so that they are inlined before the rest of the optimizer runs.
+            global_optimizer!(pm)
+
+            run!(pm, mod)
+        end
     end
 
     return entry
@@ -145,6 +156,7 @@ end
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     tm = llvm_machine(job.config.target)
+    # TODO can't convert to newpm because speculative-execution doesn't have a parameter in the default PassBuilder parser
     @dispose pm=ModulePassManager() begin
         add_library_info!(pm, triple(mod))
         add_transform_info!(pm, tm)
@@ -178,11 +190,37 @@ end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
-    @dispose pm=ModulePassManager() begin
-        add!(pm, ModulePass("LowerTrap", lower_trap!))
-        add!(pm, FunctionPass("LowerUnreachable", lower_unreachable!))
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm) do m, mam
+                if lower_trap!(m, mam)
+                    return no_analyses_preserved()
+                else
+                    return all_analyses_preserved()
+                end
+            end
+            add!(mpm, NewPMFunctionPassManager) do fpm
+                add!(fpm) do f, fam
+                    if lower_unreachable!(f, fam)
+                        return no_analyses_preserved()
+                    else
+                        return all_analyses_preserved()
+                    end
+                end
+            end
 
-        run!(pm, mod)
+            analysis_managers() do lam, fam, cam, mam
+                register!(pb, lam, fam, cam, mam)
+                dispose(run!(mpm, mod, mam))
+            end
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            add!(pm, ModulePass("LowerTrap", lower_trap!))
+            add!(pm, FunctionPass("LowerUnreachable", lower_unreachable!))
+
+            run!(pm, mod)
+        end
     end
 
     if job.config.kernel

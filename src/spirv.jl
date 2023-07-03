@@ -82,16 +82,45 @@ end
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
-    @dispose pm=ModulePassManager() begin
-        # SPIR-V does not support trap, and has no mechanism to abort compute kernels
-        # (OpKill is only available in fragment execution mode)
-        add!(pm, ModulePass("RemoveTrap", rm_trap!))
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
+            add!(mpm) do m, mam
+                # SPIR-V does not support trap, and has no mechanism to abort compute kernels
+                # (OpKill is only available in fragment execution mode)
+                if rm_trap!(m)
+                    return no_analyses_preserved()
+                else
+                    return all_analyses_preserved()
+                end
+            end
 
-        # the LLVM to SPIR-V translator does not support the freeze instruction
-        # (SPIRV-LLVM-Translator#1140)
-        add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
+            # the LLVM to SPIR-V translator does not support the freeze instruction
+            # (SPIRV-LLVM-Translator#1140)
+            add!(mpm) do m, mam
+                if rm_freeze!(m)
+                    return no_analyses_preserved()
+                else
+                    return all_analyses_preserved()
+                end
+            end
 
-        run!(pm, mod)
+            analysis_managers() do lam, fam, cam, mam
+                register!(pb, lam, fam, cam, mam)
+                run!(mpm, mod, mam)
+            end
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            # SPIR-V does not support trap, and has no mechanism to abort compute kernels
+            # (OpKill is only available in fragment execution mode)
+            add!(pm, ModulePass("RemoveTrap", rm_trap!))
+
+            # the LLVM to SPIR-V translator does not support the freeze instruction
+            # (SPIRV-LLVM-Translator#1140)
+            add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
+
+            run!(pm, mod)
+        end
     end
 
 

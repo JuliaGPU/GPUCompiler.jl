@@ -14,6 +14,8 @@ using Scratch: @get_scratch!
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
 
+const use_newpm = isdefined(LLVM, :PassBuilder)
+
 include("utils.jl")
 
 # compiler interface and implementations

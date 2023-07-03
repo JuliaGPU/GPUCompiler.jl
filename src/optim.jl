@@ -608,8 +608,6 @@ function optimize_legacypm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     return
 end
 
-const use_newpm = isdefined(LLVM, :PassBuilder)
-
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     if use_newpm
         optimize_newpm!(job, mod)

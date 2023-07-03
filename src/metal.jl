@@ -87,10 +87,21 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     # add metadata to AIR intrinsics LLVM doesn't know about
     annotate_air_intrinsics!(job, mod)
 
-    @dispose pm=ModulePassManager() begin
-        # we emit properties (of the device and ptx isa) as private global constants,
-        # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-        global_optimizer!(pm)
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
+            add!(mpm, GlobalOptPass())
+            analysis_managers() do lam, fam, cam, mam
+                register!(pb, lam, fam, cam, mam)
+                dispose(run!(mpm, mod, mam))
+            end
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            # we emit properties (of the device and ptx isa) as private global constants,
+            # so run the optimizer so that they are inlined before the rest of the optimizer runs.
+            global_optimizer!(pm)
+            # TODO run!?
+        end
     end
 
     return functions(mod)[entry_fn]
@@ -121,11 +132,26 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     end
     if changed
         # lowering may have introduced additional functions marked `alwaysinline`
-        @dispose pm=ModulePassManager() begin
-            always_inliner!(pm)
-            cfgsimplification!(pm)
-            instruction_combining!(pm)
-            run!(pm, mod)
+        if use_newpm
+            @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
+                add!(mpm, AlwaysInlinerPass())
+                add!(mpm, NewPMFunctionPassManager) do fpm
+                    add!(fpm, SimplifyCFGPass())
+                    add!(fpm, InstructionCombiningPass())
+                end
+
+                analysis_managers() do lam, fam, cam, mam
+                    register!(pb, lam, fam, cam, mam)
+                    dispose(run!(mpm, mod, mam))
+                end
+            end
+        else
+            @dispose pm=ModulePassManager() begin
+                always_inliner!(pm)
+                cfgsimplification!(pm)
+                instruction_combining!(pm)
+                run!(pm, mod)
+            end
         end
     end
 
@@ -158,11 +184,26 @@ end
         end
 
         if any_noreturn
-            @dispose pm=ModulePassManager() begin
-                always_inliner!(pm)
-                cfgsimplification!(pm)
-                instruction_combining!(pm)
-                run!(pm, mod)
+            if use_newpm
+                @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
+                    add!(mpm, AlwaysInlinerPass())
+                    add!(mpm, NewPMFunctionPassManager) do fpm
+                        add!(fpm, SimplifyCFGPass())
+                        add!(fpm, InstructionCombiningPass())
+                    end
+    
+                    analysis_managers() do lam, fam, cam, mam
+                        register!(pb, lam, fam, cam, mam)
+                        dispose(run!(mpm, mod, mam))
+                    end
+                end
+            else
+                @dispose pm=ModulePassManager() begin
+                    always_inliner!(pm)
+                    cfgsimplification!(pm)
+                    instruction_combining!(pm)
+                    run!(pm, mod)
+                end
             end
         end
     end
@@ -294,13 +335,29 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     LLVM.name!(new_f, fn)
 
     # clean-up after this pass (which runs after optimization)
-    @dispose pm=ModulePassManager() begin
-        cfgsimplification!(pm)
-        scalar_repl_aggregates!(pm)
-        early_cse!(pm)
-        instruction_combining!(pm)
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
+            add!(mpm, NewPMFunctionPassManager) do fpm
+                add!(fpm, SimplifyCFGPass())
+                add!(fpm, SROAPass())
+                add!(fpm, EarlyCSEPass())
+                add!(fpm, InstructionCombiningPass())
+            end
 
-        run!(pm, mod)
+            analysis_managers() do lam, fam, cam, mam
+                register!(lam, fam, cam, mam)
+                dispose(run!(mpm, mod, mam))
+            end
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            cfgsimplification!(pm)
+            scalar_repl_aggregates!(pm)
+            early_cse!(pm)
+            instruction_combining!(pm)
+
+            run!(pm, mod)
+        end
     end
 
     return new_f
