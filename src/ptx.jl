@@ -132,14 +132,7 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 
     if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, GlobalOptPass())
-
-            analysis_managers() do lam, fam, cam, mam
-                register!(pb, lam, fam, cam, mam)
-                dispose(run!(mpm, mod, mam))
-            end
-        end
+        run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
     else
         @dispose pm=ModulePassManager() begin
             # we emit properties (of the device and ptx isa) as private global constants,

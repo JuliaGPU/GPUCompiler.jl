@@ -88,13 +88,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     annotate_air_intrinsics!(job, mod)
 
     if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
-            add!(mpm, GlobalOptPass())
-            analysis_managers() do lam, fam, cam, mam
-                register!(pb, lam, fam, cam, mam)
-                dispose(run!(mpm, mod, mam))
-            end
-        end
+        run!(GlobalOptPass(), mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
     else
         @dispose pm=ModulePassManager() begin
             # we emit properties (of the device and ptx isa) as private global constants,
@@ -139,11 +133,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
                     add!(fpm, SimplifyCFGPass())
                     add!(fpm, InstructionCombiningPass())
                 end
-
-                analysis_managers() do lam, fam, cam, mam
-                    register!(pb, lam, fam, cam, mam)
-                    dispose(run!(mpm, mod, mam))
-                end
+                run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
             end
         else
             @dispose pm=ModulePassManager() begin
@@ -185,17 +175,13 @@ end
 
         if any_noreturn
             if use_newpm
-                @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
+                @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(nothing, pic) mpm=NewPMModulePassManager() begin
                     add!(mpm, AlwaysInlinerPass())
                     add!(mpm, NewPMFunctionPassManager) do fpm
                         add!(fpm, SimplifyCFGPass())
                         add!(fpm, InstructionCombiningPass())
                     end
-    
-                    analysis_managers() do lam, fam, cam, mam
-                        register!(pb, lam, fam, cam, mam)
-                        dispose(run!(mpm, mod, mam))
-                    end
+                    run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
                 end
             else
                 @dispose pm=ModulePassManager() begin
@@ -336,7 +322,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
 
     # clean-up after this pass (which runs after optimization)
     if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
+        @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(nothing, pic) mpm=NewPMModulePassManager() begin
             add!(mpm, NewPMFunctionPassManager) do fpm
                 add!(fpm, SimplifyCFGPass())
                 add!(fpm, SROAPass())
@@ -344,10 +330,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
                 add!(fpm, InstructionCombiningPass())
             end
 
-            analysis_managers() do lam, fam, cam, mam
-                register!(lam, fam, cam, mam)
-                dispose(run!(mpm, mod, mam))
-            end
+            run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
         end
     else
         @dispose pm=ModulePassManager() begin

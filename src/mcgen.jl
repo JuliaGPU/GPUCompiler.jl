@@ -3,24 +3,23 @@
 # final preparations for the module to be compiled to machine code
 # these passes should not be run when e.g. compiling to write to disk.
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-        global current_job
-        current_job = job
+    global current_job
+    current_job = job
     if use_newpm
         @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, RecomputeGlobalsAAPass())
             add!(mpm, GlobalOptPass())
+            resolve_cpu_references!(mod)
             add!(mpm) do m, mam
                 if resolve_cpu_references!(m)
-                    return no_analyses_preserved()
+                    no_analyses_preserved()
                 else
-                    return all_analyses_preserved()
+                    all_analyses_preserved()
                 end
             end
             add!(mpm, GlobalDCEPass())
             add!(mpm, StripDeadPrototypesPass())
-            analysis_managers() do lam, fam, cam, mam
-                register!(pb, lam, fam, cam, mam)
-                dispose(run!(mpm, mod, mam))
-            end
+            run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA(), GlobalsAA()])
         end
     else
         @dispose pm=ModulePassManager() begin

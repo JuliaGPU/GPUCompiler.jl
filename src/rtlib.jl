@@ -65,14 +65,7 @@ function emit_function!(mod, config::CompilerConfig, f, method)
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
     if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, StripDeadPrototypesPass())
-
-            analysis_managers() do lam, fam, cam, mam
-                register!(pb, lam, fam, cam, mam)
-                run!(mpm, new_mod, mam)
-            end
-        end
+        run!(StripDeadPrototypesPass(), new_mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
     else
         @dispose pm=ModulePassManager() begin
             strip_dead_prototypes!(pm)

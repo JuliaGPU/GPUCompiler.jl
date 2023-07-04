@@ -343,7 +343,8 @@ const __llvm_initialized = Ref(false)
                 # XXX: make these part of the optimizer pipeline?
                 if has_deferred_jobs
                     if use_newpm
-                        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+
+                        @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(pic) mpm=NewPMModulePassManager(pb) begin
                             add!(mpm, NewPMFunctionPassManager) do fpm
                                 add!(fpm, InstCombinePass())
                             end
@@ -353,15 +354,7 @@ const __llvm_initialized = Ref(false)
                                 add!(fpm, GVNPass())
                             end
                             add!(mpm, MergeFunctionsPass())
-                            analysis_managers() do lam, fam, cam, mam
-                                add!(fam, AAManager) do aam
-                                    add!(aam, BasicAA())
-                                    add!(aam, ScopedNoAliasAA())
-                                    add!(aam, TypeBasedAA())
-                                end
-                                register!(pb, lam, fam, cam, mam)
-                                dispose(run!(mpm, ir, mam))
-                            end
+                            run!(mpm, ir, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
                         end
                     else
                         @dispose pm=ModulePassManager() begin
@@ -396,16 +389,7 @@ const __llvm_initialized = Ref(false)
                         add!(mpm, GlobalDCEPass())
                         add!(mpm, StripDeadPrototypesPass())
                         add!(mpm, ConstantMergePass())
-                        analysis_managers() do lam, fam, cam, mam
-                            add!(fam, AAManager) do aam
-                                add!(aam, BasicAA())
-                                add!(aam, ScopedNoAliasAA())
-                                add!(aam, TypeBasedAA())
-                                add!(aam, GlobalsAA())
-                            end
-                            register!(pb, lam, fam, cam, mam)
-                            dispose(run!(mpm, ir, mam))
-                        end
+                        run!(mpm, ir, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA(), GlobalsAA()])
                     end
                 else
                     # we can only clean-up now, as optimization may lower or introduce calls to

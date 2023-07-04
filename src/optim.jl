@@ -434,42 +434,11 @@ function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(tm,pic) begin
         @dispose mpm=NewPMModulePassManager(pb) begin
             buildNewPMPipeline!(mpm, job)
-            analysis_managers() do lam, fam, cam, mam
-                add!(fam, TargetIRAnalysis(tm))
-                add!(fam, TargetLibraryAnalysis(triple))
-                add!(fam, AAManager) do aam
-                    add!(aam, BasicAA())
-                    add!(aam, ScopedNoAliasAA())
-                    add!(aam, TypeBasedAA())
-                end
-                register!(pb, lam, fam, cam, mam)
-
-                dispose(run!(mpm, mod, mam))
-            end
+            run!(mpm, mod, tm, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
         end
     end
-
     optimize_module!(job, mod)
-
-    @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(tm,pic) begin
-        @dispose mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, DeadArgumentEliminationPass())
-
-            analysis_managers() do lam, fam, cam, mam
-                add!(fam, TargetIRAnalysis(tm))
-                add!(fam, TargetLibraryAnalysis(triple))
-                add!(fam, AAManager) do aam
-                    add!(aam, BasicAA())
-                    add!(aam, ScopedNoAliasAA())
-                    add!(aam, TypeBasedAA())
-                end
-                register!(pb, lam, fam, cam, mam)
-
-                dispose(run!(mpm, mod, mam))
-            end
-        end
-    end
-
+    run!(DeadArgumentEliminationPass(), mod, tm, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
     return
 end
 
