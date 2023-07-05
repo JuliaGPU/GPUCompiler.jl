@@ -10,13 +10,7 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             add!(mpm, RecomputeGlobalsAAPass())
             add!(mpm, GlobalOptPass())
             resolve_cpu_references!(mod)
-            add!(mpm) do m, mam
-                if resolve_cpu_references!(m)
-                    no_analyses_preserved()
-                else
-                    all_analyses_preserved()
-                end
-            end
+            add!(legacy2newpm(resolve_cpu_references!), mpm)
             add!(mpm, GlobalDCEPass())
             add!(mpm, StripDeadPrototypesPass())
             run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA(), GlobalsAA()])

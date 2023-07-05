@@ -171,9 +171,11 @@ function addOptimizationPasses!(pm, opt_level=2)
     aggressive_dce!(pm)
 end
 
-const add_verification_passes = false
-const BasicSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, false, false, 1)
-const AggressiveSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, true, false, 1)
+if use_newpm
+    const add_verification_passes = false
+    const BasicSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, false, false, 1)
+    const AggressiveSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, true, false, 1)
+end
 
 function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if add_verification_passes
@@ -207,13 +209,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
             add!(fpm, LowerConstantIntrinsicsPass())
         end
     end
-    add!(mpm) do m, mam
-        if cpu_features!(m)
-            no_analyses_preserved()
-        else
-            all_analyses_preserved()
-        end
-    end
+    add!(legacy2newpm(cpu_features!), mpm)
     if opt_level >= 1
         add!(mpm, NewPMFunctionPassManager) do fpm
             if opt_level >= 2
@@ -341,40 +337,16 @@ function buildKernelIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJo
         # GC lowering is the last pass that may introduce calls to the runtime library,
         # and thus additional uses of the kernel state intrinsic.
         # TODO: now that all kernel state-related passes are being run here, merge some?
-        add!(mpm) do m, mam
-            if add_kernel_state!(m)
-                return no_analyses_preserved()
-            else
-                return all_analyses_preserved()
-            end
-        end
+        add!(legacy2newpm(add_kernel_state!), mpm)
         add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm) do f, fam
-                if lower_kernel_state!(f)
-                    return no_analyses_preserved()
-                else
-                    return all_analyses_preserved()
-                end
-            end
+            add!(legacy2newpm(lower_kernel_state!), fpm)
         end
-        add!(mpm) do m, mam
-            if cleanup_kernel_state!(m)
-                return no_analyses_preserved()
-            else
-                return all_analyses_preserved()
-            end
-        end
+        add!(legacy2newpm(cleanup_kernel_state!), mpm)
     end
     add!(mpm, NewPMFunctionPassManager) do fpm
         add!(fpm, ADCEPass())
     end
-    add!(mpm) do m, mam
-        if lower_ptls!(m)
-            return no_analyses_preserved()
-        else
-            return all_analyses_preserved()
-        end
-    end
+    add!(legacy2newpm(lower_ptls!), mpm)
     add!(mpm, NewPMFunctionPassManager) do fpm
         add!(fpm, LowerExcHandlersPass())
         add!(fpm, LateLowerGCPass())
