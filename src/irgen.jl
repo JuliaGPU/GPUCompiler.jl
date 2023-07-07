@@ -412,7 +412,16 @@ if VERSION >= v"1.7.0-DEV.204"
     function is_inlinealloc(T::Type)
         mayinlinealloc = (T.name.flags >> 2) & 1 == true
         # FIXME: To simple
-        return mayinlinealloc
+        if mayinlinealloc
+            if !Base.datatype_pointerfree(T)
+                t_name(dt::DataType)=dt.name
+                if t_name(T).n_uninitialized != 0
+                    return false
+                end
+            end
+            return true
+        end
+        return false
     end
 else
     function is_inlinealloc(T::Type)

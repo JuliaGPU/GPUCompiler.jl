@@ -618,6 +618,33 @@ end
 end
 end
 
+
+@testset "Argbox" begin
+    abstract type KineticModel{T} end
+    abstract type IntegralModel{T} <: KineticModel{T} end
+
+    struct DOSData
+        interp_func
+        average_value
+        E_min
+        E_max
+    end
+    struct MarcusHushChidseyDOS{T} <: IntegralModel{T}
+        A::T
+        λ::T
+        dos::DOSData
+    end
+
+    function f(T::Type)
+        mayinlinealloc = (T.name.flags >> 2) & 1 == true
+        return mayinlinealloc
+    end
+    t_name(dt::DataType)=dt.name
+
+    @show f(MarcusHushChidseyDOS{Float64}), GPUCompiler.is_inlinealloc(MarcusHushChidseyDOS{Float64}), Base.datatype_pointerfree(MarcusHushChidseyDOS{Float64}), t_name(MarcusHushChidseyDOS{Float64}).n_uninitialized
+    @test !GPUCompiler.is_inlinealloc(MarcusHushChidseyDOS{Float64})
+end
+
 ############################################################################################
 
 end
