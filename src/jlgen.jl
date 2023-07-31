@@ -415,7 +415,25 @@ CC.method_table(interp::GPUInterpreter, sv::CC.InferenceState) = interp.method_t
 end
 
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
-@static if VERSION >= v"1.9.0-DEV.1248"
+@static if VERSION >= v"1.9.0-beta3"
+function CC.concrete_eval_eligible(interp::GPUInterpreter,
+    @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
+    # NOTE it's fine to skip overloading with `sv::IRInterpretationState` since we disables
+    #      semi-concrete interpretation anyway.
+    ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
+        f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
+    @static if VERSION ≥ v"1.10.0-DEV.1345"
+        if ret === :semi_concrete_eval
+            return :none
+        end
+    else
+        if ret === false
+            return nothing
+        end
+    end
+    return ret
+end
+elseif VERSION >= v"1.9.0-DEV.1248"
 function CC.concrete_eval_eligible(interp::GPUInterpreter,
     @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo)
     ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
