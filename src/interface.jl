@@ -45,6 +45,7 @@ end
 
 have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
 
+dwarf_version(target::AbstractCompilerTarget) = Int32(4) # It seems every target supports v4 bar cuda
 
 ## params
 

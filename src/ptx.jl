@@ -70,6 +70,7 @@ llvm_datalayout(target::PTXCompilerTarget) =
 
 have_fma(@nospecialize(target::PTXCompilerTarget), T::Type) = true
 
+dwarf_version(target::PTXCompilerTarget) = Int32(2) # Cuda only supports dwarfv2
 
 ## job
 

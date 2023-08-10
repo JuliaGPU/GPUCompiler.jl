@@ -608,7 +608,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                     datalayout!(mod, julia_datalayout(job.config.target))
                 end
                 flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
-                    Metadata(ConstantInt(Int32(4)))
+                    Metadata(ConstantInt(dwarf_version(job.config.target)))
                 flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
                     Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
             end
