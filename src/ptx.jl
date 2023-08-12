@@ -18,7 +18,7 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     blocks_per_sm::Union{Nothing,Int} = nothing
     maxregs::Union{Nothing,Int} = nothing
 
-    fastmath::Bool = false
+    fastmath::Bool = Base.JLOptions().fast_math == 1
 
     # deprecated; remove with next major version
     exitable::Union{Nothing,Bool} = nothing
