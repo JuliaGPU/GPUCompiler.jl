@@ -307,21 +307,19 @@ else
     import Core.Compiler: get_world_counter, get_world_counter as get_inference_world
 end
 
-using Core.Compiler: OverlayMethodTable
 const MTType = Core.MethodTable
 if isdefined(Core.Compiler, :CachedMethodTable)
     using Core.Compiler: CachedMethodTable
-    const GPUMethodTableView = CachedMethodTable{OverlayMethodTable}
-    get_method_table_view(world::UInt, mt::MTType) =
-        CachedMethodTable(OverlayMethodTable(world, mt))
+    maybe_cached(mtv::CC.MethodTableView) = CachedMethodTable(mtv)
 else
-    const GPUMethodTableView = OverlayMethodTable
-    get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
+    maybe_cached(mtv::CC.MethodTableView) = mtv
 end
 
-struct GPUInterpreter <: CC.AbstractInterpreter
+get_method_table_view(world::UInt, mt::CC.MethodTable) = CC.OverlayMethodTable(world, mt)
+
+struct GPUInterpreter{MTV<:CC.MethodTableView} <: CC.AbstractInterpreter
     world::UInt
-    method_table::GPUMethodTableView
+    method_table_view::MTV
 
 @static if HAS_INTEGRATED_CACHE
     token::Any
@@ -336,28 +334,27 @@ end
 
 @static if HAS_INTEGRATED_CACHE
 function GPUInterpreter(world::UInt=Base.get_world_counter();
-                        method_table::MTType,
+                        method_table_view::CC.MethodTableView,
                         token::Any,
                         inf_params::CC.InferenceParams,
                         opt_params::CC.OptimizationParams)
     @assert world <= Base.get_world_counter()
 
-    method_table = get_method_table_view(world, method_table)
     inf_cache = Vector{CC.InferenceResult}()
 
-    return GPUInterpreter(world, method_table,
+    return GPUInterpreter(world, method_table_view,
                           token, inf_cache,
                           inf_params, opt_params)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
                         world::UInt=interp.world,
-                        method_table::GPUMethodTableView=interp.method_table,
+                        method_table_view::Core.MethodTable=interp.method_table_view,
                         token::Any=interp.token,
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
                         opt_params::CC.OptimizationParams=interp.opt_params)
-    return GPUInterpreter(world, method_table,
+    return GPUInterpreter(world, method_table_view,
                           token, inf_cache,
                           inf_params, opt_params)
 end
@@ -365,28 +362,27 @@ end
 else
 
 function GPUInterpreter(world::UInt=Base.get_world_counter();
-                        method_table::MTType,
+                        method_table_view::CC.MethodTableView,
                         code_cache::CodeCache,
                         inf_params::CC.InferenceParams,
                         opt_params::CC.OptimizationParams)
     @assert world <= Base.get_world_counter()
 
-    method_table = get_method_table_view(world, method_table)
     inf_cache = Vector{CC.InferenceResult}()
 
-    return GPUInterpreter(world, method_table,
+    return GPUInterpreter(world, method_table_view,
                           code_cache, inf_cache,
                           inf_params, opt_params)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
                         world::UInt=interp.world,
-                        method_table::GPUMethodTableView=interp.method_table,
+                        method_table_view::CC.MethodTableView=interp.method_table_view,
                         code_cache::CodeCache=interp.code_cache,
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
                         opt_params::CC.OptimizationParams=interp.opt_params)
-    return GPUInterpreter(world, method_table,
+    return GPUInterpreter(world, method_table_view,
                           code_cache, inf_cache,
                           inf_params, opt_params)
 end
@@ -416,7 +412,7 @@ CC.may_discard_trees(interp::GPUInterpreter) = true
 @static if VERSION <= v"1.12.0-DEV.1531"
 CC.verbose_stmt_info(interp::GPUInterpreter) = false
 end
-CC.method_table(interp::GPUInterpreter) = interp.method_table
+CC.method_table(interp::GPUInterpreter) = interp.method_table_view
 
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
 function CC.concrete_eval_eligible(interp::GPUInterpreter,
