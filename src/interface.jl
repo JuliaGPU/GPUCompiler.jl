@@ -236,7 +236,7 @@ get_interpreter(@nospecialize(job::CompilerJob)) =
                    opt_params=optimization_params(job))
 else
 get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table=method_table(job),
+    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
                    code_cache=ci_cache(job), inf_params=inference_params(job),
                    opt_params=optimization_params(job))
 end
@@ -299,6 +299,7 @@ end
 
 # the method table to use
 method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
+method_table_view(@nospecialize(job::CompilerJob)) = get_method_table_view(job.world, method_table(job))
 
 # the inference parameters to use when constructing the GPUInterpreter
 function inference_params(@nospecialize(job::CompilerJob))
