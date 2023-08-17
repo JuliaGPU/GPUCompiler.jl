@@ -489,7 +489,7 @@ end
 
 ## codegen/inference integration
 
-function ci_cache_populate(interp, cache, mt, mi, min_world, max_world)
+function ci_cache_populate(interp, cache, mi, min_world, max_world)
     src = CC.typeinf_ext_toplevel(interp, mi)
 
     # inference populates the cache, so we don't need to jl_get_method_inferred
@@ -558,10 +558,9 @@ end
 function compile_method_instance(@nospecialize(job::CompilerJob))
     # populate the cache
     cache = ci_cache(job)
-    mt = method_table(job)
     interp = get_interpreter(job)
     if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
-        ci_cache_populate(interp, cache, mt, job.source, job.world, job.world)
+        ci_cache_populate(interp, cache, job.source, job.world, job.world)
     end
 
     # create a callback to look-up function in our cache,
