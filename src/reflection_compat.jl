@@ -1,15 +1,10 @@
 # The content of this file should be upstreamed to Julia proper
 
 using InteractiveUtils: highlighting
+using Base: hasgenerator
 
 function method_instances(@nospecialize(tt::Type), world::UInt=Base.get_world_counter())
     return map(Core.Compiler.specialize_method, method_matches(tt; world))
-end
-
-if VERSION >= v"1.7-"
-    const hasgenerator = Base.hasgenerator
-else
-    const hasgenerator = Base.isgenerated
 end
 
 function code_lowered_by_type(@nospecialize(tt); generated::Bool=true, debuginfo::Symbol=:default)
@@ -120,12 +115,9 @@ function code_warntype_by_type(io::IO, @nospecialize(tt);
             InteractiveUtils.warntype_type_printer(io, rettype, true)
         end
         println(io)
-@static if VERSION < v"1.7.0"
-        Base.IRShow.show_ir(lambda_io, src, lineprinter(src), InteractiveUtils.warntype_type_printer)
-else
+
         irshow_config = Base.IRShow.IRShowConfig(lineprinter(src), InteractiveUtils.warntype_type_printer)
         Base.IRShow.show_ir(lambda_io, src, irshow_config)
-end
         println(io)
     end
     nothing

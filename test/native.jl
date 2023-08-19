@@ -4,15 +4,9 @@ include("definitions/native.jl")
 
 ############################################################################################
 
-if VERSION >= v"1.8-"
-    using Cthulhu
-    include(joinpath(dirname(pathof(Cthulhu)), "..", "test", "FakeTerminals.jl"))
-    using .FakeTerminals
-
-    test_interactive = true
-else
-    test_interactive = false
-end
+using Cthulhu
+include(joinpath(dirname(pathof(Cthulhu)), "..", "test", "FakeTerminals.jl"))
+using .FakeTerminals
 
 cread1(io) = readuntil(io, '↩'; keep=true)
 cread(io) = cread1(io) * cread1(io)
@@ -34,16 +28,14 @@ cread(io) = cread1(io) * cread1(io)
     asm = sprint(io->GPUCompiler.code_native(io, job))
     @test contains(asm, "julia_identity")
 
-    if test_interactive
-        fake_terminal() do term, in, out, err
-            t = @async begin
-                GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term, annotate_source=false)
-            end
-            lines = replace(cread(out), r"\e\[[0-9;]*[a-zA-Z]"=>"") # without ANSI escape codes
-            @test contains(lines, "identity(x)")
-            write(in, 'q')
-            wait(t)
+    fake_terminal() do term, in, out, err
+        t = @async begin
+            GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term, annotate_source=false)
         end
+        lines = replace(cread(out), r"\e\[[0-9;]*[a-zA-Z]"=>"") # without ANSI escape codes
+        @test contains(lines, "identity(x)")
+        write(in, 'q')
+        wait(t)
     end
 end
 
@@ -571,7 +563,6 @@ end
     @test occursin("ret i64 1", ir)
 end
 
-if VERSION >= v"1.7"
 @testset "#366: semi-concrete interpretation + overlay methods = dynamic dispatch" begin
     mod = @eval module $(gensym())
         using ..GPUCompiler
@@ -615,7 +606,6 @@ end
     @test !occursin("apply_iterate", ir)
     @test !occursin("inttoptr", ir)
     @test occursin("ret void", ir)
-end
 end
 
 ############################################################################################

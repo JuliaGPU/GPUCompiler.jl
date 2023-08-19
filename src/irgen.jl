@@ -398,35 +398,23 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
     return args
 end
 
-if VERSION >= v"1.7.0-DEV.204"
-    function is_immutable_datatype(T::Type)
-        isa(T,DataType) && !Base.ismutabletype(T)
-    end
-else
-    function is_immutable_datatype(T::Type)
-        isa(T,DataType) && !T.mutable
-    end
+function is_immutable_datatype(T::Type)
+    isa(T,DataType) && !Base.ismutabletype(T)
 end
 
-if VERSION >= v"1.7.0-DEV.204"
-    function is_inlinealloc(T::Type)
-        mayinlinealloc = (T.name.flags >> 2) & 1 == true
-        # FIXME: To simple
-        if mayinlinealloc
-            if !Base.datatype_pointerfree(T)
-                t_name(dt::DataType)=dt.name
-                if t_name(T).n_uninitialized != 0
-                    return false
-                end
+function is_inlinealloc(T::Type)
+    mayinlinealloc = (T.name.flags >> 2) & 1 == true
+    # FIXME: To simple
+    if mayinlinealloc
+        if !Base.datatype_pointerfree(T)
+            t_name(dt::DataType)=dt.name
+            if t_name(T).n_uninitialized != 0
+                return false
             end
-            return true
         end
-        return false
+        return true
     end
-else
-    function is_inlinealloc(T::Type)
-        return T.isinlinealloc
-    end
+    return false
 end
 
 function is_concrete_immutable(T::Type)

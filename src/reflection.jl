@@ -63,11 +63,9 @@ function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kw
         interp = get_interpreter(job)
         descend_code_typed = getfield(mod, :descend_code_typed)
         descend_code_typed(sig; interp, kwargs...)
-    elseif VERSION >= v"1.7-"
+    else
         interp = get_interpreter(job)
         Base.code_typed_by_type(sig; interp, kwargs...)
-    else
-        Base.code_typed_by_type(sig; kwargs...)
     end
 end
 
@@ -78,19 +76,13 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
         mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
-        if VERSION < v"1.7-"
-            descend_code_typed = getfield(mod, :descend_code_typed)
-            descend_code_typed(job.source; kwargs...)
-        else
-            interp = get_interpreter(job)
-            descend_code_warntype = getfield(mod, :descend_code_warntype)
-            descend_code_warntype(sig; interp, kwargs...)
-        end
-    elseif VERSION >= v"1.7-"
+
+        interp = get_interpreter(job)
+        descend_code_warntype = getfield(mod, :descend_code_warntype)
+        descend_code_warntype(sig; interp, kwargs...)
+    else
         interp = get_interpreter(job)
         code_warntype_by_type(io, sig; interp, kwargs...)
-    else
-        code_warntype_by_type(io, sig; kwargs...)
     end
 end
 code_warntype(@nospecialize(job::CompilerJob); kwargs...) = code_warntype(stdout, job; kwargs...)
@@ -103,10 +95,11 @@ InteractiveUtils.code_lowered(err::KernelError; kwargs...) = code_lowered(err.jo
 InteractiveUtils.code_typed(err::KernelError; kwargs...) = code_typed(err.job; kwargs...)
 InteractiveUtils.code_warntype(err::KernelError; kwargs...) = code_warntype(err.job; kwargs...)
 
-# For VERSION >= v"1.9.0-DEV.516"
-struct jl_llvmf_dump
-    TSM::LLVM.API.LLVMOrcThreadSafeModuleRef
-    F::LLVM.API.LLVMValueRef
+@static if VERSION >= v"1.9.0-DEV.516"
+    struct jl_llvmf_dump
+        TSM::LLVM.API.LLVMOrcThreadSafeModuleRef
+        F::LLVM.API.LLVMValueRef
+    end
 end
 
 """

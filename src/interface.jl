@@ -229,10 +229,6 @@ end
 function optimization_params(@nospecialize(job::CompilerJob))
     kwargs = NamedTuple()
 
-    if VERSION < v"1.8.0-DEV.486"
-        kwargs = (kwargs..., unoptimize_throw_blocks=false)
-    end
-
     if job.config.always_inline
         kwargs = (kwargs..., inline_cost_threshold=typemax(Int))
     end
