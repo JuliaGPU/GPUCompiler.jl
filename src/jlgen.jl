@@ -235,15 +235,6 @@ end
 
 Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
 
-"""
-    @override mt def
-"""
-macro override(mt, ex)
-    esc(quote
-        Base.Experimental.@overlay $mt $ex
-    end)
-end
-
 
 ## interpreter
 

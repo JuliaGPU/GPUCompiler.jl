@@ -556,7 +556,7 @@ end
         kernel() = child()
         child() = 0
 
-        GPUCompiler.@override method_table child() = 1
+        Base.Experimental.@overlay method_table child() = 1
     end
 
     ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}; mod.method_table))
@@ -576,7 +576,7 @@ end
         end
 
         Base.Experimental.@MethodTable method_table
-        GPUCompiler.@override method_table Base.isnan(x::Float32) =
+        Base.Experimental.@overlay method_table Base.isnan(x::Float32) =
             (ccall("extern __nv_isnanf", llvmcall, Int32, (Cfloat,), x)) != 0
     end
 
