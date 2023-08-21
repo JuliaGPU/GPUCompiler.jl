@@ -212,13 +212,8 @@ for (T, t) in [Int8   => :int8,  Int16  => :int16,  Int32  => :int32,  Int64  =>
         $box_fn(val)   = box($T(val), Val($(QuoteNode(t))))
         $unbox_fn(obj) = unbox(obj, $T)
 
-        if VERSION >= v"1.8.0-DEV.600"
-            compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name=$"ijl_$box_fn")
-            compile($unbox_fn, $T, (Any,); llvm_name=$"ijl_$unbox_fn")
-        else
-            compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name=$"jl_$box_fn")
-            compile($unbox_fn, $T, (Any,); llvm_name=$"jl_$unbox_fn")
-        end
+        compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name=$"ijl_$box_fn")
+        compile($unbox_fn, $T, (Any,); llvm_name=$"ijl_$unbox_fn")
     end
 end
 

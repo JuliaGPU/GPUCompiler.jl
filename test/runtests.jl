@@ -21,10 +21,8 @@ include("native.jl")
 include("ptx.jl")
 include("spirv.jl")
 include("bpf.jl")
-if VERSION >= v"1.8-"
-    include("gcn.jl")
-    include("metal.jl")
-end
+include("gcn.jl")
+include("metal.jl")
 include("examples.jl")
 
 haskey(ENV, "CI") && GPUCompiler.timings()

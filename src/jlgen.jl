@@ -57,23 +57,10 @@ If the method is not found, a `MethodError` is thrown.
 function methodinstance(ft::Type, tt::Type, world::Integer)
     sig = typed_signature(ft, tt)
 
-    @static if VERSION >= v"1.8"
-        match, _ = CC._findsup(sig, nothing, world)
-        match === nothing && throw(MethodError(ft, tt, world))
+    match, _ = CC._findsup(sig, nothing, world)
+    match === nothing && throw(MethodError(ft, tt, world))
 
-        mi = CC.specialize_method(match)
-    else
-        meth = ccall(:jl_gf_invoke_lookup, Any, (Any, UInt), sig, world)
-        meth === nothing && throw(MethodError(ft, tt, world))
-
-        (ti, env) = ccall(:jl_type_intersection_with_env, Any,
-                          (Any, Any), sig, meth.sig)::Core.SimpleVector
-
-        meth = Base.func_for_method_checked(meth, ti, env)
-
-        mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance},
-                   (Any, Any, Any, UInt), meth, ti, env, world)
-    end
+    mi = CC.specialize_method(match)
 
     return mi::MethodInstance
 end
@@ -246,107 +233,21 @@ end
 
 ## method overrides
 
-@static if isdefined(Base.Experimental, Symbol("@overlay"))
-
-# use an overlay method table
-
 Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
-
-else
-
-# use an overlay world -- a special world that contains all method overrides
-
-const GLOBAL_METHOD_TABLE = nothing
-
-const override_world = typemax(Csize_t) - 1
-
-struct WorldOverlayMethodTable <: CC.MethodTableView
-    world::UInt
-end
-
-function CC.findall(@nospecialize(sig::Type{<:Tuple}), table::WorldOverlayMethodTable; limit::Int=typemax(Int))
-    _min_val = Ref{UInt}(typemin(UInt))
-    _max_val = Ref{UInt}(typemax(UInt))
-    _ambig = Ref{Int32}(0)
-    ms = Base._methods_by_ftype(sig, limit, override_world, false, _min_val, _max_val, _ambig)
-    if ms === false
-        return CC.missing
-    elseif isempty(ms)
-        # no override, so look in the regular world
-        _min_val[] = typemin(UInt)
-        _max_val[] = typemax(UInt)
-        ms = Base._methods_by_ftype(sig, limit, table.world, false, _min_val, _max_val, _ambig)
-    else
-        # HACK: inference doesn't like our override world
-        _min_val[] = table.world
-    end
-    if ms === false
-        return CC.missing
-    end
-    return CC.MethodLookupResult(ms::Vector{Any}, CC.WorldRange(_min_val[], _max_val[]), _ambig[] != 0)
-end
-
-end
-
-"""
-    @override mt def
-
-!!! warning
-
-    On Julia 1.6, evaluation of the expression returned by this macro should be postponed
-    until run time (i.e. don't just call this macro or return its returned value, but
-    save it in a global expression and `eval` it during `__init__`, additionally guarded
-    by a check to `ccall(:jl_generating_output, Cint, ()) != 0`).
-"""
-macro override(mt, ex)
-    if isdefined(Base.Experimental, Symbol("@overlay"))
-        esc(quote
-            Base.Experimental.@overlay $mt $ex
-        end)
-    else
-        quote
-            world_counter = cglobal(:jl_world_counter, Csize_t)
-            regular_world = unsafe_load(world_counter)
-
-            $(Expr(:tryfinally, # don't introduce scope
-                quote
-                    unsafe_store!(world_counter, $(override_world-1))
-                    $(esc(ex))
-                end,
-                quote
-                    unsafe_store!(world_counter, regular_world)
-                end
-            ))
-        end
-    end
-end
 
 
 ## interpreter
 
-if isdefined(Base.Experimental, Symbol("@overlay"))
-    using Core.Compiler: OverlayMethodTable
-    const MTType = Core.MethodTable
-    if isdefined(Core.Compiler, :CachedMethodTable)
-        using Core.Compiler: CachedMethodTable
-        const GPUMethodTableView = CachedMethodTable{OverlayMethodTable}
-        get_method_table_view(world::UInt, mt::MTType) =
-            CachedMethodTable(OverlayMethodTable(world, mt))
-    else
-        const GPUMethodTableView = OverlayMethodTable
-        get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
-    end
+using Core.Compiler: OverlayMethodTable
+const MTType = Core.MethodTable
+if isdefined(Core.Compiler, :CachedMethodTable)
+    using Core.Compiler: CachedMethodTable
+    const GPUMethodTableView = CachedMethodTable{OverlayMethodTable}
+    get_method_table_view(world::UInt, mt::MTType) =
+        CachedMethodTable(OverlayMethodTable(world, mt))
 else
-    const MTType = Nothing
-    if isdefined(Core.Compiler, :CachedMethodTable)
-        using Core.Compiler: CachedMethodTable
-        const GPUMethodTableView = CachedMethodTable{WorldOverlayMethodTable}
-        get_method_table_view(world::UInt, mt::MTType) =
-            CachedMethodTable(WorldOverlayMethodTable(world))
-    else
-        const GPUMethodTableView = WorldOverlayMethodTable
-        get_method_table_view(world::UInt, mt::MTType) = WorldOverlayMethodTable(world)
-    end
+    const GPUMethodTableView = OverlayMethodTable
+    get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
 end
 
 struct GPUInterpreter <: CC.AbstractInterpreter
@@ -404,9 +305,7 @@ end
 CC.may_optimize(interp::GPUInterpreter) = true
 CC.may_compress(interp::GPUInterpreter) = true
 CC.may_discard_trees(interp::GPUInterpreter) = true
-if VERSION >= v"1.7.0-DEV.577"
 CC.verbose_stmt_info(interp::GPUInterpreter) = false
-end
 
 if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION >= v"1.9.0-DEV.120"
 CC.method_table(interp::GPUInterpreter) = interp.method_table
@@ -634,16 +533,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
                   [job.source], context(), Ref(params), CompilationPolicyExtern)
-        elseif VERSION >= v"1.8.0-DEV.661"
+        else
             @assert context() == JuliaContext()
             @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
                   (Vector{MethodInstance}, Ptr{Base.CodegenParams}, Cint),
                   [job.source], Ref(params), CompilationPolicyExtern)
-        else
-            @assert context() == JuliaContext()
-            @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
-                  (Vector{MethodInstance}, Base.CodegenParams, Cint),
-                  [job.source], params, CompilationPolicyExtern)
         end
         @assert native_code != C_NULL
         llvm_mod_ref = if VERSION >= v"1.9.0-DEV.516"
