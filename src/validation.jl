@@ -189,7 +189,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 sym = Base.unsafe_pointer_to_objref(sym)
                 push!(errors, (DELAYED_BINDING, bt, sym))
             catch e
-                @debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=LLVM.parent(inst)
                 push!(errors, (DELAYED_BINDING, bt, nothing))
             end
         elseif fn == "jl_invoke" || fn == "ijl_invoke"
@@ -201,7 +201,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 meth = Base.unsafe_pointer_to_objref(meth)::Core.MethodInstance
                 push!(errors, (DYNAMIC_CALL, bt, meth.def))
             catch e
-                @debug "Decoding arguments to jl_invoke failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_invoke failed" inst bb=LLVM.parent(inst)
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
         elseif fn == "jl_apply_generic" || fn == "ijl_apply_generic"
@@ -213,7 +213,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 f = Base.unsafe_pointer_to_objref(f)
                 push!(errors, (DYNAMIC_CALL, bt, f))
             catch e
-                @debug "Decoding arguments to jl_apply_generic failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_apply_generic failed" inst bb=LLVM.parent(inst)
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
 
