@@ -85,13 +85,13 @@ end
         # smoke test
         job, _ = native_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
-        @test contains(ir, "add i64 %1, 1")
+        @test contains(ir, r"add i64 %\d+, 1")
 
         # basic redefinition
         @eval $kernel(i) = $child(i)+2
         job, _ = native_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
-        @test contains(ir, "add i64 %1, 2")
+        @test contains(ir, r"add i64 %\d+, 2")
 
         # cached_compilation interface
         invocations = Ref(0)
@@ -108,24 +108,24 @@ end
         # initial compilation
         source = methodinstance(ft, tt, Base.get_world_counter())
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 2")
+        @test contains(ir, r"add i64 %\d+, 2")
         @test invocations[] == 1
 
         # cached compilation
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 2")
+        @test contains(ir, r"add i64 %\d+, 2")
         @test invocations[] == 1
 
         # redefinition
         @eval $kernel(i) = $child(i)+3
         source = methodinstance(ft, tt, Base.get_world_counter())
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 3")
+        @test contains(ir, r"add i64 %\d+, 3")
         @test invocations[] == 2
 
         # cached compilation
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 3")
+        @test contains(ir, r"add i64 %\d+, 3")
         @test invocations[] == 2
 
         # redefinition of an unrelated function
@@ -155,10 +155,10 @@ end
         @eval $kernel(i) = $child(i)+4
         source = methodinstance(ft, tt, Base.get_world_counter())
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 4")
+        @test contains(ir, r"add i64 %\d+, 4")
         notify(c2)      # wake up the task
         ir = fetch(t)
-        @test contains(ir, "add i64 %1, 3")
+        @test contains(ir, r"add i64 %\d+, 3")
     end
 end
 
