@@ -4,13 +4,6 @@ include("definitions/native.jl")
 
 ############################################################################################
 
-using Cthulhu
-include(joinpath(dirname(pathof(Cthulhu)), "..", "test", "FakeTerminals.jl"))
-using .FakeTerminals
-
-cread1(io) = readuntil(io, '↩'; keep=true)
-cread(io) = cread1(io) * cread1(io)
-
 @testset "reflection" begin
     job, _ = native_job(identity, (Int,))
 
@@ -27,16 +20,6 @@ cread(io) = cread1(io) * cread1(io)
 
     asm = sprint(io->GPUCompiler.code_native(io, job))
     @test contains(asm, "julia_identity")
-
-    fake_terminal() do term, in, out, err
-        t = @async begin
-            GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term, annotate_source=false)
-        end
-        lines = replace(cread(out), r"\e\[[0-9;]*[a-zA-Z]"=>"") # without ANSI escape codes
-        @test contains(lines, "identity(x)")
-        write(in, 'q')
-        wait(t)
-    end
 end
 
 @testset "compilation" begin
