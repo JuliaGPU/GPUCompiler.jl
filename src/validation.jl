@@ -113,6 +113,8 @@ end
 const RUNTIME_FUNCTION = "call to the Julia runtime"
 const UNKNOWN_FUNCTION = "call to an unknown function"
 const POINTER_FUNCTION = "call through a literal pointer"
+const CCALL_FUNCTION   = "call to an external C function"
+const LAZY_FUNCTION    = "call to a lazy-initialized function"
 const DELAYED_BINDING  = "use of an undefined name"
 const DYNAMIC_CALL     = "dynamic function invocation"
 
@@ -121,7 +123,7 @@ function Base.showerror(io::IO, err::InvalidIRError)
     for (kind, bt, meta) in err.errors
         printstyled(io, "\nReason: unsupported $kind"; color=:red)
         if meta !== nothing
-            if kind == RUNTIME_FUNCTION || kind == UNKNOWN_FUNCTION || kind == POINTER_FUNCTION || kind == DYNAMIC_CALL
+            if kind == RUNTIME_FUNCTION || kind == UNKNOWN_FUNCTION || kind == POINTER_FUNCTION || kind == DYNAMIC_CALL || kind == CCALL_FUNCTION || kind == LAZY_FUNCTION
                 printstyled(io, " (call to ", meta, ")"; color=:red)
             elseif kind == DELAYED_BINDING
                 printstyled(io, " (use of '", meta, "')"; color=:red)
@@ -165,6 +167,8 @@ function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function)
     for bb in blocks(f), inst in instructions(bb)
         if isa(inst, LLVM.CallInst)
             check_ir!(job, errors, inst)
+        elseif isa(inst, LLVM.LoadInst)
+            check_ir!(job, errors, inst)
         end
     end
 
@@ -172,6 +176,30 @@ function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function)
 end
 
 const libjulia = Ref{Ptr{Cvoid}}(C_NULL)
+
+function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
+    bt = backtrace(inst)
+    src = operands(inst)[1]
+    if src isa ConstantExpr
+        if opcode(src) == LLVM.API.LLVMBitCast
+            src = operands(src)[1]
+        end
+    end
+    if src isa GlobalVariable
+        name = LLVM.name(src)
+        if startswith(name, "jlplt_")
+            try
+                rx = r"jlplt_(.*)_\d+_got"
+                name = match(rx, name).captures[1]
+                push!(errors, (LAZY_FUNCTION, bt, name))
+            catch e
+                @safe_debug "Decoding name of PLT entry failed" inst bb=LLVM.parent(inst)
+                push!(errors, (LAZY_FUNCTION, bt, nothing))
+            end
+        end
+    end
+    return errors
+end
 
 function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
     bt = backtrace(inst)
@@ -215,6 +243,21 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             catch e
                 @safe_debug "Decoding arguments to jl_apply_generic failed" inst bb=LLVM.parent(inst)
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
+            end
+
+        elseif fn == "jl_load_and_lookup" || fn == "ijl_load_and_lookup"
+            try
+                f_lib, f_name, hnd = arguments(inst)
+                f_name = first(operands(f_name))::GlobalVariable # get rid of the GEP
+                name_init = LLVM.initializer(f_name)::ConstantDataSequential
+                name_value = map(collect(name_init)) do char
+                    convert(UInt8, char)
+                end |> String
+                name_value = name_value[1:end-1] # remove trailing \0
+                push!(errors, (CCALL_FUNCTION, bt, name_value))
+            catch e
+                @safe_debug "Decoding arguments to jl_load_and_lookup failed" inst bb=LLVM.parent(inst)
+                push!(errors, (CCALL_FUNCTION, bt, nothing))
             end
 
         # detect calls to undefined functions

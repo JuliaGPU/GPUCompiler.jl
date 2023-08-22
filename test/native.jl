@@ -396,9 +396,16 @@ end
 
     @test_throws_message(InvalidIRError,
                          native_code_execution(foobar, Tuple{Ptr{Int}})) do msg
-        occursin("invalid LLVM IR", msg) &&
-        occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
-        occursin(r"\[1\] .*foobar", msg)
+        if VERSION >= v"1.11-"
+            occursin("invalid LLVM IR", msg) &&
+            occursin(GPUCompiler.LAZY_FUNCTION, msg) &&
+            occursin("call to time", msg) &&
+            occursin(r"\[1\] .*foobar", msg)
+        else
+            occursin("invalid LLVM IR", msg) &&
+            occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
+            occursin(r"\[1\] .*foobar", msg)
+        end
     end
 end
 
