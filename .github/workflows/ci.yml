@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ['release-1.6', 'release-1.7', 'release-1.8', 'release-1.9', 'master']
+        branch: ['release-1.8', 'release-1.9', 'master']
         os: ['ubuntu-latest', 'macOS-latest', 'windows-latest']
         arch: [x64]
         exclude:
@@ -56,10 +56,6 @@ jobs:
             arch: 'x64'
           # hangs
           - branch: 'master'
-            os: 'macOS-latest'
-            arch: 'x64'
-          # 1.6 requires gfortran, which isn't available on macOS runners
-          - branch: 'release-1.6'
             os: 'macOS-latest'
             arch: 'x64'
     steps:
