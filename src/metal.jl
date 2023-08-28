@@ -171,8 +171,8 @@ end
     input = tempname(cleanup=false) * ".bc"
     translated = tempname(cleanup=false) * ".metallib"
     write(input, mod)
-    Metal_LLVM_Tools_jll.metallib_as() do assembler
-        proc = run(ignorestatus(`$assembler -o $translated $input`))
+    let cmd = `$(Metal_LLVM_Tools_jll.metallib_as()) -o $translated $input`
+        proc = run(ignorestatus(cmd))
         if !success(proc)
             error("""Failed to translate LLVM code to MetalLib.
                      If you think this is a bug, please file an issue and attach $(input).""")
@@ -183,9 +183,7 @@ end
         read(translated)
     else
         # disassemble
-        Metal_LLVM_Tools_jll.metallib_dis() do disassembler
-            read(`$disassembler -o - $translated`, String)
-        end
+        read(`$(Metal_LLVM_Tools_jll.metallib_dis()) -o - $translated`, String)
     end
 
     rm(input)

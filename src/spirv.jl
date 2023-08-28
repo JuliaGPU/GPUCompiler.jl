@@ -104,8 +104,8 @@ end
         options = `$options --spirv-ext=$str`
     end
     write(input, mod)
-    SPIRV_LLVM_Translator_unified_jll.llvm_spirv() do translator
-        proc = run(ignorestatus(`$translator $options -o $translated $input`))
+    let cmd = `$(SPIRV_LLVM_Translator_unified_jll.llvm_spirv()) $options -o $translated $input`
+        proc = run(ignorestatus(cmd))
         if !success(proc)
             error("""Failed to translate LLVM code to SPIR-V.
                      If you think this is a bug, please file an issue and attach $(input).""")
@@ -115,37 +115,32 @@ end
     # validate
     # XXX: parameterize this on the `validate` driver argument
     # XXX: our code currently doesn't pass the validator
-    if Base.JLOptions().debug_level >= 2 && false
-        SPIRV_Tools_jll.spirv_val() do validator
-            proc = run(ignorestatus(`$validator $translated`))
-            if !success(proc)
-                error("""Failed to validate generated SPIR-V.
-                         If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
-            end
-        end
-    end
+    #if Base.JLOptions().debug_level >= 2
+    #    cmd = `$(SPIRV_Tools_jll.spirv_val()) $translated`
+    #    proc = run(ignorestatus(cmd))
+    #    if !success(proc)
+    #        error("""Failed to validate generated SPIR-V.
+    #                 If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+    #    end
+    #end
 
     # optimize
     # XXX: parameterize this on the `optimize` driver argument
     # XXX: the optimizer segfaults on some of our code
     optimized = tempname(cleanup=false) * ".spv"
-    if false
-        SPIRV_Tools_jll.spirv_opt() do optimizer
-            proc = run(ignorestatus(`$optimizer -O --skip-validation $translated -o $optimized`))
-            if !success(proc)
-                error("""Failed to optimize generated SPIR-V.
-                         If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
-            end
-        end
-    end
+    #let cmd = `$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation $translated -o $optimized`
+    #    proc = run(ignorestatus(cmd))
+    #    if !success(proc)
+    #        error("""Failed to optimize generated SPIR-V.
+    #                 If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+    #    end
+    #end
 
     output = if format == LLVM.API.LLVMObjectFile
         read(translated)
     else
         # disassemble
-        SPIRV_Tools_jll.spirv_dis() do disassembler
-            read(`$disassembler $translated`, String)
-        end
+        read(`$(SPIRV_Tools_jll.spirv_dis()) $translated`, String)
     end
 
     rm(input)
@@ -164,15 +159,14 @@ function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=fa
         write(input_io, obj)
         flush(input_io)
 
-        SPIRV_Tools_jll.spirv_dis() do disassembler
-            if io == stdout
-                run(`$disassembler $input_path`)
-            else
-                mktemp() do output_path, output_io
-                    run(`$disassembler $input_path -o $output_path`)
-                    asm = read(output_io, String)
-                    print(io, asm)
-                end
+        disassembler = SPIRV_Tools_jll.spirv_dis()
+        if io == stdout
+            run(`$disassembler $input_path`)
+        else
+            mktemp() do output_path, output_io
+                run(`$disassembler $input_path -o $output_path`)
+                asm = read(output_io, String)
+                print(io, asm)
             end
         end
     end
