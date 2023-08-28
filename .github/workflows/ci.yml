@@ -46,7 +46,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ['release-1.8', 'release-1.9', 'master']
+        branch: ['release-1.8', 'release-1.9', 'release-1.10', 'master']
         os: ['ubuntu-latest', 'macOS-latest', 'windows-latest']
         arch: [x64]
         exclude:
