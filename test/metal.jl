@@ -71,11 +71,11 @@ end
     end
 
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}))
-    @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %0\)", ir)
+    @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %.+\)", ir)
     @test occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
 
     ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true))
-    @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %0, i32 %thread_position_in_threadgroup\)", ir)
+    @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %.+, i32 %thread_position_in_threadgroup\)", ir)
     @test !occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
 end
 
