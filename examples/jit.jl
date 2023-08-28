@@ -19,8 +19,14 @@ GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntim
 ## JIT integration
 
 using LLVM, LLVM.Interop
+
+# XXX: this example has bitrotten, due to many changes to Julia's JIT.
 if LLVM.is_asserts()
-    @error "This example fails LLVM assertions, and is therefor disabled."
+    @error "The JIT example fails LLVM assertions, and is therefor disabled."
+    exit(0)
+end
+if VERSION >= v"1.10-" && Sys.iswindows()
+    @error "The JIT example fails on Windows with Julia 1.10+, and is therefor disabled."
     exit(0)
 end
 
