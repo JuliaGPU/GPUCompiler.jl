@@ -21,7 +21,10 @@ include("native.jl")
 include("ptx.jl")
 include("spirv.jl")
 include("bpf.jl")
-include("gcn.jl")
+if !LLVM.is_asserts()
+    # XXX: GCN's non-0 stack address space triggers LLVM assertions due to Julia bugs
+    include("gcn.jl")
+end
 include("metal.jl")
 include("examples.jl")
 

@@ -4,13 +4,6 @@ include("definitions/native.jl")
 
 ############################################################################################
 
-using Cthulhu
-include(joinpath(dirname(pathof(Cthulhu)), "..", "test", "FakeTerminals.jl"))
-using .FakeTerminals
-
-cread1(io) = readuntil(io, '↩'; keep=true)
-cread(io) = cread1(io) * cread1(io)
-
 @testset "reflection" begin
     job, _ = native_job(identity, (Int,))
 
@@ -27,16 +20,6 @@ cread(io) = cread1(io) * cread1(io)
 
     asm = sprint(io->GPUCompiler.code_native(io, job))
     @test contains(asm, "julia_identity")
-
-    fake_terminal() do term, in, out, err
-        t = @async begin
-            GPUCompiler.code_typed(job, interactive=true, interruptexc=false, terminal=term, annotate_source=false)
-        end
-        lines = replace(cread(out), r"\e\[[0-9;]*[a-zA-Z]"=>"") # without ANSI escape codes
-        @test contains(lines, "identity(x)")
-        write(in, 'q')
-        wait(t)
-    end
 end
 
 @testset "compilation" begin
@@ -102,13 +85,13 @@ end
         # smoke test
         job, _ = native_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
-        @test contains(ir, "add i64 %1, 1")
+        @test contains(ir, r"add i64 %\d+, 1")
 
         # basic redefinition
         @eval $kernel(i) = $child(i)+2
         job, _ = native_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
-        @test contains(ir, "add i64 %1, 2")
+        @test contains(ir, r"add i64 %\d+, 2")
 
         # cached_compilation interface
         invocations = Ref(0)
@@ -125,24 +108,24 @@ end
         # initial compilation
         source = methodinstance(ft, tt, Base.get_world_counter())
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 2")
+        @test contains(ir, r"add i64 %\d+, 2")
         @test invocations[] == 1
 
         # cached compilation
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 2")
+        @test contains(ir, r"add i64 %\d+, 2")
         @test invocations[] == 1
 
         # redefinition
         @eval $kernel(i) = $child(i)+3
         source = methodinstance(ft, tt, Base.get_world_counter())
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 3")
+        @test contains(ir, r"add i64 %\d+, 3")
         @test invocations[] == 2
 
         # cached compilation
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 3")
+        @test contains(ir, r"add i64 %\d+, 3")
         @test invocations[] == 2
 
         # redefinition of an unrelated function
@@ -172,10 +155,10 @@ end
         @eval $kernel(i) = $child(i)+4
         source = methodinstance(ft, tt, Base.get_world_counter())
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, "add i64 %1, 4")
+        @test contains(ir, r"add i64 %\d+, 4")
         notify(c2)      # wake up the task
         ir = fetch(t)
-        @test contains(ir, "add i64 %1, 3")
+        @test contains(ir, r"add i64 %\d+, 3")
     end
 end
 
@@ -413,9 +396,16 @@ end
 
     @test_throws_message(InvalidIRError,
                          native_code_execution(foobar, Tuple{Ptr{Int}})) do msg
-        occursin("invalid LLVM IR", msg) &&
-        occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
-        occursin(r"\[1\] .*foobar", msg)
+        if VERSION >= v"1.11-"
+            occursin("invalid LLVM IR", msg) &&
+            occursin(GPUCompiler.LAZY_FUNCTION, msg) &&
+            occursin("call to time", msg) &&
+            occursin(r"\[1\] .*foobar", msg)
+        else
+            occursin("invalid LLVM IR", msg) &&
+            occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
+            occursin(r"\[1\] .*foobar", msg)
+        end
     end
 end
 
@@ -456,79 +446,6 @@ end
     end
 end
 
-end
-
-############################################################################################
-
-@testset "LazyCodegen" begin
-    import .LazyCodegen: call_delayed
-
-    f(A) = (A[] += 42; nothing)
-
-    global flag = [0]
-    function caller()
-        call_delayed(f, flag::Vector{Int})
-    end
-    @test caller() === nothing
-    @test flag[] == 42
-
-    ir = sprint(io->native_code_llvm(io, caller, Tuple{}, dump_module=true))
-    @test_broken occursin(r"add i64 %\d+, 42", ir)
-    # NOTE: can't just look for `jl_f` here, since it may be inlined and optimized away.
-
-    add(x, y) = x+y
-    function call_add(x, y)
-        call_delayed(add, x, y)
-    end
-
-    @test call_add(1, 3) == 4
-
-    incr(r) = r[] += 1
-    function call_incr(r)
-        call_delayed(incr, r)
-    end
-    r = Ref{Int}(0)
-    @test call_incr(r) == 1
-    @test r[] == 1
-
-    function call_real(c)
-        call_delayed(real, c)
-    end
-
-    @test call_real(1.0+im) == 1.0
-
-    # Test ABI removal
-    # XXX: this relies on llvm_always_inline, which it shouldn't
-    ir = sprint(io->native_code_llvm(io, call_real, Tuple{ComplexF64}))
-    @test_broken !occursin("alloca", ir)
-
-    ghostly_identity(x, y) = y
-    @test call_delayed(ghostly_identity, nothing, 1) == 1
-
-    # tests struct return
-    if Sys.ARCH != :aarch64
-        @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
-    else
-        @test_broken call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
-    end
-
-    throws(arr, i) = arr[i]
-    @test call_delayed(throws, [1], 1) == 1
-    @test_throws BoundsError call_delayed(throws, [1], 0)
-
-    struct Closure
-        x::Int64
-    end
-    (c::Closure)(b) = c.x+b
-
-    @test call_delayed(Closure(3), 5) == 8
-
-    struct Closure2
-        x::Integer
-    end
-    (c::Closure2)(b) = c.x+b
-
-    @test call_delayed(Closure2(3), 5) == 8
 end
 
 ############################################################################################

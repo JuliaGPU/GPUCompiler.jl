@@ -46,20 +46,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        branch: ['release-1.6', 'release-1.7', 'release-1.8', 'release-1.9', 'master']
+        branch: ['release-1.8', 'release-1.9', 'release-1.10', 'master']
         os: ['ubuntu-latest', 'macOS-latest', 'windows-latest']
         arch: [x64]
         exclude:
+          # unknown segfault in LLVM
+          - branch: 'release-1.10'
+            os: 'windows-latest'
+            arch: 'x64'
           # JuliaLang/julia#48081
           - branch: 'master'
             os: 'windows-latest'
             arch: 'x64'
           # hangs
           - branch: 'master'
-            os: 'macOS-latest'
-            arch: 'x64'
-          # 1.6 requires gfortran, which isn't available on macOS runners
-          - branch: 'release-1.6'
             os: 'macOS-latest'
             arch: 'x64'
     steps:
