@@ -14,7 +14,7 @@ using Scratch: @get_scratch!
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
 
-const use_newpm = isdefined(LLVM, :PassBuilder)
+const use_newpm = LLVM.has_newpm()
 
 include("utils.jl")
 
