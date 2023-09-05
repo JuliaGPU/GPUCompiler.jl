@@ -54,7 +54,9 @@ end
 
 function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if should_verify()
-        add!(mpm, GCInvariantVerifierPass())
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, GCInvariantVerifierPass())
+        end
         add!(mpm, VerifierPass())
     end
     add!(mpm, ForceFunctionAttrsPass())
