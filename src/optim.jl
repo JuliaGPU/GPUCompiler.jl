@@ -1,5 +1,414 @@
 # LLVM IR optimization
 
+function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    if use_newpm
+        optimize_newpm!(job, mod)
+    else
+        optimize_legacypm!(job, mod)
+    end
+    return
+end
+
+
+## new pm
+
+function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    triple = llvm_triple(job.config.target)
+    tm = llvm_machine(job.config.target)
+
+    global current_job
+    current_job = job
+
+    @dispose pb=PassBuilder(tm) begin
+        @dispose mpm=NewPMModulePassManager(pb) begin
+            buildNewPMPipeline!(mpm, job)
+            run!(mpm, mod, tm)
+        end
+    end
+    optimize_module!(job, mod)
+    run!(DeadArgumentEliminationPass(), mod, tm)
+    return
+end
+
+function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
+    buildEarlySimplificationPipeline(mpm, job, opt_level)
+    add!(mpm, AlwaysInlinerPass())
+    buildEarlyOptimizerPipeline(mpm, job, opt_level)
+    add!(mpm, LowerSIMDLoopPass())
+    add!(mpm, NewPMFunctionPassManager) do fpm
+        buildLoopOptimizerPipeline(fpm, job, opt_level)
+        buildScalarOptimizerPipeline(fpm, job, opt_level)
+        if opt_level >= 2
+            buildVectorPipeline(fpm, job, opt_level)
+        end
+        add!(fpm, WarnMissedTransformationsPass())
+    end
+    buildIntrinsicLoweringPipeline(mpm, job, opt_level)
+    buildCleanupPipeline(mpm, job, opt_level)
+end
+
+if use_newpm
+    const BasicSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, false, false, 1)
+    const AggressiveSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, true, false, 1)
+end
+
+function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
+    if should_verify()
+        add!(mpm, GCInvariantVerifierPass())
+        add!(mpm, VerifierPass())
+    end
+    add!(mpm, ForceFunctionAttrsPass())
+    # TODO invokePipelineStartCallbacks
+    add!(mpm, Annotation2MetadataPass())
+    add!(mpm, ConstantMergePass())
+    add!(mpm, NewPMFunctionPassManager) do fpm
+        add!(fpm, LowerExpectIntrinsicPass())
+        if opt_level >= 2
+            add!(fpm, PropagateJuliaAddrspacesPass())
+        end
+        add!(fpm, SimplifyCFGPass(BasicSimplifyCFGOptions))
+        if opt_level >= 1
+            add!(fpm, DCEPass())
+            add!(fpm, SROAPass())
+        end
+    end
+    # TODO invokeEarlySimplificationCallbacks
+end
+
+function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
+    add!(mpm, NewPMCGSCCPassManager) do cgpm
+        # TODO invokeCGSCCCallbacks
+        add!(cgpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, AllocOptPass())
+            add!(fpm, Float2IntPass())
+            add!(fpm, LowerConstantIntrinsicsPass())
+        end
+    end
+    add!(legacy2newpm(cpu_features!), mpm)
+    if opt_level >= 1
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            if opt_level >= 2
+                add!(fpm, SROAPass())
+                add!(fpm, InstCombinePass())
+                add!(fpm, JumpThreadingPass())
+                add!(fpm, CorrelatedValuePropagationPass())
+                add!(fpm, ReassociatePass())
+                add!(fpm, EarlyCSEPass())
+                add!(fpm, AllocOptPass())
+            else
+                add!(fpm, InstCombinePass())
+                add!(fpm, EarlyCSEPass())
+            end
+        end
+        # TODO invokePeepholeCallbacks
+    end
+end
+
+function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
+    add!(fpm, NewPMLoopPassManager) do lpm
+        if opt_level >= 2
+            add!(lpm, LoopRotatePass())
+        end
+        # TODO invokeLateLoopOptimizationCallbacks
+    end
+    if opt_level >= 2
+        add!(fpm, NewPMLoopPassManager, #=UseMemorySSA=#true) do lpm
+            add!(lpm, LICMPass())
+            add!(lpm, JuliaLICMPass())
+            add!(lpm, SimpleLoopUnswitchPass())
+            add!(lpm, LICMPass())
+            add!(lpm, JuliaLICMPass())
+        end
+    end
+    if opt_level >= 2
+        add!(fpm, IRCEPass())
+    end
+    add!(fpm, NewPMLoopPassManager) do lpm
+        if opt_level >= 2
+            add!(lpm, LoopInstSimplifyPass())
+            add!(lpm, LoopIdiomRecognizePass())
+            add!(lpm, IndVarSimplifyPass())
+            add!(lpm, LoopDeletionPass())
+            add!(lpm, LoopFullUnrollPass())
+        end
+        # TODO invokeLoopOptimizerEndCallbacks
+    end
+end
+
+function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
+    if opt_level >= 2
+        add!(fpm, AllocOptPass())
+        add!(fpm, SROAPass())
+        add!(fpm, InstSimplifyPass())
+        add!(fpm, GVNPass())
+        add!(fpm, MemCpyOptPass())
+        add!(fpm, SCCPPass())
+        add!(fpm, CorrelatedValuePropagationPass())
+        add!(fpm, DCEPass())
+        add!(fpm, IRCEPass())
+        add!(fpm, InstCombinePass())
+        add!(fpm, JumpThreadingPass())
+    end
+    if opt_level >= 3
+        add!(fpm, GVNPass())
+    end
+    if opt_level >= 2
+        add!(fpm, DSEPass())
+        # TODO invokePeepholeCallbacks
+        add!(fpm, SimplifyCFGPass(AggressiveSimplifyCFGOptions))
+        add!(fpm, AllocOptPass())
+        add!(fpm, NewPMLoopPassManager) do lpm
+            add!(lpm, LoopDeletionPass())
+            add!(lpm, LoopInstSimplifyPass())
+        end
+        add!(fpm, LoopDistributePass())
+    end
+    # TODO invokeScalarOptimizerCallbacks
+end
+
+function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
+    add!(fpm, InjectTLIMappings())
+    add!(fpm, LoopVectorizePass())
+    add!(fpm, LoopLoadEliminationPass())
+    add!(fpm, InstCombinePass())
+    add!(fpm, SimplifyCFGPass(AggressiveSimplifyCFGOptions))
+    add!(fpm, SLPVectorizerPass())
+    add!(fpm, VectorCombinePass())
+    # TODO invokeVectorizerCallbacks
+    add!(fpm, ADCEPass())
+    add!(fpm, LoopUnrollPass(LoopUnrollOptions(; opt_level)))
+end
+
+function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
+    # lower exception handling
+    if uses_julia_runtime(job)
+        add!(mpm, NewPMFunctionPassManager) do fpm
+             add!(fpm, LowerExcHandlersPass())
+        end
+    end
+
+    add!(mpm, NewPMFunctionPassManager) do fpm
+        add!(fpm, GCInvariantVerifierPass())
+    end
+    add!(mpm, RemoveNIPass())
+
+    # lower GC intrinsics
+    add!(mpm, NewPMFunctionPassManager) do fpm
+        if !uses_julia_runtime(job)
+            add!(legacy2newpm(lower_gc_frame!), fpm)
+        end
+        add!(fpm, LateLowerGCPass())
+        if uses_julia_runtime(job) && VERSION >= v"1.11.0-DEV.208"
+            add!(fpm, FinalLowerGCPass())
+        end
+    end
+    if uses_julia_runtime(job) && VERSION < v"1.11.0-DEV.208"
+        add!(mpm, FinalLowerGCPass())
+    end
+
+    if opt_level >= 2
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, GVNPass())
+            add!(fpm, SCCPPass())
+            add!(fpm, DCEPass())
+        end
+    end
+
+    # lower kernel state intrinsics
+    # NOTE: we can only do so here, as GC lowering can introduce calls to the runtime,
+    #       and thus additional uses of the kernel state intrinsics.
+    if job.config.kernel
+        # TODO: now that all kernel state-related passes are being run here, merge some?
+        add!(legacy2newpm(add_kernel_state!), mpm)
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(legacy2newpm(lower_kernel_state!), fpm)
+        end
+        add!(legacy2newpm(cleanup_kernel_state!), mpm)
+    end
+
+    # lower PTLS intrinsics
+    if uses_julia_runtime(job)
+        add!(mpm, LowerPTLSPass())
+    else
+        # remove dead uses of ptls
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, ADCEPass())
+        end
+        add!(legacy2newpm(lower_ptls!), mpm)
+    end
+
+    if opt_level >= 1
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, InstCombinePass())
+            add!(fpm, SimplifyCFGPass(AggressiveSimplifyCFGOptions))
+        end
+    end
+
+    # remove Julia address spaces
+    add!(mpm, RemoveJuliaAddrspacesPass())
+
+    # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
+    # FIXME: we should fix the inliner so that inlined code gets optimized early-on
+    add!(mpm, AlwaysInlinerPass())
+end
+
+function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
+    if opt_level >= 2
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, CombineMulAddPass())
+            add!(fpm, DivRemPairsPass())
+        end
+    end
+    # TODO invokeOptimizerLastCallbacks
+    add!(mpm, NewPMFunctionPassManager) do fpm
+        add!(fpm, AnnotationRemarksPass())
+    end
+    add!(mpm, NewPMFunctionPassManager) do fpm
+        add!(fpm, DemoteFloat16Pass())
+        if opt_level >= 1
+            add!(fpm, GVNPass())
+        end
+    end
+end
+
+
+## legacy pm
+
+function optimize_legacypm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    triple = llvm_triple(job.config.target)
+    tm = llvm_machine(job.config.target)
+
+    global current_job
+    current_job = job
+
+    @dispose pm=ModulePassManager() begin
+        addTargetPasses!(pm, tm, triple)
+        addOptimizationPasses!(pm)
+        run!(pm, mod)
+    end
+
+    # NOTE: we need to use multiple distinct pass managers to force pass ordering;
+    #       intrinsics should never get lowered before Julia has optimized them.
+    # XXX: why doesn't the barrier noop pass work here?
+
+    # lower intrinsics
+    @dispose pm=ModulePassManager() begin
+        addTargetPasses!(pm, tm, triple)
+
+        if !uses_julia_runtime(job)
+            add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
+        end
+
+        if job.config.kernel
+            # GC lowering is the last pass that may introduce calls to the runtime library,
+            # and thus additional uses of the kernel state intrinsic.
+            # TODO: now that all kernel state-related passes are being run here, merge some?
+            add!(pm, ModulePass("AddKernelState", add_kernel_state!))
+            add!(pm, FunctionPass("LowerKernelState", lower_kernel_state!))
+            add!(pm, ModulePass("CleanupKernelState", cleanup_kernel_state!))
+        end
+
+        if !uses_julia_runtime(job)
+            # remove dead uses of ptls
+            aggressive_dce!(pm)
+            add!(pm, ModulePass("LowerPTLS", lower_ptls!))
+        end
+
+        if uses_julia_runtime(job)
+            lower_exc_handlers!(pm)
+        end
+        # the Julia GC lowering pass also has some clean-up that is required
+        late_lower_gc_frame!(pm)
+        if uses_julia_runtime(job)
+            final_lower_gc!(pm)
+        end
+
+        remove_ni!(pm)
+        remove_julia_addrspaces!(pm)
+
+        if uses_julia_runtime(job)
+            # We need these two passes and the instcombine below
+            # after GC lowering to let LLVM do some constant propagation on the tags.
+            # and remove some unnecessary write barrier checks.
+            gvn!(pm)
+            sccp!(pm)
+            # Remove dead use of ptls
+            dce!(pm)
+            LLVM.Interop.lower_ptls!(pm, dump_native(job))
+            instruction_combining!(pm)
+            # Clean up write barrier and ptls lowering
+            cfgsimplification!(pm)
+        end
+
+        # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
+        # FIXME: we should fix the inliner so that inlined code gets optimized early-on
+        always_inliner!(pm)
+
+        # some of Julia's optimization passes happen _after_ lowering intrinsics
+        combine_mul_add!(pm)
+        div_rem_pairs!(pm)
+
+        if VERSION < v"1.10.0-DEV.1144"
+            # save function attributes to work around JuliaGPU/GPUCompiler#437
+            current_attrs = Dict{String,Any}()
+            for f in functions(mod)
+                attrs = function_attributes(f)
+                length(attrs) == 0 && continue
+                current_attrs[LLVM.name(f)] = collect(attrs)
+            end
+        end
+
+        run!(pm, mod)
+
+        if VERSION < v"1.10.0-DEV.1144"
+            # restore function attributes
+            for (fn, attrs) in current_attrs
+                haskey(functions(mod), fn) || continue
+                f = functions(mod)[fn]
+
+                for attr in attrs
+                    # NOTE: there's no function attributes that contain a type,
+                    #       so we can just blindly add them back
+                    push!(function_attributes(f), attr)
+                end
+            end
+        end
+    end
+
+    # target-specific optimizations
+    optimize_module!(job, mod)
+
+    # we compile a module containing the entire call graph,
+    # so perform some interprocedural optimizations.
+    #
+    # for some reason, these passes need to be distinct from the regular optimization chain,
+    # or certain values (such as the constant arrays used to populare llvm.compiler.user ad
+    # part of the LateLowerGCFrame pass) aren't collected properly.
+    #
+    # these might not always be safe, as Julia's IR metadata isn't designed for IPO.
+    @dispose pm=ModulePassManager() begin
+        addTargetPasses!(pm, tm, triple)
+
+        # simplify function calls that don't use the returned value
+        dead_arg_elimination!(pm)
+
+        run!(pm, mod)
+    end
+
+    # compare to Clang by using the pass manager builder APIs:
+    #LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
+    #@dispose pm=ModulePassManager() begin
+    #    addTargetPasses!(pm, tm, triple)
+    #    PassManager@dispose pmb=IRBuilder() begin
+    #        optlevel!(pmb, 2)
+    #        populate!(pm, pmb)
+    #    end
+    #    run!(pm, mod)
+    #end
+
+    return
+end
+
 function addTargetPasses!(pm, tm, triple)
     add_library_info!(pm, triple)
     add_transform_info!(pm, tm)
@@ -171,403 +580,10 @@ function addOptimizationPasses!(pm, opt_level=2)
     aggressive_dce!(pm)
 end
 
-if use_newpm
-    const BasicSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, false, false, 1)
-    const AggressiveSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, true, false, 1)
-end
 
-function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
-    if should_verify()
-        add!(mpm, GCInvariantVerifierPass())
-        add!(mpm, VerifierPass())
-    end
-    add!(mpm, ForceFunctionAttrsPass())
-    # TODO invokePipelineStartCallbacks
-    add!(mpm, Annotation2MetadataPass())
-    add!(mpm, ConstantMergePass())
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, LowerExpectIntrinsicPass())
-        if opt_level >= 2
-            add!(fpm, PropagateJuliaAddrspacesPass())
-        end
-        add!(fpm, SimplifyCFGPass(BasicSimplifyCFGOptions))
-        if opt_level >= 1
-            add!(fpm, DCEPass())
-            add!(fpm, SROAPass())
-        end
-    end
-    # TODO invokeEarlySimplificationCallbacks
-end
+## custom passes
 
-function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
-    add!(mpm, NewPMCGSCCPassManager) do cgpm
-        # TODO invokeCGSCCCallbacks
-        add!(cgpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, AllocOptPass())
-            add!(fpm, Float2IntPass())
-            add!(fpm, LowerConstantIntrinsicsPass())
-        end
-    end
-    add!(legacy2newpm(cpu_features!), mpm)
-    if opt_level >= 1
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            if opt_level >= 2
-                add!(fpm, SROAPass())
-                add!(fpm, InstCombinePass())
-                add!(fpm, JumpThreadingPass())
-                add!(fpm, CorrelatedValuePropagationPass())
-                add!(fpm, ReassociatePass())
-                add!(fpm, EarlyCSEPass())
-                add!(fpm, AllocOptPass())
-            else
-                add!(fpm, InstCombinePass())
-                add!(fpm, EarlyCSEPass())
-            end
-        end
-        # TODO invokePeepholeCallbacks
-    end
-end
-
-function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
-    add!(fpm, NewPMLoopPassManager) do lpm
-        if opt_level >= 2
-            add!(lpm, LoopRotatePass())
-        end
-        # TODO invokeLateLoopOptimizationCallbacks
-    end
-    if opt_level >= 2
-        add!(fpm, NewPMLoopPassManager, #=UseMemorySSA=#true) do lpm
-            add!(lpm, LICMPass())
-            add!(lpm, JuliaLICMPass())
-            add!(lpm, SimpleLoopUnswitchPass())
-            add!(lpm, LICMPass())
-            add!(lpm, JuliaLICMPass())
-        end
-    end
-    if opt_level >= 2
-        add!(fpm, IRCEPass())
-    end
-    add!(fpm, NewPMLoopPassManager) do lpm
-        if opt_level >= 2
-            add!(lpm, LoopInstSimplifyPass())
-            add!(lpm, LoopIdiomRecognizePass())
-            add!(lpm, IndVarSimplifyPass())
-            add!(lpm, LoopDeletionPass())
-            add!(lpm, LoopFullUnrollPass())
-        end
-        # TODO invokeLoopOptimizerEndCallbacks
-    end
-end
-
-function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
-    if opt_level >= 2
-        add!(fpm, AllocOptPass())
-        add!(fpm, SROAPass())
-        add!(fpm, InstSimplifyPass())
-        add!(fpm, GVNPass())
-        add!(fpm, MemCpyOptPass())
-        add!(fpm, SCCPPass())
-        add!(fpm, CorrelatedValuePropagationPass())
-        add!(fpm, DCEPass())
-        add!(fpm, IRCEPass())
-        add!(fpm, InstCombinePass())
-        add!(fpm, JumpThreadingPass())
-    end
-    if opt_level >= 3
-        add!(fpm, GVNPass())
-    end
-    if opt_level >= 2
-        add!(fpm, DSEPass())
-        # TODO invokePeepholeCallbacks
-        add!(fpm, SimplifyCFGPass(AggressiveSimplifyCFGOptions))
-        add!(fpm, AllocOptPass())
-        add!(fpm, NewPMLoopPassManager) do lpm
-            add!(lpm, LoopDeletionPass())
-            add!(lpm, LoopInstSimplifyPass())
-        end
-        add!(fpm, LoopDistributePass())
-    end
-    # TODO invokeScalarOptimizerCallbacks
-end
-
-function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
-    add!(fpm, InjectTLIMappings())
-    add!(fpm, LoopVectorizePass())
-    add!(fpm, LoopLoadEliminationPass())
-    add!(fpm, InstCombinePass())
-    add!(fpm, SimplifyCFGPass(AggressiveSimplifyCFGOptions))
-    add!(fpm, SLPVectorizerPass())
-    add!(fpm, VectorCombinePass())
-    # TODO invokeVectorizerCallbacks
-    add!(fpm, ADCEPass())
-    add!(fpm, LoopUnrollPass(LoopUnrollOptions(; opt_level)))
-end
-
-function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
-    if !uses_julia_runtime(job)
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(legacy2newpm(lower_gc_frame!), fpm)
-        end
-    end
-
-    if job.config.kernel
-        # GC lowering is the last pass that may introduce calls to the runtime library,
-        # and thus additional uses of the kernel state intrinsic.
-        # TODO: now that all kernel state-related passes are being run here, merge some?
-        add!(legacy2newpm(add_kernel_state!), mpm)
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(legacy2newpm(lower_kernel_state!), fpm)
-        end
-        add!(legacy2newpm(cleanup_kernel_state!), mpm)
-    end
-
-    if !uses_julia_runtime(job)
-        # remove dead uses of ptls
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, ADCEPass())
-        end
-        add!(legacy2newpm(lower_ptls!), mpm)
-    end
-
-    if uses_julia_runtime(job)
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, LowerExcHandlersPass())
-        end
-    end
-    # the Julia GC lowering pass also has some clean-up that is required
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, LateLowerGCPass())
-    end
-    if uses_julia_runtime(job)
-        add!(mpm, FinalLowerGCPass())
-    end
-
-    add!(mpm, RemoveNIPass())
-    add!(mpm, RemoveJuliaAddrspacesPass())
-
-    if uses_julia_runtime(job)
-        # We need these two passes and the instcombine below
-        # after GC lowering to let LLVM do some constant propagation on the tags.
-        # and remove some unnecessary write barrier checks.
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, GVNPass())
-            add!(fpm, SCCPPass())
-            # Remove dead use of ptls
-            add!(fpm, DCEPass())
-        end
-        add!(mpm, LowerPTLSPass())
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, InstCombinePass())
-            # Clean up write barrier and ptls lowering
-            add!(fpm, SimplifyCFGPass(AggressiveSimplifyCFGOptions))
-        end
-    end
-
-    # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
-    # FIXME: we should fix the inliner so that inlined code gets optimized early-on
-    add!(mpm, AlwaysInlinerPass())
-end
-
-function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
-    if opt_level >= 2
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, CombineMulAddPass())
-            add!(fpm, DivRemPairsPass())
-        end
-    end
-    # TODO invokeOptimizerLastCallbacks
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, AnnotationRemarksPass())
-    end
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, DemoteFloat16Pass())
-        if opt_level >= 1
-            add!(fpm, GVNPass())
-        end
-    end
-end
-
-function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
-    buildEarlySimplificationPipeline(mpm, job, opt_level)
-    add!(mpm, AlwaysInlinerPass())
-    buildEarlyOptimizerPipeline(mpm, job, opt_level)
-    add!(mpm, LowerSIMDLoopPass())
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        buildLoopOptimizerPipeline(fpm, job, opt_level)
-        buildScalarOptimizerPipeline(fpm, job, opt_level)
-        if opt_level >= 2
-            buildVectorPipeline(fpm, job, opt_level)
-        end
-        add!(fpm, WarnMissedTransformationsPass())
-    end
-    buildIntrinsicLoweringPipeline(mpm, job, opt_level)
-    buildCleanupPipeline(mpm, job, opt_level)
-end
-
-function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    triple = llvm_triple(job.config.target)
-    tm = llvm_machine(job.config.target)
-
-    global current_job
-    current_job = job
-
-    @dispose pb=PassBuilder(tm) begin
-        @dispose mpm=NewPMModulePassManager(pb) begin
-            buildNewPMPipeline!(mpm, job)
-            run!(mpm, mod, tm)
-        end
-    end
-    optimize_module!(job, mod)
-    run!(DeadArgumentEliminationPass(), mod, tm)
-    return
-end
-
-function optimize_legacypm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    triple = llvm_triple(job.config.target)
-    tm = llvm_machine(job.config.target)
-
-    global current_job
-    current_job = job
-
-    @dispose pm=ModulePassManager() begin
-        addTargetPasses!(pm, tm, triple)
-        addOptimizationPasses!(pm)
-        run!(pm, mod)
-    end
-
-    # NOTE: we need to use multiple distinct pass managers to force pass ordering;
-    #       intrinsics should never get lowered before Julia has optimized them.
-    # XXX: why doesn't the barrier noop pass work here?
-
-    # lower intrinsics
-    @dispose pm=ModulePassManager() begin
-        addTargetPasses!(pm, tm, triple)
-
-        if !uses_julia_runtime(job)
-            add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
-        end
-
-        if job.config.kernel
-            # GC lowering is the last pass that may introduce calls to the runtime library,
-            # and thus additional uses of the kernel state intrinsic.
-            # TODO: now that all kernel state-related passes are being run here, merge some?
-            add!(pm, ModulePass("AddKernelState", add_kernel_state!))
-            add!(pm, FunctionPass("LowerKernelState", lower_kernel_state!))
-            add!(pm, ModulePass("CleanupKernelState", cleanup_kernel_state!))
-        end
-
-        if !uses_julia_runtime(job)
-            # remove dead uses of ptls
-            aggressive_dce!(pm)
-            add!(pm, ModulePass("LowerPTLS", lower_ptls!))
-        end
-
-        if uses_julia_runtime(job)
-            lower_exc_handlers!(pm)
-        end
-        # the Julia GC lowering pass also has some clean-up that is required
-        late_lower_gc_frame!(pm)
-        if uses_julia_runtime(job)
-            final_lower_gc!(pm)
-        end
-
-        remove_ni!(pm)
-        remove_julia_addrspaces!(pm)
-
-        if uses_julia_runtime(job)
-            # We need these two passes and the instcombine below
-            # after GC lowering to let LLVM do some constant propagation on the tags.
-            # and remove some unnecessary write barrier checks.
-            gvn!(pm)
-            sccp!(pm)
-            # Remove dead use of ptls
-            dce!(pm)
-            LLVM.Interop.lower_ptls!(pm, dump_native(job))
-            instruction_combining!(pm)
-            # Clean up write barrier and ptls lowering
-            cfgsimplification!(pm)
-        end
-
-        # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
-        # FIXME: we should fix the inliner so that inlined code gets optimized early-on
-        always_inliner!(pm)
-
-        # some of Julia's optimization passes happen _after_ lowering intrinsics
-        combine_mul_add!(pm)
-        div_rem_pairs!(pm)
-
-        if VERSION < v"1.10.0-DEV.1144"
-            # save function attributes to work around JuliaGPU/GPUCompiler#437
-            current_attrs = Dict{String,Any}()
-            for f in functions(mod)
-                attrs = function_attributes(f)
-                length(attrs) == 0 && continue
-                current_attrs[LLVM.name(f)] = collect(attrs)
-            end
-        end
-
-        run!(pm, mod)
-
-        if VERSION < v"1.10.0-DEV.1144"
-            # restore function attributes
-            for (fn, attrs) in current_attrs
-                haskey(functions(mod), fn) || continue
-                f = functions(mod)[fn]
-
-                for attr in attrs
-                    # NOTE: there's no function attributes that contain a type,
-                    #       so we can just blindly add them back
-                    push!(function_attributes(f), attr)
-                end
-            end
-        end
-    end
-
-    # target-specific optimizations
-    optimize_module!(job, mod)
-
-    # we compile a module containing the entire call graph,
-    # so perform some interprocedural optimizations.
-    #
-    # for some reason, these passes need to be distinct from the regular optimization chain,
-    # or certain values (such as the constant arrays used to populare llvm.compiler.user ad
-    # part of the LateLowerGCFrame pass) aren't collected properly.
-    #
-    # these might not always be safe, as Julia's IR metadata isn't designed for IPO.
-    @dispose pm=ModulePassManager() begin
-        addTargetPasses!(pm, tm, triple)
-
-        # simplify function calls that don't use the returned value
-        dead_arg_elimination!(pm)
-
-        run!(pm, mod)
-    end
-
-    # compare to Clang by using the pass manager builder APIs:
-    #LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
-    #@dispose pm=ModulePassManager() begin
-    #    addTargetPasses!(pm, tm, triple)
-    #    PassManager@dispose pmb=IRBuilder() begin
-    #        optlevel!(pmb, 2)
-    #        populate!(pm, pmb)
-    #    end
-    #    run!(pm, mod)
-    #end
-
-    return
-end
-
-function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    if use_newpm
-        optimize_newpm!(job, mod)
-    else
-        optimize_legacypm!(job, mod)
-    end
-    return
-end
-
-
-## lowering intrinsics
+# lowering intrinsics
 cpu_features!(pm::PassManager) = add!(pm, ModulePass("LowerCPUFeatures", cpu_features!))
 function cpu_features!(mod::LLVM.Module)
     job = current_job::CompilerJob
