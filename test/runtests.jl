@@ -1,4 +1,4 @@
-using GPUCompiler
+using GPUCompiler, LLVM
 GPUCompiler.reset_runtime()
 
 using InteractiveUtils
