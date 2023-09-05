@@ -1,8 +1,6 @@
+@testitem "Metal" setup=[Metal, Helpers] begin
+
 using Metal_LLVM_Tools_jll, LLVM
-
-include("definitions/metal.jl")
-
-@testset "Metal" begin
 
 ############################################################################################
 
@@ -12,10 +10,10 @@ include("definitions/metal.jl")
 @testset "calling convention" begin
     kernel() = return
 
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{}; dump_module=true))
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{}; dump_module=true))
     @test !occursin("cc103", ir)
 
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{};
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{};
                                     dump_module=true, kernel=true))
     @test occursin("cc103", ir)
 end
@@ -23,29 +21,29 @@ end
 @testset "byref aggregates" begin
     kernel(x) = return
 
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Tuple{Int}}))
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Tuple{Int}}))
     @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\*", ir)
 
     # for kernels, every pointer argument needs to take an address space
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Tuple{Int}}; kernel=true))
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Tuple{Int}}; kernel=true))
     @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\]) addrspace\(1\)\*", ir)
 end
 
 @testset "byref primitives" begin
     kernel(x) = return
 
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Int}))
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Int}))
     @test occursin(r"@\w*kernel\w*\(i64 ", ir)
 
     # for kernels, every pointer argument needs to take an address space
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Int}; kernel=true))
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Int}; kernel=true))
     @test occursin(r"@\w*kernel\w*\(i64 addrspace\(1\)\*", ir)
 end
 
 @testset "module metadata" begin
     kernel() = return
 
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{};
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{};
                                     dump_module=true, kernel=true))
     @test occursin("air.version", ir)
     @test occursin("air.language_version", ir)
@@ -55,7 +53,7 @@ end
 @testset "argument metadata" begin
     kernel(x) = return
 
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Int};
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Int};
                                     dump_module=true, kernel=true))
     @test occursin("air.buffer", ir)
 
@@ -70,11 +68,11 @@ end
         return
     end
 
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}))
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}))
     @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %.+\)", ir)
     @test occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
 
-    ir = sprint(io->metal_code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true))
+    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true))
     @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %.+, i32 %thread_position_in_threadgroup\)", ir)
     @test !occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
 end
@@ -90,7 +88,7 @@ Sys.isapple() && @testset "asm" begin
 @testset "smoke test" begin
     kernel() = return
 
-    asm = sprint(io->metal_code_native(io, kernel, Tuple{};
+    asm = sprint(io->Metal.code_native(io, kernel, Tuple{};
                                     dump_module=true, kernel=true))
     @test occursin("[header]", asm)
     @test occursin("[program]", asm)

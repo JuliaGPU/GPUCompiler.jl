@@ -1,4 +1,4 @@
-## tests of auxiliary functionality
+@testitem "util" begin
 
 @testset "split_kwargs" begin
     kwargs = [:(a=1), :(b=2), :(c=3), :(d=4)]
@@ -7,4 +7,6 @@
     @test groups[1] == [:(a=1)]
     @test groups[2] == [:(b=2), :(c=3)]
     @test groups[3] == [:(d=4)]
+end
+
 end
