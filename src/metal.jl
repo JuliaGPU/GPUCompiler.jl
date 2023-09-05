@@ -87,14 +87,18 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     # add metadata to AIR intrinsics LLVM doesn't know about
     annotate_air_intrinsics!(job, mod)
 
+    # we emit properties (of the air and metal version) as private global constants,
+    # so run the optimizer so that they are inlined before the rest of the optimizer runs.
     if use_newpm
-        run!(GlobalOptPass(), mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, RecomputeGlobalsAAPass())
+            add!(mpm, GlobalOptPass())
+            run!(mpm, mod)
+        end
     else
         @dispose pm=ModulePassManager() begin
-            # we emit properties (of the device and ptx isa) as private global constants,
-            # so run the optimizer so that they are inlined before the rest of the optimizer runs.
             global_optimizer!(pm)
-            # TODO run!?
+            run!(pm, mod)
         end
     end
 
@@ -127,13 +131,13 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     if changed
         # lowering may have introduced additional functions marked `alwaysinline`
         if use_newpm
-            @dispose pb=PassBuilder() mpm=NewPMModulePassManager() begin
+            @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
                 add!(mpm, AlwaysInlinerPass())
                 add!(mpm, NewPMFunctionPassManager) do fpm
                     add!(fpm, SimplifyCFGPass())
-                    add!(fpm, InstructionCombiningPass())
+                    add!(fpm, InstCombinePass())
                 end
-                run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
+                run!(mpm, mod)
             end
         else
             @dispose pm=ModulePassManager() begin
@@ -175,13 +179,13 @@ end
 
         if any_noreturn
             if use_newpm
-                @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(nothing, pic) mpm=NewPMModulePassManager() begin
+                @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
                     add!(mpm, AlwaysInlinerPass())
                     add!(mpm, NewPMFunctionPassManager) do fpm
                         add!(fpm, SimplifyCFGPass())
-                        add!(fpm, InstructionCombiningPass())
+                        add!(fpm, InstCombinePass())
                     end
-                    run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
+                    run!(mpm, mod)
                 end
             else
                 @dispose pm=ModulePassManager() begin
@@ -322,15 +326,15 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
 
     # clean-up after this pass (which runs after optimization)
     if use_newpm
-        @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(nothing, pic) mpm=NewPMModulePassManager() begin
+       @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
             add!(mpm, NewPMFunctionPassManager) do fpm
                 add!(fpm, SimplifyCFGPass())
                 add!(fpm, SROAPass())
                 add!(fpm, EarlyCSEPass())
-                add!(fpm, InstructionCombiningPass())
+                add!(fpm, InstCombinePass())
             end
 
-            run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
+            run!(mpm, mod)
         end
     else
         @dispose pm=ModulePassManager() begin

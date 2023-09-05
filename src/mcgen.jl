@@ -5,6 +5,7 @@
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     global current_job
     current_job = job
+
     if use_newpm
         @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
             add!(mpm, RecomputeGlobalsAAPass())
@@ -13,11 +14,10 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             add!(legacy2newpm(resolve_cpu_references!), mpm)
             add!(mpm, GlobalDCEPass())
             add!(mpm, StripDeadPrototypesPass())
-            run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA(), GlobalsAA()])
+            run!(mpm, mod)
         end
     else
         @dispose pm=ModulePassManager() begin
-
             global_optimizer!(pm)
 
             add!(pm, ModulePass("ResolveCPUReferences", resolve_cpu_references!))

@@ -313,7 +313,7 @@ const __llvm_initialized = Ref(false)
         # global variables. this makes sure that the optimizer can, e.g.,
         # rewrite function signatures.
         if toplevel
-            # TODO No good api to expose internalize via newpm yet
+            # TODO: there's no good API to use internalize with the new pass manager yet
             @dispose pm=ModulePassManager() begin
                 exports = collect(values(jobs))
                 for gvar in globals(ir)
@@ -343,8 +343,7 @@ const __llvm_initialized = Ref(false)
                 # XXX: make these part of the optimizer pipeline?
                 if has_deferred_jobs
                     if use_newpm
-
-                        @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(pic) mpm=NewPMModulePassManager(pb) begin
+                        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
                             add!(mpm, NewPMFunctionPassManager) do fpm
                                 add!(fpm, InstCombinePass())
                             end
@@ -354,7 +353,7 @@ const __llvm_initialized = Ref(false)
                                 add!(fpm, GVNPass())
                             end
                             add!(mpm, MergeFunctionsPass())
-                            run!(mpm, ir, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
+                            run!(mpm, ir)
                         end
                     else
                         @dispose pm=ModulePassManager() begin
@@ -365,11 +364,11 @@ const __llvm_initialized = Ref(false)
                             scalar_repl_aggregates_ssa!(pm)
                             promote_memory_to_register!(pm)
                             gvn!(pm)
-        
+
                             # merge duplicate functions, since each compilation invocation emits everything
                             # XXX: ideally we want to avoid emitting these in the first place
                             merge_functions!(pm)
-        
+
                             run!(pm, ir)
                         end
                     end
@@ -389,7 +388,7 @@ const __llvm_initialized = Ref(false)
                         add!(mpm, GlobalDCEPass())
                         add!(mpm, StripDeadPrototypesPass())
                         add!(mpm, ConstantMergePass())
-                        run!(mpm, ir, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA(), GlobalsAA()])
+                        run!(mpm, ir)
                     end
                 else
                     # we can only clean-up now, as optimization may lower or introduce calls to

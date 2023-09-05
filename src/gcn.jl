@@ -76,7 +76,6 @@ function optimize_module!(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
         datalayout!(mod, julia_datalayout(job.config.target))
 
         tm = llvm_machine(job.config.target)
-        # doesn't need newpm because only applies to v<1.9
         @dispose pm=ModulePassManager() begin
             add_library_info!(pm, triple(mod))
             add_transform_info!(pm, tm)

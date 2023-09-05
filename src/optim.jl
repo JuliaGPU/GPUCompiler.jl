@@ -172,13 +172,12 @@ function addOptimizationPasses!(pm, opt_level=2)
 end
 
 if use_newpm
-    const add_verification_passes = false
     const BasicSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, false, false, 1)
     const AggressiveSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, true, false, 1)
 end
 
 function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
-    if add_verification_passes
+    if should_verify()
         add!(mpm, GCInvariantVerifierPass())
         add!(mpm, VerifierPass())
     end
@@ -301,38 +300,16 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, VectorCombinePass())
     # TODO invokeVectorizerCallbacks
     add!(fpm, ADCEPass())
-    add!(fpm, LoopUnrollPass(LoopUnrollOptions(opt_level)))
+    add!(fpm, LoopUnrollPass(LoopUnrollOptions(; opt_level)))
 end
 
-function buildJuliaIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, LowerExcHandlersPass())
-        if add_verification_passes
-            add!(fpm, GCInvariantVerifierPass())
-        end
-    end
-    add!(mpm, RemoveNIPass())
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, LateLowerGCPass())
-    end
-    add!(mpm, FinalLowerGCPass())
-    if opt_level >= 2
+function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
+    if !uses_julia_runtime(job)
         add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, GVNPass())
-            add!(fpm, SCCPPass())
-            add!(fpm, DCEPass())
+            add!(legacy2newpm(lower_gc_frame!), fpm)
         end
     end
-    add!(mpm, LowerPTLSPass())
-    if opt_level >= 1
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, InstCombinePass())
-            add!(fpm, SimplifyCFGPass(AggressiveSimplifyCFGOptions))
-        end
-    end
-end
 
-function buildKernelIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if job.config.kernel
         # GC lowering is the last pass that may introduce calls to the runtime library,
         # and thus additional uses of the kernel state intrinsic.
@@ -343,16 +320,51 @@ function buildKernelIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJo
         end
         add!(legacy2newpm(cleanup_kernel_state!), mpm)
     end
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, ADCEPass())
+
+    if !uses_julia_runtime(job)
+        # remove dead uses of ptls
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, ADCEPass())
+        end
+        add!(legacy2newpm(lower_ptls!), mpm)
     end
-    add!(legacy2newpm(lower_ptls!), mpm)
+
+    if uses_julia_runtime(job)
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, LowerExcHandlersPass())
+        end
+    end
+    # the Julia GC lowering pass also has some clean-up that is required
     add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, LowerExcHandlersPass())
         add!(fpm, LateLowerGCPass())
     end
+    if uses_julia_runtime(job)
+        add!(mpm, FinalLowerGCPass())
+    end
+
     add!(mpm, RemoveNIPass())
     add!(mpm, RemoveJuliaAddrspacesPass())
+
+    if uses_julia_runtime(job)
+        # We need these two passes and the instcombine below
+        # after GC lowering to let LLVM do some constant propagation on the tags.
+        # and remove some unnecessary write barrier checks.
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, GVNPass())
+            add!(fpm, SCCPPass())
+            # Remove dead use of ptls
+            add!(fpm, DCEPass())
+        end
+        add!(mpm, LowerPTLSPass())
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, InstCombinePass())
+            # Clean up write barrier and ptls lowering
+            add!(fpm, SimplifyCFGPass(AggressiveSimplifyCFGOptions))
+        end
+    end
+
+    # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
+    # FIXME: we should fix the inliner so that inlined code gets optimized early-on
     add!(mpm, AlwaysInlinerPass())
 end
 
@@ -388,11 +400,7 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
         end
         add!(fpm, WarnMissedTransformationsPass())
     end
-    if uses_julia_runtime(job)
-        buildJuliaIntrinsicLoweringPipeline(mpm, job, opt_level)
-    else
-        
-    end
+    buildIntrinsicLoweringPipeline(mpm, job, opt_level)
     buildCleanupPipeline(mpm, job, opt_level)
 end
 
@@ -403,14 +411,14 @@ function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     global current_job
     current_job = job
 
-    @dispose pic=StandardInstrumentationCallbacks() pb=PassBuilder(tm,pic) begin
+    @dispose pb=PassBuilder(tm) begin
         @dispose mpm=NewPMModulePassManager(pb) begin
             buildNewPMPipeline!(mpm, job)
-            run!(mpm, mod, tm, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
+            run!(mpm, mod, tm)
         end
     end
     optimize_module!(job, mod)
-    run!(DeadArgumentEliminationPass(), mod, tm, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
+    run!(DeadArgumentEliminationPass(), mod, tm)
     return
 end
 

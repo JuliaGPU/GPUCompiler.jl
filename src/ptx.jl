@@ -131,14 +131,17 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         entry = lower_byval(job, mod, entry)
     end
 
+    # we emit properties (of the device and ptx isa) as private global constants,
+    # so run the optimizer so that they are inlined before the rest of the optimizer runs.
     if use_newpm
-        run!(mpm, mod, nothing, [BasicAA(), ScopedNoAliasAA(), TypeBasedAA()])
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, RecomputeGlobalsAAPass())
+            add!(mpm, GlobalOptPass())
+            run!(mpm, mod)
+        end
     else
         @dispose pm=ModulePassManager() begin
-            # we emit properties (of the device and ptx isa) as private global constants,
-            # so run the optimizer so that they are inlined before the rest of the optimizer runs.
             global_optimizer!(pm)
-
             run!(pm, mod)
         end
     end
@@ -182,9 +185,11 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
 end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                        mod::LLVM.Module, entry::LLVM.Function)
-    lower_trap!(m)
-    lower_unreachable!(m)
+                    mod::LLVM.Module, entry::LLVM.Function)
+    lower_trap!(mod)
+    for f in functions(mod)
+        lower_unreachable!(f)
+    end
 
     if job.config.kernel
         # add metadata annotations for the assembler to the module
