@@ -58,7 +58,10 @@ jobs:
           - branch: 'master'
             os: 'windows-latest'
             arch: 'x64'
-          # hangs
+          # hangs during compilation
+          - branch: 'release-1.10'
+            os: 'macOS-latest'
+            arch: 'x64'
           - branch: 'master'
             os: 'macOS-latest'
             arch: 'x64'
