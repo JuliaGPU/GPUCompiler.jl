@@ -3,18 +3,30 @@
 # final preparations for the module to be compiled to machine code
 # these passes should not be run when e.g. compiling to write to disk.
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    @dispose pm=ModulePassManager() begin
-        global current_job
-        current_job = job
+    global current_job
+    current_job = job
 
-        global_optimizer!(pm)
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, RecomputeGlobalsAAPass())
+            add!(mpm, GlobalOptPass())
+            resolve_cpu_references!(mod)
+            add!(legacy2newpm(resolve_cpu_references!), mpm)
+            add!(mpm, GlobalDCEPass())
+            add!(mpm, StripDeadPrototypesPass())
+            run!(mpm, mod)
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            global_optimizer!(pm)
 
-        add!(pm, ModulePass("ResolveCPUReferences", resolve_cpu_references!))
+            add!(pm, ModulePass("ResolveCPUReferences", resolve_cpu_references!))
 
-        global_dce!(pm)
-        strip_dead_prototypes!(pm)
+            global_dce!(pm)
+            strip_dead_prototypes!(pm)
 
-        run!(pm, mod)
+            run!(pm, mod)
+        end
     end
 
     return

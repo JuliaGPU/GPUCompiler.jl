@@ -82,17 +82,13 @@ end
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
-    @dispose pm=ModulePassManager() begin
-        # SPIR-V does not support trap, and has no mechanism to abort compute kernels
-        # (OpKill is only available in fragment execution mode)
-        add!(pm, ModulePass("RemoveTrap", rm_trap!))
+    # SPIR-V does not support trap, and has no mechanism to abort compute kernels
+    # (OpKill is only available in fragment execution mode)
+    rm_trap!(mod)
 
-        # the LLVM to SPIR-V translator does not support the freeze instruction
-        # (SPIRV-LLVM-Translator#1140)
-        add!(pm, ModulePass("RemoveFreeze", rm_freeze!))
-
-        run!(pm, mod)
-    end
+    # the LLVM to SPIR-V translator does not support the freeze instruction
+    # (SPIRV-LLVM-Translator#1140)
+    rm_freeze!(mod)
 
 
     # translate to SPIR-V

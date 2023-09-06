@@ -37,10 +37,7 @@ isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsic
 
 function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
-    @dispose pm=ModulePassManager() begin
-        add!(pm, ModulePass("LowerThrowExtra", lower_throw_extra!))
-        run!(pm, mod)
-    end
+    lower_throw_extra!(mod)
 
     if job.config.kernel
         # calling convention

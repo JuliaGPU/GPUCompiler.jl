@@ -96,6 +96,7 @@ function irgen(@nospecialize(job::CompilerJob))
             end
         end
 
+        # TODO: there's no good API to use internalize with the new pass manager yet
         @dispose pm=ModulePassManager() begin
             global current_job
             current_job = job

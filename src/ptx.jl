@@ -131,12 +131,19 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         entry = lower_byval(job, mod, entry)
     end
 
-    @dispose pm=ModulePassManager() begin
-        # we emit properties (of the device and ptx isa) as private global constants,
-        # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-        global_optimizer!(pm)
-
-        run!(pm, mod)
+    # we emit properties (of the device and ptx isa) as private global constants,
+    # so run the optimizer so that they are inlined before the rest of the optimizer runs.
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, RecomputeGlobalsAAPass())
+            add!(mpm, GlobalOptPass())
+            run!(mpm, mod)
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            global_optimizer!(pm)
+            run!(pm, mod)
+        end
     end
 
     return entry
@@ -145,6 +152,7 @@ end
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     tm = llvm_machine(job.config.target)
+    # TODO can't convert to newpm because speculative-execution doesn't have a parameter in the default PassBuilder parser
     @dispose pm=ModulePassManager() begin
         add_library_info!(pm, triple(mod))
         add_transform_info!(pm, tm)
@@ -177,12 +185,10 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
 end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                        mod::LLVM.Module, entry::LLVM.Function)
-    @dispose pm=ModulePassManager() begin
-        add!(pm, ModulePass("LowerTrap", lower_trap!))
-        add!(pm, FunctionPass("LowerUnreachable", lower_unreachable!))
-
-        run!(pm, mod)
+                    mod::LLVM.Module, entry::LLVM.Function)
+    lower_trap!(mod)
+    for f in functions(mod)
+        lower_unreachable!(f)
     end
 
     if job.config.kernel

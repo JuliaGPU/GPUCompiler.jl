@@ -14,6 +14,8 @@ using Scratch: @get_scratch!
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
 
+const use_newpm = LLVM.has_newpm()
+
 include("utils.jl")
 
 # compiler interface and implementations
