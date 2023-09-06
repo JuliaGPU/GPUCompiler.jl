@@ -515,7 +515,6 @@ end
 
 @testset "JuliaLang/julia#48097: kwcall inference in the presence of overlay method" begin
     mod = @eval module $(gensym())
-        using ..GPUCompiler
         child(; kwargs...) = return
         function parent()
             child(; a=1f0, b=1.0)
@@ -523,8 +522,7 @@ end
         end
 
         Base.Experimental.@MethodTable method_table
-        Base.Experimental.@overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} =
-        return
+        Base.Experimental.@overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} = return
     end
 
     ir = sprint(io->Native.code_llvm(io, mod.parent, Tuple{};
