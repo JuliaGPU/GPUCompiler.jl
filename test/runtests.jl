@@ -1,33 +1,16 @@
-using Test, Base.CoreLogging
-import Base.CoreLogging: Info
-
-import InteractiveUtils
-InteractiveUtils.versioninfo(verbose=true)
-
-using GPUCompiler
-
-using LLVM, LLVM.Interop
-
-include("testhelpers.jl")
-
-@testset "GPUCompiler" begin
-
+using GPUCompiler, LLVM
 GPUCompiler.reset_runtime()
 
-GPUCompiler.enable_timings()
+using InteractiveUtils
+@info "System information:\n" * sprint(io->versioninfo(io; verbose=true))
 
-include("util.jl")
-include("native.jl")
-include("ptx.jl")
-include("spirv.jl")
-include("bpf.jl")
-if !LLVM.is_asserts()
-    # XXX: GCN's non-0 stack address space triggers LLVM assertions due to Julia bugs
-    include("gcn.jl")
-end
-include("metal.jl")
-include("examples.jl")
+using ReTestItems
+runtests(GPUCompiler; nworkers=min(Sys.CPU_THREADS,4), nworker_threads=1,
+                      testitem_timeout=120) do ti
+    if ti.name == "GCN" && LLVM.is_asserts()
+        # XXX: GCN's non-0 stack address space triggers LLVM assertions due to Julia bugs
+        return false
+    end
 
-haskey(ENV, "CI") && GPUCompiler.timings()
-
+    true
 end

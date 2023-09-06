@@ -1,4 +1,4 @@
-@testset "examples" begin
+@testitem "examples" begin
 
 function find_sources(path::String, sources=String[])
     if isdir(path)
@@ -11,13 +11,13 @@ function find_sources(path::String, sources=String[])
     sources
 end
 
-examples_dir = joinpath(@__DIR__, "..", "examples")
-examples = find_sources(examples_dir)
-filter!(file -> readline(file) != "# EXCLUDE FROM TESTING", examples)
-filter!(file -> !occursin("Kaleidoscope", file), examples)
+dir = joinpath(@__DIR__, "..", "examples")
+files = find_sources(dir)
+filter!(file -> readline(file) != "# EXCLUDE FROM TESTING", files)
+filter!(file -> !occursin("Kaleidoscope", file), files)
 
-cd(examples_dir) do
-    examples = relpath.(examples, Ref(examples_dir))
+cd(dir) do
+    examples = relpath.(files, Ref(dir))
     @testset for example in examples
         cmd = `$(Base.julia_cmd()) --project=$(Base.active_project())`
         @test success(pipeline(`$cmd $example`, stderr=stderr))

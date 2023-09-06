@@ -58,9 +58,16 @@ jobs:
           - branch: 'master'
             os: 'windows-latest'
             arch: 'x64'
-          # hangs
+          # hangs during compilation
+          - branch: 'release-1.10'
+            os: 'macOS-latest'
+            arch: 'x64'
           - branch: 'master'
             os: 'macOS-latest'
+            arch: 'x64'
+          # compilation failure
+          - branch: 'release-1.8'
+            os: 'windows-latest'
             arch: 'x64'
     steps:
       - uses: actions/checkout@v3
@@ -80,20 +87,21 @@ jobs:
       # compile Julia
       - name: Compile Julia
         run: |
-          sed -i.bak 's/exit 2/exit 0/g' julia/deps/tools/jlchecksum
-          make -C julia -j $(nproc) FORCE_ASSERTIONS=1 LLVM_ASSERTIONS=1 JULIA_PRECOMPILE=0
-          echo $PWD/julia/usr/bin >> $GITHUB_PATH
+          mv julia ../  # move julia checkout out of the way, for ReTestItems.jl
+          sed -i.bak 's/exit 2/exit 0/g' ../julia/deps/tools/jlchecksum
+          make -C ../julia -j $(nproc) FORCE_ASSERTIONS=1 LLVM_ASSERTIONS=1 JULIA_PRECOMPILE=0
+          echo $PWD/../julia/usr/bin >> $GITHUB_PATH
         if: runner.os != 'Windows'
       - name: Compile Julia (in msys2)
         shell: msys2 {0}
         run: |
-          echo $PWD
-          sed -i.bak 's/exit 2/exit 0/g' julia/deps/tools/jlchecksum
+          mv julia ../  # move julia checkout out of the way, for ReTestItems.jl
+          sed -i.bak 's/exit 2/exit 0/g' ../julia/deps/tools/jlchecksum
           # XXX: workaround for JuliaLang/julia#48081
-          make -C julia/deps install-csl && \
-          cp ${MINGW_PREFIX}/lib/libmsvcrt.a ./julia/usr/lib/libmsvcrt.a && \
-          make -C julia -j $(nproc) FORCE_ASSERTIONS=1 LLVM_ASSERTIONS=1 JULIA_PRECOMPILE=0
-          echo $PWD/julia/usr/bin >> $GITHUB_PATH
+          make -C ../julia/deps install-csl && \
+          cp ${MINGW_PREFIX}/lib/libmsvcrt.a ../julia/usr/lib/libmsvcrt.a && \
+          make -C ../julia -j $(nproc) FORCE_ASSERTIONS=1 LLVM_ASSERTIONS=1 JULIA_PRECOMPILE=0
+          echo $PWD/../julia/usr/bin >> $GITHUB_PATH
         if: runner.os == 'Windows'
 
       # set-up packages

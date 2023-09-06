@@ -1,11 +1,11 @@
-using GPUCompiler
+@testsetup module Native
 
-if !@isdefined(TestRuntime)
-    include("../testhelpers.jl")
-end
+using GPUCompiler
 
 
 # create a native test compiler, and generate reflection methods for it
+
+include("runtime.jl")
 
 # local method table for device functions
 @static if isdefined(Base.Experimental, Symbol("@overlay"))
@@ -14,63 +14,65 @@ else
 const test_method_table = nothing
 end
 
-struct NativeCompilerParams <: AbstractCompilerParams
+struct CompilerParams <: AbstractCompilerParams
     entry_safepoint::Bool
     method_table
 
-    NativeCompilerParams(entry_safepoint::Bool=false, method_table=test_method_table) =
+    CompilerParams(entry_safepoint::Bool=false, method_table=test_method_table) =
         new(entry_safepoint, method_table)
 end
 
-NativeCompilerJob = CompilerJob{NativeCompilerTarget,NativeCompilerParams}
+NativeCompilerJob = CompilerJob{NativeCompilerTarget,CompilerParams}
+GPUCompiler.runtime_module(::NativeCompilerJob) = TestRuntime
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
-GPUCompiler.runtime_module(::NativeCompilerJob) = TestRuntime
 
-function native_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
+function create_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                     entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
                     method_table=test_method_table, kwargs...)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget()
-    params = NativeCompilerParams(entry_safepoint, method_table)
+    params = CompilerParams(entry_safepoint, method_table)
     config = CompilerConfig(target, params; kernel, entry_abi, always_inline)
     CompilerJob(source, config), kwargs
 end
 
-function native_code_typed(@nospecialize(func), @nospecialize(types); kwargs...)
-    job, kwargs = native_job(func, types; kwargs...)
+function code_typed(@nospecialize(func), @nospecialize(types); kwargs...)
+    job, kwargs = create_job(func, types; kwargs...)
     GPUCompiler.code_typed(job; kwargs...)
 end
 
-function native_code_warntype(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
-    job, kwargs = native_job(func, types; kwargs...)
+function code_warntype(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
+    job, kwargs = create_job(func, types; kwargs...)
     GPUCompiler.code_warntype(io, job; kwargs...)
 end
 
-function native_code_llvm(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
-    job, kwargs = native_job(func, types; kwargs...)
+function code_llvm(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
+    job, kwargs = create_job(func, types; kwargs...)
     GPUCompiler.code_llvm(io, job; kwargs...)
 end
 
-function native_code_native(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
-    job, kwargs = native_job(func, types; kwargs...)
+function code_native(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
+    job, kwargs = create_job(func, types; kwargs...)
     GPUCompiler.code_native(io, job; kwargs...)
 end
 
 # aliases without ::IO argument
 for method in (:code_warntype, :code_llvm, :code_native)
-    native_method = Symbol("native_$(method)")
+    method = Symbol("$(method)")
     @eval begin
-        $native_method(@nospecialize(func), @nospecialize(types); kwargs...) =
-            $native_method(stdout, func, types; kwargs...)
+        $method(@nospecialize(func), @nospecialize(types); kwargs...) =
+            $method(stdout, func, types; kwargs...)
     end
 end
 
 # simulates codegen for a kernel function: validates by default
-function native_code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
-    job, kwargs = native_job(func, types; kernel=true, kwargs...)
+function code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
+    job, kwargs = create_job(func, types; kernel=true, kwargs...)
     JuliaContext() do ctx
         GPUCompiler.compile(:asm, job; kwargs...)
     end
+end
+
 end

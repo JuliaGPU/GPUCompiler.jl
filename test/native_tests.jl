@@ -1,11 +1,11 @@
-@testset "native" begin
+@testitem "native" setup=[Native, Helpers] begin
 
-include("definitions/native.jl")
+using Test
 
 ############################################################################################
 
 @testset "reflection" begin
-    job, _ = native_job(identity, (Int,))
+    job, _ = Native.create_job(identity, (Int,))
 
     @test only(GPUCompiler.code_lowered(job)) isa Core.CodeInfo
 
@@ -27,7 +27,7 @@ end
         struct MyCallable end
         (::MyCallable)(a, b) = a+b
 
-        (ci, rt) = native_code_typed(MyCallable(), (Int, Int), kernel=false)[1]
+        (ci, rt) = Native.code_typed(MyCallable(), (Int, Int), kernel=false)[1]
         @test ci.slottypes[1] == Core.Compiler.Const(MyCallable())
     end
 
@@ -37,7 +37,7 @@ end
             return inner(x)
         end
 
-        job, _ = native_job(outer, (Int,))
+        job, _ = Native.create_job(outer, (Int,))
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job)
 
@@ -56,7 +56,7 @@ end
         @noinline inner(x) = x+1
         foo(x) = sum(inner, fill(x, 10, 10))
 
-        job, _ = native_job(foo, (Float64,))
+        job, _ = Native.create_job(foo, (Float64,))
         JuliaContext() do ctx
             # shouldn't segfault
             ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
@@ -79,17 +79,17 @@ end
         @eval $kernel(i) = $child(i)+1
 
         target = NativeCompilerTarget()
-        params = TestCompilerParams()
+        params = Native.CompilerParams()
         config = CompilerConfig(target, params; kernel=false)
 
         # smoke test
-        job, _ = native_job(eval(kernel), (Int64,))
+        job, _ = Native.create_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
         @test contains(ir, r"add i64 %\d+, 1")
 
         # basic redefinition
         @eval $kernel(i) = $child(i)+2
-        job, _ = native_job(eval(kernel), (Int64,))
+        job, _ = Native.create_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
         @test contains(ir, r"add i64 %\d+, 2")
 
@@ -170,7 +170,7 @@ end
     valid_kernel() = return
     invalid_kernel() = 1
 
-    ir = sprint(io->native_code_llvm(io, valid_kernel, Tuple{}; optimize=false, dump_module=true))
+    ir = sprint(io->Native.code_llvm(io, valid_kernel, Tuple{}; optimize=false, dump_module=true))
 
     # module should contain our function + a generic call wrapper
     @test occursin(r"define\ .* void\ @.*julia_valid_kernel.*\(\)"x, ir)
@@ -179,13 +179,13 @@ end
     # there should be no debug metadata
     @test !occursin("!dbg", ir)
 
-    @test native_code_llvm(devnull, invalid_kernel, Tuple{}) == nothing
-    @test_throws KernelError native_code_llvm(devnull, invalid_kernel, Tuple{}; kernel=true) == nothing
+    @test Native.code_llvm(devnull, invalid_kernel, Tuple{}) == nothing
+    @test_throws KernelError Native.code_llvm(devnull, invalid_kernel, Tuple{}; kernel=true) == nothing
 end
 
 @testset "unbound typevars" begin
     invalid_kernel() where {unbound} = return
-    @test_throws KernelError native_code_llvm(devnull, invalid_kernel, Tuple{})
+    @test_throws KernelError Native.code_llvm(devnull, invalid_kernel, Tuple{})
 end
 
 @testset "child functions" begin
@@ -193,7 +193,7 @@ end
     @noinline child(i) = sink(i)
     parent(i) = child(i)
 
-    ir = sprint(io->native_code_llvm(io, parent, Tuple{Int}))
+    ir = sprint(io->Native.code_llvm(io, parent, Tuple{Int}))
     @test occursin(r"call .+ @julia.+child.+", ir)
 end
 
@@ -204,7 +204,7 @@ end
         Base.pointerset(a, 0, mod1(i,10), 8)
     end
 
-    ir = sprint(io->native_code_llvm(io, foobar, Tuple{Ptr{Int},Int}))
+    ir = sprint(io->Native.code_llvm(io, foobar, Tuple{Ptr{Int},Int}))
     @test !occursin("jlsys_", ir)
 end
 
@@ -215,7 +215,8 @@ end
     end
 
     # this used to throw an LLVM assertion (#223)
-    native_code_llvm(devnull, kernel, Tuple{Vector{Int}}; kernel=true)
+    Native.code_llvm(devnull, kernel, Tuple{Vector{Int}}; kernel=true)
+    @test "We did not crash!" != ""
 end
 
 @testset "CUDAnative.jl#278" begin
@@ -223,67 +224,74 @@ end
     # NOTE: this isn't fixed, but surfaces here due to bad inference of checked_sub
     # NOTE: with the fix to print_to_string this doesn't error anymore,
     #       but still have a test to make sure it doesn't regress
-    native_code_llvm(devnull, Base.checked_sub, Tuple{Int,Int}; optimize=false)
-    native_code_llvm(devnull, Base.checked_sub, Tuple{Int,Int}; optimize=false)
+    Native.code_llvm(devnull, Base.checked_sub, Tuple{Int,Int}; optimize=false)
+    Native.code_llvm(devnull, Base.checked_sub, Tuple{Int,Int}; optimize=false)
 
     # breaking recursion in print_to_string makes it possible to compile
     # even in the presence of the above bug
-    native_code_llvm(devnull, Base.print_to_string, Tuple{Int,Int}; optimize=false)
+    Native.code_llvm(devnull, Base.print_to_string, Tuple{Int,Int}; optimize=false)
+
+    @test "We did not crash!" != ""
 end
 
 @testset "LLVM D32593" begin
-    @eval struct D32593_struct
-        foo::Float32
-        bar::Float32
+    mod = @eval module $(gensym())
+        struct D32593_struct
+            foo::Float32
+            bar::Float32
+        end
+
+        D32593(ptr) = unsafe_load(ptr).foo
     end
 
-    D32593(ptr) = unsafe_load(ptr).foo
-
-    native_code_llvm(devnull, D32593, Tuple{Ptr{D32593_struct}})
+    Native.code_llvm(devnull, mod.D32593, Tuple{Ptr{mod.D32593_struct}})
+    @test "We did not crash!" != ""
 end
 
 @testset "slow abi" begin
     x = 2
     f = () -> x+1
-    ir = sprint(io->native_code_llvm(io, f, Tuple{}, entry_abi=:func, dump_module=true))
+    ir = sprint(io->Native.code_llvm(io, f, Tuple{}, entry_abi=:func, dump_module=true))
     @test occursin(r"define nonnull {}\* @jfptr", ir)
     @test occursin(r"define internal fastcc .+ @julia", ir)
     @test occursin(r"call fastcc .+ @julia", ir)
 end
 
 @testset "function entry safepoint emission" begin
-    ir = sprint(io->native_code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true))
+    ir = sprint(io->Native.code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true))
     @test !occursin("%safepoint", ir)
 
     if v"1.9.0-DEV.1660" <= VERSION < v"1.9.0-alpha1.57" || VERSION >= v"1.10-"
-        ir = sprint(io->native_code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true))
+        ir = sprint(io->Native.code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true))
         @test occursin("%safepoint", ir)
     end
 end
 
 @testset "always_inline" begin
-    @eval f_expensive(x) = $(foldl((e, _) -> :(sink($e) + sink(x)), 1:100; init=:x))
-    function g(x)
-        f_expensive(x)
-        return
-    end
-    function h(x)
-        f_expensive(x)
-        return
+    mod = @eval module $(gensym())
+        f_expensive(x) = $(foldl((e, _) -> :($sink($e) + $sink(x)), 1:100; init=:x))
+        function g(x)
+            f_expensive(x)
+            return
+        end
+        function h(x)
+            f_expensive(x)
+            return
+        end
     end
 
-    ir = sprint(io->native_code_llvm(io, g, Tuple{Int64}; dump_module=true, kernel=true))
+    ir = sprint(io->Native.code_llvm(io, mod.g, Tuple{Int64}; dump_module=true, kernel=true))
     @test occursin(r"^define.*julia_f_expensive"m, ir)
 
-    ir = sprint(io->native_code_llvm(io, g, Tuple{Int64}; dump_module=true, kernel=true,
+    ir = sprint(io->Native.code_llvm(io, mod.g, Tuple{Int64}; dump_module=true, kernel=true,
                                      always_inline=true))
     @test !occursin(r"^define.*julia_f_expensive"m, ir)
 
-    ir = sprint(io->native_code_llvm(io, h, Tuple{Int64}; dump_module=true, kernel=true,
+    ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true,
                                      always_inline=true))
     @test !occursin(r"^define.*julia_f_expensive"m, ir)
 
-    ir = sprint(io->native_code_llvm(io, h, Tuple{Int64}; dump_module=true, kernel=true))
+    ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true))
     @test occursin(r"^define.*julia_f_expensive"m, ir)
 end
 
@@ -302,7 +310,7 @@ end
         Nothing, Tuple{})
     end
 
-    ir = sprint(io->native_code_llvm(io, convergent_barrier, Tuple{}; dump_module=true, raw=true))
+    ir = sprint(io->Native.code_llvm(io, convergent_barrier, Tuple{}; dump_module=true, raw=true))
     @test occursin(r"attributes #. = \{ convergent \}", ir)
 end
 
@@ -316,17 +324,19 @@ end
     valid_kernel() = return
     invalid_kernel() = 1
 
-    @test native_code_native(devnull, valid_kernel, Tuple{}) == nothing
-    @test native_code_native(devnull, invalid_kernel, Tuple{}) == nothing
-    @test_throws KernelError native_code_native(devnull, invalid_kernel, Tuple{}; kernel=true)
+    @test Native.code_native(devnull, valid_kernel, Tuple{}) == nothing
+    @test Native.code_native(devnull, invalid_kernel, Tuple{}) == nothing
+    @test_throws KernelError Native.code_native(devnull, invalid_kernel, Tuple{}; kernel=true)
 end
 
 @testset "idempotency" begin
     # bug: generate code twice for the same kernel (jl_to_ptx wasn't idempotent)
 
     kernel() = return
-    native_code_native(devnull, kernel, Tuple{})
-    native_code_native(devnull, kernel, Tuple{})
+    Native.code_native(devnull, kernel, Tuple{})
+    Native.code_native(devnull, kernel, Tuple{})
+
+    @test "We did not crash!" != ""
 end
 
 @testset "compile for host after gpu" begin
@@ -342,7 +352,7 @@ end
         return
     end
 
-    native_code_native(devnull, fromptx, Tuple{})
+    Native.code_native(devnull, fromptx, Tuple{})
     @test fromhost() == 11
 end
 
@@ -352,25 +362,23 @@ end
 
 @testset "errors" begin
 
-@eval Main begin
 struct CleverType{T}
     x::T
 end
 Base.unsafe_trunc(::Type{Int}, x::CleverType) = unsafe_trunc(Int, x.x)
-end
 
 @testset "non-isbits arguments" begin
     foobar(i) = (sink(unsafe_trunc(Int,i)); return)
 
     @test_throws_message(KernelError,
-                         native_code_execution(foobar, Tuple{BigInt})) do msg
+                         Native.code_execution(foobar, Tuple{BigInt})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("BigInt", msg)
     end
 
     # test that we get information about fields and reason why something is not isbits
     @test_throws_message(KernelError,
-                         native_code_execution(foobar, Tuple{CleverType{BigInt}})) do msg
+                         Native.code_execution(foobar, Tuple{CleverType{BigInt}})) do msg
         occursin("passing and using non-bitstype argument", msg) &&
         occursin("CleverType", msg) &&
         occursin("BigInt", msg)
@@ -381,7 +389,7 @@ end
     foobar(i) = println(i)
 
     @test_throws_message(InvalidIRError,
-                         native_code_execution(foobar, Tuple{Int})) do msg
+                         Native.code_execution(foobar, Tuple{Int})) do msg
         occursin("invalid LLVM IR", msg) &&
         (occursin(GPUCompiler.RUNTIME_FUNCTION, msg) ||
          occursin(GPUCompiler.UNKNOWN_FUNCTION, msg) ||
@@ -395,7 +403,7 @@ end
     foobar(p) = (unsafe_store!(p, ccall(:time, Cint, ())); nothing)
 
     @test_throws_message(InvalidIRError,
-                         native_code_execution(foobar, Tuple{Ptr{Int}})) do msg
+                         Native.code_execution(foobar, Tuple{Ptr{Int}})) do msg
         if VERSION >= v"1.11-"
             occursin("invalid LLVM IR", msg) &&
             occursin(GPUCompiler.LAZY_FUNCTION, msg) &&
@@ -413,7 +421,7 @@ end
     kernel() = (undefined; return)
 
     @test_throws_message(InvalidIRError,
-                         native_code_execution(kernel, Tuple{})) do msg
+                         Native.code_execution(kernel, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DELAYED_BINDING, msg) &&
         occursin("use of 'undefined'", msg) &&
@@ -422,15 +430,17 @@ end
 end
 
 @testset "dynamic call (invoke)" begin
-    @eval @noinline nospecialize_child(@nospecialize(i)) = i
-    kernel(a, b) = (unsafe_store!(b, nospecialize_child(a)); return)
+    mod = @eval module $(gensym())
+        @noinline nospecialize_child(@nospecialize(i)) = i
+        kernel(a, b) = (unsafe_store!(b, nospecialize_child(a)); return)
+    end
 
     @test_throws_message(InvalidIRError,
-                         native_code_execution(kernel, Tuple{Int,Ptr{Int}})) do msg
+                         Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to nospecialize_child", msg) &&
-        occursin(r"\[1\] .+kernel", msg)
+        occursin(r"\[1\] kernel", msg)
     end
 end
 
@@ -438,7 +448,7 @@ end
     func() = println(1)
 
     @test_throws_message(InvalidIRError,
-                         native_code_execution(func, Tuple{})) do msg
+                         Native.code_execution(func, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to println", msg) &&
@@ -458,7 +468,7 @@ end
         child() = 0
     end
 
-    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}))
+    ir = sprint(io->Native.code_llvm(io, mod.kernel, Tuple{}))
     @test occursin("ret i64 0", ir)
 
     mod = @eval module $(gensym())
@@ -476,7 +486,7 @@ end
         Base.Experimental.@overlay method_table child() = 1
     end
 
-    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{}; mod.method_table))
+    ir = sprint(io->Native.code_llvm(io, mod.kernel, Tuple{}; mod.method_table))
     @test occursin("ret i64 1", ir)
 end
 
@@ -497,7 +507,7 @@ end
             (ccall("extern __nv_isnanf", llvmcall, Int32, (Cfloat,), x)) != 0
     end
 
-    ir = sprint(io->native_code_llvm(io, mod.kernel, Tuple{Int, Int};
+    ir = sprint(io->Native.code_llvm(io, mod.kernel, Tuple{Int, Int};
                                      debuginfo=:none, mod.method_table))
     @test !occursin("apply_generic", ir)
     @test occursin("llvm.floor", ir)
@@ -505,7 +515,6 @@ end
 
 @testset "JuliaLang/julia#48097: kwcall inference in the presence of overlay method" begin
     mod = @eval module $(gensym())
-        using ..GPUCompiler
         child(; kwargs...) = return
         function parent()
             child(; a=1f0, b=1.0)
@@ -513,11 +522,10 @@ end
         end
 
         Base.Experimental.@MethodTable method_table
-        Base.Experimental.@overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} =
-        return
+        Base.Experimental.@overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} = return
     end
 
-    ir = sprint(io->native_code_llvm(io, mod.parent, Tuple{};
+    ir = sprint(io->Native.code_llvm(io, mod.parent, Tuple{};
                                      debuginfo=:none, mod.method_table))
     @test !occursin("jl_invoke", ir)
     @test !occursin("apply_iterate", ir)

@@ -1,6 +1,6 @@
-@testset "PTX" begin
+@testitem "PTX" setup=[PTX, Helpers] begin
 
-include("definitions/ptx.jl")
+using LLVM
 
 ############################################################################################
 
@@ -8,7 +8,7 @@ include("definitions/ptx.jl")
 
 @testset "exceptions" begin
     foobar() = throw(DivideError())
-    ir = sprint(io->ptx_code_llvm(io, foobar, Tuple{}))
+    ir = sprint(io->PTX.code_llvm(io, foobar, Tuple{}))
 
     # plain exceptions should get lowered to a call to the GPU run-time
     @test occursin("gpu_report_exception", ir)
@@ -18,26 +18,28 @@ end
 
 @testset "kernel functions" begin
 @testset "kernel argument attributes" begin
-    kernel(x) = return
+    mod = @eval module $(gensym())
+        kernel(x) = return
 
-    @eval struct Aggregate
-        x::Int
+        struct Aggregate
+            x::Int
+        end
     end
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}))
+    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{mod.Aggregate}))
     @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\* ", ir)
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Aggregate}; kernel=true))
+    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{mod.Aggregate}; kernel=true))
     @test occursin(r"@\w*kernel\w*\(.*({ i64 }|\[1 x i64\]) ", ir)
 end
 
 @testset "property_annotations" begin
     kernel() = return
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}; dump_module=true))
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{}; dump_module=true))
     @test !occursin("nvvm.annotations", ir)
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
                                   dump_module=true, kernel=true))
     @test occursin("nvvm.annotations", ir)
     @test !occursin("maxntid", ir)
@@ -45,23 +47,23 @@ end
     @test !occursin("minctasm", ir)
     @test !occursin("maxnreg", ir)
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
                                   dump_module=true, kernel=true, maxthreads=42))
     @test occursin("maxntidx\", i32 42", ir)
     @test occursin("maxntidy\", i32 1", ir)
     @test occursin("maxntidz\", i32 1", ir)
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
                                   dump_module=true, kernel=true, minthreads=42))
     @test occursin("reqntidx\", i32 42", ir)
     @test occursin("reqntidy\", i32 1", ir)
     @test occursin("reqntidz\", i32 1", ir)
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
                                   dump_module=true, kernel=true, blocks_per_sm=42))
     @test occursin("minctasm\", i32 42", ir)
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
                                   dump_module=true, kernel=true, maxregs=42))
     @test occursin("maxnreg\", i32 42", ir)
 end
@@ -69,10 +71,10 @@ end
 LLVM.version() >= v"8" && @testset "calling convention" begin
     kernel() = return
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}; dump_module=true))
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{}; dump_module=true))
     @test !occursin("ptx_kernel", ir)
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{};
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
                                   dump_module=true, kernel=true))
     @test occursin("ptx_kernel", ir)
 end
@@ -82,27 +84,29 @@ end
 
     kernel() = return
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}))
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{}))
     @test occursin(r"@\w*kernel\w*\(\)", ir)
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{}; kernel=true))
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{}; kernel=true))
     @test occursin(r"@\w*kernel\w*\(\[1 x i64\] %state\)", ir)
 
     # state should only passed to device functions that use it
 
-    @eval @noinline kernel_state_child1(ptr) = unsafe_load(ptr)
-    @eval @noinline function kernel_state_child2()
-        data = ptx_kernel_state().data
-        ptr = reinterpret(Ptr{Int}, data)
-        unsafe_load(ptr)
+    mod = @eval module $(gensym())
+        @noinline child1(ptr) = unsafe_load(ptr)
+        @noinline function child2()
+            data = $PTX.kernel_state().data
+            ptr = reinterpret(Ptr{Int}, data)
+            unsafe_load(ptr)
+        end
+
+        function kernel(ptr)
+            unsafe_store!(ptr, child1(ptr) + child2())
+            return
+        end
     end
 
-    function kernel(ptr)
-        unsafe_store!(ptr, kernel_state_child1(ptr) + kernel_state_child2())
-        return
-    end
-
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Ptr{Int64}};
+    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{Ptr{Int64}};
                                   kernel=true, dump_module=true))
 
     # kernel should take state argument before all else
@@ -134,7 +138,7 @@ end
         return
     end
 
-    asm = sprint(io->ptx_code_native(io, parent, Tuple{Int64}))
+    asm = sprint(io->PTX.code_native(io, parent, Tuple{Int64}))
     @test occursin(r"call.uni\s+julia_.*child_"m, asm)
 end
 
@@ -145,29 +149,29 @@ end
         return
     end
 
-    asm = sprint(io->ptx_code_native(io, entry, Tuple{Int64}; kernel=true))
+    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64}; kernel=true))
     @test occursin(r"\.visible \.entry \w*entry", asm)
     @test !occursin(r"\.visible \.func \w*nonentry", asm)
     @test occursin(r"\.func \w*nonentry", asm)
 
 @testset "property_annotations" begin
-    asm = sprint(io->ptx_code_native(io, entry, Tuple{Int64}; kernel=true))
+    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64}; kernel=true))
     @test !occursin("maxntid", asm)
 
-    asm = sprint(io->ptx_code_native(io, entry, Tuple{Int64};
+    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64};
                                          kernel=true, maxthreads=42))
     @test occursin(".maxntid 42, 1, 1", asm)
 
-    asm = sprint(io->ptx_code_native(io, entry, Tuple{Int64};
+    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64};
                                          kernel=true, minthreads=42))
     @test occursin(".reqntid 42, 1, 1", asm)
 
-    asm = sprint(io->ptx_code_native(io, entry, Tuple{Int64};
+    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64};
                                          kernel=true, blocks_per_sm=42))
     @test occursin(".minnctapersm 42", asm)
 
     if LLVM.version() >= v"4.0"
-        asm = sprint(io->ptx_code_native(io, entry, Tuple{Int64};
+        asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64};
                                              kernel=true, maxregs=42))
         @test occursin(".maxnreg 42", asm)
     end
@@ -184,7 +188,7 @@ end
         return
     end
 
-    asm = sprint(io->ptx_code_native(io, parent1, Tuple{Int}))
+    asm = sprint(io->PTX.code_native(io, parent1, Tuple{Int}))
     @test occursin(r".func \w*child_", asm)
 
     function parent2(i)
@@ -192,7 +196,7 @@ end
         return
     end
 
-    asm = sprint(io->ptx_code_native(io, parent2, Tuple{Int}))
+    asm = sprint(io->PTX.code_native(io, parent2, Tuple{Int}))
     @test occursin(r".func \w*child_", asm)
 end
 
@@ -205,13 +209,17 @@ end
         child1(i) + child2(i)
         return
     end
-    ptx_code_native(devnull, parent1, Tuple{Int})
+    asm = sprint(io->PTX.code_native(io, parent1, Tuple{Int}))
+    @test occursin(r".func \w*child1_", asm)
+    @test occursin(r".func \w*child2_", asm)
 
     function parent2(i)
         child1(i+1) + child2(i+1)
         return
     end
-    ptx_code_native(devnull, parent2, Tuple{Int})
+    asm = sprint(io->PTX.code_native(io, parent2, Tuple{Int}))
+    @test occursin(r".func \w*child1_", asm)
+    @test occursin(r".func \w*child2_", asm)
 end
 
 @testset "indirect sysimg function use" begin
@@ -226,7 +234,7 @@ end
         return
     end
 
-    asm = sprint(io->ptx_code_native(io, kernel, Tuple{Ptr{Int32}}))
+    asm = sprint(io->PTX.code_native(io, kernel, Tuple{Ptr{Int32}}))
     @test !occursin("jl_throw", asm)
     @test !occursin("jl_invoke", asm)   # forced recompilation should still not invoke
 end
@@ -237,7 +245,8 @@ end
         unsafe_trunc(Int, x)
         return
     end
-    ptx_code_native(devnull, kernel, Tuple{Float64})
+    PTX.code_native(devnull, kernel, Tuple{Float64})
+    @test "We did not crash!" != ""
 end
 
 @testset "exception arguments" begin
@@ -245,27 +254,29 @@ end
         unsafe_store!(a, trunc(Int, unsafe_load(a)))
         return
     end
-
-    ptx_code_native(devnull, kernel, Tuple{Ptr{Float64}})
+    PTX.code_native(devnull, kernel, Tuple{Ptr{Float64}})
+    @test "We did not crash!" != ""
 end
 
 @testset "GC and TLS lowering" begin
-    @eval mutable struct PleaseAllocate
-        y::Csize_t
+    mod = @eval module $(gensym())
+        mutable struct PleaseAllocate
+            y::Csize_t
+        end
+
+        # common pattern in Julia 0.7: outlined throw to avoid a GC frame in the calling code
+        @noinline function inner(x)
+            sink(x.y)
+            nothing
+        end
+
+        function kernel(i)
+            inner(PleaseAllocate(Csize_t(42)))
+            nothing
+        end
     end
 
-    # common pattern in Julia 0.7: outlined throw to avoid a GC frame in the calling code
-    @noinline function inner(x)
-        sink(x.y)
-        nothing
-    end
-
-    function kernel(i)
-        inner(PleaseAllocate(Csize_t(42)))
-        nothing
-    end
-
-    asm = sprint(io->ptx_code_native(io, kernel, Tuple{Int}))
+    asm = sprint(io->PTX.code_native(io, mod.kernel, Tuple{Int}))
     @test occursin("gpu_gc_pool_alloc", asm)
 
     # make sure that we can still ellide allocations
@@ -281,7 +292,7 @@ end
         return nothing
     end
 
-    asm = sprint(io->ptx_code_native(io, ref_kernel, Tuple{Ptr{Int64}, Int}))
+    asm = sprint(io->PTX.code_native(io, ref_kernel, Tuple{Ptr{Int64}, Int}))
 
 
     @test !occursin("gpu_gc_pool_alloc", asm)
@@ -298,9 +309,9 @@ end
         return
     end
 
-    ir = sprint(io->ptx_code_llvm(io, kernel, Tuple{Float32,Ptr{Float32}}))
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Float32,Ptr{Float32}}))
     @test occursin("jl_box_float32", ir)
-    ptx_code_native(devnull, kernel, Tuple{Float32,Ptr{Float32}})
+    PTX.code_native(devnull, kernel, Tuple{Float32,Ptr{Float32}})
 end
 
 end

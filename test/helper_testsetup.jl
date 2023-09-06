@@ -1,6 +1,8 @@
-## test helpers
+@testsetup module Helpers
 
 using Test
+
+export @test_throws_message, sink
 
 # @test_throw, with additional testing for the exception message
 macro test_throws_message(f, typ, ex...)
@@ -40,19 +42,4 @@ end
     return :(Base.llvmcall($llvmcall_str, T, Tuple{T}, i))
 end
 
-
-# the GPU runtime library
-module TestRuntime
-    # dummy methods
-    signal_exception() = return
-    # HACK: if malloc returns 0 or traps, all calling functions (like jl_box_*)
-    #       get reduced to a trap, which really messes with our test suite.
-    malloc(sz) = Ptr{Cvoid}(Int(0xDEADBEEF))
-    report_oom(sz) = return
-    report_exception(ex) = return
-    report_exception_name(ex) = return
-    report_exception_frame(idx, func, file, line) = return
 end
-
-struct TestCompilerParams <: AbstractCompilerParams end
-GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
