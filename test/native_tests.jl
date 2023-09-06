@@ -474,11 +474,7 @@ end
     mod = @eval module $(gensym())
         using ..GPUCompiler
 
-        @static if isdefined(Base.Experimental, Symbol("@overlay"))
         Base.Experimental.@MethodTable(method_table)
-        else
-        const method_table = nothing
-        end
 
         kernel() = child()
         child() = 0

@@ -8,11 +8,7 @@ using GPUCompiler
 include("runtime.jl")
 
 # local method table for device functions
-@static if isdefined(Base.Experimental, Symbol("@overlay"))
 Base.Experimental.@MethodTable(test_method_table)
-else
-const test_method_table = nothing
-end
 
 struct CompilerParams <: AbstractCompilerParams
     entry_safepoint::Bool
