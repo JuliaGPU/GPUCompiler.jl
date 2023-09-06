@@ -17,6 +17,7 @@ using Core: MethodInstance, CodeInstance, CodeInfo
 const use_newpm = LLVM.has_newpm()
 
 include("utils.jl")
+include("mangling.jl")
 
 # compiler interface and implementations
 include("interface.jl")
