@@ -67,10 +67,16 @@ function create_compile_cache()
     global compile_cache = dir
 end
 
+# remove the existing cache
+# NOTE: call this function from global scope, so any change triggers recompilation.
 function reset_compile_cache()
     dir = @get_scratch!("compiled")
-    rm(dir; force=true, recursive=true)
-    create_compile_cache()
+    lock(runtime_lock) do
+        rm(dir; force=true, recursive=true)
+        create_compile_cache()
+    end
+
+    return
 end
 
 end # module
