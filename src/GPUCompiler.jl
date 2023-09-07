@@ -51,7 +51,10 @@ compile_cache = "" # defined in __init__()
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
+    create_compile_cache()
+end
 
+function create_compile_cache()
     dir = @get_scratch!("compiled")
     ## add the Julia version
     dir = joinpath(dir, "v$(VERSION.major).$(VERSION.minor)")
@@ -62,6 +65,12 @@ function __init__()
     end
     mkpath(dir)
     global compile_cache = dir
+end
+
+function reset_compile_cache()
+    dir = @get_scratch!("compiled")
+    rm(dir; force=true, recursive=true)
+    create_compile_cache()
 end
 
 end # module
