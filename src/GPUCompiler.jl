@@ -78,5 +78,7 @@ function reset_compile_cache()
 
     return
 end
+# backwards compatibility
+const reset_runtime = reset_compile_cache
 
 end # module
