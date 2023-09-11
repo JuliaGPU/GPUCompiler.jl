@@ -32,11 +32,9 @@ function check_method(@nospecialize(job::CompilerJob))
     if job.config.kernel
         rt = typeinf_type(job.source; interp=get_interpreter(job))
 
-        if rt != Nothing
+        if rt != Nothing && rt != Union{}
             throw(KernelError(job, "kernel returns a value of type `$rt`",
-                """Make sure your kernel function ends in `return`, `return nothing` or `nothing`.
-                   If the returned value is of type `Union{}`, your Julia code probably throws an exception.
-                   Inspect the code with `@device_code_warntype` for more details."""))
+                """Make sure your kernel function ends in `return`, `return nothing` or `nothing`."""))
         end
     end
 
