@@ -343,7 +343,6 @@ end
 # https://reviews.llvm.org/D79744
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)
-    @compiler_assert return_type(ft) == LLVM.VoidType() job
     @timeit_debug to "lower byval" begin
 
     # find the byval parameters
