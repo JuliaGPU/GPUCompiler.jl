@@ -356,7 +356,6 @@ end
 # Metal doesn't support passing valuse, so we need to convert those to references instead
 function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)
-    @compiler_assert return_type(ft) == LLVM.VoidType() job
 
     # generate the new function type & definition
     args = classify_arguments(job, ft)

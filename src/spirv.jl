@@ -220,7 +220,6 @@ end
 # wrap byval pointers in a single-value struct
 function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)::LLVM.FunctionType
-    @compiler_assert return_type(ft) == LLVM.VoidType() job
 
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
@@ -253,7 +252,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         end
         push!(new_types, typ)
     end
-    new_ft = LLVM.FunctionType(LLVM.VoidType(), new_types)
+    new_ft = LLVM.FunctionType(return_type(ft), new_types)
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
     for (arg, new_arg) in zip(parameters(f), parameters(new_f))
