@@ -433,16 +433,16 @@ const __llvm_initialized = Ref(false)
                 empty!(f)
             end
         end
-
-        if should_verify()
-            @timeit_debug to "verification" verify(ir)
-        end
     end
 
     if validate
         @timeit_debug to "Validation" begin
             check_ir(job, ir)
         end
+    end
+
+    if should_verify()
+        @timeit_debug to "verification" verify(ir)
     end
 
     return ir, (; entry, compiled)
