@@ -54,7 +54,7 @@ end
     @test_throws_message(InvalidIRError,
                          SPIRV.code_llvm(devnull, kernel, Tuple{Ptr{Float16}, Float16};
                                          supports_fp16=false, validate=true)) do msg
-        occursin("unsupported unsupported use of half value", msg) &&
+        occursin("unsupported use of half value", msg) &&
         occursin("[1] unsafe_store!", msg) &&
         occursin(r"\[2\] .*kernel", msg)
     end
@@ -62,7 +62,7 @@ end
     @test_throws_message(InvalidIRError,
                          SPIRV.code_llvm(devnull, kernel, Tuple{Ptr{Float64}, Float64};
                                          supports_fp64=false, validate=true)) do msg
-        occursin("unsupported unsupported use of double value", msg) &&
+        occursin("unsupported use of double value", msg) &&
         occursin("[1] unsafe_store!", msg) &&
         occursin(r"\[2\] .*kernel", msg)
     end
