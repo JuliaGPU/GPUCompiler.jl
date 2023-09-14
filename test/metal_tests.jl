@@ -77,6 +77,14 @@ end
     @test !occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
 end
 
+@testset "vector intrinsics" begin
+    foo(x, y) = ccall("llvm.smax.v2i64", llvmcall, NTuple{2, VecElement{Int64}},
+                      (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}), x, y)
+
+    ir = sprint(io->Metal.code_llvm(io, foo, (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}})))
+    @test occursin("air.max.v2s64", ir)
+end
+
 end
 
 end
