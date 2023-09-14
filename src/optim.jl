@@ -38,7 +38,9 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
     add!(mpm, NewPMFunctionPassManager) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
-        if opt_level >= 2
+        if false && opt_level >= 2
+            # XXX: we disable vectorization, as this generally isn't useful for GPU targets
+            #      and actually causes issues with some back-end compilers (like Metal).
             buildVectorPipeline(fpm, job, opt_level)
         end
         add!(fpm, WarnMissedTransformationsPass())
