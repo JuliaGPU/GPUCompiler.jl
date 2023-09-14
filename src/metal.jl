@@ -880,18 +880,23 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
             # determine type of the intrinsic
             typ = value_type(call)
-            if typ isa LLVM.IntegerType
-                fn *= signed::Bool ? ".s" : ".u"
-                fn *= ".$(width(typ))"
-            elseif typ == LLVM.HalfType()
-                fn *= ".f16"
-            elseif typ == LLVM.FloatType()
-                fn *= ".f32"
-            elseif typ == LLVM.DoubleType()
-                fn *= ".f64"
-            else
-                error("Unsupported intrinsic type: $typ")
+            function type_suffix(typ)
+                # XXX: can't we use LLVM to do this kind of mangling?
+                if typ isa LLVM.IntegerType
+                    (signed::Bool ? "s" : "u") * "$(width(typ))"
+                elseif typ == LLVM.HalfType()
+                    "f16"
+                elseif typ == LLVM.FloatType()
+                    "f32"
+                elseif typ == LLVM.DoubleType()
+                    "f64"
+                elseif typ isa LLVM.VectorType
+                    "v$(size(typ))$(type_suffix(eltype(typ)))"
+                else
+                    error("Unsupported intrinsic type: $typ")
+                end
             end
+            fn *= "." * type_suffix(typ)
 
             new_intr = LLVM.Function(mod, fn, call_ft)
             @dispose builder=IRBuilder() begin
