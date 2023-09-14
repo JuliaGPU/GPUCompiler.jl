@@ -898,7 +898,11 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             end
             fn *= "." * type_suffix(typ)
 
-            new_intr = LLVM.Function(mod, fn, call_ft)
+            new_intr = if haskey(functions(mod), fn)
+                functions(mod)[fn]
+            else
+                LLVM.Function(mod, fn, call_ft)
+            end
             @dispose builder=IRBuilder() begin
                 position!(builder, call)
                 debuglocation!(builder, call)
