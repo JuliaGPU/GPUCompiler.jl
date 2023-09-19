@@ -261,29 +261,34 @@ end
 
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
     source_sig = job.source.specTypes
-
     source_types = [source_sig.parameters...]
+
+    source_argnames = Base.method_argnames(job.source.def)
+    while length(source_argnames) < length(source_types)
+        # this is probably due to a trailing vararg; repeat its name
+        push!(source_argnames, source_argnames[end])
+    end
 
     codegen_types = parameters(codegen_ft)
 
     args = []
     codegen_i = 1
-    for (source_i, source_typ) in enumerate(source_types)
+    for (source_i, (source_typ, source_name)) in enumerate(zip(source_types, source_argnames))
         if isghosttype(source_typ) || Core.Compiler.isconstType(source_typ)
-            push!(args, (cc=GHOST, typ=source_typ))
+            push!(args, (cc=GHOST, typ=source_typ, name=source_name))
             continue
         end
 
         codegen_typ = codegen_types[codegen_i]
         if codegen_typ isa LLVM.PointerType && !issized(eltype(codegen_typ))
-            push!(args, (cc=MUT_REF, typ=source_typ,
+            push!(args, (cc=MUT_REF, typ=source_typ, name=source_name,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         elseif codegen_typ isa LLVM.PointerType && issized(eltype(codegen_typ)) &&
                !(source_typ <: Ptr) && !(source_typ <: Core.LLVMPtr)
-            push!(args, (cc=BITS_REF, typ=source_typ,
+            push!(args, (cc=BITS_REF, typ=source_typ, name=source_name,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         else
-            push!(args, (cc=BITS_VALUE, typ=source_typ,
+            push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         end
         codegen_i += 1
