@@ -699,6 +699,12 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(md, MDString("air.arg_type_align_size"))
         push!(md, Metadata(ConstantInt(Int32(Base.datatype_alignment(arg_type)))))
 
+        push!(md, MDString("air.arg_type_name"))
+        push!(md, MDString(repr(arg.typ)))
+
+        push!(md, MDString("air.arg_name"))
+        push!(md, MDString(String(arg.name)))
+
         push!(arg_infos, MDNode(md))
 
         i += 1
