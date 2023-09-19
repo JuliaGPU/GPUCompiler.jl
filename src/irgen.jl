@@ -18,6 +18,9 @@ function irgen(@nospecialize(job::CompilerJob))
                         EnumAttribute("sspstrong", 0))
             end
 
+            delete!(function_attributes(llvmf),
+                    StringAttribute("probe-stack", "inline-asm"))
+
             if Sys.iswindows()
                 personality!(llvmf, nothing)
             end
