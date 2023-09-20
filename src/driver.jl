@@ -342,7 +342,7 @@ const __llvm_initialized = Ref(false)
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
                 if has_deferred_jobs
-                    if use_newpm
+                    if use_newpm[]
                         @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
                             add!(mpm, NewPMFunctionPassManager) do fpm
                                 add!(fpm, InstCombinePass())
@@ -381,7 +381,7 @@ const __llvm_initialized = Ref(false)
 
         if cleanup
             @timeit_debug to "clean-up" begin
-                if use_newpm
+                if use_newpm[]
                     @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
                         add!(mpm, RecomputeGlobalsAAPass())
                         add!(mpm, GlobalOptPass())

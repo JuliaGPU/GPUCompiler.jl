@@ -6,7 +6,7 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     global current_job
     current_job = job
 
-    if use_newpm
+    if use_newpm[]
         @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
             add!(mpm, RecomputeGlobalsAAPass())
             add!(mpm, GlobalOptPass())

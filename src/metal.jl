@@ -89,7 +89,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
 
     # we emit properties (of the air and metal version) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-    if use_newpm
+    if use_newpm[]
         @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
             add!(mpm, RecomputeGlobalsAAPass())
             add!(mpm, GlobalOptPass())
@@ -130,7 +130,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     end
     if changed
         # lowering may have introduced additional functions marked `alwaysinline`
-        if use_newpm
+        if use_newpm[]
             @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
                 add!(mpm, AlwaysInlinerPass())
                 add!(mpm, NewPMFunctionPassManager) do fpm
@@ -178,7 +178,7 @@ end
         end
 
         if any_noreturn
-            if use_newpm
+            if use_newpm[]
                 @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
                     add!(mpm, AlwaysInlinerPass())
                     add!(mpm, NewPMFunctionPassManager) do fpm
@@ -325,7 +325,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     LLVM.name!(new_f, fn)
 
     # clean-up after this pass (which runs after optimization)
-    if use_newpm
+    if use_newpm[]
        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
             add!(mpm, NewPMFunctionPassManager) do fpm
                 add!(fpm, SimplifyCFGPass())

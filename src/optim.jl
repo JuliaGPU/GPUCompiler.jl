@@ -1,7 +1,7 @@
 # LLVM IR optimization
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    if use_newpm
+    if use_newpm[]
         optimize_newpm!(job, mod)
     else
         optimize_legacypm!(job, mod)
@@ -49,7 +49,7 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
     buildCleanupPipeline(mpm, job, opt_level)
 end
 
-if use_newpm
+if LLVM.has_newpm()
     const BasicSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, false, false, 1)
     const AggressiveSimplifyCFGOptions = SimplifyCFGPassOptions(true, true, true, true, true, false, 1)
 end

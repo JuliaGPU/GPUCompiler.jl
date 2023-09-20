@@ -134,7 +134,7 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
 
     # we emit properties (of the device and ptx isa) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-    if use_newpm
+    if use_newpm[]
         @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
             add!(mpm, RecomputeGlobalsAAPass())
             add!(mpm, GlobalOptPass())

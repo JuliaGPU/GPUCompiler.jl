@@ -64,7 +64,7 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
-    if use_newpm
+    if use_newpm[]
         run!(StripDeadPrototypesPass(), new_mod)
     else
         @dispose pm=ModulePassManager() begin

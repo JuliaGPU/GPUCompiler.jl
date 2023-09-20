@@ -14,7 +14,7 @@ using Scratch: @get_scratch!
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
 
-const use_newpm = LLVM.has_newpm()
+const use_newpm = Ref(LLVM.has_newpm())
 
 include("utils.jl")
 include("mangling.jl")
@@ -65,6 +65,10 @@ function __init__()
     end
     mkpath(dir)
     global compile_cache = dir
+
+    if use_newpm[]
+        use_newpm[] = parse(Bool, get(ENV, "JULIA_GPUCOMPILER_NEWPM", "true"))
+    end
 end
 
 end # module
