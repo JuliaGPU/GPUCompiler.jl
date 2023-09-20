@@ -616,7 +616,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.config.kernel
         # Don't cache the top-level inference result.
         ci = compiled[job.source].ci
-@static VERSION < v"1.9.0"
+@static if VERSION < v"1.9.0"
         ci.inferred = nothing
 else
         Base.@atomic :release ci.inferred = nothing
