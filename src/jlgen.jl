@@ -410,10 +410,10 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
     return ci
 end
 
-function ci_cache_lookup(cache, mi, min_world, max_world)
+function ci_cache_lookup(cache, mi, min_world, max_world; allow_uninferred=false)
     wvc = WorldView(cache, min_world, max_world)
     ci = CC.get(wvc, mi, nothing)
-    if ci !== nothing && ci.inferred === nothing
+    if ci !== nothing && (allow_uninferred || ci.inferred === nothing)
         # if for some reason we did end up with a codeinfo without inferred source, e.g.,
         # because of calling `Base.return_types` which only sets rettyp, pretend we didn't
         # run inference so that we re-infer now and not during codegen (which is disallowed)
