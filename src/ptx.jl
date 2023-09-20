@@ -94,8 +94,9 @@ isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
 
 # XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
 runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
-    "ptx-sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)" *
-       "-debuginfo=$(Int(llvm_debug_info(job)))"
+    "ptx$(job.config.target.ptx.major)$(job.config.target.ptx.minor)" *
+    "-sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)" *
+    "-debuginfo=$(Int(llvm_debug_info(job)))"
 
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
