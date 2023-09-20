@@ -613,5 +613,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
     end
 
+    if job.config.kernel
+        # Don't cache the top-level inference result.
+        compiled[job.source].ci.inferred = nothing
+    end
+
     return llvm_mod, compiled
 end
