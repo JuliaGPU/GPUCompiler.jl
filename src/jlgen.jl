@@ -376,12 +376,6 @@ function CC.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
 end
 
 function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
-    src = if ci.inferred isa Vector{UInt8}
-        ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
-                mi.def, C_NULL, ci.inferred)
-    else
-        ci.inferred
-    end
     CC.setindex!(wvc.cache, ci, mi)
 end
 
