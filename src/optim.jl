@@ -43,7 +43,9 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
             #      and actually causes issues with some back-end compilers (like Metal).
             buildVectorPipeline(fpm, job, opt_level)
         end
-        add!(fpm, WarnMissedTransformationsPass())
+        if isdebug(:optim)
+            add!(fpm, WarnMissedTransformationsPass())
+        end
     end
     buildIntrinsicLoweringPipeline(mpm, job, opt_level)
     buildCleanupPipeline(mpm, job, opt_level)

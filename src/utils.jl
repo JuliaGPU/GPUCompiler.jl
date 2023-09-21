@@ -17,6 +17,9 @@ should_verify() = ccall(:jl_is_debugbuild, Cint, ()) == 1 ||
                   Base.JLOptions().debug_level >= 2 ||
                   parse(Bool, get(ENV, "CI", "false"))
 
+isdebug(group, mod=GPUCompiler) =
+    Base.CoreLogging.current_logger_for_env(Base.CoreLogging.Debug, group, mod) !== nothing
+
 
 ## lazy module loading
 
