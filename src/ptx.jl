@@ -187,7 +187,6 @@ end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                     mod::LLVM.Module, entry::LLVM.Function)
-    lower_trap!(mod)
     for f in functions(mod)
         lower_unreachable!(f)
     end
@@ -246,36 +245,6 @@ end
 
 ## LLVM passes
 
-# replace calls to `trap` with inline assembly calling `exit`, which isn't fatal
-function lower_trap!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    changed = false
-    @timeit_debug to "lower trap" begin
-
-    if haskey(functions(mod), "llvm.trap")
-        trap = functions(mod)["llvm.trap"]
-
-        # inline assembly to exit a thread
-        exit_ft = LLVM.FunctionType(LLVM.VoidType())
-        exit = InlineAsm(exit_ft, "exit;", "", true)
-
-        for use in uses(trap)
-            val = user(use)
-            if isa(val, LLVM.CallInst)
-                @dispose builder=IRBuilder() begin
-                    position!(builder, val)
-                    call!(builder, exit_ft, exit)
-                end
-                unsafe_delete!(LLVM.parent(val), val)
-                changed = true
-            end
-        end
-    end
-
-    end
-    return changed
-end
-
 # lower `unreachable` to `exit` so that the emitted PTX has correct control flow
 #
 # During back-end compilation, `ptxas` inserts instructions to manage the harware's
@@ -328,10 +297,14 @@ end
 # `bar.sync` cannot be executed divergently on Pascal hardware or earlier.
 #
 # To avoid these fall-through successors that change the control flow,
-# we replace `unreachable` instructions with a call to `exit`. This informs
-# `ptxas` that the thread exits, and allows it to correctly construct a CFG,
-# and consequently correctly determine the divergence regions as intended.
+# we replace `unreachable` instructions with a call to `trap` and `exit`. This
+# informs `ptxas` that the thread exits, and allows it to correctly construct a
+# CFG, and consequently correctly determine the divergence regions as intended.
+# Note that we first emit a call to `trap`, so that the behaviour is the same
+# as before.
 function lower_unreachable!(f::LLVM.Function)
+    mod = LLVM.parent(f)
+
     # TODO:
     # - if unreachable blocks have been merged, we still may be jumping from different
     #   divergent regions, potentially causing the same problem as above:
@@ -375,6 +348,12 @@ function lower_unreachable!(f::LLVM.Function)
     # inline assembly to exit a thread
     exit_ft = LLVM.FunctionType(LLVM.VoidType())
     exit = InlineAsm(exit_ft, "exit;", "", true)
+    trap_ft = LLVM.FunctionType(LLVM.VoidType())
+    trap = if haskey(functions(mod), "llvm.trap")
+        functions(mod)["llvm.trap"]
+    else
+        LLVM.Function(mod, "llvm.trap", trap_ft)
+    end
 
     # rewrite the unreachable terminators
     @dispose builder=IRBuilder() begin
@@ -384,6 +363,7 @@ function lower_unreachable!(f::LLVM.Function)
             @assert inst isa LLVM.UnreachableInst
 
             position!(builder, inst)
+            call!(builder, trap_ft, trap)
             call!(builder, exit_ft, exit)
         end
     end
