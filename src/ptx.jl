@@ -187,7 +187,6 @@ end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                     mod::LLVM.Module, entry::LLVM.Function)
-    lower_trap!(mod)
     for f in functions(mod)
         lower_unreachable!(f)
     end
@@ -245,36 +244,6 @@ end
 
 
 ## LLVM passes
-
-# replace calls to `trap` with inline assembly calling `exit`, which isn't fatal
-function lower_trap!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    changed = false
-    @timeit_debug to "lower trap" begin
-
-    if haskey(functions(mod), "llvm.trap")
-        trap = functions(mod)["llvm.trap"]
-
-        # inline assembly to exit a thread
-        exit_ft = LLVM.FunctionType(LLVM.VoidType())
-        exit = InlineAsm(exit_ft, "exit;", "", true)
-
-        for use in uses(trap)
-            val = user(use)
-            if isa(val, LLVM.CallInst)
-                @dispose builder=IRBuilder() begin
-                    position!(builder, val)
-                    call!(builder, exit_ft, exit)
-                end
-                unsafe_delete!(LLVM.parent(val), val)
-                changed = true
-            end
-        end
-    end
-
-    end
-    return changed
-end
 
 # lower `unreachable` to `exit` so that the emitted PTX has correct control flow
 #
