@@ -283,17 +283,29 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
         end
 
         codegen_typ = codegen_types[codegen_i]
-        if codegen_typ isa LLVM.PointerType && !issized(eltype(codegen_typ))
-            push!(args, (cc=MUT_REF, typ=source_typ, name=source_name,
-                         codegen=(typ=codegen_typ, i=codegen_i)))
-        elseif codegen_typ isa LLVM.PointerType && issized(eltype(codegen_typ)) &&
-               !(source_typ <: Ptr) && !(source_typ <: Core.LLVMPtr)
-            push!(args, (cc=BITS_REF, typ=source_typ, name=source_name,
-                         codegen=(typ=codegen_typ, i=codegen_i)))
+
+        if codegen_typ isa LLVM.PointerType
+            llvm_source_typ = convert(LLVMType, source_typ; allow_boxed=true)
+            # pointers are used for multiple kinds of arguments
+            # - literal pointer values
+            if source_typ <: Ptr || source_typ <: Core.LLVMPtr
+                push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name,
+                             codegen=(typ=codegen_typ, i=codegen_i)))
+            # - boxed values
+            #   XXX: use `deserves_retbox` instead?
+            elseif llvm_source_typ isa LLVM.PointerType
+                push!(args, (cc=MUT_REF, typ=source_typ, name=source_name,
+                             codegen=(typ=codegen_typ, i=codegen_i)))
+            # - references to aggregates
+            else
+                push!(args, (cc=BITS_REF, typ=source_typ, name=source_name,
+                             codegen=(typ=codegen_typ, i=codegen_i)))
+            end
         else
             push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name,
                          codegen=(typ=codegen_typ, i=codegen_i)))
         end
+
         codegen_i += 1
     end
 
