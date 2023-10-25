@@ -87,8 +87,9 @@ function irgen(@nospecialize(job::CompilerJob))
             args = classify_arguments(job, function_type(entry))
             for arg in args
                 if arg.cc == BITS_REF
-                    attr = if LLVM.version() >= v"12"
-                        TypeAttribute("byval", eltype(arg.codegen.typ))
+                    llvm_typ = convert(LLVMType, arg.typ)
+                    attr = @static if LLVM.version() >= v"12"
+                        TypeAttribute("byval", llvm_typ)
                     else
                         EnumAttribute("byval", 0)
                     end
@@ -365,6 +366,12 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     ft = function_type(f)
     @timeit_debug to "lower byval" begin
 
+    # classify the arguments
+    args = classify_arguments(job, ft)
+    filter!(args) do arg
+        arg.cc != GHOST
+    end
+
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
     if LLVM.version() >= v"12"
@@ -376,12 +383,6 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         end
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
-        #      so we need to re-classify the Julia arguments.
-        #      remove this once we only support 1.7.
-        args = classify_arguments(job, ft)
-        filter!(args) do arg
-            arg.cc != GHOST
-        end
         for arg in args
             byval[arg.codegen.i] = (arg.cc == BITS_REF)
         end
@@ -421,7 +422,8 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     new_types = LLVM.LLVMType[]
     for (i, param) in enumerate(parameters(ft))
         if byval[i]
-            push!(new_types, eltype(param::LLVM.PointerType))
+            llvm_typ = convert(LLVMType, args[i].typ)
+            push!(new_types, llvm_typ)
         else
             push!(new_types, param)
         end
@@ -443,7 +445,8 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         for (i, param) in enumerate(parameters(ft))
             if byval[i]
                 # copy the argument value to a stack slot, and reference it.
-                ptr = alloca!(builder, eltype(param))
+                llvm_typ = convert(LLVMType, args[i].typ)
+                ptr = alloca!(builder, llvm_typ)
                 if LLVM.addrspace(param) != 0
                     ptr = addrspacecast!(builder, ptr, param)
                 end

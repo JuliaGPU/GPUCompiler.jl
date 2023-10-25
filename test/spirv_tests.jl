@@ -22,10 +22,12 @@ end
     kernel(x) = return
 
     ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{Tuple{Int}}))
-    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\*", ir)
+    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\*", ir) ||
+          occursin(r"@\w*kernel\w*\(ptr", ir)
 
     ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{Tuple{Int}}; kernel=true))
-    @test occursin(r"@\w*kernel\w*\(.*{ ({ i64 }|\[1 x i64\]) }\*.+byval", ir)
+    @test occursin(r"@\w*kernel\w*\(.*{ ({ i64 }|\[1 x i64\]) }\*.+byval", ir) ||
+          occursin(r"@\w*kernel\w*\(ptr byval", ir)
 end
 
 @testset "byval bug" begin

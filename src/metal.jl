@@ -240,13 +240,12 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
 
     # find the byref parameters
     byref = BitVector(undef, length(parameters(ft)))
-    let args = classify_arguments(job, ft)
-        filter!(args) do arg
-            arg.cc != GHOST
-        end
-        for arg in args
-            byref[arg.codegen.i] = (arg.cc == BITS_REF)
-        end
+    args = classify_arguments(job, ft)
+    filter!(args) do arg
+        arg.cc != GHOST
+    end
+    for arg in args
+        byref[arg.codegen.i] = (arg.cc == BITS_REF)
     end
 
     function remapType(src)
@@ -255,7 +254,11 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
         #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
         #       device addrss space (i.e. no mismatch between parent and field possible)
         dst = if src isa LLVM.PointerType && addrspace(src) == 0
-            LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
+            if typed_pointers(context())
+                LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
+            else
+                LLVM.PointerType(#=device=# 1)
+            end
         else
             src
         end
@@ -292,8 +295,9 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
         for (i, param) in enumerate(parameters(ft))
             if byref[i]
                 # load the argument in a stack slot
-                val = load!(builder, eltype(parameters(new_ft)[i]), parameters(new_f)[i])
-                ptr = alloca!(builder, eltype(param))
+                llvm_typ = convert(LLVMType, args[i].typ)
+                val = load!(builder, llvm_typ, parameters(new_f)[i])
+                ptr = alloca!(builder, llvm_typ)
                 store!(builder, val, ptr)
                 push!(new_args, ptr)
             else
@@ -389,8 +393,7 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
             if arg.cc != GHOST
                 if bits_as_reference[arg.codegen.i]
                     # load the reference to get a value back
-                    val = load!(builder, eltype(parameters(new_ft)[arg.codegen.i]),
-                                parameters(new_f)[arg.codegen.i])
+                    val = load!(builder, arg.codegen.typ, parameters(new_f)[arg.codegen.i])
                     push!(new_args, val)
                 else
                     push!(new_args, parameters(new_f)[arg.codegen.i])

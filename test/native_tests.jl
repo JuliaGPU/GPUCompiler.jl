@@ -252,7 +252,8 @@ end
     x = 2
     f = () -> x+1
     ir = sprint(io->Native.code_llvm(io, f, Tuple{}, entry_abi=:func, dump_module=true))
-    @test occursin(r"define nonnull {}\* @jfptr", ir)
+    @test occursin(r"define nonnull {}\* @jfptr", ir) ||
+          occursin(r"define nonnull ptr @jfptr", ir)
     @test occursin(r"define internal fastcc .+ @julia", ir)
     @test occursin(r"call fastcc .+ @julia", ir)
 end
