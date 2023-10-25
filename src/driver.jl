@@ -18,25 +18,30 @@ export JuliaContext
 # JuliaContext helper below, which returns a local context on Julia 1.9, and the global
 # unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
 # this helper to a regular `Context()` call.
-function JuliaContext()
+function JuliaContext(; opaque_pointers=nothing)
     if VERSION >= v"1.9.0-DEV.516"
         # Julia 1.9 knows how to deal with arbitrary contexts,
         # and uses ORC's thread safe versions.
-        ThreadSafeContext()
+        ctx = ThreadSafeContext(; opaque_pointers)
     elseif VERSION >= v"1.9.0-DEV.115"
         # Julia 1.9 knows how to deal with arbitrary contexts
-        Context()
+        ctx = Context(; opaque_pointers)
     else
         # earlier versions of Julia claim so, but actually use a global context
         isboxed_ref = Ref{Bool}()
         typ = LLVMType(ccall(:jl_type_to_llvm, LLVM.API.LLVMTypeRef,
                        (Any, Ptr{Bool}), Any, isboxed_ref))
-        context(typ)
+        ctx = context(typ)
+        if opaque_pointers !== nothing && typed_pointers(ctx) !== !opaque_pointers
+            error("Cannot use $(opaque_pointers ? "opaque" : "typed") pointers, as the context has already been configured to use $(typed_pointers(ctx) ? "typed" : "opaque") pointers, and this version of Julia does not support changing that.")
+        end
     end
+
+    ctx
 end
-function JuliaContext(f)
+function JuliaContext(f; kwargs...)
     if VERSION >= v"1.9.0-DEV.516"
-        ts_ctx = ThreadSafeContext()
+        ts_ctx = JuliaContext(; kwargs...)
         # for now, also activate the underlying context
         # XXX: this is wrong; we can't expose the underlying LLVM context, but should
         #      instead always go through the callback in order to unlock it properly.
