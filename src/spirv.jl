@@ -238,7 +238,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
         for arg in args
-            byval[arg.codegen.i] = (arg.cc == BITS_REF)
+            byval[arg.idx] = (arg.cc == BITS_REF)
         end
     end
 
