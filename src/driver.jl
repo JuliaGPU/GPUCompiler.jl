@@ -32,8 +32,8 @@ function JuliaContext(; opaque_pointers=nothing)
         typ = LLVMType(ccall(:jl_type_to_llvm, LLVM.API.LLVMTypeRef,
                        (Any, Ptr{Bool}), Any, isboxed_ref))
         ctx = context(typ)
-        if opaque_pointers !== nothing && typed_pointers(ctx) !== !opaque_pointers
-            error("Cannot use $(opaque_pointers ? "opaque" : "typed") pointers, as the context has already been configured to use $(typed_pointers(ctx) ? "typed" : "opaque") pointers, and this version of Julia does not support changing that.")
+        if opaque_pointers !== nothing && supports_typed_pointers(ctx) !== !opaque_pointers
+            error("Cannot use $(opaque_pointers ? "opaque" : "typed") pointers, as the context has already been configured to use $(supports_typed_pointers(ctx) ? "typed" : "opaque") pointers, and this version of Julia does not support changing that.")
         end
     end
 

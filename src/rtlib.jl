@@ -120,7 +120,7 @@ const runtime_lock = ReentrantLock()
 @locked function load_runtime(@nospecialize(job::CompilerJob))
     lock(runtime_lock) do
         slug = runtime_slug(job)
-        if !typed_pointers(context())
+        if !supports_typed_pointers(context())
             slug *= "-opaque"
         end
         name = "runtime_$(slug).bc"

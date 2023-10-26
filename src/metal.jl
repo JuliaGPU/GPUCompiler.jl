@@ -254,7 +254,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
         #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
         #       device addrss space (i.e. no mismatch between parent and field possible)
         dst = if src isa LLVM.PointerType && addrspace(src) == 0
-            if typed_pointers(context())
+            if supports_typed_pointers(context())
                 LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
             else
                 LLVM.PointerType(#=device=# 1)
