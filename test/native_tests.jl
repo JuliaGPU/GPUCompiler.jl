@@ -269,6 +269,7 @@ end
 end
 
 @testset "always_inline" begin
+    # XXX: broken by JuliaLang/julia#51599, see JuliaGPU/GPUCompiler.jl#527
     mod = @eval module $(gensym())
         f_expensive(x) = $(foldl((e, _) -> :($sink($e) + $sink(x)), 1:100; init=:x))
         function g(x)
@@ -286,11 +287,11 @@ end
 
     ir = sprint(io->Native.code_llvm(io, mod.g, Tuple{Int64}; dump_module=true, kernel=true,
                                      always_inline=true))
-    @test !occursin(r"^define.*julia_f_expensive"m, ir)
+    @test !occursin(r"^define.*julia_f_expensive"m, ir) broken=VERSION>=v"1.11.0-DEV.608"
 
     ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true,
                                      always_inline=true))
-    @test !occursin(r"^define.*julia_f_expensive"m, ir)
+    @test !occursin(r"^define.*julia_f_expensive"m, ir) broken=VERSION>=v"1.11.0-DEV.608"
 
     ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true))
     @test occursin(r"^define.*julia_f_expensive"m, ir)
@@ -511,6 +512,8 @@ end
 end
 
 @testset "JuliaLang/julia#48097: kwcall inference in the presence of overlay method" begin
+    # XXX: broken again by JuliaLang/julia#51092, see JuliaGPU/GPUCompiler.jl#506
+
     mod = @eval module $(gensym())
         child(; kwargs...) = return
         function parent()
@@ -524,10 +527,11 @@ end
 
     ir = sprint(io->Native.code_llvm(io, mod.parent, Tuple{};
                                      debuginfo=:none, mod.method_table))
-    @test !occursin("jl_invoke", ir)
-    @test !occursin("apply_iterate", ir)
-    @test !occursin("inttoptr", ir)
+
     @test occursin("ret void", ir)
+    @test !any(f->occursin(f, ir),
+               ["jl_invoke", "apply_iterate",
+                "inttoptr", "apply_type"]) broken=VERSION>=v"1.11.0-DEV.392"
 end
 
 ############################################################################################

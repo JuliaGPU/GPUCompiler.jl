@@ -31,7 +31,7 @@ end
         kernel(x) = goodcall(x)
 
         output = sprint(io->BPF.code_native(io, kernel, (Int,)))
-        @test occursin("\tcall 3\n\texit", output)
+        @test occursin(r"\tcall .*\n\texit", output)
     end
     @testset "invalid" begin
         badcall(x) = Base.llvmcall("%2 = call i64 inttoptr (i64 3000 to i64 (i64)*)(i64 %0)\nret i64 %2", Int, Tuple{Int}, x)
