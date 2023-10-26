@@ -12,5 +12,12 @@ runtests(GPUCompiler; nworkers=min(Sys.CPU_THREADS,4), nworker_threads=1,
         return false
     end
 
+    @dispose ctx=Context() begin
+        # XXX: some back-ends do not support opaque pointers
+        if ti.name in ["Metal"] && !supports_typed_pointers(ctx)
+            return false
+        end
+    end
+
     true
 end
