@@ -1,4 +1,10 @@
-# example how to integrate GPUCompiler.jl with an LLVM Orc-based JIT
+# EXCLUDE FROM TESTING
+#
+# example how to integrate GPUCompiler.jl with an LLVM Orc-based JIT.
+# as it heavily relies on Julia's JIT internals, it breaks easily and is thus not tested.
+# the main focus of GPUCompiler is currently not to provide integration with Julia's JIT,
+# but only with its code generator.
+# TODO: do provide and test this kind of integration as part of GPUCompiler
 
 using GPUCompiler
 
@@ -19,16 +25,6 @@ GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntim
 ## JIT integration
 
 using LLVM, LLVM.Interop
-
-# XXX: this example has bitrotten, due to many changes to Julia's JIT.
-if LLVM.is_asserts()
-    @error "The JIT example fails LLVM assertions, and is therefor disabled."
-    exit(0)
-end
-if VERSION >= v"1.10-" && Sys.iswindows()
-    @error "The JIT example fails on Windows with Julia 1.10+, and is therefor disabled."
-    exit(0)
-end
 
 function absolute_symbol_materialization(name, ptr)
     address = LLVM.API.LLVMOrcJITTargetAddress(reinterpret(UInt, ptr))

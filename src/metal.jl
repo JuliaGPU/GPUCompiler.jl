@@ -240,13 +240,12 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
 
     # find the byref parameters
     byref = BitVector(undef, length(parameters(ft)))
-    let args = classify_arguments(job, ft)
-        filter!(args) do arg
-            arg.cc != GHOST
-        end
-        for arg in args
-            byref[arg.codegen.i] = (arg.cc == BITS_REF)
-        end
+    args = classify_arguments(job, ft)
+    filter!(args) do arg
+        arg.cc != GHOST
+    end
+    for arg in args
+        byref[arg.idx] = (arg.cc == BITS_REF)
     end
 
     function remapType(src)
@@ -255,7 +254,11 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
         #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
         #       device addrss space (i.e. no mismatch between parent and field possible)
         dst = if src isa LLVM.PointerType && addrspace(src) == 0
-            LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
+            if supports_typed_pointers(context())
+                LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
+            else
+                LLVM.PointerType(#=device=# 1)
+            end
         else
             src
         end
@@ -292,8 +295,9 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
         for (i, param) in enumerate(parameters(ft))
             if byref[i]
                 # load the argument in a stack slot
-                val = load!(builder, eltype(parameters(new_ft)[i]), parameters(new_f)[i])
-                ptr = alloca!(builder, eltype(param))
+                llvm_typ = convert(LLVMType, args[i].typ)
+                val = load!(builder, llvm_typ, parameters(new_f)[i])
+                ptr = alloca!(builder, llvm_typ)
                 store!(builder, val, ptr)
                 push!(new_args, ptr)
             else
@@ -364,11 +368,11 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
     for arg in args
         if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
             # pass the value as a reference instead
-            push!(new_types, LLVM.PointerType(arg.codegen.typ, #=Constant=# 1))
-            bits_as_reference[arg.codegen.i] = true
+            push!(new_types, LLVM.PointerType(parameters(ft)[arg.idx], #=Constant=# 1))
+            bits_as_reference[arg.idx] = true
         elseif arg.cc != GHOST
-            push!(new_types, arg.codegen.typ)
-            bits_as_reference[arg.codegen.i] = false
+            push!(new_types, parameters(ft)[arg.idx])
+            bits_as_reference[arg.idx] = false
         end
     end
     new_ft = LLVM.FunctionType(return_type(ft), new_types)
@@ -387,13 +391,12 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
         # perform argument conversions
         for arg in args
             if arg.cc != GHOST
-                if bits_as_reference[arg.codegen.i]
+                if bits_as_reference[arg.idx]
                     # load the reference to get a value back
-                    val = load!(builder, eltype(parameters(new_ft)[arg.codegen.i]),
-                                parameters(new_f)[arg.codegen.i])
+                    val = load!(builder, parameters(ft)[arg.idx], parameters(new_f)[arg.idx])
                     push!(new_args, val)
                 else
-                    push!(new_args, parameters(new_f)[arg.codegen.i])
+                    push!(new_args, parameters(new_f)[arg.idx])
                 end
             end
         end
@@ -652,15 +655,17 @@ end
 
 function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 entry::LLVM.Function)
+    entry_ft = function_type(entry)
+
     ## argument info
     arg_infos = Metadata[]
 
     # Iterate through arguments and create metadata for them
-    args = classify_arguments(job, function_type(entry))
+    args = classify_arguments(job, entry_ft)
     i = 1
     for arg in args
-        haskey(arg, :codegen) || continue
-        @assert arg.codegen.typ isa LLVM.PointerType
+        arg.idx ===  nothing && continue
+        @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
 
         # NOTE: we emit the bare minimum of argument metadata to support
         #       bindless argument encoding. Actually using the argument encoder
@@ -671,7 +676,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         md = Metadata[]
 
         # argument index
-        @assert arg.codegen.i == i
+        @assert arg.idx == i
         push!(md, Metadata(ConstantInt(Int32(i-1))))
 
         push!(md, MDString("air.buffer"))
@@ -685,7 +690,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(md, MDString("air.read_write")) # TODO: Check for const array
 
         push!(md, MDString("air.address_space"))
-        push!(md, Metadata(ConstantInt(Int32(addrspace(arg.codegen.typ)))))
+        push!(md, Metadata(ConstantInt(Int32(addrspace(parameters(entry_ft)[arg.idx])))))
 
         arg_type = if arg.typ <: Core.LLVMPtr
             arg.typ.parameters[1]

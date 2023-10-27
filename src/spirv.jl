@@ -221,6 +221,11 @@ end
 function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)::LLVM.FunctionType
 
+    args = classify_arguments(job, ft)
+    filter!(args) do arg
+        arg.cc != GHOST
+    end
+
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
     if LLVM.version() >= v"12"
@@ -232,12 +237,8 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         end
     else
         # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
-        args = classify_arguments(job, ft)
-        filter!(args) do arg
-            arg.cc != GHOST
-        end
         for arg in args
-            byval[arg.codegen.i] = (arg.cc == BITS_REF)
+            byval[arg.idx] = (arg.cc == BITS_REF)
         end
     end
 
@@ -245,7 +246,8 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     new_types = LLVM.LLVMType[]
     for (i, param) in enumerate(parameters(ft))
         typ = if byval[i]
-            st = LLVM.StructType([eltype(param)])
+            llvm_typ = convert(LLVMType, args[i].typ)
+            st = LLVM.StructType([llvm_typ])
             LLVM.PointerType(st, addrspace(param))
         else
             param
@@ -268,7 +270,8 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         # perform argument conversions
         for (i, param) in enumerate(parameters(new_f))
             if byval[i]
-                ptr = struct_gep!(builder, eltype(parameters(new_ft)[i]), param, 0)
+                llvm_typ = convert(LLVMType, args[i].typ)
+                ptr = struct_gep!(builder, LLVM.StructType([llvm_typ]), param, 0)
                 push!(new_args, ptr)
             else
                 push!(new_args, param)
@@ -288,8 +291,9 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         for i in 1:length(byval)
             attrs = parameter_attributes(new_f, i)
             if byval[i]
+                llvm_typ = convert(LLVMType, args[i].typ)
                 if LLVM.version() >= v"12"
-                    push!(attrs, TypeAttribute("byval", eltype(new_types[i])))
+                    push!(attrs, TypeAttribute("byval", LLVM.StructType([llvm_typ])))
                 else
                     push!(attrs, EnumAttribute("byval", 0))
                 end
