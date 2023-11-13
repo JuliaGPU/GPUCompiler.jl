@@ -140,7 +140,7 @@ end
 struct CodeCache
     dict::IdDict{MethodInstance,Vector{CodeInstance}}
 
-    CodeCache() = new(Dict{MethodInstance,Vector{CodeInstance}}())
+    CodeCache() = new(IdDict{MethodInstance,Vector{CodeInstance}}())
 end
 
 function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
