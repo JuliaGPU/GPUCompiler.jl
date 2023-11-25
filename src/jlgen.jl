@@ -134,7 +134,7 @@ methodinstance(f, tt) = methodinstance(f, tt, tls_world_age())
 
 end
 
-
+if !isdefined(CC, :cache_owner)
 ## code instance cache
 
 struct CodeCache
@@ -229,6 +229,9 @@ function invalidate_code_cache(cache::CodeCache, replaced::MethodInstance, max_w
         end
     end
 end
+else
+    const CodeCache = CC.InternalCodeCache
+end #CodeCache
 
 
 ## method overrides
@@ -292,9 +295,13 @@ CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
 CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
 CC.get_world_counter(interp::GPUInterpreter) = interp.world
 CC.get_inference_cache(interp::GPUInterpreter) = interp.inf_cache
-CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
+CC.code_cache(interp::GPUInterpreter) = CC.WorldView(interp.code_cache, interp.world)
+if isdefined(CC, :cache_owner)
+CC.cache_owner(interp::GPUCompiler.GPUInterpreter) = interp.code_cache.owner
+end
 
 # No need to do any locking since we're not putting our results into the runtime cache
+# Q(@aviatesk) do we need to lock?
 CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 CC.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
@@ -342,7 +349,7 @@ function CC.concrete_eval_eligible(interp::GPUInterpreter,
 end
 end
 
-
+if !isdefined(CC, :cache_owner)
 ## world view of the cache
 
 using Core.Compiler: WorldView
@@ -384,6 +391,7 @@ function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodIns
     end
     CC.setindex!(wvc.cache, ci, mi)
 end
+end
 
 
 ## codegen/inference integration
@@ -392,7 +400,7 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
     src = CC.typeinf_ext_toplevel(interp, mi)
 
     # inference populates the cache, so we don't need to jl_get_method_inferred
-    wvc = WorldView(cache, min_world, max_world)
+    wvc = CC.WorldView(cache, min_world, max_world)
     @assert CC.haskey(wvc, mi)
 
     # if src is rettyp_const, the codeinfo won't cache ci.inferred
@@ -411,7 +419,7 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
 end
 
 function ci_cache_lookup(cache, mi, min_world, max_world)
-    wvc = WorldView(cache, min_world, max_world)
+    wvc = CC.WorldView(cache, min_world, max_world)
     ci = CC.get(wvc, mi, nothing)
     if ci !== nothing && ci.inferred === nothing
         # if for some reason we did end up with a codeinfo without inferred source, e.g.,
@@ -419,6 +427,11 @@ function ci_cache_lookup(cache, mi, min_world, max_world)
         # run inference so that we re-infer now and not during codegen (which is disallowed)
         return nothing
     end
+@static if isdefined(CC, :cache_owner)
+    if ci !== nothing
+        @assert ci.owner isa CompilerConfig
+    end
+end
     return ci
 end
 
