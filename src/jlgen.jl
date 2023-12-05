@@ -492,6 +492,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     @static if VERSION >= v"1.10.0-DEV.1499"
         cgparams = merge(cgparams, (;gcstack_arg = false))
     end
+    cgparams = merge(cgparams, codegen_params(job))
     params = Base.CodegenParams(; cgparams...)
 
     # generate IR
