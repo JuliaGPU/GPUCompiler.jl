@@ -10,3 +10,6 @@ SPIRV_LLVM_Translator_unified_jll = "85f0d8ed-5b39-5caa-b1ae-7472de402361"
 SPIRV_Tools_jll = "6ac6d60f-d740-5983-97d7-a4482c0689f4"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+Aqua = "0.8"
