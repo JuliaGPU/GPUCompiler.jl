@@ -287,11 +287,11 @@ end
 
     ir = sprint(io->Native.code_llvm(io, mod.g, Tuple{Int64}; dump_module=true, kernel=true,
                                      always_inline=true))
-    @test !occursin(r"^define.*julia_f_expensive"m, ir) broken=VERSION>=v"1.11.0-DEV.608"
+    @test !occursin(r"^define.*julia_f_expensive"m, ir)
 
     ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true,
                                      always_inline=true))
-    @test !occursin(r"^define.*julia_f_expensive"m, ir) broken=VERSION>=v"1.11.0-DEV.608"
+    @test !occursin(r"^define.*julia_f_expensive"m, ir)
 
     ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true))
     @test occursin(r"^define.*julia_f_expensive"m, ir)
