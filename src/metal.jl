@@ -894,7 +894,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             function type_suffix(typ)
                 # XXX: can't we use LLVM to do this kind of mangling?
                 if typ isa LLVM.IntegerType
-                    (signed::Bool ? "s" : "u") * ".i$(width(typ))"
+                    "i$(width(typ))"
                 elseif typ == LLVM.HalfType()
                     "f16"
                 elseif typ == LLVM.FloatType()
@@ -907,7 +907,12 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     error("Unsupported intrinsic type: $typ")
                 end
             end
-            fn *= "." * type_suffix(typ)
+
+            if typ isa LLVM.IntegerType || (typ isa LLVM.VectorType && eltype(typ) isa LLVM.IntegerType)
+                fn *= "." * (signed::Bool ? "s" : "u") * "." * type_suffix(typ)
+            else
+                fn *= "." * type_suffix(typ)
+            end
 
             new_intr = if haskey(functions(mod), fn)
                 functions(mod)[fn]
