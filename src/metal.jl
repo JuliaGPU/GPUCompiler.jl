@@ -894,7 +894,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             function type_suffix(typ)
                 # XXX: can't we use LLVM to do this kind of mangling?
                 if typ isa LLVM.IntegerType
-                    (signed::Bool ? "s" : "u") * "$(width(typ))"
+                    (signed::Bool ? "s" : "u") * ".i$(width(typ))"
                 elseif typ == LLVM.HalfType()
                     "f16"
                 elseif typ == LLVM.FloatType()
