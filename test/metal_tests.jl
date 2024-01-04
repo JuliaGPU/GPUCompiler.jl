@@ -87,7 +87,7 @@ end
                       (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}), x, y)
 
     ir = sprint(io->Metal.code_llvm(io, foo, (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}})))
-                @test occursin("air.max.s.v2i64", ir)
+    @test occursin("air.max.s.v2i64", ir)
 end
 
 end
