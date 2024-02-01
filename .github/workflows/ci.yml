@@ -58,7 +58,7 @@ jobs:
           arch: ${{ matrix.arch }}
 
       # set-up packages
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         env:
           cache-name: cache-artifacts
         with:
@@ -105,7 +105,7 @@ jobs:
           echo $PWD/../julia-*/bin >> $GITHUB_PATH
 
       # set-up packages
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         env:
           cache-name: cache-artifacts
         with:
