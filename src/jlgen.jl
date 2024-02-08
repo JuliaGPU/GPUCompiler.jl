@@ -204,7 +204,11 @@ function (callback::CodeCacheCallback)(replaced::MethodInstance, max_world::UInt
     for ci in cis
         if ci.max_world == ~0 % Csize_t
             @assert ci.min_world - 1 <= max_world "attempting to set illogical constraints"
+@static if VERSION >= v"1.11.0-DEV.1390"
+            @atomic ci.max_world = max_world
+else
             ci.max_world = max_world
+end
         end
         @assert ci.max_world <= max_world
     end
