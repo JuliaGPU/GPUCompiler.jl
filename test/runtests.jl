@@ -4,6 +4,9 @@ GPUCompiler.reset_runtime()
 using InteractiveUtils
 @info "System information:\n" * sprint(io->versioninfo(io; verbose=true))
 
+import SPIRV_LLVM_Translator_unified_jll
+import SPIRV_Tools_jll
+
 using ReTestItems
 runtests(GPUCompiler; nworkers=min(Sys.CPU_THREADS,4), nworker_threads=1,
                       testitem_timeout=120) do ti
@@ -24,5 +27,9 @@ runtests(GPUCompiler; nworkers=min(Sys.CPU_THREADS,4), nworker_threads=1,
         return false
     end
 
+    if ti.name in ["SPIRV"] && !(SPIRV_LLVM_Translator_unified_jll.is_available() && SPIRV_Tools_jll.is_available())
+        # SPIRV needs it's tools to be available
+        return false
+    end
     true
 end
