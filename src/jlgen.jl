@@ -268,6 +268,13 @@ Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
 
 ## interpreter
 
+@static if VERSION ≥ v"1.11.0-DEV.1498"
+    import Core.Compiler: get_inference_world
+    using Base: get_world_counter
+else
+    import Core.Compiler: get_world_counter, get_world_counter as get_inference_world
+end
+
 using Core.Compiler: OverlayMethodTable
 const MTType = Core.MethodTable
 if isdefined(Core.Compiler, :CachedMethodTable)
@@ -320,7 +327,7 @@ end
 
 CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
 CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
-CC.get_world_counter(interp::GPUInterpreter) = interp.world
+#=CC.=#get_inference_world(interp::GPUInterpreter) = interp.world
 CC.get_inference_cache(interp::GPUInterpreter) = interp.inf_cache
 CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
 
@@ -471,6 +478,7 @@ end
 # HACK: in older versions of Julia, `jl_create_native` doesn't take a world argument
 #       but instead always generates code for the current world. note that this doesn't
 #       actually change the world age, but just spoofs the counter `jl_create_native` reads.
+# XXX: Base.get_world_counter is supposed to be monotonically increasing and is runtime global.
 macro in_world(world, ex)
     quote
         actual_world = Base.get_world_counter()
