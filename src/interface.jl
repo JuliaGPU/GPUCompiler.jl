@@ -214,9 +214,21 @@ needs_byval(@nospecialize(job::CompilerJob)) = true
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
-ci_cache_token(@nospecialize(job::CompilerJob)) = job.config
+# Care is required for anything that impacts:
+#   - method_table
+#   - inference_params
+#   - optimization_params
+# By default that is just always_inline
+# the cache token is compared with jl_egal
+struct GPUCompilerCacheToken
+    target_type::Type
+    always_inline::Bool
+end
+
+ci_cache_token(@nospecialize(job::CompilerJob)) = GPUCompilerCacheToken(typeof(job.target), job.config.always_inline)
+
 # the codeinfo cache to use
-if isdefined(Base, :method_instance)
+if isdefined(Core.Compiler, :cache_owner)
     ci_cache(@nospecialize(job::CompilerJob)) = Core.Compiler.InternalCodeCache(ci_cache_token(job))
 else
 function ci_cache(@nospecialize(job::CompilerJob))
