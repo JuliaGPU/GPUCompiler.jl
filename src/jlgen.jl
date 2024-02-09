@@ -6,8 +6,11 @@
 # `tls_world_age` should be used to look up the current world age. in most cases, this is
 # what you should use to invoke the compiler with.
 
-tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
-
+if isdefined(Base, :tls_world_age)
+    import Base: tls_world_age
+else
+    tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
+end
 
 ## looking up method instances
 
@@ -164,7 +167,9 @@ end
 
 
 ## code instance cache
+const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
 
+if !HAS_INTEGRATED_CACHE
 struct CodeCache
     dict::IdDict{MethodInstance,Vector{CodeInstance}}
 
@@ -292,6 +297,8 @@ function (callback::CodeCacheCallback)(replaced::MethodInstance, max_world::UInt
 end
 
 end
+end # !HAS_INTEGRATED_CACHE
+
 
 ## method overrides
 
@@ -323,12 +330,46 @@ struct GPUInterpreter <: CC.AbstractInterpreter
     world::UInt
     method_table::GPUMethodTableView
 
+@static if HAS_INTEGRATED_CACHE
+    token::Any
+else
     code_cache::CodeCache
+end
     inf_cache::Vector{CC.InferenceResult}
 
     inf_params::CC.InferenceParams
     opt_params::CC.OptimizationParams
 end
+
+@static if HAS_INTEGRATED_CACHE
+function GPUInterpreter(world::UInt=Base.get_world_counter();
+                        method_table::MTType,
+                        token::Any,
+                        inf_params::CC.InferenceParams,
+                        opt_params::CC.OptimizationParams)
+    @assert world <= Base.get_world_counter()
+
+    method_table = get_method_table_view(world, method_table)
+    inf_cache = Vector{CC.InferenceResult}()
+
+    return GPUInterpreter(world, method_table,
+                          token, inf_cache,
+                          inf_params, opt_params)
+end
+
+function GPUInterpreter(interp::GPUInterpreter;
+                        world::UInt=interp.world,
+                        method_table::GPUMethodTableView=interp.method_table,
+                        token::Any=interp.token,
+                        inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
+                        inf_params::CC.InferenceParams=interp.inf_params,
+                        opt_params::CC.OptimizationParams=interp.opt_params)
+    return GPUInterpreter(world, method_table,
+                          token, inf_cache,
+                          inf_params, opt_params)
+end
+
+else
 
 function GPUInterpreter(world::UInt=Base.get_world_counter();
                         method_table::MTType,
@@ -356,12 +397,17 @@ function GPUInterpreter(interp::GPUInterpreter;
                           code_cache, inf_cache,
                           inf_params, opt_params)
 end
+end # HAS_INTEGRATED_CACHE
 
 CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
 CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
 #=CC.=#get_inference_world(interp::GPUInterpreter) = interp.world
 CC.get_inference_cache(interp::GPUInterpreter) = interp.inf_cache
-CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
+if HAS_INTEGRATED_CACHE
+    CC.cache_owner(interp::GPUInterpreter) = interp.token
+else
+    CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
+end
 
 # No need to do any locking since we're not putting our results into the runtime cache
 CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
@@ -413,8 +459,9 @@ end
 
 
 ## world view of the cache
-
 using Core.Compiler: WorldView
+
+if !HAS_INTEGRATED_CACHE
 
 function CC.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
     CC.get(wvc, mi, nothing) !== nothing
@@ -454,6 +501,7 @@ function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodIns
     CC.setindex!(wvc.cache, ci, mi)
 end
 
+end # HAS_INTEGRATED_CACHE
 
 ## codegen/inference integration
 
@@ -526,8 +574,8 @@ end
 
 function compile_method_instance(@nospecialize(job::CompilerJob))
     # populate the cache
-    cache = ci_cache(job)
     interp = get_interpreter(job)
+    cache = CC.code_cache(interp)
     if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
         ci_cache_populate(interp, cache, job.source, job.world, job.world)
     end

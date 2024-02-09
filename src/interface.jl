@@ -176,10 +176,17 @@ runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
+if VERSION >= v"1.11.0-DEV.1552"
+get_interpreter(@nospecialize(job::CompilerJob)) =
+    GPUInterpreter(job.world; method_table=method_table(job),
+                   token=ci_cache_token(job), inf_params=inference_params(job),
+                   opt_params=optimization_params(job))
+else
 get_interpreter(@nospecialize(job::CompilerJob)) =
     GPUInterpreter(job.world; method_table=method_table(job),
                    code_cache=ci_cache(job), inf_params=inference_params(job),
                    opt_params=optimization_params(job))
+end
 
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime
@@ -207,7 +214,26 @@ needs_byval(@nospecialize(job::CompilerJob)) = true
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
-# the codeinfo cache to use
+# Care is required for anything that impacts:
+#   - method_table
+#   - inference_params
+#   - optimization_params
+# By default that is just always_inline
+# the cache token is compared with jl_egal
+struct GPUCompilerCacheToken
+    target_type::Type
+    always_inline::Bool
+    method_table::Core.MethodTable
+end
+
+ci_cache_token(@nospecialize(job::CompilerJob)) =
+    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
+
+# the codeinfo cache to use -- should only be used for the constructor
+if VERSION >= v"1.11.0-DEV.1552"
+    # Soft deprecated user should use `CC.code_cache(get_interpreter(job))`
+    ci_cache(@nospecialize(job::CompilerJob)) = CC.code_cache(get_interpreter(job))
+else
 function ci_cache(@nospecialize(job::CompilerJob))
     lock(GLOBAL_CI_CACHES_LOCK) do
         cache = get!(GLOBAL_CI_CACHES, job.config) do
@@ -215,6 +241,7 @@ function ci_cache(@nospecialize(job::CompilerJob))
         end
         return cache
     end
+end
 end
 
 # the method table to use
