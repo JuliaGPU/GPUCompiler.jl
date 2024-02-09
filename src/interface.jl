@@ -176,10 +176,17 @@ runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
+if isdefined(Base, :method_instance)
+get_interpreter(@nospecialize(job::CompilerJob)) =
+    GPUInterpreter(job.world; method_table=method_table(job),
+                   token=ci_cache_token(job), inf_params=inference_params(job),
+                   opt_params=optimization_params(job))
+else
 get_interpreter(@nospecialize(job::CompilerJob)) =
     GPUInterpreter(job.world; method_table=method_table(job),
                    code_cache=ci_cache(job), inf_params=inference_params(job),
                    opt_params=optimization_params(job))
+end
 
 # does this target support throwing Julia exceptions with jl_throw?
 # if not, calls to throw will be replaced with calls to the GPU runtime
@@ -207,7 +214,11 @@ needs_byval(@nospecialize(job::CompilerJob)) = true
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
+ci_cache_token(@nospecialize(job::CompilerJob)) = job.config
 # the codeinfo cache to use
+if isdefined(Base, :method_instance)
+    ci_cache(@nospecialize(job::CompilerJob)) = Core.Compiler.InternalCodeCache(ci_cache_token(job))
+else
 function ci_cache(@nospecialize(job::CompilerJob))
     lock(GLOBAL_CI_CACHES_LOCK) do
         cache = get!(GLOBAL_CI_CACHES, job.config) do
@@ -215,6 +226,7 @@ function ci_cache(@nospecialize(job::CompilerJob))
         end
         return cache
     end
+end
 end
 
 # the method table to use
