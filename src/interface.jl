@@ -225,7 +225,7 @@ struct GPUCompilerCacheToken
     always_inline::Bool
 end
 
-ci_cache_token(@nospecialize(job::CompilerJob)) = GPUCompilerCacheToken(typeof(job.target), job.config.always_inline)
+ci_cache_token(@nospecialize(job::CompilerJob)) = GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline)
 
 # the codeinfo cache to use
 if isdefined(Core.Compiler, :cache_owner)
