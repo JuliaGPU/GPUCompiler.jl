@@ -16,6 +16,24 @@ end
 
 export methodinstance
 
+@static if isdefined(Base, :method_instance)
+    function signature_type_by_tt(ft, tt)
+        u = Base.unwrap_unionall(tt)::DataType
+        return Base.rewrap_unionall(Tuple{ft, u.parameters...}, tt)
+    end
+
+    function methodinstance(ft, tt, world=tls_world_age())
+        # XXX: Base.method_instance uses f not ft...
+        sig = signature_type_by_tt(ft, tt)
+        mi = ccall(:jl_method_lookup_by_tt, Any,
+                (Any, Csize_t, Any),
+                sig, world, #=method_table=# nothing)
+        # XXX: MethodError takes `f` not `ft`?
+        mi === nothing && throw(MethodError(ft, tt, world))
+        return mi
+    end
+else
+
 @inline function typed_signature(ft::Type, tt::Type)
     u = Base.unwrap_unionall(tt)
     return Base.rewrap_unionall(Tuple{ft, u.parameters...}, tt)
@@ -46,17 +64,6 @@ macro LineInfoNode(method)
     end
 end
 
-"""
-    methodinstance(ft::Type, tt::Type, [world::UInt])
-
-Look up the method instance that corresponds to invoking the function with type `ft` with
-argument typed `tt`. If the `world` argument is specified, the look-up is static and will
-always return the same result. If the `world` argument is not specified, the look-up is
-dynamic and the returned method instance will automatically be invalidated when a relevant
-function is redefined.
-
-If the method is not found, a `MethodError` is thrown.
-"""
 function methodinstance(ft::Type, tt::Type, world::Integer)
     sig = typed_signature(ft, tt)
 
@@ -136,6 +143,19 @@ else
 methodinstance(f, tt) = methodinstance(f, tt, tls_world_age())
 
 end
+
+end # isdefined(Base, :method_instance)
+@doc """
+    methodinstance(ft::Type, tt::Type, [world::UInt])
+
+Look up the method instance that corresponds to invoking the function with type `ft` with
+argument typed `tt`. If the `world` argument is specified, the look-up is static and will
+always return the same result. If the `world` argument is not specified, the look-up is
+dynamic and the returned method instance will automatically be invalidated when a relevant
+function is redefined.
+
+If the method is not found, a `MethodError` is thrown.
+""" methodinstance
 
 
 ## code instance cache
