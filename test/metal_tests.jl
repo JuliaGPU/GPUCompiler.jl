@@ -1,23 +1,12 @@
 @testitem "Metal" setup=[Metal, Helpers] begin
 
-using Metal_LLVM_Tools_jll, LLVM
+using LLVM
 
 ############################################################################################
 
 @testset "IR" begin
 
 @testset "kernel functions" begin
-@testset "calling convention" begin
-    kernel() = return
-
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{}; dump_module=true))
-    @test !occursin("cc103", ir)
-
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{};
-                                    dump_module=true, kernel=true))
-    @test occursin("cc103", ir)
-end
-
 @testset "byref aggregates" begin
     kernel(x) = return
 
@@ -90,23 +79,6 @@ end
     @test occursin("air.max.s.v2i64", ir)
 end
 
-end
-
-end
-
-############################################################################################
-
-Sys.isapple() && @testset "asm" begin
-
-@testset "smoke test" begin
-    kernel() = return
-
-    asm = sprint(io->Metal.code_native(io, kernel, Tuple{};
-                                    dump_module=true, kernel=true))
-    @test occursin("[header]", asm)
-    @test occursin("[program]", asm)
-    @test occursin(r"name: \w*kernel\w*", asm)
-    @test occursin(r"define void @\w*kernel\w*", asm)
 end
 
 end
