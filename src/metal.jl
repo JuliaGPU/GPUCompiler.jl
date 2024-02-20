@@ -98,6 +98,49 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     check_ir_values(mod, LLVM.DoubleType())
 end
 
+# hide `noreturn` function attributes, which cause issues with the back-end compiler,
+# probably because of thread-divergent control flow as we've encountered with CUDA.
+# note that it isn't enough to remove the function attribute, because the Metal LLVM
+# compiler re-optimizes and will rediscover the property. to avoid this, we inline
+# all functions that are marked noreturn, i.e., until LLVM cannot rediscover it.
+function hide_noreturn!(mod::LLVM.Module)
+    noreturn_attr = EnumAttribute("noreturn", 0)
+    noinline_attr = EnumAttribute("noinline", 0)
+    alwaysinline_attr = EnumAttribute("alwaysinline", 0)
+
+    any_noreturn = false
+    for f in functions(mod)
+        attrs = function_attributes(f)
+        if noreturn_attr in collect(attrs)
+            delete!(attrs, noreturn_attr)
+            delete!(attrs, noinline_attr)
+            push!(attrs, alwaysinline_attr)
+            any_noreturn = true
+        end
+    end
+    any_noreturn || return false
+
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, AlwaysInlinerPass())
+            add!(mpm, NewPMFunctionPassManager) do fpm
+                add!(fpm, SimplifyCFGPass())
+                add!(fpm, InstCombinePass())
+            end
+            run!(mpm, mod)
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            always_inliner!(pm)
+            cfgsimplification!(pm)
+            instruction_combining!(pm)
+            run!(pm, mod)
+        end
+    end
+
+    return true
+end
+
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
@@ -109,6 +152,8 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         add_argument_metadata!(job, mod, entry)
 
         add_module_metadata!(job, mod)
+
+        hide_noreturn!(mod)
     end
 
     # lower LLVM intrinsics that AIR doesn't support
@@ -142,53 +187,8 @@ end
 
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMObjectFile)
-    # hide `noreturn` function attributes, which cause issues with the back-end compiler,
-    # probably because of thread-divergent control flow as we've encountered with CUDA.
-    # note that it isn't enough to remove the function attribute, because the Metal LLVM
-    # compiler re-optimizes and will rediscover the property. to avoid this, we inline
-    # all functions that are marked noreturn, i.e., until LLVM cannot rediscover it.
-    let
-        noreturn_attr = EnumAttribute("noreturn", 0)
-        noinline_attr = EnumAttribute("noinline", 0)
-        alwaysinline_attr = EnumAttribute("alwaysinline", 0)
-
-        any_noreturn = false
-        for f in functions(mod)
-            attrs = function_attributes(f)
-            if noreturn_attr in collect(attrs)
-                delete!(attrs, noreturn_attr)
-                delete!(attrs, noinline_attr)
-                push!(attrs, alwaysinline_attr)
-                any_noreturn = true
-            end
-        end
-
-        if any_noreturn
-            if use_newpm
-                @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                    add!(mpm, AlwaysInlinerPass())
-                    add!(mpm, NewPMFunctionPassManager) do fpm
-                        add!(fpm, SimplifyCFGPass())
-                        add!(fpm, InstCombinePass())
-                    end
-                    run!(mpm, mod)
-                end
-            else
-                @dispose pm=ModulePassManager() begin
-                    always_inliner!(pm)
-                    cfgsimplification!(pm)
-                    instruction_combining!(pm)
-                    run!(pm, mod)
-                end
-            end
-        end
-    end
-
-    if format == LLVM.API.LLVMAssemblyFile
-        return string(mod)
-    else
-        error("GPUCompiler does not support generating binary Metal objects")
-    end
+    # our LLVM version does not support emitting Metal libraries
+    return nothing
 end
 
 
