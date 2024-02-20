@@ -1,7 +1,5 @@
 # implementation of the GPUCompiler interfaces for generating Metal code
 
-const Metal_LLVM_Tools_jll = LazyModule("Metal_LLVM_Tools_jll", UUID("0418c028-ff8c-56b8-a53e-0f9676ed36fc"))
-
 ## target
 
 export MetalCompilerTarget
@@ -47,21 +45,11 @@ runtime_slug(job::CompilerJob{MetalCompilerTarget}) = "metal-macos$(job.config.t
 isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
 
-const LLVMMETALFUNCCallConv   = LLVM.API.LLVMCallConv(102)
-const LLVMMETALKERNELCallConv = LLVM.API.LLVMCallConv(103)
-
 function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module, entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
 
     # update calling conventions
-    for f in functions(mod)
-        #callconv!(f, LLVMMETALFUNCCallConv)
-        # XXX: this makes InstCombine erase kernel->func calls.
-        #      do we even need this? if we do, do so in metallib-instead.
-    end
     if job.config.kernel
-        callconv!(entry, LLVMMETALKERNELCallConv)
-
         entry = pass_by_reference!(job, mod, entry)
 
         add_input_arguments!(job, mod, entry)
@@ -110,6 +98,49 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     check_ir_values(mod, LLVM.DoubleType())
 end
 
+# hide `noreturn` function attributes, which cause issues with the back-end compiler,
+# probably because of thread-divergent control flow as we've encountered with CUDA.
+# note that it isn't enough to remove the function attribute, because the Metal LLVM
+# compiler re-optimizes and will rediscover the property. to avoid this, we inline
+# all functions that are marked noreturn, i.e., until LLVM cannot rediscover it.
+function hide_noreturn!(mod::LLVM.Module)
+    noreturn_attr = EnumAttribute("noreturn", 0)
+    noinline_attr = EnumAttribute("noinline", 0)
+    alwaysinline_attr = EnumAttribute("alwaysinline", 0)
+
+    any_noreturn = false
+    for f in functions(mod)
+        attrs = function_attributes(f)
+        if noreturn_attr in collect(attrs)
+            delete!(attrs, noreturn_attr)
+            delete!(attrs, noinline_attr)
+            push!(attrs, alwaysinline_attr)
+            any_noreturn = true
+        end
+    end
+    any_noreturn || return false
+
+    if use_newpm
+        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, AlwaysInlinerPass())
+            add!(mpm, NewPMFunctionPassManager) do fpm
+                add!(fpm, SimplifyCFGPass())
+                add!(fpm, InstCombinePass())
+            end
+            run!(mpm, mod)
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            always_inliner!(pm)
+            cfgsimplification!(pm)
+            instruction_combining!(pm)
+            run!(pm, mod)
+        end
+    end
+
+    return true
+end
+
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
@@ -121,6 +152,8 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         add_argument_metadata!(job, mod, entry)
 
         add_module_metadata!(job, mod)
+
+        hide_noreturn!(mod)
     end
 
     # lower LLVM intrinsics that AIR doesn't support
@@ -154,73 +187,8 @@ end
 
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMObjectFile)
-    strip_debuginfo!(mod)  # XXX: is this needed?
-
-    # hide `noreturn` function attributes, which cause issues with the back-end compiler,
-    # probably because of thread-divergent control flow as we've encountered with CUDA.
-    # note that it isn't enough to remove the function attribute, because the Metal LLVM
-    # compiler re-optimizes and will rediscover the property. to avoid this, we inline
-    # all functions that are marked noreturn, i.e., until LLVM cannot rediscover it.
-    let
-        noreturn_attr = EnumAttribute("noreturn", 0)
-        noinline_attr = EnumAttribute("noinline", 0)
-        alwaysinline_attr = EnumAttribute("alwaysinline", 0)
-
-        any_noreturn = false
-        for f in functions(mod)
-            attrs = function_attributes(f)
-            if noreturn_attr in collect(attrs)
-                delete!(attrs, noreturn_attr)
-                delete!(attrs, noinline_attr)
-                push!(attrs, alwaysinline_attr)
-                any_noreturn = true
-            end
-        end
-
-        if any_noreturn
-            if use_newpm
-                @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                    add!(mpm, AlwaysInlinerPass())
-                    add!(mpm, NewPMFunctionPassManager) do fpm
-                        add!(fpm, SimplifyCFGPass())
-                        add!(fpm, InstCombinePass())
-                    end
-                    run!(mpm, mod)
-                end
-            else
-                @dispose pm=ModulePassManager() begin
-                    always_inliner!(pm)
-                    cfgsimplification!(pm)
-                    instruction_combining!(pm)
-                    run!(pm, mod)
-                end
-            end
-        end
-    end
-
-    # translate to metallib
-    input = tempname(cleanup=false) * ".bc"
-    translated = tempname(cleanup=false) * ".metallib"
-    write(input, mod)
-    let cmd = `$(Metal_LLVM_Tools_jll.metallib_as()) -o $translated $input`
-        proc = run(ignorestatus(cmd))
-        if !success(proc)
-            error("""Failed to translate LLVM code to MetalLib.
-                     If you think this is a bug, please file an issue and attach $(input).""")
-        end
-    end
-
-    output = if format == LLVM.API.LLVMObjectFile
-        read(translated)
-    else
-        # disassemble
-        read(`$(Metal_LLVM_Tools_jll.metallib_dis()) -o - $translated`, String)
-    end
-
-    rm(input)
-    rm(translated)
-
-    return output
+    # our LLVM version does not support emitting Metal libraries
+    return nothing
 end
 
 
