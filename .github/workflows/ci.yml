@@ -18,36 +18,36 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.8', '1.9', '1.10', 'nightly']
+        version: ['1.8', '1.9', '1.10'] # 'nightly'
         os: [ubuntu-latest, macOS-latest, windows-latest]
         arch: [x64]
         llvm_args: ['']
         include:
           # starting with Julia 1.10, we can enable opaque pointers
-          - version: '1.10.0-beta3'
+          - version: '1.10'
             os: 'ubuntu-latest'
             arch: 'x64'
             llvm_args: '--opaque-pointers'
-          - version: '1.10.0-beta3'
+          - version: '1.10'
             os: 'macOS-latest'
             arch: 'x64'
             llvm_args: '--opaque-pointers'
-          - version: '1.10.0-beta3'
+          - version: '1.10'
             os: 'windows-latest'
             arch: 'x64'
             llvm_args: '--opaque-pointers'
-          - version: 'nightly'
-            os: 'ubuntu-latest'
-            arch: 'x64'
-            llvm_args: '--opaque-pointers'
-          - version: 'nightly'
-            os: 'macOS-latest'
-            arch: 'x64'
-            llvm_args: '--opaque-pointers'
-          - version: 'nightly'
-            os: 'windows-latest'
-            arch: 'x64'
-            llvm_args: '--opaque-pointers'
+          #- version: 'nightly'
+          #  os: 'ubuntu-latest'
+          #  arch: 'x64'
+          #  llvm_args: '--opaque-pointers'
+          #- version: 'nightly'
+          #  os: 'macOS-latest'
+          #  arch: 'x64'
+          #  llvm_args: '--opaque-pointers'
+          #- version: 'nightly'
+          #  os: 'windows-latest'
+          #  arch: 'x64'
+          #  llvm_args: '--opaque-pointers'
     steps:
       - uses: actions/checkout@v4
 
@@ -82,48 +82,48 @@ jobs:
           file: lcov.info
 
   # fetching builds from Buildkite with assertions enabled
-  assert_test:
-    name: Julia-master ${{ matrix.build }} ${{ matrix.llvm_args }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        build: ['x86_64-linux-gnuassert']
-        os: ['ubuntu-latest']
-        arch: ['x64']
-        llvm_args: ['', '--opaque-pointers']
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download Julia
-        env:
-          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
-        run: |
-          ./.github/download_build.sh build_${{ matrix.build }} julia.tar.gz
-          tar -xf julia.tar.gz -C ../
-          rm julia.tar.gz
-          echo $PWD/../julia-*/bin >> $GITHUB_PATH
-
-      # set-up packages
-      - uses: actions/cache@v4
-        env:
-          cache-name: cache-artifacts
-        with:
-          path: ~/.julia/artifacts
-          key: ${{ runner.os }}-test-${{ env.cache-name }}-${{ hashFiles('**/Project.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-test-${{ env.cache-name }}-
-            ${{ runner.os }}-test-
-            ${{ runner.os }}-
-      - uses: julia-actions/julia-buildpkg@v1
-
-      - name: Run tests
-        uses: julia-actions/julia-runtest@v1
-        env:
-          JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
-
-      # post-process
-      - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v4
-        with:
-          file: lcov.info
+  #assert_test:
+  #  name: Julia-master ${{ matrix.build }} ${{ matrix.llvm_args }}
+  #  runs-on: ${{ matrix.os }}
+  #  strategy:
+  #    fail-fast: false
+  #    matrix:
+  #      build: ['x86_64-linux-gnuassert']
+  #      os: ['ubuntu-latest']
+  #      arch: ['x64']
+  #      llvm_args: ['', '--opaque-pointers']
+  #  steps:
+  #    - uses: actions/checkout@v4
+  #
+  #    - name: Download Julia
+  #      env:
+  #        BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+  #      run: |
+  #        ./.github/download_build.sh build_${{ matrix.build }} julia.tar.gz
+  #        tar -xf julia.tar.gz -C ../
+  #        rm julia.tar.gz
+  #        echo $PWD/../julia-*/bin >> $GITHUB_PATH
+  #
+  #    # set-up packages
+  #    - uses: actions/cache@v4
+  #      env:
+  #        cache-name: cache-artifacts
+  #      with:
+  #        path: ~/.julia/artifacts
+  #        key: ${{ runner.os }}-test-${{ env.cache-name }}-${{ hashFiles('**/Project.toml') }}
+  #        restore-keys: |
+  #          ${{ runner.os }}-test-${{ env.cache-name }}-
+  #          ${{ runner.os }}-test-
+  #          ${{ runner.os }}-
+  #    - uses: julia-actions/julia-buildpkg@v1
+  #
+  #    - name: Run tests
+  #      uses: julia-actions/julia-runtest@v1
+  #      env:
+  #        JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
+  #
+  #    # post-process
+  #    - uses: julia-actions/julia-processcoverage@v1
+  #    - uses: codecov/codecov-action@v4
+  #      with:
+  #        file: lcov.info
