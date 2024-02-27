@@ -79,6 +79,8 @@ jobs:
       - uses: julia-actions/julia-processcoverage@v1
       - uses: codecov/codecov-action@v4
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
           file: lcov.info
 
   # fetching builds from Buildkite
@@ -134,4 +136,6 @@ jobs:
       - uses: julia-actions/julia-processcoverage@v1
       - uses: codecov/codecov-action@v4
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
           file: lcov.info
