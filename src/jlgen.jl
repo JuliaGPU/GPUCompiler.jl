@@ -61,15 +61,16 @@ methodinstance
 # Julia's cached method lookup to simply look up method instances at run time.
 if VERSION >= v"1.11.0-DEV.1552"
 
+# XXX: version of Base.method_instance that uses a function type
 function methodinstance(ft, tt, world=tls_world_age())
-    # XXX: Base.method_instance uses f not ft...
     sig = signature_type_by_tt(ft, tt)
+
     mi = ccall(:jl_method_lookup_by_tt, Any,
-            (Any, Csize_t, Any),
-            sig, world, #=method_table=# nothing)
-    # XXX: MethodError takes `f` not `ft`?
+               (Any, Csize_t, Any),
+               sig, world, #=method_table=# nothing)
     mi === nothing && throw(MethodError(ft, tt, world))
-    return mi
+
+    return mi::MethodInstance
 end
 
 # on older versions of Julia, the run-time lookup is much slower, so we'll need to cache it
