@@ -13,7 +13,7 @@ tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
 
 export methodinstance
 
-@inline function typed_signature(ft::Type, tt::Type)
+@inline function signature_type_by_tt(ft::Type, tt::Type)
     u = Base.unwrap_unionall(tt)
     return Base.rewrap_unionall(Tuple{ft, u.parameters...}, tt)
 end
@@ -49,13 +49,34 @@ end
 Look up the method instance that corresponds to invoking the function with type `ft` with
 argument typed `tt`. If the `world` argument is specified, the look-up is static and will
 always return the same result. If the `world` argument is not specified, the look-up is
-dynamic and the returned method instance will automatically be invalidated when a relevant
-function is redefined.
+dynamic and the returned method instance will depende on the current world age.
+
+This call is highly optimized, and does not need to be cached additionally.
 
 If the method is not found, a `MethodError` is thrown.
 """
+methodinstance
+
+# on 1.11 (JuliaLang/julia#52572, merged as part of JuliaLang/julia#52233) we can use
+# Julia's cached method lookup to simply look up method instances at run time.
+if VERSION >= v"1.11.0-DEV.1552"
+
+function methodinstance(ft, tt, world=tls_world_age())
+    # XXX: Base.method_instance uses f not ft...
+    sig = signature_type_by_tt(ft, tt)
+    mi = ccall(:jl_method_lookup_by_tt, Any,
+            (Any, Csize_t, Any),
+            sig, world, #=method_table=# nothing)
+    # XXX: MethodError takes `f` not `ft`?
+    mi === nothing && throw(MethodError(ft, tt, world))
+    return mi
+end
+
+# on older versions of Julia, the run-time lookup is much slower, so we'll need to cache it
+else
+
 function methodinstance(ft::Type, tt::Type, world::Integer)
-    sig = typed_signature(ft, tt)
+    sig = signature_type_by_tt(ft, tt)
 
     match, _ = CC._findsup(sig, nothing, world)
     match === nothing && throw(MethodError(ft, tt, world))
@@ -65,10 +86,10 @@ function methodinstance(ft::Type, tt::Type, world::Integer)
     return mi::MethodInstance
 end
 
-if VERSION >= v"1.10.0-DEV.873"
-
 # on 1.10 (JuliaLang/julia#48611) generated functions know which world to generate code for.
 # we can use this to cache and automatically invalidate method instance look-ups.
+# this isn't perfect, see e.g. JuliaGPU/GPUCompiler.jl#530.
+if VERSION >= v"1.10.0-DEV.873"
 
 function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
     @nospecialize
@@ -125,12 +146,12 @@ end
     $(Expr(:meta, :generated, methodinstance_generator))
 end
 
+# on really old versions, we can't cache the run-time lookup
 else
 
-# on older versions of Julia we have to fall back to a run-time lookup.
-# this is slower, and allocates.
-
 methodinstance(f, tt) = methodinstance(f, tt, tls_world_age())
+
+end
 
 end
 
