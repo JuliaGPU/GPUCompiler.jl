@@ -185,6 +185,10 @@ get_interpreter(@nospecialize(job::CompilerJob)) =
 # if not, calls to throw will be replaced with calls to the GPU runtime
 can_throw(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 
+function codegen_params(@nospecialize(job::CompilerJob))
+    return (;)
+end
+
 # does this target support loading from Julia safepoints?
 # if not, safepoints at function entry will not be emitted
 can_safepoint(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
