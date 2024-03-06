@@ -114,7 +114,7 @@ end
     obj = nothing
 
     # fast path: find an applicable CodeInstance and see if we have compiled it before
-    ci = ci_cache_lookup(ci_cache(job), src, world, world)::Union{Nothing,CodeInstance}
+    ci = ci_cache_lookup(ci_cache(job), src, world, world; allow_uninferred=true)::Union{Nothing,CodeInstance}
     if ci !== nothing && haskey(cache, ci)
         obj = cache[ci]
     end
@@ -130,7 +130,7 @@ end
         end
 
         obj = linker(job, asm)
-        ci = ci_cache_lookup(ci_cache(job), src, world, world)::CodeInstance
+        ci = ci_cache_lookup(ci_cache(job), src, world, world; allow_uninferred=true)::CodeInstance
         cache[ci] = obj
     end
 
