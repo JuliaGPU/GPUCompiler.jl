@@ -69,8 +69,15 @@ function methodinstance(ft, tt, world=tls_world_age())
                (Any, Csize_t, Any),
                sig, world, #=method_table=# nothing)
     mi === nothing && throw(MethodError(ft, tt, world))
-
-    return mi::MethodInstance
+    mi = mi::MethodInstance
+    # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
+    if mi.specTypes !== sig
+        # XXX: This slows down the lookup significantly
+        #      Do we really need this? We need the mi where we will insert our CodeInstance.
+        mi = CC.specialize_method(mi.def, sig, Core.svec(), preexisting=true)
+        mi === nothing && throw(MethodError(ft, tt, world))
+    end
+    return mi
 end
 
 # on older versions of Julia, the run-time lookup is much slower, so we'll need to cache it
@@ -82,7 +89,7 @@ function methodinstance(ft::Type, tt::Type, world::Integer)
     match, _ = CC._findsup(sig, nothing, world)
     match === nothing && throw(MethodError(ft, tt, world))
 
-    mi = CC.specialize_method(match)
+    mi = CC.specialize_method(match) # XXX: preexisting=true?
 
     return mi::MethodInstance
 end
