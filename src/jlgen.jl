@@ -14,7 +14,7 @@ tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
 export methodinstance
 
 @inline function signature_type_by_tt(ft::Type, tt::Type)
-    u = Base.unwrap_unionall(tt)
+    u = Base.unwrap_unionall(tt)::DataType
     return Base.rewrap_unionall(Tuple{ft, u.parameters...}, tt)
 end
 
