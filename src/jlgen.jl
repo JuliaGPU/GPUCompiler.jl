@@ -61,12 +61,8 @@ methodinstance
 # Julia's cached method lookup to simply look up method instances at run time.
 if VERSION >= v"1.11.0-DEV.1552"
 
-@inline function specialize(mi::MethodInstance, @nospecialize(sig::Type))
-    @invoke CC.specialize_method(mi.def::Method, sig::Type, Core.svec(), preexisting=true)
-end
-
 # XXX: version of Base.method_instance that uses a function type
-function methodinstance(ft, tt, world=tls_world_age())
+@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type), world::Integer=tls_world_age())
     sig = signature_type_by_tt(ft, tt)
 
     mi = ccall(:jl_method_lookup_by_tt, Any,
@@ -76,7 +72,7 @@ function methodinstance(ft, tt, world=tls_world_age())
     mi = mi::MethodInstance
     # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
     if mi.specTypes !== sig
-        mi = specialize(mi, sig)
+        mi = CC.specialize_method(mi.def, sig, Core.svec(), preexisting=true)
         mi === nothing && throw(MethodError(ft, tt, world))
     end
     return mi
