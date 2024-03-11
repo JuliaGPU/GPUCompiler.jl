@@ -72,8 +72,8 @@ if VERSION >= v"1.11.0-DEV.1552"
     mi = mi::MethodInstance
     # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
     if !isdispatchtuple(mi.specTypes) && sig != mi.specTypes
-        mi = CC.specialize_method(mi.def, sig, Core.svec(), preexisting=true)
-        mi === nothing && throw(MethodError(ft, tt, world))
+        mi = CC.specialize_method(mi.def, sig, mi.sparams_vals)
+        @assert mi !== nothing
     end
     return mi
 end
@@ -87,7 +87,7 @@ function methodinstance(ft::Type, tt::Type, world::Integer)
     match, _ = CC._findsup(sig, nothing, world)
     match === nothing && throw(MethodError(ft, tt, world))
 
-    mi = CC.specialize_method(match) # XXX: preexisting=true?
+    mi = CC.specialize_method(match)
 
     return mi::MethodInstance
 end
