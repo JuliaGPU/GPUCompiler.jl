@@ -232,7 +232,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         for i in 1:length(byval)
             attrs = collect(parameter_attributes(f, i))
             byval[i] = any(attrs) do attr
-                kind(attr) == kind(EnumAttribute("byval", 0))
+                kind(attr) == kind(TypeAttribute("byval", LLVM.VoidType()))
             end
         end
     else
@@ -292,11 +292,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
             attrs = parameter_attributes(new_f, i)
             if byval[i]
                 llvm_typ = convert(LLVMType, args[i].typ)
-                if LLVM.version() >= v"12"
-                    push!(attrs, TypeAttribute("byval", LLVM.StructType([llvm_typ])))
-                else
-                    push!(attrs, EnumAttribute("byval", 0))
-                end
+                push!(attrs, TypeAttribute("byval", LLVM.StructType([llvm_typ])))
             end
         end
 
