@@ -88,11 +88,7 @@ function irgen(@nospecialize(job::CompilerJob))
             for arg in args
                 if arg.cc == BITS_REF
                     llvm_typ = convert(LLVMType, arg.typ)
-                    attr = @static if LLVM.version() >= v"12"
-                        TypeAttribute("byval", llvm_typ)
-                    else
-                        EnumAttribute("byval", 0)
-                    end
+                    attr = TypeAttribute("byval", llvm_typ)
                     push!(parameter_attributes(entry, arg.idx), attr)
                 end
             end
@@ -381,17 +377,10 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
-    if LLVM.version() >= v"12"
-        for i in 1:length(byval)
-            attrs = collect(parameter_attributes(f, i))
-            byval[i] = any(attrs) do attr
-                kind(attr) == kind(EnumAttribute("byval", 0))
-            end
-        end
-    else
-        # XXX: byval is not round-trippable on LLVM < 12 (see maleadt/LLVM.jl#186)
-        for arg in args
-            byval[arg.idx] = (arg.cc == BITS_REF)
+    for i in 1:length(byval)
+        attrs = collect(parameter_attributes(f, i))
+        byval[i] = any(attrs) do attr
+            kind(attr) == kind(TypeAttribute("byval", LLVM.VoidType()))
         end
     end
 
