@@ -14,7 +14,7 @@ tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
 export methodinstance
 
 @inline function signature_type_by_tt(ft::Type, tt::Type)
-    u = Base.unwrap_unionall(tt)
+    u = Base.unwrap_unionall(tt)::DataType
     return Base.rewrap_unionall(Tuple{ft, u.parameters...}, tt)
 end
 
@@ -62,15 +62,21 @@ methodinstance
 if VERSION >= v"1.11.0-DEV.1552"
 
 # XXX: version of Base.method_instance that uses a function type
-function methodinstance(ft, tt, world=tls_world_age())
+@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type), world::Integer=tls_world_age())
     sig = signature_type_by_tt(ft, tt)
 
     mi = ccall(:jl_method_lookup_by_tt, Any,
                (Any, Csize_t, Any),
                sig, world, #=method_table=# nothing)
     mi === nothing && throw(MethodError(ft, tt, world))
+    mi = mi::MethodInstance
 
-    return mi::MethodInstance
+    # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
+    if !Base.isdispatchtuple(mi.specTypes)
+        mi = CC.specialize_method(mi.def, sig, mi.sparam_vals)::MethodInstance
+    end
+
+    return mi
 end
 
 # on older versions of Julia, the run-time lookup is much slower, so we'll need to cache it
