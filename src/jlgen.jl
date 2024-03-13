@@ -70,11 +70,12 @@ if VERSION >= v"1.11.0-DEV.1552"
                sig, world, #=method_table=# nothing)
     mi === nothing && throw(MethodError(ft, tt, world))
     mi = mi::MethodInstance
+
     # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
-    if !Base.isdispatchtuple(mi.specTypes) && sig !== mi.specTypes
-        mi = CC.specialize_method(mi.def, sig, mi.sparam_vals)
-        @assert mi !== nothing
+    if !Base.isdispatchtuple(mi.specTypes)
+        mi = CC.specialize_method(mi.def, sig, mi.sparam_vals)::MethodInstance
     end
+
     return mi
 end
 
