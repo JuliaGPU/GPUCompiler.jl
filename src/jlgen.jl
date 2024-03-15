@@ -14,7 +14,7 @@ end
 
 ## looking up method instances
 
-export methodinstance
+export methodinstance, generic_methodinstance
 
 @inline function signature_type_by_tt(ft::Type, tt::Type)
     u = Base.unwrap_unionall(tt)::DataType
@@ -52,18 +52,19 @@ end
 Look up the method instance that corresponds to invoking the function with type `ft` with
 argument typed `tt`. If the `world` argument is specified, the look-up is static and will
 always return the same result. If the `world` argument is not specified, the look-up is
-dynamic and the returned method instance will depende on the current world age.
+dynamic and the returned method instance will depende on the current world age. If no method
+is found, a `MethodError` is thrown.
 
-This call is highly optimized, and does not need to be cached additionally.
+This function is highly optimized, and results do not need to be cached additionally.
 
-If the method is not found, a `MethodError` is thrown.
+Only use this function with concrete signatures, i.e., using the types of values you would
+pass at run time. For non-concrete signatures, use `generic_methodinstance` instead.
+
 """
 methodinstance
 
-# even though on newer versions of Julia we can use `jl_method_lookup_by_tt`,
-# that doesn't support looking up non-concrete signatures (JuliaLang/julia#53723)
-function slow_methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
-                             world::Integer=tls_world_age())
+function generic_methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
+                                world::Integer=tls_world_age())
     sig = signature_type_by_tt(ft, tt)
 
     match, _ = CC._findsup(sig, nothing, world)
@@ -98,10 +99,10 @@ if VERSION >= v"1.11.0-DEV.1552"
     return mi
 end
 
-# on older versions of Julia, the run-time lookup is much slower, so we'll need to cache it
+# on older versions of Julia, we always need to use the generic lookup
 else
 
-const methodinstance = slow_methodinstance
+const methodinstance = generic_methodinstance
 
 # on 1.10 (JuliaLang/julia#48611) generated functions know which world to generate code for.
 # we can use this to cache and automatically invalidate method instance look-ups.

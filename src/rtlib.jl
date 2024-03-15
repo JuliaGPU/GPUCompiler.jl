@@ -55,7 +55,7 @@ end
 
 function emit_function!(mod, config::CompilerConfig, f, method)
     tt = Base.to_tuple_type(method.types)
-    source = slow_methodinstance(f, tt)
+    source = generic_methodinstance(f, tt)
     new_mod, meta = codegen(:llvm, CompilerJob(source, config);
                             optimize=false, libraries=false, validate=false)
     ft = function_type(meta.entry)
