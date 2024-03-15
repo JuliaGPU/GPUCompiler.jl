@@ -60,13 +60,29 @@ If the method is not found, a `MethodError` is thrown.
 """
 methodinstance
 
+# even though on newer versions of Julia we can use `jl_method_lookup_by_tt`,
+# that doesn't support looking up non-concrete signatures (JuliaLang/julia#53723)
+function slow_methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
+                             world::Integer=tls_world_age())
+    sig = signature_type_by_tt(ft, tt)
+
+    match, _ = CC._findsup(sig, nothing, world)
+    match === nothing && throw(MethodError(ft, tt, world))
+
+    mi = CC.specialize_method(match)
+
+    return mi::MethodInstance
+end
+
 # on 1.11 (JuliaLang/julia#52572, merged as part of JuliaLang/julia#52233) we can use
 # Julia's cached method lookup to simply look up method instances at run time.
 if VERSION >= v"1.11.0-DEV.1552"
 
 # XXX: version of Base.method_instance that uses a function type
-@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type), world::Integer=tls_world_age())
+@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
+                                world::Integer=tls_world_age())
     sig = signature_type_by_tt(ft, tt)
+    @assert Base.isdispatchtuple(sig)   # JuliaLang/julia#52233
 
     mi = ccall(:jl_method_lookup_by_tt, Any,
                (Any, Csize_t, Any),
@@ -85,16 +101,7 @@ end
 # on older versions of Julia, the run-time lookup is much slower, so we'll need to cache it
 else
 
-function methodinstance(ft::Type, tt::Type, world::Integer)
-    sig = signature_type_by_tt(ft, tt)
-
-    match, _ = CC._findsup(sig, nothing, world)
-    match === nothing && throw(MethodError(ft, tt, world))
-
-    mi = CC.specialize_method(match)
-
-    return mi::MethodInstance
-end
+const methodinstance = slow_methodinstance
 
 # on 1.10 (JuliaLang/julia#48611) generated functions know which world to generate code for.
 # we can use this to cache and automatically invalidate method instance look-ups.
