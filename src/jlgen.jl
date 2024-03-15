@@ -164,11 +164,6 @@ end
     $(Expr(:meta, :generated, methodinstance_generator))
 end
 
-# on really old versions, we can't cache the run-time lookup
-else
-
-methodinstance(f, tt) = methodinstance(f, tt, tls_world_age())
-
 end
 
 end
