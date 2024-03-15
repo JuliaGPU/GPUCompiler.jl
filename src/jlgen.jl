@@ -6,12 +6,15 @@
 # `tls_world_age` should be used to look up the current world age. in most cases, this is
 # what you should use to invoke the compiler with.
 
-tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
-
+if isdefined(Base, :tls_world_age)
+    import Base: tls_world_age
+else
+    tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
+end
 
 ## looking up method instances
 
-export methodinstance
+export methodinstance, generic_methodinstance
 
 @inline function signature_type_by_tt(ft::Type, tt::Type)
     u = Base.unwrap_unionall(tt)::DataType
@@ -49,21 +52,38 @@ end
 Look up the method instance that corresponds to invoking the function with type `ft` with
 argument typed `tt`. If the `world` argument is specified, the look-up is static and will
 always return the same result. If the `world` argument is not specified, the look-up is
-dynamic and the returned method instance will depende on the current world age.
+dynamic and the returned method instance will depende on the current world age. If no method
+is found, a `MethodError` is thrown.
 
-This call is highly optimized, and does not need to be cached additionally.
+This function is highly optimized, and results do not need to be cached additionally.
 
-If the method is not found, a `MethodError` is thrown.
+Only use this function with concrete signatures, i.e., using the types of values you would
+pass at run time. For non-concrete signatures, use `generic_methodinstance` instead.
+
 """
 methodinstance
+
+function generic_methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
+                                world::Integer=tls_world_age())
+    sig = signature_type_by_tt(ft, tt)
+
+    match, _ = CC._findsup(sig, nothing, world)
+    match === nothing && throw(MethodError(ft, tt, world))
+
+    mi = CC.specialize_method(match)
+
+    return mi::MethodInstance
+end
 
 # on 1.11 (JuliaLang/julia#52572, merged as part of JuliaLang/julia#52233) we can use
 # Julia's cached method lookup to simply look up method instances at run time.
 if VERSION >= v"1.11.0-DEV.1552"
 
 # XXX: version of Base.method_instance that uses a function type
-@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type), world::Integer=tls_world_age())
+@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
+                                world::Integer=tls_world_age())
     sig = signature_type_by_tt(ft, tt)
+    @assert Base.isdispatchtuple(sig)   # JuliaLang/julia#52233
 
     mi = ccall(:jl_method_lookup_by_tt, Any,
                (Any, Csize_t, Any),
@@ -79,19 +99,10 @@ if VERSION >= v"1.11.0-DEV.1552"
     return mi
 end
 
-# on older versions of Julia, the run-time lookup is much slower, so we'll need to cache it
+# on older versions of Julia, we always need to use the generic lookup
 else
 
-function methodinstance(ft::Type, tt::Type, world::Integer)
-    sig = signature_type_by_tt(ft, tt)
-
-    match, _ = CC._findsup(sig, nothing, world)
-    match === nothing && throw(MethodError(ft, tt, world))
-
-    mi = CC.specialize_method(match)
-
-    return mi::MethodInstance
-end
+const methodinstance = generic_methodinstance
 
 # on 1.10 (JuliaLang/julia#48611) generated functions know which world to generate code for.
 # we can use this to cache and automatically invalidate method instance look-ups.
@@ -153,18 +164,15 @@ end
     $(Expr(:meta, :generated, methodinstance_generator))
 end
 
-# on really old versions, we can't cache the run-time lookup
-else
-
-methodinstance(f, tt) = methodinstance(f, tt, tls_world_age())
-
 end
 
 end
 
 
 ## code instance cache
+const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
 
+if !HAS_INTEGRATED_CACHE
 struct CodeCache
     dict::IdDict{MethodInstance,Vector{CodeInstance}}
 
@@ -292,6 +300,8 @@ function (callback::CodeCacheCallback)(replaced::MethodInstance, max_world::UInt
 end
 
 end
+end # !HAS_INTEGRATED_CACHE
+
 
 ## method overrides
 
@@ -323,12 +333,46 @@ struct GPUInterpreter <: CC.AbstractInterpreter
     world::UInt
     method_table::GPUMethodTableView
 
+@static if HAS_INTEGRATED_CACHE
+    token::Any
+else
     code_cache::CodeCache
+end
     inf_cache::Vector{CC.InferenceResult}
 
     inf_params::CC.InferenceParams
     opt_params::CC.OptimizationParams
 end
+
+@static if HAS_INTEGRATED_CACHE
+function GPUInterpreter(world::UInt=Base.get_world_counter();
+                        method_table::MTType,
+                        token::Any,
+                        inf_params::CC.InferenceParams,
+                        opt_params::CC.OptimizationParams)
+    @assert world <= Base.get_world_counter()
+
+    method_table = get_method_table_view(world, method_table)
+    inf_cache = Vector{CC.InferenceResult}()
+
+    return GPUInterpreter(world, method_table,
+                          token, inf_cache,
+                          inf_params, opt_params)
+end
+
+function GPUInterpreter(interp::GPUInterpreter;
+                        world::UInt=interp.world,
+                        method_table::GPUMethodTableView=interp.method_table,
+                        token::Any=interp.token,
+                        inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
+                        inf_params::CC.InferenceParams=interp.inf_params,
+                        opt_params::CC.OptimizationParams=interp.opt_params)
+    return GPUInterpreter(world, method_table,
+                          token, inf_cache,
+                          inf_params, opt_params)
+end
+
+else
 
 function GPUInterpreter(world::UInt=Base.get_world_counter();
                         method_table::MTType,
@@ -356,12 +400,17 @@ function GPUInterpreter(interp::GPUInterpreter;
                           code_cache, inf_cache,
                           inf_params, opt_params)
 end
+end # HAS_INTEGRATED_CACHE
 
 CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
 CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
 #=CC.=#get_inference_world(interp::GPUInterpreter) = interp.world
 CC.get_inference_cache(interp::GPUInterpreter) = interp.inf_cache
-CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
+if HAS_INTEGRATED_CACHE
+    CC.cache_owner(interp::GPUInterpreter) = interp.token
+else
+    CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
+end
 
 # No need to do any locking since we're not putting our results into the runtime cache
 CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
@@ -413,8 +462,9 @@ end
 
 
 ## world view of the cache
-
 using Core.Compiler: WorldView
+
+if !HAS_INTEGRATED_CACHE
 
 function CC.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
     CC.get(wvc, mi, nothing) !== nothing
@@ -454,6 +504,7 @@ function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodIns
     CC.setindex!(wvc.cache, ci, mi)
 end
 
+end # HAS_INTEGRATED_CACHE
 
 ## codegen/inference integration
 
@@ -526,8 +577,8 @@ end
 
 function compile_method_instance(@nospecialize(job::CompilerJob))
     # populate the cache
-    cache = ci_cache(job)
     interp = get_interpreter(job)
+    cache = CC.code_cache(interp)
     if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
         ci_cache_populate(interp, cache, job.source, job.world, job.world)
     end
