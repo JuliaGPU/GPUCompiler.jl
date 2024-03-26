@@ -218,7 +218,7 @@ const __llvm_initialized = Ref(false)
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    has_deferred_jobs = !only_entry && toplevel &&
+    has_deferred_jobs = !only_entry &&
                         haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
