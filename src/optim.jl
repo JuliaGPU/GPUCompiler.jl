@@ -38,9 +38,10 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
     add!(mpm, NewPMFunctionPassManager) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
-        if false && opt_level >= 2
+        if uses_julia_runtime(job) && opt_level >= 2
             # XXX: we disable vectorization, as this generally isn't useful for GPU targets
             #      and actually causes issues with some back-end compilers (like Metal).
+            # TODO: Make this not dependent on `uses_julia_runtime` (likely CPU), but it's own control
             buildVectorPipeline(fpm, job, opt_level)
         end
         if isdebug(:optim)
@@ -112,6 +113,8 @@ end
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, NewPMLoopPassManager) do lpm
+        # TODO LowerSIMDLoopPass
+        # LoopPass since JuliaLang/julia#51883
         if opt_level >= 2
             add!(lpm, LoopRotatePass())
         end
@@ -121,7 +124,7 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
         add!(fpm, NewPMLoopPassManager, #=UseMemorySSA=#true) do lpm
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
-            add!(lpm, SimpleLoopUnswitchPass())
+            add!(lpm, SimpleLoopUnswitchPass(SimpleLoopUnswitchPassOptions(nontrivial=true, trivial=true)))
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
         end
@@ -187,15 +190,13 @@ end
 
 function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     # lower exception handling
-    if uses_julia_runtime(job)
-        add!(mpm, NewPMFunctionPassManager) do fpm
-             add!(fpm, LowerExcHandlersPass())
-        end
-    end
-
     add!(mpm, NewPMFunctionPassManager) do fpm
+        if uses_julia_runtime(job)
+            add!(fpm, LowerExcHandlersPass())
+        end
         add!(fpm, GCInvariantVerifierPass())
     end
+
     add!(mpm, RemoveNIPass())
 
     # lower GC intrinsics
