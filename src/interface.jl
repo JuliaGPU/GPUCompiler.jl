@@ -221,13 +221,12 @@ valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 # By default that is just always_inline
 # the cache token is compared with jl_egal
 struct GPUCompilerCacheToken
-    target_type::Type
-    always_inline::Bool
+    config::CompilerConfig
     method_table::Core.MethodTable
 end
 
 ci_cache_token(@nospecialize(job::CompilerJob)) =
-    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
+    GPUCompilerCacheToken(job.config, method_table(job))
 
 # the codeinfo cache to use -- should only be used for the constructor
 if VERSION >= v"1.11.0-DEV.1552"
