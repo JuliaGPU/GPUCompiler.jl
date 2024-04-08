@@ -495,12 +495,6 @@ function CC.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
 end
 
 function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
-    src = if ci.inferred isa Vector{UInt8}
-        ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
-                mi.def, C_NULL, ci.inferred)
-    else
-        ci.inferred
-    end
     CC.setindex!(wvc.cache, ci, mi)
 end
 
@@ -530,10 +524,10 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
     return ci
 end
 
-function ci_cache_lookup(cache, mi, min_world, max_world)
+function ci_cache_lookup(cache, mi, min_world, max_world; allow_uninferred=false)
     wvc = WorldView(cache, min_world, max_world)
     ci = CC.get(wvc, mi, nothing)
-    if ci !== nothing && ci.inferred === nothing
+    if ci !== nothing && (!allow_uninferred && ci.inferred === nothing)
         # if for some reason we did end up with a codeinfo without inferred source, e.g.,
         # because of calling `Base.return_types` which only sets rettyp, pretend we didn't
         # run inference so that we re-infer now and not during codegen (which is disallowed)
@@ -732,6 +726,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         if julia_datalayout(job.config.target) !== nothing
             datalayout!(llvm_mod, julia_datalayout(job.config.target))
         end
+    end
+
+    if job.config.kernel
+        # Don't cache the top-level inference result.
+        ci = compiled[job.source].ci
+@static if VERSION < v"1.9.0"
+        ci.inferred = nothing
+else
+        Base.@atomic :release ci.inferred = nothing
+end
     end
 
     return llvm_mod, compiled
