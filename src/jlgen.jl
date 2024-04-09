@@ -503,25 +503,42 @@ end # HAS_INTEGRATED_CACHE
 ## codegen/inference integration
 
 function ci_cache_populate(interp, cache, mi, min_world, max_world)
-    src = CC.typeinf_ext_toplevel(interp, mi)
+    if VERSION >= v"1.12.0-DEV.15"
+        inferred_ci = CC.typeinf_ext_toplevel(interp, mi, CC.SOURCE_MODE_FORCE_SOURCE) # or SOURCE_MODE_FORCE_SOURCE_UNCACHED?
 
-    # inference populates the cache, so we don't need to jl_get_method_inferred
-    wvc = WorldView(cache, min_world, max_world)
-    @assert CC.haskey(wvc, mi)
+        # inference should have populated our cache
+        wvc = WorldView(cache, min_world, max_world)
+        @assert CC.haskey(wvc, mi)
+        ci = CC.getindex(wvc, mi)
 
-    # if src is rettyp_const, the codeinfo won't cache ci.inferred
-    # (because it is normally not supposed to be used ever again).
-    # to avoid the need to re-infer, set that field here.
-    ci = CC.getindex(wvc, mi)
-    if ci !== nothing && ci.inferred === nothing
-        @static if VERSION >= v"1.9.0-DEV.1115"
-            @atomic ci.inferred = src
-        else
-            ci.inferred = src
+        # if ci is rettype_const, the inference result won't have been cached
+        # (because it is normally not supposed to be used ever again).
+        # to avoid the need to re-infer, set that field here.
+        if ci.inferred === nothing
+            CC.setindex!(wvc, inferred_ci, mi)
+            ci = CC.getindex(wvc, mi)
+        end
+    else
+        src = CC.typeinf_ext_toplevel(interp, mi)
+
+        # inference should have populated our cache
+        wvc = WorldView(cache, min_world, max_world)
+        @assert CC.haskey(wvc, mi)
+        ci = CC.getindex(wvc, mi)
+
+        # if ci is rettype_const, the inference result won't have been cached
+        # (because it is normally not supposed to be used ever again).
+        # to avoid the need to re-infer, set that field here.
+        if ci.inferred === nothing
+            @static if VERSION >= v"1.9.0-DEV.1115"
+                @atomic ci.inferred = src
+            else
+                ci.inferred = src
+            end
         end
     end
 
-    return ci
+    return ci::CodeInstance
 end
 
 function ci_cache_lookup(cache, mi, min_world, max_world)
