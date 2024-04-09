@@ -115,8 +115,11 @@ end
 
     # fast path: find an applicable CodeInstance and see if we have compiled it before
     ci = ci_cache_lookup(ci_cache(job), src, world, world)::Union{Nothing,CodeInstance}
-    if ci !== nothing && haskey(cache, ci)
-        obj = cache[ci]
+    if ci !== nothing
+        key = (ci, cfg)
+        if haskey(cache, key)
+            obj = cache[key]
+        end
     end
 
     # slow path: compile and link
@@ -128,10 +131,13 @@ end
             # we got here because of a *compile* hook; don't bother linking
             return obj
         end
-
         obj = linker(job, asm)
-        ci = ci_cache_lookup(ci_cache(job), src, world, world)::CodeInstance
-        cache[ci] = obj
+
+        if ci === nothing
+            ci = ci_cache_lookup(ci_cache(job), src, world, world)::CodeInstance
+            key = (ci, cfg)
+        end
+        cache[key] = obj
     end
 
     return obj
