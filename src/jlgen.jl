@@ -495,12 +495,6 @@ function CC.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
 end
 
 function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
-    src = if ci.inferred isa Vector{UInt8}
-        ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
-                mi.def, C_NULL, ci.inferred)
-    else
-        ci.inferred
-    end
     CC.setindex!(wvc.cache, ci, mi)
 end
 
@@ -509,25 +503,42 @@ end # HAS_INTEGRATED_CACHE
 ## codegen/inference integration
 
 function ci_cache_populate(interp, cache, mi, min_world, max_world)
-    src = CC.typeinf_ext_toplevel(interp, mi)
+    if VERSION >= v"1.12.0-DEV.15"
+        inferred_ci = CC.typeinf_ext_toplevel(interp, mi, CC.SOURCE_MODE_FORCE_SOURCE) # or SOURCE_MODE_FORCE_SOURCE_UNCACHED?
 
-    # inference populates the cache, so we don't need to jl_get_method_inferred
-    wvc = WorldView(cache, min_world, max_world)
-    @assert CC.haskey(wvc, mi)
+        # inference should have populated our cache
+        wvc = WorldView(cache, min_world, max_world)
+        @assert CC.haskey(wvc, mi)
+        ci = CC.getindex(wvc, mi)
 
-    # if src is rettyp_const, the codeinfo won't cache ci.inferred
-    # (because it is normally not supposed to be used ever again).
-    # to avoid the need to re-infer, set that field here.
-    ci = CC.getindex(wvc, mi)
-    if ci !== nothing && ci.inferred === nothing
-        @static if VERSION >= v"1.9.0-DEV.1115"
-            @atomic ci.inferred = src
-        else
-            ci.inferred = src
+        # if ci is rettype_const, the inference result won't have been cached
+        # (because it is normally not supposed to be used ever again).
+        # to avoid the need to re-infer, set that field here.
+        if ci.inferred === nothing
+            CC.setindex!(wvc, inferred_ci, mi)
+            ci = CC.getindex(wvc, mi)
+        end
+    else
+        src = CC.typeinf_ext_toplevel(interp, mi)
+
+        # inference should have populated our cache
+        wvc = WorldView(cache, min_world, max_world)
+        @assert CC.haskey(wvc, mi)
+        ci = CC.getindex(wvc, mi)
+
+        # if ci is rettype_const, the inference result won't have been cached
+        # (because it is normally not supposed to be used ever again).
+        # to avoid the need to re-infer, set that field here.
+        if ci.inferred === nothing
+            @static if VERSION >= v"1.9.0-DEV.1115"
+                @atomic ci.inferred = src
+            else
+                ci.inferred = src
+            end
         end
     end
 
-    return ci
+    return ci::CodeInstance
 end
 
 function ci_cache_lookup(cache, mi, min_world, max_world)
@@ -581,6 +592,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     cache = CC.code_cache(interp)
     if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
         ci_cache_populate(interp, cache, job.source, job.world, job.world)
+        @assert ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
     end
 
     # create a callback to look-up function in our cache,
@@ -698,9 +710,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         ccall(:jl_get_function_id, Nothing,
               (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
               native_code, ci, llvm_func_idx, llvm_specfunc_idx)
+        @assert llvm_func_idx[] != -1 || llvm_specfunc_idx[] != -1 "Static compilation failed"
 
         # get the function
-        llvm_func = if llvm_func_idx[] >=  1
+        llvm_func = if llvm_func_idx[] >= 1
             llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
                                   (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
             @assert llvm_func_ref != C_NULL
@@ -709,7 +722,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             nothing
         end
 
-        llvm_specfunc = if llvm_specfunc_idx[] >=  1
+        llvm_specfunc = if llvm_specfunc_idx[] >= 1
             llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
                                       (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
             @assert llvm_specfunc_ref != C_NULL

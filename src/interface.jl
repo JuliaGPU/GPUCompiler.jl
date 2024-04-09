@@ -229,7 +229,7 @@ end
 ci_cache_token(@nospecialize(job::CompilerJob)) =
     GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
 
-# the codeinfo cache to use -- should only be used for the constructor
+# the codeinstance cache to use -- should only be used for the constructor
 if VERSION >= v"1.11.0-DEV.1552"
     # Soft deprecated user should use `CC.code_cache(get_interpreter(job))`
     ci_cache(@nospecialize(job::CompilerJob)) = CC.code_cache(get_interpreter(job))

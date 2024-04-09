@@ -114,7 +114,7 @@ end
     @test occursin(r"@\w*kernel\w*\(\[1 x i64\] %state", ir)
 
     # child1 doesn't use the state
-    @test occursin(r"@\w*child1\w*\(i64", ir)
+    @test occursin(r"@\w*child1\w*\((i64|i8\*)", ir)
 
     # child2 does
     @test occursin(r"@\w*child2\w*\(\[1 x i64\] %state", ir)
