@@ -592,8 +592,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     cache = CC.code_cache(interp)
     if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
         ci_cache_populate(interp, cache, job.source, job.world, job.world)
+        @assert ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
     end
-    @assert ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
 
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
