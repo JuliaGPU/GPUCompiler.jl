@@ -7,6 +7,7 @@ function irgen(@nospecialize(job::CompilerJob))
     else
         entry_fn = compiled[job.source].func
     end
+    @assert entry_fn !== nothing
     entry = functions(mod)[entry_fn]
 
     # clean up incompatibilities

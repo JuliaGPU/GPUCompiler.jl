@@ -582,6 +582,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
         ci_cache_populate(interp, cache, job.source, job.world, job.world)
     end
+    @assert ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
 
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
@@ -698,9 +699,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         ccall(:jl_get_function_id, Nothing,
               (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
               native_code, ci, llvm_func_idx, llvm_specfunc_idx)
+        @assert llvm_func_idx[] != -1 || llvm_specfunc_idx[] != -1 "Static compilation failed"
 
         # get the function
-        llvm_func = if llvm_func_idx[] >=  1
+        llvm_func = if llvm_func_idx[] >= 1
             llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
                                   (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
             @assert llvm_func_ref != C_NULL
@@ -709,7 +711,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             nothing
         end
 
-        llvm_specfunc = if llvm_specfunc_idx[] >=  1
+        llvm_specfunc = if llvm_specfunc_idx[] >= 1
             llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
                                       (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
             @assert llvm_specfunc_ref != C_NULL
