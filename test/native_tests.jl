@@ -78,10 +78,6 @@ end
         @eval @noinline $child(i) = i
         @eval $kernel(i) = $child(i)+1
 
-        target = NativeCompilerTarget()
-        params = Native.CompilerParams()
-        config = CompilerConfig(target, params; kernel=false)
-
         # smoke test
         job, _ = Native.create_job(eval(kernel), (Int64,))
         ir = sprint(io->GPUCompiler.code_llvm(io, job))
@@ -141,6 +137,12 @@ end
         # cached compilation
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test invocations[] == 3
+
+        # change in configuration
+        config = CompilerConfig(job.config; name="foobar")
+        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, config, compiler, linker)
+        @test invocations[] == 4
+        @test contains(ir, "foobar")
 
         # tasks running in the background should keep on using the old version
         c1, c2 = Condition(), Condition()
