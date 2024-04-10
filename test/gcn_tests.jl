@@ -191,6 +191,10 @@ false && @testset "GC and TLS lowering" begin
 
     asm = sprint(io->GCN.code_native(io, mod.kernel, Tuple{Int}))
     @test occursin("gpu_gc_pool_alloc", asm)
+    @test !occursin("julia.push_gc_frame", asm)
+    @test !occursin("julia.pop_gc_frame", asm)
+    @test !occursin("julia.get_gc_frame_slot", asm)
+    @test !occursin("julia.new_gc_frame", asm)
 
     # make sure that we can still ellide allocations
     function ref_kernel(ptr, i)

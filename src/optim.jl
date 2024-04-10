@@ -38,9 +38,10 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
     add!(mpm, NewPMFunctionPassManager) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
-        if false && opt_level >= 2
+        if uses_julia_runtime(job) && opt_level >= 2
             # XXX: we disable vectorization, as this generally isn't useful for GPU targets
             #      and actually causes issues with some back-end compilers (like Metal).
+            # TODO: Make this not dependent on `uses_julia_runtime` (likely CPU), but it's own control
             buildVectorPipeline(fpm, job, opt_level)
         end
         if isdebug(:optim)
@@ -112,6 +113,8 @@ end
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, NewPMLoopPassManager) do lpm
+        # TODO LowerSIMDLoopPass
+        # LoopPass since JuliaLang/julia#51883
         if opt_level >= 2
             add!(lpm, LoopRotatePass())
         end
@@ -121,7 +124,7 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
         add!(fpm, NewPMLoopPassManager, #=UseMemorySSA=#true) do lpm
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
-            add!(lpm, SimpleLoopUnswitchPass())
+            add!(lpm, SimpleLoopUnswitchPass(SimpleLoopUnswitchPassOptions(nontrivial=true, trivial=true)))
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
         end
@@ -186,16 +189,6 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
 end
 
 function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
-    # lower exception handling
-    if uses_julia_runtime(job)
-        add!(mpm, NewPMFunctionPassManager) do fpm
-             add!(fpm, LowerExcHandlersPass())
-        end
-    end
-
-    add!(mpm, NewPMFunctionPassManager) do fpm
-        add!(fpm, GCInvariantVerifierPass())
-    end
     add!(mpm, RemoveNIPass())
 
     # lower GC intrinsics
@@ -203,6 +196,34 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         if !uses_julia_runtime(job)
             add!(legacy2newpm(lower_gc_frame!), fpm)
         end
+    end
+
+    # lower kernel state intrinsics
+    # NOTE: we can only do so here, as GC lowering can introduce calls to the runtime,
+    #       and thus additional uses of the kernel state intrinsics.
+    if job.config.kernel
+        # TODO: now that all kernel state-related passes are being run here, merge some?
+        add!(legacy2newpm(add_kernel_state!), mpm)
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(legacy2newpm(lower_kernel_state!), fpm)
+        end
+        add!(legacy2newpm(cleanup_kernel_state!), mpm)
+    end
+
+    if !uses_julia_runtime(job)
+        # remove dead uses of ptls
+        add!(mpm, NewPMFunctionPassManager) do fpm
+            add!(fpm, ADCEPass())
+        end
+        add!(legacy2newpm(lower_ptls!), mpm)
+    end
+
+    add!(mpm, NewPMFunctionPassManager) do fpm
+        # lower exception handling
+        if uses_julia_runtime(job)
+            add!(fpm, LowerExcHandlersPass())
+        end
+        add!(fpm, GCInvariantVerifierPass())
         add!(fpm, LateLowerGCPass())
         if uses_julia_runtime(job) && VERSION >= v"1.11.0-DEV.208"
             add!(fpm, FinalLowerGCPass())
@@ -220,27 +241,9 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         end
     end
 
-    # lower kernel state intrinsics
-    # NOTE: we can only do so here, as GC lowering can introduce calls to the runtime,
-    #       and thus additional uses of the kernel state intrinsics.
-    if job.config.kernel
-        # TODO: now that all kernel state-related passes are being run here, merge some?
-        add!(legacy2newpm(add_kernel_state!), mpm)
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(legacy2newpm(lower_kernel_state!), fpm)
-        end
-        add!(legacy2newpm(cleanup_kernel_state!), mpm)
-    end
-
     # lower PTLS intrinsics
     if uses_julia_runtime(job)
         add!(mpm, LowerPTLSPass())
-    else
-        # remove dead uses of ptls
-        add!(mpm, NewPMFunctionPassManager) do fpm
-            add!(fpm, ADCEPass())
-        end
-        add!(legacy2newpm(lower_ptls!), mpm)
     end
 
     if opt_level >= 1
