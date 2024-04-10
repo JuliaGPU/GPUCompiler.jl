@@ -1069,6 +1069,12 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
         attrs = function_attributes(f)
         function add_attributes(names...)
             for name in names
+                if LLVM.version() >= v"16" && name in ["argmemonly", "inaccessiblememonly",
+                                                       "inaccessiblemem_or_argmemonly",
+                                                       "readnone", "readonly", "writeonly"]
+                    # XXX: workaround for changes from https://reviews.llvm.org/D135780
+                    continue
+                end
                 push!(attrs, EnumAttribute(name, 0))
             end
             changed = true
@@ -1080,12 +1086,16 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
 
         # atomics
         elseif match(r"air.atomic.(local|global).load", fn) !== nothing
-            add_attributes("argmemonly", "nounwind", "readonly")
+            # TODO: "memory(argmem: read)" on LLVM 16+
+            add_attributes("argmemonly", "readonly", "nounwind")
         elseif match(r"air.atomic.(local|global).store", fn) !== nothing
-            add_attributes("argmemonly", "nounwind", "writeonly")
+            # TODO: "memory(argmem: write)" on LLVM 16+
+            add_attributes("argmemonly", "writeonly", "nounwind")
         elseif match(r"air.atomic.(local|global).(xchg|cmpxchg)", fn) !== nothing
+            # TODO: "memory(argmem: readwrite)" on LLVM 16+
             add_attributes("argmemonly", "nounwind")
         elseif match(r"^air.atomic.(local|global).(add|sub|min|max|and|or|xor)", fn) !== nothing
+            # TODO: "memory(argmem: readwrite)" on LLVM 16+
             add_attributes("argmemonly", "nounwind")
         end
     end
