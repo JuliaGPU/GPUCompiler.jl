@@ -31,5 +31,10 @@ runtests(GPUCompiler; nworkers=min(Sys.CPU_THREADS,4), nworker_threads=1,
         # SPIRV needs it's tools to be available
         return false
     end
+
+    if ti.name == "Precompile" && VERSION < v"1.11.0-"
+        return false
+    end
+
     true
 end
