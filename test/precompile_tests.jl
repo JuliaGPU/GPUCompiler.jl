@@ -1,10 +1,8 @@
 @testitem "Precompile" begin
 
 using GPUCompiler
-pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
-pushfirst!(LOAD_PATH, joinpath(@__DIR__, "Native"))
-
-import Native
+using ReTestItems
+using Test
 
 function precompile_test_harness(@nospecialize(f), testset::String)
     @testset "$testset" begin
@@ -51,6 +49,13 @@ function check_presence(mi, token)
 end
 
 precompile_test_harness("Inference caching") do load_path
+    TS_Native = include("native_testsetup.jl")
+    cp("runtime.jl", joinpath(load_path, "runtime.jl"))
+
+    # Write out the Native test harness as a micro package
+    write(joinpath(load_path, "Native.jl"), string(:(module Native $(TS_Native.code) end)))
+    Base.compilecache(Base.PkgId("Native"))
+
     write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
         import Native
         import GPUCompiler
@@ -72,6 +77,8 @@ precompile_test_harness("Inference caching") do load_path
 
     Base.compilecache(Base.PkgId("InferenceCaching"))
     @eval let
+        import Native
+
         # Check that no cached entry is present
         identity_mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Int})
 

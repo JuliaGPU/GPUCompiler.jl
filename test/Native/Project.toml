@@ -1,6 +1,0 @@
-name = "Native"
-uuid = "fdcda96a-3e7d-4dd7-839b-bda323ec0835"
-version = "0.1.0"
-
-[deps]
-GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
