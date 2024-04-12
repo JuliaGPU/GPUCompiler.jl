@@ -1,6 +1,7 @@
 @testitem "Precompile" begin
 
 using GPUCompiler
+pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
 pushfirst!(LOAD_PATH, joinpath(@__DIR__, "Native"))
 
 import Native
