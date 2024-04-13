@@ -559,7 +559,6 @@ precompile_test_harness("Inference caching") do load_path
         end
         
         # identity is foreign
-        # Maybe https://github.com/JuliaLang/julia/pull/49391
         @setup_workload begin
             job, _ = NativeCompiler.create_job(identity, (Int,))
             @compile_workload begin
