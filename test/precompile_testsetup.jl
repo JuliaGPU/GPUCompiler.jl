@@ -1,4 +1,4 @@
-@testsetup module
+@testsetup module Precompile
 
 using ReTestItems
 
