@@ -59,6 +59,7 @@ precompile_test_harness("Inference caching") do load_path
     write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
         import Native
         import GPUCompiler
+        using PrecompileTools
 
         function kernel()
             return
@@ -71,8 +72,12 @@ precompile_test_harness("Inference caching") do load_path
         
         # identity is foreign
         # Maybe https://github.com/JuliaLang/julia/pull/49391
-        job, _ = Native.create_job(identity, (Int,))
-        GPUCompiler.code_typed(job)
+        @setup_workload begin
+            job, _ = Native.create_job(identity, (Int,))
+            @compile_workload begin
+                GPUCompiler.code_typed(job)
+            end
+        end
     end) |> string)
 
     Base.compilecache(Base.PkgId("InferenceCaching"))
@@ -100,8 +105,10 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(kernel_mi, token)
 
         # check that identity survived
-        @test_broken check_presence(identity_mi, token)
+        @test check_presence(identity_mi, token)
     end
 end
+
+# TODO test PTX to check for https://github.com/timholy/SnoopCompile.jl/issues/338
 
 end # testitem
