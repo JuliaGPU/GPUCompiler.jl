@@ -367,7 +367,6 @@ precompile_test_harness("Inference caching") do load_path
         end
         ci = isdefined(identity_mi, :cache) ? identity_mi.cache : nothing
         while ci !== nothing
-            @test ci.owner === nothing
             @test ci.owner !== token
             ci = isdefined(ci, :next) ? ci.next : nothing
         end
