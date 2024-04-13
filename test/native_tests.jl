@@ -1,4 +1,4 @@
-@testitem "native" setup=[Native, Helpers] begin
+@testitem "native" setup=[Native, Helpers, Precompile] begin
 
 using Test
 
@@ -534,6 +534,67 @@ end
     @test !any(f->occursin(f, ir),
                ["jl_invoke", "apply_iterate",
                 "inttoptr", "apply_type"]) broken=VERSION>=v"1.11.0-DEV.392"
+end
+
+precompile_test_harness("Inference caching") do load_path
+    TS_Native = include("native_testsetup.jl")
+    cp("runtime.jl", joinpath(load_path, "runtime.jl"))
+
+    # Write out the Native test setup as a micro package
+    write(joinpath(load_path, "NativeCompiler.jl"), string(:(module NativeCompiler $(TS_Native.code) end)))
+    Base.compilecache(Base.PkgId("NativeCompiler"))
+
+    write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
+        import NativeCompiler
+        import GPUCompiler
+        using PrecompileTools
+
+        function kernel()
+            return
+        end
+
+        let
+            job, _ = NativeCompiler.create_job(kernel, ())
+            GPUCompiler.code_typed(job)
+        end
+        
+        # identity is foreign
+        # Maybe https://github.com/JuliaLang/julia/pull/49391
+        @setup_workload begin
+            job, _ = NativeCompiler.create_job(identity, (Int,))
+            @compile_workload begin
+                GPUCompiler.code_typed(job)
+            end
+        end
+    end) |> string)
+
+    Base.compilecache(Base.PkgId("InferenceCaching"))
+    @eval let
+        import NativeCompiler
+
+        # Check that no cached entry is present
+        identity_mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Int})
+
+        token = let
+            job, _ = NativeCompiler.create_job(identity, (Int,))
+            GPUCompiler.ci_cache_token(job)
+        end
+        ci = isdefined(identity_mi, :cache) ? identity_mi.cache : nothing
+        while ci !== nothing
+            @test ci.owner === nothing
+            @test ci.owner !== token
+            ci = isdefined(ci, :next) ? ci.next : nothing
+        end
+
+        using InferenceCaching
+
+        # Check that kernel survived
+        kernel_mi = GPUCompiler.methodinstance(typeof(InferenceCaching.kernel), Tuple{})
+        @test check_presence(kernel_mi, token)
+
+        # check that identity survived
+        @test check_presence(identity_mi, token)
+    end
 end
 
 ############################################################################################

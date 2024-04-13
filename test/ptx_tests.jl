@@ -1,4 +1,4 @@
-@testitem "PTX" setup=[PTX, Helpers] begin
+@testitem "PTX" setup=[PTX, Helpers, Precompile] begin
 
 using LLVM
 
@@ -322,6 +322,65 @@ end
 
 end
 
+precompile_test_harness("Inference caching") do load_path
+    TS_PTX = include("ptx_testsetup.jl")
+    cp("runtime.jl", joinpath(load_path, "runtime.jl"))
+
+    # Write out the PTX test setup as a micro package
+    write(joinpath(load_path, "PTXCompiler.jl"), string(:(module PTXCompiler $(TS_PTX.code) end)))
+    Base.compilecache(Base.PkgId("PTXCompiler"))
+
+    write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
+        import PTXCompiler
+        import GPUCompiler
+        using PrecompileTools
+
+        function kernel()
+            return
+        end
+
+        let
+            job, _ = PTXCompiler.create_job(kernel, ())
+            GPUCompiler.code_typed(job)
+        end
+        
+        # identity is foreign
+        @setup_workload begin
+            job, _ = PTXCompiler.create_job(identity, (Int,))
+            @compile_workload begin
+                GPUCompiler.code_typed(job)
+            end
+        end
+    end) |> string)
+
+    Base.compilecache(Base.PkgId("InferenceCaching"))
+    @eval let
+        import PTXCompiler
+
+        # Check that no cached entry is present
+        identity_mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Int})
+
+        token = let
+            job, _ = PTXCompiler.create_job(identity, (Int,))
+            GPUCompiler.ci_cache_token(job)
+        end
+        ci = isdefined(identity_mi, :cache) ? identity_mi.cache : nothing
+        while ci !== nothing
+            @test ci.owner === nothing
+            @test ci.owner !== token
+            ci = isdefined(ci, :next) ? ci.next : nothing
+        end
+
+        using InferenceCaching
+
+        # Check that kernel survived
+        kernel_mi = GPUCompiler.methodinstance(typeof(InferenceCaching.kernel), Tuple{})
+        @test check_presence(kernel_mi, token)
+
+        # check that identity survived
+        @test check_presence(identity_mi, token)
+    end
+end
 
 ############################################################################################
 
