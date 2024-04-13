@@ -1,6 +1,7 @@
 @testitem "PTX" setup=[PTX, Helpers, Precompile] begin
 
 using LLVM
+using ReTestItems
 
 ############################################################################################
 

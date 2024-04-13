@@ -1,6 +1,6 @@
 @testsetup module Precompile
 
-using ReTestItems
+using Test
 
 export precompile_test_harness, check_presence
 

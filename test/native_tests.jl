@@ -1,6 +1,7 @@
 @testitem "native" setup=[Native, Helpers, Precompile] begin
 
 using Test
+using ReTestItems
 
 ############################################################################################
 
