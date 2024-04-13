@@ -323,7 +323,7 @@ end
 
 end
 
-precompile_test_harness("Inference caching") do load_path
+VERSION >= v"1.11.0-" && precompile_test_harness("Inference caching") do load_path
     TS_PTX = include("ptx_testsetup.jl")
     cp("runtime.jl", joinpath(load_path, "runtime.jl"))
 

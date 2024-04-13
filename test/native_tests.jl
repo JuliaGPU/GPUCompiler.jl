@@ -537,7 +537,7 @@ end
                 "inttoptr", "apply_type"]) broken=VERSION>=v"1.11.0-DEV.392"
 end
 
-precompile_test_harness("Inference caching") do load_path
+VERSION >= v"1.11.0-" && precompile_test_harness("Inference caching") do load_path
     TS_Native = include("native_testsetup.jl")
     cp("runtime.jl", joinpath(load_path, "runtime.jl"))
 
