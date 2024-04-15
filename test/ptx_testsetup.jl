@@ -9,7 +9,6 @@ include("runtime.jl")
 struct CompilerParams <: AbstractCompilerParams end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
-GPUCompiler.runtime_module(::PTXCompilerJob) = TestRuntime
 
 struct PTXKernelState
     data::Int64
