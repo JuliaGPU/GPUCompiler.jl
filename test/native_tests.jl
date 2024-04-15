@@ -1,4 +1,4 @@
-@testitem "native" setup=[Native, Helpers, Precompile] begin
+@testitem "native" setup=[Native, Helpers] begin
 
 using Test
 
@@ -535,7 +535,11 @@ end
                ["jl_invoke", "apply_iterate",
                 "inttoptr", "apply_type"]) broken=VERSION>=v"1.11.0-DEV.392"
 end
+end # testitem
 
+@testitem "native precompile" setup=[Precompile,] begin
+
+using Test
 VERSION >= v"1.11.0-" && precompile_test_harness("Inference caching") do load_path
     # Write out the Native test setup as a micro package
     create_standalone(load_path, "NativeCompiler", "native_testsetup.jl")
