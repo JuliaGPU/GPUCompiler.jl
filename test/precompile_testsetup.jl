@@ -64,3 +64,5 @@ function create_standalone(load_path, name::String, file)
     write(joinpath(load_path, "$name.jl"), string(code))
     Base.compilecache(Base.PkgId(name)))
 end
+
+end # testsetup
