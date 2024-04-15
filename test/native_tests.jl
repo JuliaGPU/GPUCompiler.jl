@@ -1,7 +1,6 @@
 @testitem "native" setup=[Native, Helpers, Precompile] begin
 
 using Test
-using ReTestItems
 
 ############################################################################################
 
@@ -538,12 +537,8 @@ end
 end
 
 VERSION >= v"1.11.0-" && precompile_test_harness("Inference caching") do load_path
-    TS_Native = include("native_testsetup.jl")
-    cp("runtime.jl", joinpath(load_path, "runtime.jl"))
-
     # Write out the Native test setup as a micro package
-    write(joinpath(load_path, "NativeCompiler.jl"), string(:(module NativeCompiler $(TS_Native.code) end)))
-    Base.compilecache(Base.PkgId("NativeCompiler"))
+    create_standalone(load_path, "NativeCompiler", "native_testsetup.jl")
 
     write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
         import NativeCompiler

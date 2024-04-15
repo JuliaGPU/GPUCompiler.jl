@@ -1,8 +1,9 @@
 @testsetup module Precompile
 
 using Test
+using ReTestItems
 
-export precompile_test_harness, check_presence
+export precompile_test_harness, check_presence, create_standalone
 
 function precompile_test_harness(@nospecialize(f), testset::String)
     @testset "$testset" begin
@@ -48,4 +49,18 @@ function check_presence(mi, token)
     return found
 end
 
+function create_standalone(load_path, name::String, file)
+    cp(joinpath(@__DIR__, "runtime.jl"), joinpath(load_path, "runtime.jl"), force=true)
+
+    TS = include(file)
+    code = TS.code
+    if code.head == :begin
+        code.head = :block
+    end
+    @assert code.head == :block
+    code = Expr(:module, true, Symbol(name), code)
+
+    # Write out the test setup as a micro package
+    write(joinpath(load_path, "$name.jl"), string(code))
+    Base.compilecache(Base.PkgId(name)))
 end

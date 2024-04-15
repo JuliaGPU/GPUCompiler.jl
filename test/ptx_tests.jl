@@ -1,7 +1,6 @@
 @testitem "PTX" setup=[PTX, Helpers, Precompile] begin
 
 using LLVM
-using ReTestItems
 
 ############################################################################################
 
@@ -324,12 +323,8 @@ end
 end
 
 VERSION >= v"1.11.0-" && precompile_test_harness("Inference caching") do load_path
-    TS_PTX = include("ptx_testsetup.jl")
-    cp("runtime.jl", joinpath(load_path, "runtime.jl"))
-
     # Write out the PTX test setup as a micro package
-    write(joinpath(load_path, "PTXCompiler.jl"), string(:(module PTXCompiler $(TS_PTX.code) end)))
-    Base.compilecache(Base.PkgId("PTXCompiler"))
+    create_standalone(load_path, "PTXCompiler", "ptx_testsetup.jl")
 
     write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
         import PTXCompiler
