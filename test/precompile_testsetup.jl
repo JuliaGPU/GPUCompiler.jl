@@ -62,7 +62,7 @@ function create_standalone(load_path, name::String, file)
 
     # Write out the test setup as a micro package
     write(joinpath(load_path, "$name.jl"), string(code))
-    Base.compilecache(Base.PkgId(name)))
+    Base.compilecache(Base.PkgId(name))
 end
 
 end # testsetup
