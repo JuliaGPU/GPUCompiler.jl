@@ -324,7 +324,7 @@ end
 end # testitem
 
 @testitem "PTX precompile" setup=[Precompile,] begin
-VERSION >= v"1.11.0-" && precompile_test_harness("Inference caching") do load_path
+precompile_test_harness("Inference caching") do load_path
     # Write out the PTX test setup as a micro package
     create_standalone(load_path, "PTXCompiler", "ptx_testsetup.jl")
 
