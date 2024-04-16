@@ -750,6 +750,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     return llvm_mod, compiled
 end
 
+# Narrow this if JuliaLang/julia#54069 get's backported to 1.11
+@static if v"1.11.0-DEV.1603" <= VERSION < v"1.12.0-DEV.347"
 function CC.typeinf(interp::GPUInterpreter, frame::CC.InferenceState)
     if CC.__measure_typeinf__[]
         CC.Timings.enter_new_timer(frame)
@@ -759,4 +761,5 @@ function CC.typeinf(interp::GPUInterpreter, frame::CC.InferenceState)
     else
         return CC._typeinf(interp, frame)
     end
+end
 end
