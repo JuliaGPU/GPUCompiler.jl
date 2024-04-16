@@ -275,7 +275,12 @@ const __llvm_initialized = Ref(false)
                 for call in worklist[dyn_job]
                     @dispose builder=IRBuilder() begin
                         position!(builder, call)
-                        fptr = ptrtoint!(builder, dyn_entry, T_ptr)
+                        fptr = if VERSION >= v"1.12.0-DEV.225"
+                            T_ptr = LLVM.PointerType(LLVM.Int8Type())
+                            bitcast!(builder, dyn_entry, T_ptr)
+                        else
+                            ptrtoint!(builder, dyn_entry, T_ptr)
+                        end
                         replace_uses!(call, fptr)
                     end
                     unsafe_delete!(LLVM.parent(call), call)

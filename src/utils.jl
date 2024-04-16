@@ -72,6 +72,17 @@ for level in [:debug, :info, :warn, :error]
     end
 end
 
+macro safe_show(exs...)
+    blk = Expr(:block)
+    for ex in exs
+        push!(blk.args,
+              :(println(Core.stdout, $(sprint(Base.show_unquoted,ex)*" = "),
+                                     repr(begin local value = $(esc(ex)) end))))
+    end
+    isempty(exs) || push!(blk.args, :value)
+    return blk
+end
+
 
 
 ## codegen locking

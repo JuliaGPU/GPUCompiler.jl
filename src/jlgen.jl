@@ -587,6 +587,10 @@ macro in_world(world, ex)
 end
 
 function compile_method_instance(@nospecialize(job::CompilerJob))
+    if job.source.def.primary_world > job.world || job.world > job.source.def.deleted_world
+        error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")
+    end
+
     # populate the cache
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
