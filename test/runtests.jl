@@ -22,14 +22,21 @@ runtests(GPUCompiler; nworkers=min(Sys.CPU_THREADS,4), nworker_threads=1,
         end
     end
 
-    if ti.name in ["PTX", "GCN"] && Sys.isapple() && VERSION >= v"1.10-"
+    if ti.name in ["PTX", "GCN", "PTX precompile"] && Sys.isapple() && VERSION >= v"1.10-"
         # support for AMDGPU and NVTX on macOS has been removed from Julia's LLVM build
         return false
     end
+
 
     if ti.name in ["SPIRV"] && !(SPIRV_LLVM_Translator_unified_jll.is_available() && SPIRV_Tools_jll.is_available())
         # SPIRV needs it's tools to be available
         return false
     end
+
+    if ti.name in ["PTX precompile", "native precompile"] && VERSION < v"1.11-"
+        # precompile needs v1.11
+        return false
+    end
+
     true
 end

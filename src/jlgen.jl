@@ -749,3 +749,14 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     return llvm_mod, compiled
 end
+
+function CC.typeinf(interp::GPUInterpreter, frame::CC.InferenceState)
+    if CC.__measure_typeinf__[]
+        CC.Timings.enter_new_timer(frame)
+        v = CC._typeinf(interp, frame)
+        CC.Timings.exit_current_timer(frame)
+        return v
+    else
+        return CC._typeinf(interp, frame)
+    end
+end
