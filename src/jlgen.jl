@@ -505,6 +505,7 @@ end # HAS_INTEGRATED_CACHE
 function ci_cache_populate(interp, cache, mi, min_world, max_world)
     if VERSION >= v"1.12.0-DEV.15"
         inferred_ci = CC.typeinf_ext_toplevel(interp, mi, CC.SOURCE_MODE_FORCE_SOURCE) # or SOURCE_MODE_FORCE_SOURCE_UNCACHED?
+        @assert inferred_ci !== nothing "Inference of $mi failed"
 
         # inference should have populated our cache
         wvc = WorldView(cache, min_world, max_world)

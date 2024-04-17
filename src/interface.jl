@@ -277,6 +277,10 @@ end
 
 ## extension points at important stages of compilation
 
+# prepare the environment for compilation of a job. this can involve, e.g.,
+# priming the cache with entries that cannot be easily inferred.
+prepare_job!(@nospecialize(job::CompilerJob)) = return
+
 # early extension point used to link-in external bitcode files.
 # this is typically used by downstream packages to link vendor libraries.
 link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
