@@ -126,16 +126,17 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
 end
 
 @noinline function cache_file(ci::CodeInstance, cfg::CompilerConfig)
+    h = hash(Base.objectid(ci))
     @static if isdefined(Base, :object_build_id)
-        id = Base.object_build_id(ci)
-        if id === nothing # CI is from a runtime compilation, not worth caching on disk
+        bid = Base.object_build_id(ci)
+        if bid === nothing # CI is from a runtime compilation, not worth caching on disk
             return nothing
         else
-            id = id % UInt64 # The upper 64bit are a checksum, unavailable during precompilation
+            bid = bid % UInt64 # The upper 64bit are a checksum, unavailable during precompilation
         end
-    else
-        id = Base.objectid(ci)
+        h = hash(bid, h)
     end
+    h = hash(cfg, h)
 
     gpucompiler_buildid = Base.module_build_id(@__MODULE__)
     if (gpucompiler_buildid >> 64) % UInt64 == 0xffffffffffffffff
@@ -146,7 +147,7 @@ end
         cache_path(),
         # bifurcate the cache by build id of GPUCompiler
         string(gpucompiler_buildid),
-        string(hash(cfg, hash(id)), ".jls"))
+        string(h, ".jls"))
 end
 
 @noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
