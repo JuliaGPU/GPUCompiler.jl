@@ -96,6 +96,7 @@ end
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     # Metal never supports double precision
     check_ir_values(mod, LLVM.DoubleType())
+    check_ir_values(mod, LLVM.IntType(128))
 end
 
 # hide `noreturn` function attributes, which cause issues with the back-end compiler,
