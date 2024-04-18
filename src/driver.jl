@@ -128,6 +128,8 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
         validate && check_invocation(job)
     end
 
+    prepare_job!(job)
+
 
     ## LLVM IR
 
