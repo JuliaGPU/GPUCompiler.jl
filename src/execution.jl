@@ -150,6 +150,12 @@ end
         string(h, ".jls"))
 end
 
+struct OnDiskCacheEntry
+    src::MethodInstance
+    cfg::CompilerConfig
+    asm
+end
+
 @noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
                                       cfg::CompilerConfig, compiler::Function, linker::Function)
     job = CompilerJob(src, cfg, world)
@@ -176,7 +182,12 @@ end
                     ondisk_hit = true
                     try
                         @debug "Loading compiled kernel" job path
-                        asm = deserialize(path)
+                        entry = deserialize(path)::OnDiskCacheEntry
+                        if entry.src == src && entry.cfg == cfg
+                            asm = entry.asm
+                        else
+                            @warn "Cache missmatch" src cfg entry
+                        end
                     catch ex
                         @warn "Failed to load compiled kernel" job path exception=(ex, catch_backtrace())
                     end
@@ -196,9 +207,9 @@ end
         @static if VERSION >= v"1.11.0-"
             if !ondisk_hit && path !== nothing && disk_cache()
                 @debug "Writing out on-disk cache" job path
-                # TODO: Do we want to serialize some more metadata to make sure the asm matches?
                 tmppath, io = mktemp(;cleanup=false)
-                serialize(io, asm)
+                entry = OnDiskCacheEntry(src, cfg, asm)
+                serialize(io, entry)
                 close(io)
                 # atomic move
                 mkpath(dirname(path))
