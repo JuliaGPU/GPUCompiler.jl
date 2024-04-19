@@ -61,6 +61,37 @@ end
 
 
 ## cached compilation
+
+### Disk cache notes
+# Julia uses package images (pkgimg) to cache both the result of inference,
+# and the result of native code emissions. Up until Julia v1.11 neither the
+# inferred nor the nativce code of foreign abstract interpreters was cached
+# across sessions. Julia v1.11 allows for caching of inference results across
+# sessions as long as those inference results are created during precompilation.
+#
+# Julia cache hierarchy is roughly as follows:
+# Function (name of a thing)
+# -> Method (particular piece of code to dispatch to with a signature)
+#  -> MethodInstance (A particular Method + particular signature)
+#    -> CodeInstance (A MethodInstance compiled for a world)
+#
+# In order to cache code across sessions we need to insert CodeInstance(owner=GPUCompilerCacheToken)
+# into the internal cache. Once we have done so we know that a particular CodeInstance is unique in
+# the system. (During pkgimg loading conflicts will be resolved).
+#
+# When a pkgimg is loaded we check it's validity, this means checking that all depdencies are the same,
+# the pkgimg was created for the right set of compiler flags, and that all source code that was used
+# to create this pkgimg is the same. When a CodeInstance is inside a pkgimg we can extend the chain of
+# validity even for GPU code, we cannot verify a "runtime" CodeInstance in the same way.
+#
+# Therefore when we see a compilation request for a CodeInstance that is originating from a pkgimg
+# we can use it as part of the hash for the on-disk cache. (see `cache_file`)
+
+"""
+    disk_cache()
+
+Query if caching to disk is enabled.
+"""
 disk_cache() = parse(Bool, @load_preference("disk_cache", "false"))
 
 """
@@ -175,7 +206,10 @@ end
         ondisk_hit = false
         @static if VERSION >= v"1.11.0-"
             # Don't try to hit the disk cache if we are for a *compile* hook
-            if ci !== nothing && obj === nothing && disk_cache() # TODO: (Should we allow backends to opt out?)
+            # TODO:
+            #  - Sould we hit disk cache if Base.generating_output()
+            #  - Should we allow backend to opt out?
+            if ci !== nothing && obj === nothing &&  disk_cache()
                 path = cache_file(ci, cfg)
                 @debug "Looking for on-disk cache" job path
                 if path !== nothing && isfile(path)
