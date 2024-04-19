@@ -587,6 +587,27 @@ macro in_world(world, ex)
     end
 end
 
+"""
+    precompile(job::CompilerJob)
+
+Compile the GPUCompiler job. In particular this will run inference using the foreign
+abstract interpreter.
+"""
+function Base.precompile(@nospecialize(job::CompilerJob))
+    if job.source.def.primary_world > job.world || job.world > job.source.def.deleted_world
+        error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")
+    end
+
+    # populate the cache
+    interp = get_interpreter(job)
+    cache = CC.code_cache(interp)
+    if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
+        ci_cache_populate(interp, cache, job.source, job.world, job.world)
+        return ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
+    end
+    return true
+end
+
 function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.source.def.primary_world > job.world || job.world > job.source.def.deleted_world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")

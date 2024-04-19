@@ -556,14 +556,14 @@ precompile_test_harness("Inference caching") do load_path
 
         let
             job, _ = NativeCompiler.create_job(kernel, (Vector{Int}, Int))
-            GPUCompiler.code_typed(job)
+            precompile(job)
         end
         
         # identity is foreign
         @setup_workload begin
             job, _ = NativeCompiler.create_job(identity, (Int,))
             @compile_workload begin
-                GPUCompiler.code_typed(job)
+                precompile(job)
             end
         end
     end) |> string)

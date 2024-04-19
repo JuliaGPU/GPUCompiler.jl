@@ -339,14 +339,14 @@ precompile_test_harness("Inference caching") do load_path
 
         let
             job, _ = PTXCompiler.create_job(kernel, ())
-            GPUCompiler.code_typed(job)
+            precompile(job)
         end
 
         # identity is foreign
         @setup_workload begin
             job, _ = PTXCompiler.create_job(identity, (Int,))
             @compile_workload begin
-                GPUCompiler.code_typed(job)
+                precompile(job)
             end
         end
     end) |> string)
