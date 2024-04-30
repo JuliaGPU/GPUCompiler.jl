@@ -348,7 +348,7 @@ const __llvm_initialized = Ref(false)
 
         if optimize
             @timeit_debug to "optimization" begin
-                optimize!(job, ir)
+                optimize!(job, ir; job.config.opt_level)
 
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
