@@ -460,12 +460,27 @@ function CC.concrete_eval_eligible(interp::GPUInterpreter,
 end
 end
 
+struct DeferredCallInfo <: CC.CallInfo
+    rt::DataType
+    info::CC.CallInfo
+end
+
 function CC.abstract_call_known(interp::GPUInterpreter, @nospecialize(f),
         arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
         max_methods::Int = CC.get_max_methods(interp, f, sv))
-    if f === var"gpuc.deferred" ||
-       f === var"gpuc.lookup"
-        return CC.CallMeta(Ptr{Cvoid}, Union{}, CC.Effects(), CC.NoCallInfo())
+    (; fargs, argtypes) = arginfo
+    if f === var"gpuc.deferred"
+        argvec = argtypes[2:end]
+        call = CC.abstract_call(interp, CC.ArgInfo(nothing, argvec), si, sv, max_methods)
+        callinfo = DeferredCallInfo(call.rt, call.info)
+        @static if VERSION < v"1.11.0-"
+            return CC.CallMeta(Ptr{Cvoid}, CC.Effects(), callinfo)
+        else
+            return CC.CallMeta(Ptr{Cvoid}, Union{}, CC.Effects(), callinfo)
+        end
+    end
+    if f === var"gpuc.lookup"
+        error("Unimplemented")
     end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f,
         arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
