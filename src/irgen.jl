@@ -80,6 +80,17 @@ function irgen(@nospecialize(job::CompilerJob))
     compiled[job.source] =
         (; compiled[job.source].ci, func, specfunc)
 
+    # Earlier we sanitize global names, this invalidates the
+    # func, specfunc names safed in compiled. Update the names now,
+    # such that when when use the compiled mappings to lookup the
+    # llvm function for a methodinstance (deferred codegen) we have 
+    # valid targets.
+    for mi in keys(compiled)
+        mi == job.source && continue
+        ci, func, specfunc = compiled[mi]
+        compiled[mi] = (; ci, func=safe_name(func), specfunc=safe_name(specfunc))
+    end
+
     # minimal required optimization
     @timeit_debug to "rewrite" begin
         if job.config.kernel && needs_byval(job)

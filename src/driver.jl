@@ -39,6 +39,41 @@ function JuliaContext(f; kwargs...)
 end
 
 
+## deferred compilation
+
+function var"gpuc.deferred" end
+
+# old, deprecated mechanism slated for removal once Enzyme is updated to the new intrinsic
+begin
+    # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
+    # this could both be generalized (e.g. supporting actual function calls, instead of
+    # returning a function pointer), and be integrated with the nonrecursive codegen.
+    const deferred_codegen_jobs = Dict{Int, Any}()
+
+    # We make this function explicitly callable so that we can drive OrcJIT's
+    # lazy compilation from, while also enabling recursive compilation.
+    Base.@ccallable Ptr{Cvoid} function deferred_codegen(ptr::Ptr{Cvoid})
+        ptr
+    end
+
+    @generated function deferred_codegen(::Val{ft}, ::Val{tt}) where {ft,tt}
+        id = length(deferred_codegen_jobs) + 1
+        deferred_codegen_jobs[id] = (; ft, tt)
+        # don't bother looking up the method instance, as we'll do so again during codegen
+        # using the world age of the parent.
+        #
+        # this also works around an issue on <1.10, where we don't know the world age of
+        # generated functions so use the current world counter, which may be too new
+        # for the world we're compiling for.
+
+        quote
+            # TODO: add an edge to this method instance to support method redefinitions
+            ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
+        end
+    end
+end
+
+
 ## compiler entrypoint
 
 export compile
@@ -127,33 +162,6 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob); toplevel::Bool
     error("Unknown compilation output $output")
 end
 
-# primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
-# this could both be generalized (e.g. supporting actual function calls, instead of
-# returning a function pointer), and be integrated with the nonrecursive codegen.
-const deferred_codegen_jobs = Dict{Int, Any}()
-
-# We make this function explicitly callable so that we can drive OrcJIT's
-# lazy compilation from, while also enabling recursive compilation.
-Base.@ccallable Ptr{Cvoid} function deferred_codegen(ptr::Ptr{Cvoid})
-    ptr
-end
-
-@generated function deferred_codegen(::Val{ft}, ::Val{tt}) where {ft,tt}
-    id = length(deferred_codegen_jobs) + 1
-    deferred_codegen_jobs[id] = (; ft, tt)
-    # don't bother looking up the method instance, as we'll do so again during codegen
-    # using the world age of the parent.
-    #
-    # this also works around an issue on <1.10, where we don't know the world age of
-    # generated functions so use the current world counter, which may be too new
-    # for the world we're compiling for.
-
-    quote
-        # TODO: add an edge to this method instance to support method redefinitions
-        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
-    end
-end
-
 const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob); toplevel::Bool,
@@ -183,9 +191,82 @@ const __llvm_initialized = Ref(false)
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    has_deferred_jobs = toplevel && !only_entry && haskey(functions(ir), "deferred_codegen")
+    run_optimization_for_deferred = false
+    if haskey(functions(ir), "gpuc.lookup")
+        run_optimization_for_deferred = true
+        dyn_marker = functions(ir)["gpuc.lookup"]
+
+        # gpuc.deferred is lowered to a gpuc.lookup foreigncall, so we need to extract the
+        # target method instance from the LLVM IR
+        # TODO: drive deferred compilation from the Julia IR instead
+        function find_base_object(val)
+            while true
+                if val isa ConstantExpr && (opcode(val) == LLVM.API.LLVMIntToPtr ||
+                                            opcode(val) == LLVM.API.LLVMBitCast ||
+                                            opcode(val) == LLVM.API.LLVMAddrSpaceCast)
+                    val = first(operands(val))
+                elseif val isa LLVM.IntToPtrInst ||
+                       val isa LLVM.BitCastInst ||
+                       val isa LLVM.AddrSpaceCastInst
+                    val = first(operands(val))
+                elseif val isa LLVM.LoadInst
+                    # In 1.11+ we no longer embed integer constants directly.
+                    gv = first(operands(val))
+                    if gv isa LLVM.GlobalValue
+                        val = LLVM.initializer(gv)
+                        continue
+                    end
+                    break
+                else
+                    break
+                end
+            end
+            return val
+        end
+
+        worklist = Dict{Any, Vector{LLVM.CallInst}}()
+        for use in uses(dyn_marker)
+            # decode the call
+            call = user(use)::LLVM.CallInst
+            dyn_mi_inst = find_base_object(operands(call)[1])
+            @compiler_assert isa(dyn_mi_inst, LLVM.ConstantInt) job
+            dyn_mi = Base.unsafe_pointer_to_objref(
+                convert(Ptr{Cvoid}, convert(Int, dyn_mi_inst)))
+            push!(get!(worklist, dyn_mi, LLVM.CallInst[]), call)
+        end
+
+        for dyn_mi in keys(worklist)
+            dyn_fn_name = compiled[dyn_mi].specfunc
+            dyn_fn = functions(ir)[dyn_fn_name]
+
+            # insert a pointer to the function everywhere the entry is used
+            T_ptr = convert(LLVMType, Ptr{Cvoid})
+            for call in worklist[dyn_mi]
+                @dispose builder=IRBuilder() begin
+                    position!(builder, call)
+                    fptr = if LLVM.version() >= v"17"
+                        T_ptr = LLVM.PointerType()
+                        bitcast!(builder, dyn_fn, T_ptr)
+                    elseif VERSION >= v"1.12.0-DEV.225"
+                        T_ptr = LLVM.PointerType(LLVM.Int8Type())
+                        bitcast!(builder, dyn_fn, T_ptr)
+                    else
+                        ptrtoint!(builder, dyn_fn, T_ptr)
+                    end
+                    replace_uses!(call, fptr)
+                end
+                unsafe_delete!(LLVM.parent(call), call)
+            end
+        end
+
+        # all deferred compilations should have been resolved
+        @compiler_assert isempty(uses(dyn_marker)) job
+        unsafe_delete!(ir, dyn_marker)
+    end
+    ## old, deprecated implementation
     jobs = Dict{CompilerJob, String}(job => entry_fn)
-    if has_deferred_jobs
+    if toplevel && !only_entry && haskey(functions(ir), "deferred_codegen")
+        run_optimization_for_deferred = true
         dyn_marker = functions(ir)["deferred_codegen"]
 
         # iterative compilation (non-recursive)
@@ -194,7 +275,6 @@ const __llvm_initialized = Ref(false)
             changed = false
 
             # find deferred compiler
-            # TODO: recover this information earlier, from the Julia IR
             worklist = Dict{CompilerJob, Vector{LLVM.CallInst}}()
             for use in uses(dyn_marker)
                 # decode the call
@@ -317,7 +397,7 @@ const __llvm_initialized = Ref(false)
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
-                if has_deferred_jobs
+                if run_optimization_for_deferred
                     @dispose pb=NewPMPassBuilder() begin
                         add!(pb, NewPMFunctionPassManager()) do fpm
                             add!(fpm, InstCombinePass())
