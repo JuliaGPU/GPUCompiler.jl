@@ -460,6 +460,17 @@ function CC.concrete_eval_eligible(interp::GPUInterpreter,
 end
 end
 
+function CC.abstract_call_known(interp::GPUInterpreter, @nospecialize(f),
+        arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+        max_methods::Int = CC.get_max_methods(interp, f, sv))
+    if f === var"gpuc.deferred" ||
+       f === var"gpuc.lookup"
+        return CC.CallMeta(Ptr{Cvoid}, Union{}, CC.Effects(), CC.NoCallInfo())
+    end
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f,
+        arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+        max_methods::Int)
+end
 
 ## world view of the cache
 using Core.Compiler: WorldView

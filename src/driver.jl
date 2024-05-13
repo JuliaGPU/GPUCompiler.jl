@@ -163,6 +163,9 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
     error("Unknown compilation output $output")
 end
 
+@noinline function var"gpuc.deferred"(f, args...) end
+@noinline function var"gpuc.lookup"(mi, f, args...) end
+
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
 # this could both be generalized (e.g. supporting actual function calls, instead of
 # returning a function pointer), and be integrated with the nonrecursive codegen.
