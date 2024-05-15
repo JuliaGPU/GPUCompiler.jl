@@ -487,48 +487,28 @@ function CC.abstract_call_known(interp::GPUInterpreter, @nospecialize(f),
         max_methods::Int)
 end
 
-# Customize the optimization pipeline
-Base.iterate(compact::CC.IncrementalCompact, state=nothing) = CC.iterate(compact, state)
-Base.getindex(compact::CC.IncrementalCompact, idx) = CC.getindex(compact, idx)
+# Use the Inlining infrastructure to perform our refinement
+function CC.handle_call!(todo::Vector{Pair{Int,Any}},
+    ir::CC.IRCode, idx::CC.Int, stmt::Expr, info::DeferredCallInfo, flag::UInt8, sig::CC.Signature,
+    state::CC.InliningState)
 
-function deferred_pass!(ir)
-    compact = CC.IncrementalCompact(ir)
-    for ((old_idx, idx), stmt) in compact
-        if CC.is_known_call(stmt, var"gpuc.deferred", compact)
-            @safe_show stmt
-        end
+    minfo = info.info
+    results = minfo.results
+    if length(results.matches) != 1
+        return nothing
     end
-    CC.non_dce_finish!(compact)
-    CC.simple_dce!(compact)
-    ir = CC.complete(compact)
-    return ir
-end
+    match = only(results.matches)
 
-function CC.optimize(interp::GPUInterpreter, opt::CC.OptimizationState, caller::CC.InferenceResult)
-    CC.@timeit "optimizer" ir = CC.run_passes(opt.src, opt, caller)
-    # Customizing the ipo_safe pipeline is a pain
-    ir = deferred_pass!(ir)
-    @static if VERSION >= v"1.11.0-"
-        CC.ipo_dataflow_analysis!(interp, ir, caller)
-    end
-    return CC.finish(interp, opt, ir, caller)
-end
+    # lookup the target mi with correct edge tracking
+    case = CC.compileable_specialization(match, CC.Effects(), CC.InliningEdgeTracker(state), info)
+    @assert case isa CC.InvokeCase
+    @assert stmt.head === :call
 
-function CC.typeinf_ircode(interp::GPUInterpreter, mi::CC.MethodInstance,
-                        optimize_until::Union{Integer,AbstractString,Nothing})
-    start_time = ccall(:jl_typeinf_timing_begin, UInt64, ())
-    frame = CC.typeinf_frame(interp, mi, false)
-    if frame === nothing
-        ccall(:jl_typeinf_timing_end, Cvoid, (UInt64,), start_time)
-        return nothing, Any
-    end
-    (; result) = frame
-    opt = CC.OptimizationState(frame, interp)
-    ir = CC.run_passes(opt.src, opt, result, optimize_until)
-    ir = deferred_pass!(ir)
-    rt = CC.widenconst(CC.ignorelimited(result.result))
-    ccall(:jl_typeinf_timing_end, Cvoid, (UInt64,), start_time)
-    return ir, rt
+    # rewrite the marker function
+    stmt.args[1] = var"gpuc.lookup"
+    # insert the mi
+    insert!(stmt.args, 2, case.invoke)
+    return nothing
 end
 
 ## world view of the cache
