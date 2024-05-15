@@ -479,9 +479,6 @@ function CC.abstract_call_known(interp::GPUInterpreter, @nospecialize(f),
             return CC.CallMeta(Ptr{Cvoid}, Union{}, CC.Effects(), callinfo)
         end
     end
-    if f === var"gpuc.lookup"
-        error("Unimplemented")
-    end
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f,
         arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
         max_methods::Int)
@@ -504,10 +501,17 @@ function CC.handle_call!(todo::Vector{Pair{Int,Any}},
     @assert case isa CC.InvokeCase
     @assert stmt.head === :call
 
-    # rewrite the marker function
-    stmt.args[1] = var"gpuc.lookup"
-    # insert the mi
-    insert!(stmt.args, 2, case.invoke)
+    args = Any[
+        "extern gpuc.lookup",
+        Ptr{Cvoid},
+        Core.svec(Any, Any, match.spec_types.parameters[2:end]...), # Must use Any for MethodInstance or ftype
+        0,
+        QuoteNode(:llvmcall),
+        case.invoke,
+        stmt.args[2:end]...
+    ]
+    stmt.head = :foreigncall
+    stmt.args = args
     return nothing
 end
 
