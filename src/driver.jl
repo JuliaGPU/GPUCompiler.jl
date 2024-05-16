@@ -265,6 +265,7 @@ const __llvm_initialized = Ref(false)
                                                parent_job=job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
+                    merge!(jobs, dyn_meta.jobs)
                     @assert context(dyn_ir) == context(ir)
                     link!(ir, dyn_ir)
                     changed = true
@@ -457,7 +458,7 @@ const __llvm_initialized = Ref(false)
         @timeit_debug to "verification" verify(ir)
     end
 
-    return ir, (; entry, compiled)
+    return ir, (; entry, compiled, jobs)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
