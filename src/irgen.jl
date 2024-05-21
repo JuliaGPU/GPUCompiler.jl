@@ -95,27 +95,29 @@ function irgen(@nospecialize(job::CompilerJob))
             end
         end
 
-        # TODO: there's no good API to use internalize with the new pass manager yet
-        @dispose pm=ModulePassManager() begin
-            global current_job
-            current_job = job
-
-            linkage!(entry, LLVM.API.LLVMExternalLinkage)
-
-            # internalize all functions, but keep exported global variables
-            exports = String[LLVM.name(entry)]
-            for gvar in globals(mod)
-                push!(exports, LLVM.name(gvar))
-            end
-            internalize!(pm, exports)
-
-            # inline llvmcall bodies
-            always_inliner!(pm)
-
-            can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
-
-            run!(pm, mod)
+        # internalize all functions and, but keep exported global variables.
+        linkage!(entry, LLVM.API.LLVMExternalLinkage)
+        preserved_gvs = String[LLVM.name(entry)]
+        for gvar in globals(mod)
+            push!(preserved_gvs, LLVM.name(gvar))
         end
+        if use_newpm && LLVM.version() >= v"17"
+            @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+                add!(mpm, InternalizePass(InternalizePassOptions(; preserved_gvs)))
+                add!(mpm, AlwaysInlinerPass())
+                run!(mpm, mod)
+            end
+        else
+            @dispose pm=ModulePassManager() begin
+                internalize!(pm, preserved_gvs)
+                always_inliner!(pm)
+                run!(pm, mod)
+            end
+        end
+
+        global current_job
+        current_job = job
+        can_throw(job) || lower_throw!(mod)
     end
 
     return mod, compiled

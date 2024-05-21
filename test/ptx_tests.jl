@@ -114,7 +114,7 @@ end
     @test occursin(r"@\w*kernel\w*\(\[1 x i64\] %state", ir)
 
     # child1 doesn't use the state
-    @test occursin(r"@\w*child1\w*\((i64|i8\*)", ir)
+    @test occursin(r"@\w*child1\w*\((i64|i8\*|ptr)", ir)
 
     # child2 does
     @test occursin(r"@\w*child2\w*\(\[1 x i64\] %state", ir)
@@ -341,7 +341,7 @@ precompile_test_harness("Inference caching") do load_path
             job, _ = PTXCompiler.create_job(kernel, ())
             GPUCompiler.code_typed(job)
         end
-        
+
         # identity is foreign
         @setup_workload begin
             job, _ = PTXCompiler.create_job(identity, (Int,))
