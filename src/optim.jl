@@ -1,10 +1,10 @@
 # LLVM IR optimization
 
-function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
     if use_newpm
-        optimize_newpm!(job, mod)
+        optimize_newpm!(job, mod; opt_level)
     else
-        optimize_legacypm!(job, mod)
+        optimize_legacypm!(job, mod; opt_level)
     end
     return
 end
@@ -12,7 +12,7 @@ end
 
 ## new pm
 
-function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level)
     triple = llvm_triple(job.config.target)
     tm = llvm_machine(job.config.target)
 
@@ -21,7 +21,7 @@ function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
     @dispose pb=PassBuilder(tm) begin
         @dispose mpm=NewPMModulePassManager(pb) begin
-            buildNewPMPipeline!(mpm, job)
+            buildNewPMPipeline!(mpm, job, opt_level)
             run!(mpm, mod, tm)
         end
     end
@@ -30,7 +30,7 @@ function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     return
 end
 
-function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level=2)
+function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     buildEarlySimplificationPipeline(mpm, job, opt_level)
     add!(mpm, AlwaysInlinerPass())
     buildEarlyOptimizerPipeline(mpm, job, opt_level)
@@ -283,7 +283,7 @@ end
 
 ## legacy pm
 
-function optimize_legacypm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+function optimize_legacypm!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level)
     triple = llvm_triple(job.config.target)
     tm = llvm_machine(job.config.target)
 
@@ -292,7 +292,7 @@ function optimize_legacypm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
     @dispose pm=ModulePassManager() begin
         addTargetPasses!(pm, tm, triple)
-        addOptimizationPasses!(pm)
+        addOptimizationPasses!(pm, opt_level)
         run!(pm, mod)
     end
 
@@ -404,17 +404,6 @@ function optimize_legacypm!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         run!(pm, mod)
     end
 
-    # compare to Clang by using the pass manager builder APIs:
-    #LLVM.clopts("-print-after-all", "-filter-print-funcs=$(LLVM.name(entry))")
-    #@dispose pm=ModulePassManager() begin
-    #    addTargetPasses!(pm, tm, triple)
-    #    PassManager@dispose pmb=IRBuilder() begin
-    #        optlevel!(pmb, 2)
-    #        populate!(pm, pmb)
-    #    end
-    #    run!(pm, mod)
-    #end
-
     return
 end
 
@@ -424,7 +413,7 @@ function addTargetPasses!(pm, tm, triple)
 end
 
 # Based on Julia's optimization pipeline, minus the SLP and loop vectorizers.
-function addOptimizationPasses!(pm, opt_level=2)
+function addOptimizationPasses!(pm, opt_level)
     # compare with the using Julia's optimization pipeline directly:
     #ccall(:jl_add_optimization_passes, Cvoid,
     #      (LLVM.API.LLVMPassManagerRef, Cint, Cint),
