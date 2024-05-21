@@ -153,42 +153,86 @@ end
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     tm = llvm_machine(job.config.target)
-    # TODO can't convert to newpm because speculative-execution doesn't have a parameter in the default PassBuilder parser
-    @dispose pm=ModulePassManager() begin
-        add_library_info!(pm, triple(mod))
-        add_transform_info!(pm, tm)
+    # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
+    if use_newpm
+        @dispose pb=PassBuilder(tm) mpm=NewPMModulePassManager(pb) begin
+            add!(mpm, NewPMFunctionPassManager) do fpm
+                # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
+                add!(legacy2newpm(nvvm_reflect!), fpm)
 
-        # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
-        add!(pm, FunctionPass("NVVMReflect", nvvm_reflect!))
+                # needed by GemmKernels.jl-like code
+                add!(fpm, SpeculativeExecutionPass())
 
-        # needed by GemmKernels.jl-like code
-        speculative_execution_if_has_branch_divergence!(pm)
+                # NVPTX's target machine info enables runtime unrolling,
+                # but Julia's pass sequence only invokes the simple unroller.
+                add!(fpm, LoopUnrollPass(LoopUnrollOptions(; job.config.opt_level)))
+                add!(fpm, InstCombinePass())        # clean-up redundancy
+                add!(fpm, NewPMLoopPassManager) do lpm
+                    add!(lpm, LICMPass())           # the inner runtime check might be
+                                                    # outer loop invariant
+                end
 
-        # NVPTX's target machine info enables runtime unrolling,
-        # but Julia's pass sequence only invokes the simple unroller.
-        loop_unroll!(pm)
-        instruction_combining!(pm)  # clean-up redundancy
-        licm!(pm)                   # the inner runtime check might be outer loop invariant
+                # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
+                # that code still needs to be optimized (arguably, multiple unroll passes should be
+                # scheduled by the Julia optimizer). do so here, instead of re-optimizing entirely.
+                if job.config.opt_level == 2
+                    add!(fpm, GVNPass())
+                elseif job.config.opt_level == 1
+                    add!(fpm, EarlyCSEPass())
+                end
+                add!(fpm, DSEPass())
 
-        # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
-        # that code still needs to be optimized (arguably, multiple unroll passes should be
-        # scheduled by the Julia optimizer). do so here, instead of re-optimizing entirely.
-        early_csemem_ssa!(pm) # TODO: gvn instead? see NVPTXTargetMachine.cpp::addEarlyCSEOrGVNPass
-        dead_store_elimination!(pm)
+                add!(fpm, SimplifyCFGPass())
+            end
 
-        cfgsimplification!(pm)
+            # get rid of the internalized functions; now possible unused
+            add!(mpm, GlobalDCEPass())
 
-        # get rid of the internalized functions; now possible unused
-        global_dce!(pm)
+            run!(mpm, mod, tm)
+        end
+    else
+        @dispose pm=ModulePassManager() begin
+            add_library_info!(pm, triple(mod))
+            add_transform_info!(pm, tm)
 
-        run!(pm, mod)
+            # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
+            add!(pm, FunctionPass("NVVMReflect", nvvm_reflect!))
+
+            # needed by GemmKernels.jl-like code
+            speculative_execution_if_has_branch_divergence!(pm)
+
+            # NVPTX's target machine info enables runtime unrolling,
+            # but Julia's pass sequence only invokes the simple unroller.
+            loop_unroll!(pm)
+            instruction_combining!(pm)  # clean-up redundancy
+            licm!(pm)                   # the inner runtime check might be outer loop invariant
+
+            # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
+            # that code still needs to be optimized (arguably, multiple unroll passes should be
+            # scheduled by the Julia optimizer). do so here, instead of re-optimizing entirely.
+            if job.config.opt_level == 2
+                gvn!(pm)
+            elseif job.config.opt_level == 1
+                early_cse!(pm)
+            end
+            dead_store_elimination!(pm)
+
+            cfgsimplification!(pm)
+
+            # get rid of the internalized functions; now possible unused
+            global_dce!(pm)
+
+            run!(pm, mod)
+        end
     end
 end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                     mod::LLVM.Module, entry::LLVM.Function)
-    for f in functions(mod)
-        lower_unreachable!(f)
+    if LLVM.version() < v"17"
+        for f in functions(mod)
+            lower_unreachable!(f)
+        end
     end
 
     if job.config.kernel

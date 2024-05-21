@@ -13,7 +13,6 @@ end
 ## new pm
 
 function optimize_newpm!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level)
-    triple = llvm_triple(job.config.target)
     tm = llvm_machine(job.config.target)
 
     global current_job
@@ -34,7 +33,9 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     buildEarlySimplificationPipeline(mpm, job, opt_level)
     add!(mpm, AlwaysInlinerPass())
     buildEarlyOptimizerPipeline(mpm, job, opt_level)
-    add!(mpm, LowerSIMDLoopPass())
+    if VERSION < v"1.10"
+        add!(mpm, LowerSIMDLoopPass())
+    end
     add!(mpm, NewPMFunctionPassManager) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
@@ -113,8 +114,9 @@ end
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, NewPMLoopPassManager) do lpm
-        # TODO LowerSIMDLoopPass
-        # LoopPass since JuliaLang/julia#51883
+        if VERSION >= v"1.10"
+            add!(lpm, LowerSIMDLoopPass())
+        end
         if opt_level >= 2
             add!(lpm, LoopRotatePass())
         end

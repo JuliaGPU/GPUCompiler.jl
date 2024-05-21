@@ -325,16 +325,22 @@ const __llvm_initialized = Ref(false)
         # global variables. this makes sure that the optimizer can, e.g.,
         # rewrite function signatures.
         if toplevel
-            # TODO: there's no good API to use internalize with the new pass manager yet
-            @dispose pm=ModulePassManager() begin
-                exports = collect(values(jobs))
-                for gvar in globals(ir)
-                    if linkage(gvar) == LLVM.API.LLVMExternalLinkage
-                        push!(exports, LLVM.name(gvar))
-                    end
+            preserved_gvs = collect(values(jobs))
+            for gvar in globals(ir)
+                if linkage(gvar) == LLVM.API.LLVMExternalLinkage
+                    push!(preserved_gvs, LLVM.name(gvar))
                 end
-                internalize!(pm, exports)
-                run!(pm, ir)
+            end
+            if use_newpm && LLVM.version() >= v"17"
+                @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
+                    add!(mpm, InternalizePass(InternalizePassOptions(; preserved_gvs)))
+                    run!(mpm, ir)
+                end
+            else
+                @dispose pm=ModulePassManager() begin
+                    internalize!(pm, preserved_gvs)
+                    run!(pm, ir)
+                end
             end
         end
 
