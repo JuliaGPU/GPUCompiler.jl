@@ -447,8 +447,8 @@ function nvvm_reflect!(fun::LLVM.Function)
         end
 
         # decode the string argument
-        sym = if LLVM.version() >= v"17"
-            operands(call)[1]
+        if LLVM.version() >= v"17"
+            sym = operands(call)[1]
         else
             str = operands(call)[1]
             if !isa(str, LLVM.ConstantExpr) || opcode(str) != LLVM.API.LLVMGetElementPtr
