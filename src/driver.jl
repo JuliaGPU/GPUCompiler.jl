@@ -184,10 +184,9 @@ end
     # generated functions so use the current world counter, which may be too new
     # for the world we're compiling for.
 
-    pseudo_ptr = reinterpret(Ptr{Cvoid}, id)
     quote
         # TODO: add an edge to this method instance to support method redefinitions
-        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $pseudo_ptr)
+        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
     end
 end
 
@@ -277,7 +276,10 @@ const __llvm_initialized = Ref(false)
                 for call in worklist[dyn_job]
                     @dispose builder=IRBuilder() begin
                         position!(builder, call)
-                        fptr = if VERSION >= v"1.12.0-DEV.225"
+                        fptr = if LLVM.version() >= v"17"
+                            T_ptr = LLVM.PointerType()
+                            bitcast!(builder, dyn_entry, T_ptr)
+                        elseif VERSION >= v"1.12.0-DEV.225"
                             T_ptr = LLVM.PointerType(LLVM.Int8Type())
                             bitcast!(builder, dyn_entry, T_ptr)
                         else

@@ -167,7 +167,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                 # but Julia's pass sequence only invokes the simple unroller.
                 add!(fpm, LoopUnrollPass(LoopUnrollOptions(; job.config.opt_level)))
                 add!(fpm, InstCombinePass())        # clean-up redundancy
-                add!(fpm, NewPMLoopPassManager) do lpm
+                add!(fpm, NewPMLoopPassManager, #=UseMemorySSA=#true) do lpm
                     add!(lpm, LICMPass())           # the inner runtime check might be
                                                     # outer loop invariant
                 end
@@ -439,20 +439,42 @@ function nvvm_reflect!(fun::LLVM.Function)
     for use in uses(reflect_function)
         call = user(use)
         isa(call, LLVM.CallInst) || continue
-        length(operands(call)) == 2 || error("Wrong number of operands to __nvvm_reflect function")
+        if length(operands(call)) != 2
+            @error """Unrecognized format of __nvvm_reflect call:
+                      $(string(call))
+                      Wrong number of operands: expected 2, got $(length(operands(call)))."""
+            continue
+        end
 
         # decode the string argument
-        str = operands(call)[1]
-        isa(str, LLVM.ConstantExpr) || error("Format of __nvvm__reflect function not recognized")
-        sym = operands(str)[1]
-        if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
-            # CUDA 11.0 or below
-            sym = operands(sym)[1]
+        if LLVM.version() >= v"17"
+            sym = operands(call)[1]
+        else
+            str = operands(call)[1]
+            if !isa(str, LLVM.ConstantExpr) || opcode(str) != LLVM.API.LLVMGetElementPtr
+                @safe_error """Unrecognized format of __nvvm_reflect call:
+                               $(string(call))
+                               Operand should be a GEP instruction, got a $(typeof(str)). Please file an issue."""
+                continue
+            end
+            sym = operands(str)[1]
+            if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
+                # CUDA 11.0 or below
+                sym = operands(sym)[1]
+            end
         end
-        isa(sym, LLVM.GlobalVariable) || error("Format of __nvvm__reflect function not recognized")
+        if !isa(sym, LLVM.GlobalVariable)
+            @safe_error """Unrecognized format of __nvvm_reflect call:
+                           $(string(call))
+                           Operand should be a global variable, got a $(typeof(sym)). Please file an issue."""
+            continue
+        end
         sym_op = operands(sym)[1]
-        isa(sym_op, LLVM.ConstantArray) || isa(sym_op, LLVM.ConstantDataArray) ||
-            error("Format of __nvvm__reflect function not recognized")
+        if !isa(sym_op, LLVM.ConstantArray) && !isa(sym_op, LLVM.ConstantDataArray)
+            @safe_error """Unrecognized format of __nvvm_reflect call:
+                           $(string(call))
+                           Operand should be a constant array, got a $(typeof(sym_op)). Please file an issue."""
+        end
         chars = convert.(Ref(UInt8), collect(sym_op))
         reflect_arg = String(chars[1:end-1])
 
@@ -477,7 +499,10 @@ function nvvm_reflect!(fun::LLVM.Function)
         elseif reflect_arg == "__CUDA_ARCH"
             ConstantInt(reflect_typ, job.config.target.cap.major*100 + job.config.target.cap.minor*10)
         else
-            @warn "Unknown __nvvm_reflect argument: $reflect_arg. Please file an issue."
+            @safe_error """Unrecognized format of __nvvm_reflect call:
+                           $(string(call))
+                           Unknown argument $reflect_arg. Please file an issue."""
+            continue
         end
 
         replace_uses!(call, reflect_val)
