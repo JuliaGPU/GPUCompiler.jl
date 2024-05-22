@@ -184,10 +184,9 @@ end
     # generated functions so use the current world counter, which may be too new
     # for the world we're compiling for.
 
-    pseudo_ptr = reinterpret(Ptr{Cvoid}, id)
     quote
         # TODO: add an edge to this method instance to support method redefinitions
-        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $pseudo_ptr)
+        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
     end
 end
 
