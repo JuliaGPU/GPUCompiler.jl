@@ -442,17 +442,22 @@ function nvvm_reflect!(fun::LLVM.Function)
         length(operands(call)) == 2 || error("Wrong number of operands to __nvvm_reflect function")
 
         # decode the string argument
-        str = operands(call)[1]
-        isa(str, LLVM.ConstantExpr) || error("Format of __nvvm__reflect function not recognized")
-        sym = operands(str)[1]
-        if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
-            # CUDA 11.0 or below
-            sym = operands(sym)[1]
+        sym = if LLVM.version() >= v"17"
+            operands(call)[1]
+        else
+            str = operands(call)[1]
+            # if LLVM.version() < v"17"
+            isa(str, LLVM.ConstantExpr) || error("Format of __nvvm__reflect function not recognized (1)")
+            sym = operands(str)[1]
+            if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
+                # CUDA 11.0 or below
+                sym = operands(sym)[1]
+            end
         end
-        isa(sym, LLVM.GlobalVariable) || error("Format of __nvvm__reflect function not recognized")
+        isa(sym, LLVM.GlobalVariable) || error("Format of __nvvm__reflect function not recognized (2)")
         sym_op = operands(sym)[1]
         isa(sym_op, LLVM.ConstantArray) || isa(sym_op, LLVM.ConstantDataArray) ||
-            error("Format of __nvvm__reflect function not recognized")
+            error("Format of __nvvm__reflect function not recognized (3)")
         chars = convert.(Ref(UInt8), collect(sym_op))
         reflect_arg = String(chars[1:end-1])
 
