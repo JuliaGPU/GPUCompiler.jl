@@ -167,7 +167,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                 # but Julia's pass sequence only invokes the simple unroller.
                 add!(fpm, LoopUnrollPass(LoopUnrollOptions(; job.config.opt_level)))
                 add!(fpm, InstCombinePass())        # clean-up redundancy
-                add!(fpm, NewPMLoopPassManager) do lpm
+                add!(fpm, NewPMLoopPassManager, #=UseMemorySSA=#true) do lpm
                     add!(lpm, LICMPass())           # the inner runtime check might be
                                                     # outer loop invariant
                 end
