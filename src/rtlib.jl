@@ -15,6 +15,8 @@ end
 # GPU run-time library
 #
 
+using FileWatching.Pidfile: mkpidlock
+
 
 ## higher-level functionality to work with runtime functions
 
@@ -115,10 +117,8 @@ function build_runtime(@nospecialize(job::CompilerJob))
     mod
 end
 
-const runtime_lock = ReentrantLock()
-
 @locked function load_runtime(@nospecialize(job::CompilerJob))
-    lock(runtime_lock) do
+    mkpidlock("$(compile_cache).lock"; stale_age=5) do
         slug = runtime_slug(job)
         if !supports_typed_pointers(context())
             slug *= "-opaque"
@@ -139,14 +139,8 @@ const runtime_lock = ReentrantLock()
 
         if lib === nothing
             @debug "Building the GPU runtime library at $path"
-            mkpath(compile_cache)
             lib = build_runtime(job)
-
-            # atomic write to disk
-            temp_path, io = mktemp(dirname(path); cleanup=false)
-            write(io, lib)
-            close(io)
-            Base.rename(temp_path, path; force=true)
+            write(path, lib)
         end
 
         return lib
@@ -156,8 +150,9 @@ end
 # remove the existing cache
 # NOTE: call this function from global scope, so any change triggers recompilation.
 function reset_runtime()
-    lock(runtime_lock) do
+    mkpidlock("$(compile_cache).lock"; stale_age=5) do
         rm(compile_cache; recursive=true, force=true)
+        mkpath(compile_cache)
     end
 
     return
