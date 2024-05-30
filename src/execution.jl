@@ -64,6 +64,36 @@ end
 
 const cache_lock = ReentrantLock()
 
+mutable struct CacheEntry
+    const ci::Core.CodeInstance
+    const obj::Any
+    @atomic next::Union{CacheEntry, Nothing}
+end
+
+@inline function lookup(entry::CacheEntry, world::UInt)::Any
+    while entry !== nothing
+        ci = entry.ci
+        if ci.min_world <= world <= ci.max_world
+            return entry.obj
+        end
+        entry = entry.next
+    end
+    return nothing
+end
+
+@inline function insert!(entry, nentry)
+    success = false
+    while !success
+        next = entry.next
+        if next === nothing
+            entry, success = @atomicreplace entry.next nothing => nentry
+        else
+            entry = next
+        end
+    end
+    return
+end
+
 """
     cached_compilation(cache::Dict{Any}, src::MethodInstance, cfg::CompilerConfig,
                        compiler, linker)
@@ -80,65 +110,56 @@ session-dependent objects (e.g., a `CuModule`).
 function cached_compilation(cache::AbstractDict{<:Any,V},
                             src::MethodInstance, cfg::CompilerConfig,
                             compiler::Function, linker::Function) where {V}
-    # NOTE: we index the cach both using (mi, world, cfg) keys, for the fast look-up,
-    #       and using CodeInfo keys for the slow look-up. we need to cache both for
-    #       performance, but cannot use a separate private cache for the ci->obj lookup
-    #       (e.g. putting it next to the CodeInfo's in the CodeCache) because some clients
-    #       expect to be able to wipe the cache (e.g. CUDA.jl's `device_reset!`)
-
-    # fast path: index the cache directly for the *current* world + compiler config
-
-    world = tls_world_age()
-    key = (objectid(src), world, cfg)
+    key = (objectid(src), cfg)
     # NOTE: we store the MethodInstance's objectid to avoid an expensive allocation.
-    #       Base does this with a multi-level lookup, first keyed on the mi,
-    #       then a linear scan over the (typically few) entries.
-
     # NOTE: no use of lock(::Function)/@lock/get! to avoid try/catch and closure overhead
     lock(cache_lock)
-    obj = get(cache, key, nothing)
+    entry = get(cache, key, nothing)
     unlock(cache_lock)
 
-    if obj === nothing || compile_hook[] !== nothing
-        obj = actual_compilation(cache, src, world, cfg, compiler, linker)::V
-        lock(cache_lock)
-        cache[key] = obj
-        unlock(cache_lock)
+    success = entry !== nothing
+    world = tls_world_age()
+    obj = success ? lookup(entry::CacheEntry, world) : nothing
+
+    if obj !== nothing
+        return obj::V
     end
+
+    ci, obj = actual_compilation(src, world, cfg, compiler, linker)::V
+
+    new_entry = CacheEntry(ci, obj, nothing)
+    if success
+        insert!(entry::CacheEntry, new_entry)
+        return obj::V
+    end
+
+    lock(cache_lock)
+    # Need to re-obtain entry in case we raced.
+    entry = get(cache, key, nothing)
+    if entry === nothing
+        cache[key] = new_entry
+    else
+        insert!(entry::CacheEntry, new_entry)
+    end
+    unlock(cache_lock)
     return obj::V
 end
 
-@noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
+@noinline function actual_compilation(src::MethodInstance, world::UInt,
                                       cfg::CompilerConfig, compiler::Function, linker::Function)
     job = CompilerJob(src, cfg, world)
     obj = nothing
 
-    # fast path: find an applicable CodeInstance and see if we have compiled it before
     ci = ci_cache_lookup(ci_cache(job), src, world, world)::Union{Nothing,CodeInstance}
-    if ci !== nothing
-        key = (ci, cfg)
-        if haskey(cache, key)
-            obj = cache[key]
-        end
-    end
-
-    # slow path: compile and link
-    if obj === nothing || compile_hook[] !== nothing
+    if obj === nothing 
         # TODO: consider loading the assembly from an on-disk cache here
         asm = compiler(job)
-
-        if obj !== nothing
-            # we got here because of a *compile* hook; don't bother linking
-            return obj
-        end
         obj = linker(job, asm)
 
         if ci === nothing
             ci = ci_cache_lookup(ci_cache(job), src, world, world)::CodeInstance
-            key = (ci, cfg)
         end
-        cache[key] = obj
     end
 
-    return obj
+    return ci, obj
 end
