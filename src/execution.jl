@@ -182,7 +182,7 @@ end
 end
 
 struct OnDiskCacheEntry
-    src::MethodInstance
+    src::Type # Originally MethodInstance, but upon deserialize they were not uniqued... 
     cfg::CompilerConfig
     asm
 end
@@ -216,11 +216,14 @@ end
                     ondisk_hit = true
                     try
                         @debug "Loading compiled kernel" job path
+                        # The MI we deserialize here didn't get uniqued...
                         entry = deserialize(path)::OnDiskCacheEntry
-                        if entry.src == src && entry.cfg == cfg
+                        if entry.src == src.specTypes && entry.cfg == cfg
                             asm = entry.asm
                         else
-                            @warn "Cache missmatch" src cfg entry
+                            @show entry.src == src.specTypes
+                            @show entry.cfg == cfg
+                            @warn "Cache missmatch" src.specTypes cfg entry.src entry.cfg
                         end
                     catch ex
                         @warn "Failed to load compiled kernel" job path exception=(ex, catch_backtrace())
@@ -242,7 +245,7 @@ end
             if !ondisk_hit && path !== nothing && disk_cache()
                 @debug "Writing out on-disk cache" job path
                 tmppath, io = mktemp(;cleanup=false)
-                entry = OnDiskCacheEntry(src, cfg, asm)
+                entry = OnDiskCacheEntry(src.specTypes, cfg, asm)
                 serialize(io, entry)
                 close(io)
                 # atomic move
