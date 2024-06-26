@@ -51,7 +51,7 @@ _precompile_()
 
 
 compile_cache = "" # defined in __init__()
-const pkgver = Base.pkgversion(GPUCompiler)
+const pkgver = @static VERSION > v"1.9" ? Base.pkgversion(GPUCompiler) : ""
 
 
 function __init__()
