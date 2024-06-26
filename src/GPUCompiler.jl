@@ -61,7 +61,11 @@ function __init__()
     if VERSION > v"1.9"
         ## also add the package version
         pkgver = Base.pkgversion(GPUCompiler)
-        dir = joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
+        dir = if isnothing(pkgver)
+            joinpath(dir, "sysimg") # GPUCompiler was built in the sysimg
+        else
+            joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
+        end
     end
     mkpath(dir)
     global compile_cache = dir
