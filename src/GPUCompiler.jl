@@ -51,6 +51,8 @@ _precompile_()
 
 
 compile_cache = "" # defined in __init__()
+const pkgver = Base.pkgversion(GPUCompiler)
+
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
@@ -60,12 +62,7 @@ function __init__()
     dir = joinpath(dir, "v$(VERSION.major).$(VERSION.minor)")
     if VERSION > v"1.9"
         ## also add the package version
-        pkgver = Base.pkgversion(GPUCompiler)
-        dir = if isnothing(pkgver)
-            joinpath(dir, "sysimg") # GPUCompiler was built in the sysimg
-        else
-            joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
-        end
+        dir = joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
     end
     mkpath(dir)
     global compile_cache = dir
