@@ -533,7 +533,7 @@ end
     @test occursin("ret void", ir)
     @test !any(f->occursin(f, ir),
                ["jl_invoke", "apply_iterate",
-                "inttoptr", "apply_type"]) broken=VERSION>=v"1.11.0-DEV.392"
+                "inttoptr", "apply_type"])
 end
 end # testitem
 
@@ -557,7 +557,7 @@ precompile_test_harness("Inference caching") do load_path
             job, _ = NativeCompiler.create_job(kernel, ())
             GPUCompiler.code_typed(job)
         end
-        
+
         # identity is foreign
         @setup_workload begin
             job, _ = NativeCompiler.create_job(identity, (Int,))
