@@ -590,8 +590,11 @@ precompile_test_harness("Inference caching") do load_path
         # check that identity survived
         @test check_presence(identity_mi, token)
 
-        GPUCompiler.enable_cache!()
-        @test GPUCompiler.disk_cache() == true
+        GPUCompiler.clear_disk_cache!()
+        @test GPUCompiler.disk_cache_enabled() == false\
+
+        GPUCompiler.enable_disk_cache!()
+        @test GPUCompiler.disk_cache_enabled() == true
 
         job, _ = NativeCompiler.create_job(InferenceCaching.kernel, (Vector{Int}, Int))
         @assert job.source == kernel_mi
@@ -603,6 +606,8 @@ precompile_test_harness("Inference caching") do load_path
         @test !ispath(path)
         NativeCompiler.cached_execution(InferenceCaching.kernel, (Vector{Int}, Int))
         @test ispath(path)
+        GPUCompiler.clear_disk_cache!()
+        @test !ispath(path)
     end
 end
 

@@ -62,7 +62,7 @@ end
 
 ## cached compilation
 
-### Disk cache notes
+### Notes on interactions with package images and disk cache.
 # Julia uses package images (pkgimg) to cache both the result of inference,
 # and the result of native code emissions. Up until Julia v1.11 neither the
 # inferred nor the nativce code of foreign abstract interpreters was cached
@@ -88,14 +88,14 @@ end
 # we can use it as part of the hash for the on-disk cache. (see `cache_file`)
 
 """
-    disk_cache()
+    disk_cache_enabled()
 
 Query if caching to disk is enabled.
 """
-disk_cache() = parse(Bool, @load_preference("disk_cache", "false"))
+disk_cache_enabled() = parse(Bool, @load_preference("disk_cache", "false"))
 
 """
-    enable_cache!(state::Bool=true)
+    enable_disk_cache!(state::Bool=true)
 
 Activate the GPUCompiler disk cache in the current environment.
 You will need to restart your Julia environment for it to take effect.
@@ -103,12 +103,12 @@ You will need to restart your Julia environment for it to take effect.
 !!! note
     The cache functionality requires Julia 1.11
 """
-function enable_cache!(state::Bool=true)
+function enable_disk_cache!(state::Bool=true)
     @set_preferences!("disk_cache"=>string(state))
 end
 
-cache_path() = @get_scratch!("cache")
-clear_disk_cache!() = rm(cache_path(); recursive=true, force=true)
+disk_cache_path() = @get_scratch!("disk_cache")
+clear_disk_cache!() = rm(disk_cache_path(); recursive=true, force=true)
 
 const cache_lock = ReentrantLock()
 
@@ -175,13 +175,13 @@ end
     end
 
     return joinpath(
-        cache_path(),
+        disk_cache_path(),
         # bifurcate the cache by build id of GPUCompiler
         string(gpucompiler_buildid),
         string(h, ".jls"))
 end
 
-struct OnDiskCacheEntry
+struct DiskCacheEntry
     src::Type # Originally MethodInstance, but upon deserialize they were not uniqued... 
     cfg::CompilerConfig
     asm
@@ -209,7 +209,7 @@ end
             # TODO:
             #  - Sould we hit disk cache if Base.generating_output()
             #  - Should we allow backend to opt out?
-            if ci !== nothing && obj === nothing &&  disk_cache()
+            if ci !== nothing && obj === nothing && disk_cache_enabled()
                 path = cache_file(ci, cfg)
                 @debug "Looking for on-disk cache" job path
                 if path !== nothing && isfile(path)
@@ -217,7 +217,7 @@ end
                     try
                         @debug "Loading compiled kernel" job path
                         # The MI we deserialize here didn't get uniqued...
-                        entry = deserialize(path)::OnDiskCacheEntry
+                        entry = deserialize(path)::DiskCacheEntry
                         if entry.src == src.specTypes && entry.cfg == cfg
                             asm = entry.asm
                         else
@@ -242,10 +242,10 @@ end
         end
 
         @static if VERSION >= v"1.11.0-"
-            if !ondisk_hit && path !== nothing && disk_cache()
+            if !ondisk_hit && path !== nothing && disk_cache_enabled()
                 @debug "Writing out on-disk cache" job path
                 tmppath, io = mktemp(;cleanup=false)
-                entry = OnDiskCacheEntry(src.specTypes, cfg, asm)
+                entry = DiskCacheEntry(src.specTypes, cfg, asm)
                 serialize(io, entry)
                 close(io)
                 # atomic move
