@@ -135,10 +135,10 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     # we emit properties (of the device and ptx isa) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
     if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, RecomputeGlobalsAAPass())
-            add!(mpm, GlobalOptPass())
-            run!(mpm, mod)
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, RecomputeGlobalsAAPass())
+            add!(pb, GlobalOptPass())
+            run!(pb, mod, llvm_machine(job.config.target))
         end
     else
         @dispose pm=ModulePassManager() begin
@@ -155,19 +155,19 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     tm = llvm_machine(job.config.target)
     # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
     if use_newpm
-        @dispose pb=PassBuilder(tm) mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, NewPMFunctionPassManager) do fpm
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, NewPMFunctionPassManager()) do fpm
                 # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
-                add!(legacy2newpm(nvvm_reflect!), fpm)
+                add!(fpm, NVVMReflectPass())
 
                 # needed by GemmKernels.jl-like code
                 add!(fpm, SpeculativeExecutionPass())
 
                 # NVPTX's target machine info enables runtime unrolling,
                 # but Julia's pass sequence only invokes the simple unroller.
-                add!(fpm, LoopUnrollPass(LoopUnrollOptions(; job.config.opt_level)))
+                add!(fpm, LoopUnrollPass(; job.config.opt_level))
                 add!(fpm, InstCombinePass())        # clean-up redundancy
-                add!(fpm, NewPMLoopPassManager, #=UseMemorySSA=#true) do lpm
+                add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
                     add!(lpm, LICMPass())           # the inner runtime check might be
                                                     # outer loop invariant
                 end
@@ -186,9 +186,9 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             end
 
             # get rid of the internalized functions; now possible unused
-            add!(mpm, GlobalDCEPass())
+            add!(pb, GlobalDCEPass())
 
-            run!(mpm, mod, tm)
+            run!(pb, mod, tm)
         end
     else
         @dispose pm=ModulePassManager() begin
@@ -196,7 +196,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             add_transform_info!(pm, tm)
 
             # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
-            add!(pm, FunctionPass("NVVMReflect", nvvm_reflect!))
+            nvvm_reflect!(pm)
 
             # needed by GemmKernels.jl-like code
             speculative_execution_if_has_branch_divergence!(pm)
@@ -522,4 +522,10 @@ function nvvm_reflect!(fun::LLVM.Function)
 
     end
     return changed
+end
+if LLVM.has_newpm()
+    NVVMReflectPass() = NewPMFunctionPass("nvvm-reflect", nvvm_reflect!)
+else
+    nvvm_reflect!(pm::PassManager) =
+        add!(pm, FunctionPass("NVVMReflect", nvvm_reflect!))
 end

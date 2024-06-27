@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.8', '1.9', '1.10', '^1.11.0-alpha2'] # 'nightly'
+        version: ['1.8', '1.9', '1.10', '^1.11.0-rc1'] # 'nightly'
         os: [ubuntu-latest, macOS-latest, windows-latest]
         arch: [x64]
         llvm_args: ['']
@@ -36,15 +36,15 @@ jobs:
             os: 'windows-latest'
             arch: 'x64'
             llvm_args: '--opaque-pointers'
-          - version: '^1.11.0-alpha2'
+          - version: '^1.11.0-rc1'
             os: 'ubuntu-latest'
             arch: 'x64'
             llvm_args: '--opaque-pointers'
-          - version: '^1.11.0-alpha2'
+          - version: '^1.11.0-rc1'
             os: 'macOS-latest'
             arch: 'x64'
             llvm_args: '--opaque-pointers'
-          - version: '^1.11.0-alpha2'
+          - version: '^1.11.0-rc1'
             os: 'windows-latest'
             arch: 'x64'
             llvm_args: '--opaque-pointers'

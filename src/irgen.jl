@@ -102,10 +102,10 @@ function irgen(@nospecialize(job::CompilerJob))
             push!(preserved_gvs, LLVM.name(gvar))
         end
         if use_newpm && LLVM.version() >= v"17"
-            @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                add!(mpm, InternalizePass(InternalizePassOptions(; preserved_gvs)))
-                add!(mpm, AlwaysInlinerPass())
-                run!(mpm, mod)
+            @dispose pb=NewPMPassBuilder() begin
+                add!(pb, InternalizePass(InternalizePassOptions(; preserved_gvs)))
+                add!(pb, AlwaysInlinerPass())
+                run!(pb, mod, llvm_machine(job.config.target))
             end
         else
             @dispose pm=ModulePassManager() begin
@@ -718,6 +718,12 @@ function add_kernel_state!(mod::LLVM.Module)
 
     return true
 end
+if LLVM.has_newpm()
+    AddKernelStatePass() = NewPMModulePass("AddKernelStatePass", add_kernel_state!)
+else
+    add_kernel_state!(pm::PassManager) =
+        add!(pm, ModulePass("AddKernelStatePass", add_kernel_state!))
+end
 
 # lower calls to the state getter intrinsic. this is a two-step process, so that the state
 # argument can be added before optimization, and that optimization can introduce new uses
@@ -769,6 +775,12 @@ function lower_kernel_state!(fun::LLVM.Function)
 
     return changed
 end
+if LLVM.has_newpm()
+    LowerKernelStatePass() = NewPMFunctionPass("LowerKernelStatePass", lower_kernel_state!)
+else
+    lower_kernel_state!(pm::PassManager) =
+        add!(pm, FunctionPass("LowerKernelStatePass", lower_kernel_state!))
+end
 
 function cleanup_kernel_state!(mod::LLVM.Module)
     job = current_job::CompilerJob
@@ -785,6 +797,12 @@ function cleanup_kernel_state!(mod::LLVM.Module)
     end
 
     return changed
+end
+if LLVM.has_newpm()
+    CleanupKernelStatePass() = NewPMModulePass("CleanupKernelStatePass", cleanup_kernel_state!)
+else
+    cleanup_kernel_state!(pm::PassManager) =
+        add!(pm, ModulePass("CleanupKernelStatePass", cleanup_kernel_state!))
 end
 
 function kernel_state_intr(mod::LLVM.Module, T_state)
