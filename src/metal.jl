@@ -78,10 +78,10 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
     # we emit properties (of the air and metal version) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
     if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, RecomputeGlobalsAAPass())
-            add!(mpm, GlobalOptPass())
-            run!(mpm, mod)
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, RecomputeGlobalsAAPass())
+            add!(pb, GlobalOptPass())
+            run!(pb, mod)
         end
     else
         @dispose pm=ModulePassManager() begin
@@ -122,13 +122,13 @@ function hide_noreturn!(mod::LLVM.Module)
     any_noreturn || return false
 
     if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, AlwaysInlinerPass())
-            add!(mpm, NewPMFunctionPassManager) do fpm
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, AlwaysInlinerPass())
+            add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, SimplifyCFGPass())
                 add!(fpm, InstCombinePass())
             end
-            run!(mpm, mod)
+            run!(pb, mod)
         end
     else
         @dispose pm=ModulePassManager() begin
@@ -165,13 +165,13 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     if changed
         # lowering may have introduced additional functions marked `alwaysinline`
         if use_newpm
-            @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                add!(mpm, AlwaysInlinerPass())
-                add!(mpm, NewPMFunctionPassManager) do fpm
+            @dispose pb=NewPMPassBuilder() begin
+                add!(pb, AlwaysInlinerPass())
+                add!(pb, NewPMFunctionPassManager()) do fpm
                     add!(fpm, SimplifyCFGPass())
                     add!(fpm, InstCombinePass())
                 end
-                run!(mpm, mod)
+                run!(pb, mod)
             end
         else
             @dispose pm=ModulePassManager() begin
@@ -306,15 +306,13 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
 
     # clean-up after this pass (which runs after optimization)
     if use_newpm
-       @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, NewPMFunctionPassManager) do fpm
-                add!(fpm, SimplifyCFGPass())
-                add!(fpm, SROAPass())
-                add!(fpm, EarlyCSEPass())
-                add!(fpm, InstCombinePass())
-            end
+       @dispose pb=NewPMPassBuilder() begin
+            add!(pb, SimplifyCFGPass())
+            add!(pb, SROAPass())
+            add!(pb, EarlyCSEPass())
+            add!(pb, InstCombinePass())
 
-            run!(mpm, mod)
+            run!(pb, mod)
         end
     else
         @dispose pm=ModulePassManager() begin
