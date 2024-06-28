@@ -591,7 +591,7 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(identity_mi, token)
 
         GPUCompiler.clear_disk_cache!()
-        @test GPUCompiler.disk_cache_enabled() == false\
+        @test GPUCompiler.disk_cache_enabled() == false
 
         GPUCompiler.enable_disk_cache!()
         @test GPUCompiler.disk_cache_enabled() == true
