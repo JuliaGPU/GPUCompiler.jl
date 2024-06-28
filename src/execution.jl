@@ -206,10 +206,9 @@ end
         ondisk_hit = false
         @static if VERSION >= v"1.11.0-"
             # Don't try to hit the disk cache if we are for a *compile* hook
-            # TODO:
-            #  - Sould we hit disk cache if Base.generating_output()
-            #  - Should we allow backend to opt out?
-            if ci !== nothing && obj === nothing && disk_cache_enabled()
+            if ci !== nothing && obj === nothing &&
+               disk_cache_enabled() && supports_disk_cache(cfg.params)
+
                 path = cache_file(ci, cfg)
                 @debug "Looking for on-disk cache" job path
                 if path !== nothing && isfile(path)
@@ -242,7 +241,9 @@ end
         end
 
         @static if VERSION >= v"1.11.0-"
-            if !ondisk_hit && path !== nothing && disk_cache_enabled()
+            if !ondisk_hit && path !== nothing &&
+               disk_cache_enabled() && supports_disk_cache(cfg.params)
+
                 @debug "Writing out on-disk cache" job path
                 tmppath, io = mktemp(;cleanup=false)
                 entry = DiskCacheEntry(src.specTypes, cfg, asm)
