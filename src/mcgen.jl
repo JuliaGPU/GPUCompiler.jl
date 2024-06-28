@@ -7,20 +7,22 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     current_job = job
 
     if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, RecomputeGlobalsAAPass())
-            add!(mpm, GlobalOptPass())
-            resolve_cpu_references!(mod)
-            add!(legacy2newpm(resolve_cpu_references!), mpm)
-            add!(mpm, GlobalDCEPass())
-            add!(mpm, StripDeadPrototypesPass())
-            run!(mpm, mod)
+        @dispose pb=NewPMPassBuilder() begin
+            register!(pb, ResolveCPUReferencesPass())
+
+            add!(pb, RecomputeGlobalsAAPass())
+            add!(pb, GlobalOptPass())
+            add!(pb, ResolveCPUReferencesPass())
+            add!(pb, GlobalDCEPass())
+            add!(pb, StripDeadPrototypesPass())
+
+            run!(pb, mod, llvm_machine(job.config.target))
         end
     else
         @dispose pm=ModulePassManager() begin
             global_optimizer!(pm)
 
-            add!(pm, ModulePass("ResolveCPUReferences", resolve_cpu_references!))
+            resolve_cpu_references!(pm)
 
             global_dce!(pm)
             strip_dead_prototypes!(pm)
@@ -75,6 +77,13 @@ function resolve_cpu_references!(mod::LLVM.Module)
     end
 
     return changed
+end
+if LLVM.has_newpm()
+    ResolveCPUReferencesPass() =
+        NewPMModulePass("ResolveCPUReferences", resolve_cpu_references!)
+else
+    resolve_cpu_references!(pm::PassManager) =
+        add!(pm, ModulePass("ResolveCPUReferences", resolve_cpu_references!))
 end
 
 

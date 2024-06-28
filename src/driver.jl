@@ -334,10 +334,8 @@ const __llvm_initialized = Ref(false)
                 end
             end
             if use_newpm && LLVM.version() >= v"17"
-                @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                    add!(mpm, InternalizePass(InternalizePassOptions(; preserved_gvs)))
-                    run!(mpm, ir)
-                end
+                run!(InternalizePass(InternalizePassOptions(; preserved_gvs)), ir,
+                     llvm_machine(job.config.target))
             else
                 @dispose pm=ModulePassManager() begin
                     internalize!(pm, preserved_gvs)
@@ -363,17 +361,17 @@ const __llvm_initialized = Ref(false)
                 # XXX: make these part of the optimizer pipeline?
                 if has_deferred_jobs
                     if use_newpm
-                        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                            add!(mpm, NewPMFunctionPassManager) do fpm
+                        @dispose pb=NewPMPassBuilder() begin
+                            add!(pb, NewPMFunctionPassManager()) do fpm
                                 add!(fpm, InstCombinePass())
                             end
-                            add!(mpm, AlwaysInlinerPass())
-                            add!(mpm, NewPMFunctionPassManager) do fpm
+                            add!(pb, AlwaysInlinerPass())
+                            add!(pb, NewPMFunctionPassManager()) do fpm
                                 add!(fpm, SROAPass())
                                 add!(fpm, GVNPass())
                             end
-                            add!(mpm, MergeFunctionsPass())
-                            run!(mpm, ir)
+                            add!(pb, MergeFunctionsPass())
+                            run!(pb, ir, llvm_machine(job.config.target))
                         end
                     else
                         @dispose pm=ModulePassManager() begin
@@ -402,13 +400,13 @@ const __llvm_initialized = Ref(false)
         if cleanup
             @timeit_debug to "clean-up" begin
                 if use_newpm
-                    @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                        add!(mpm, RecomputeGlobalsAAPass())
-                        add!(mpm, GlobalOptPass())
-                        add!(mpm, GlobalDCEPass())
-                        add!(mpm, StripDeadPrototypesPass())
-                        add!(mpm, ConstantMergePass())
-                        run!(mpm, ir)
+                    @dispose pb=NewPMPassBuilder() begin
+                        add!(pb, RecomputeGlobalsAAPass())
+                        add!(pb, GlobalOptPass())
+                        add!(pb, GlobalDCEPass())
+                        add!(pb, StripDeadPrototypesPass())
+                        add!(pb, ConstantMergePass())
+                        run!(pb, ir, llvm_machine(job.config.target))
                     end
                 else
                     # we can only clean-up now, as optimization may lower or introduce calls to
