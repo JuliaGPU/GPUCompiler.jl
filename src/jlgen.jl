@@ -318,7 +318,8 @@ else
     get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
 end
 
-struct GPUInterpreter <: CC.AbstractInterpreter
+abstract type AbstractGPUInterpreter <: CC.AbstractInterpreter end
+struct GPUInterpreter <: AbstractGPUInterpreter
     world::UInt
     method_table::GPUMethodTableView
 
@@ -440,7 +441,7 @@ struct DeferredCallInfo <: CC.CallInfo
     info::CC.CallInfo
 end
 
-function CC.abstract_call_known(interp::GPUInterpreter, @nospecialize(f),
+function CC.abstract_call_known(interp::AbstractGPUInterpreter, @nospecialize(f),
         arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
         max_methods::Int = CC.get_max_methods(interp, f, sv))
     (; fargs, argtypes) = arginfo

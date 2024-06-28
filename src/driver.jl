@@ -131,6 +131,8 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
 end
 
 # GPUCompiler intrinsic that marks deferred compilation
+# In contrast to `deferred_codegen` this doesn't support arbitrary
+# jobs as call targets.
 function var"gpuc.deferred" end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
@@ -188,12 +190,28 @@ const __llvm_initialized = Ref(false)
     # since those modules have been finalized themselves, and we don't want to re-finalize.
     entry = finish_module!(job, ir, entry)
 
+    function unwrap_constant(val)
+        while val isa ConstantExpr
+            if opcode(val) == LLVM.API.LLVMIntToPtr ||
+               opcode(val) == LLVM.API.LLVMBitCast ||
+               opcode(val) == LLVM.API.LLVMAddrSpaceCast
+                val = first(operands(val))
+            else
+                break
+            end
+        end
+        return val
+    end
+
     # deferred code generation
     has_deferred_jobs = !only_entry && toplevel &&
-                        haskey(functions(ir), "deferred_codegen")
+                        (haskey(functions(ir), "deferred_codegen") ||
+                         haskey(functions(ir), "gpuc.lookup"))
+
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
-        dyn_marker = functions(ir)["deferred_codegen"]
+        dyn_marker = haskey(functions(ir), "deferred_codegen") ? functions(ir)["deferred_codegen"] : nothing
+        dyn_marker_v2 = haskey(functions(ir), "gpuc.lookup") ? functions(ir)["gpuc.lookup"] : nothing
 
         # iterative compilation (non-recursive)
         changed = true
@@ -202,26 +220,40 @@ const __llvm_initialized = Ref(false)
 
             # find deferred compiler
             # TODO: recover this information earlier, from the Julia IR
+            #       We can do this now with gpuc.lookup
             worklist = Dict{CompilerJob, Vector{LLVM.CallInst}}()
-            for use in uses(dyn_marker)
-                # decode the call
-                call = user(use)::LLVM.CallInst
-                id = convert(Int, first(operands(call)))
+            if dyn_marker !== nothing
+                for use in uses(dyn_marker)
+                    # decode the call
+                    call = user(use)::LLVM.CallInst
+                    id = convert(Int, first(operands(call)))
 
-                global deferred_codegen_jobs
-                dyn_val = deferred_codegen_jobs[id]
+                    global deferred_codegen_jobs
+                    dyn_val = deferred_codegen_jobs[id]
 
-                # get a job in the appopriate world
-                dyn_job = if dyn_val isa CompilerJob
-                    # trust that the user knows what they're doing
-                    dyn_val
-                else
-                    ft, tt = dyn_val
-                    dyn_src = methodinstance(ft, tt, tls_world_age())
-                    CompilerJob(dyn_src, job.config)
+                    # get a job in the appopriate world
+                    dyn_job = if dyn_val isa CompilerJob
+                        # trust that the user knows what they're doing
+                        dyn_val
+                    else
+                        ft, tt = dyn_val
+                        dyn_src = methodinstance(ft, tt, tls_world_age())
+                        CompilerJob(dyn_src, job.config)
+                    end
+
+                    push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
                 end
+            end
 
-                push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
+            if dyn_marker_v2 !== nothing
+                for use in uses(dyn_marker_v2)
+                    # decode the call
+                    call = user(use)::LLVM.CallInst
+                    dyn_mi = Base.unsafe_pointer_to_objref(
+                        convert(Ptr{Cvoid}, convert(Int, unwrap_constant(operands(call)[1]))))
+                    dyn_job = CompilerJob(dyn_mi, job.config)
+                    push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
+                end
             end
 
             # compile and link
@@ -263,8 +295,15 @@ const __llvm_initialized = Ref(false)
         end
 
         # all deferred compilations should have been resolved
-        @compiler_assert isempty(uses(dyn_marker)) job
-        unsafe_delete!(ir, dyn_marker)
+        if dyn_marker !== nothing
+            @compiler_assert isempty(uses(dyn_marker)) job
+            unsafe_delete!(ir, dyn_marker)
+        end
+
+        if dyn_marker_v2 !== nothing
+            @compiler_assert isempty(uses(dyn_marker_v2)) job
+            unsafe_delete!(ir, dyn_marker_v2)
+        end
     end
 
     if toplevel
