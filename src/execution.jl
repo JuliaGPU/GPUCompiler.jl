@@ -62,6 +62,54 @@ end
 
 ## cached compilation
 
+### Notes on interactions with package images and disk cache.
+# Julia uses package images (pkgimg) to cache both the result of inference,
+# and the result of native code emissions. Up until Julia v1.11 neither the
+# inferred nor the nativce code of foreign abstract interpreters was cached
+# across sessions. Julia v1.11 allows for caching of inference results across
+# sessions as long as those inference results are created during precompilation.
+#
+# Julia cache hierarchy is roughly as follows:
+# Function (name of a thing)
+# -> Method (particular piece of code to dispatch to with a signature)
+#  -> MethodInstance (A particular Method + particular signature)
+#    -> CodeInstance (A MethodInstance compiled for a world)
+#
+# In order to cache code across sessions we need to insert CodeInstance(owner=GPUCompilerCacheToken)
+# into the internal cache. Once we have done so we know that a particular CodeInstance is unique in
+# the system. (During pkgimg loading conflicts will be resolved).
+#
+# When a pkgimg is loaded we check it's validity, this means checking that all depdencies are the same,
+# the pkgimg was created for the right set of compiler flags, and that all source code that was used
+# to create this pkgimg is the same. When a CodeInstance is inside a pkgimg we can extend the chain of
+# validity even for GPU code, we cannot verify a "runtime" CodeInstance in the same way.
+#
+# Therefore when we see a compilation request for a CodeInstance that is originating from a pkgimg
+# we can use it as part of the hash for the on-disk cache. (see `cache_file`)
+
+"""
+    disk_cache_enabled()
+
+Query if caching to disk is enabled.
+"""
+disk_cache_enabled() = parse(Bool, @load_preference("disk_cache", "false"))
+
+"""
+    enable_disk_cache!(state::Bool=true)
+
+Activate the GPUCompiler disk cache in the current environment.
+You will need to restart your Julia environment for it to take effect.
+
+!!! note
+    The cache functionality requires Julia 1.11
+"""
+function enable_disk_cache!(state::Bool=true)
+    @set_preferences!("disk_cache"=>string(state))
+end
+
+disk_cache_path() = @get_scratch!("disk_cache")
+clear_disk_cache!() = rm(disk_cache_path(); recursive=true, force=true)
+
 const cache_lock = ReentrantLock()
 
 """
@@ -108,6 +156,37 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
     return obj::V
 end
 
+@noinline function cache_file(ci::CodeInstance, cfg::CompilerConfig)
+    h = hash(Base.objectid(ci))
+    @static if isdefined(Base, :object_build_id)
+        bid = Base.object_build_id(ci)
+        if bid === nothing # CI is from a runtime compilation, not worth caching on disk
+            return nothing
+        else
+            bid = bid % UInt64 # The upper 64bit are a checksum, unavailable during precompilation
+        end
+        h = hash(bid, h)
+    end
+    h = hash(cfg, h)
+
+    gpucompiler_buildid = Base.module_build_id(@__MODULE__)
+    if (gpucompiler_buildid >> 64) % UInt64 == 0xffffffffffffffff
+        return nothing # Don't cache during precompilation of GPUCompiler
+    end
+
+    return joinpath(
+        disk_cache_path(),
+        # bifurcate the cache by build id of GPUCompiler
+        string(gpucompiler_buildid),
+        string(h, ".jls"))
+end
+
+struct DiskCacheEntry
+    src::Type # Originally MethodInstance, but upon deserialize they were not uniqued... 
+    cfg::CompilerConfig
+    asm
+end
+
 @noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
                                       cfg::CompilerConfig, compiler::Function, linker::Function)
     job = CompilerJob(src, cfg, world)
@@ -117,20 +196,64 @@ end
     ci = ci_cache_lookup(ci_cache(job), src, world, world)::Union{Nothing,CodeInstance}
     if ci !== nothing
         key = (ci, cfg)
-        if haskey(cache, key)
-            obj = cache[key]
-        end
+        obj = get(cache, key, nothing)
     end
 
     # slow path: compile and link
     if obj === nothing || compile_hook[] !== nothing
-        # TODO: consider loading the assembly from an on-disk cache here
-        asm = compiler(job)
+        asm = nothing
+        path = nothing
+        ondisk_hit = false
+        @static if VERSION >= v"1.11.0-"
+            # Don't try to hit the disk cache if we are for a *compile* hook
+            # TODO:
+            #  - Sould we hit disk cache if Base.generating_output()
+            #  - Should we allow backend to opt out?
+            if ci !== nothing && obj === nothing && disk_cache_enabled()
+                path = cache_file(ci, cfg)
+                @debug "Looking for on-disk cache" job path
+                if path !== nothing && isfile(path)
+                    ondisk_hit = true
+                    try
+                        @debug "Loading compiled kernel" job path
+                        # The MI we deserialize here didn't get uniqued...
+                        entry = deserialize(path)::DiskCacheEntry
+                        if entry.src == src.specTypes && entry.cfg == cfg
+                            asm = entry.asm
+                        else
+                            @show entry.src == src.specTypes
+                            @show entry.cfg == cfg
+                            @warn "Cache missmatch" src.specTypes cfg entry.src entry.cfg
+                        end
+                    catch ex
+                        @warn "Failed to load compiled kernel" job path exception=(ex, catch_backtrace())
+                    end
+                end
+            end
+        end
 
+        if asm === nothing || compile_hook[] !== nothing
+            # Run the compiler in-case we need to hook it.
+            asm = compiler(job)
+        end
         if obj !== nothing
             # we got here because of a *compile* hook; don't bother linking
             return obj
         end
+
+        @static if VERSION >= v"1.11.0-"
+            if !ondisk_hit && path !== nothing && disk_cache_enabled()
+                @debug "Writing out on-disk cache" job path
+                tmppath, io = mktemp(;cleanup=false)
+                entry = DiskCacheEntry(src.specTypes, cfg, asm)
+                serialize(io, entry)
+                close(io)
+                # atomic move
+                mkpath(dirname(path))
+                Base.rename(tmppath, path, force=true)
+            end
+        end
+
         obj = linker(job, asm)
 
         if ci === nothing
