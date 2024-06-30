@@ -53,6 +53,8 @@ _precompile_()
 
 
 compile_cache = "" # defined in __init__()
+const pkgver = @static VERSION > v"1.9" ? Base.pkgversion(GPUCompiler) : ""
+
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
@@ -62,7 +64,6 @@ function __init__()
     dir = joinpath(dir, "v$(VERSION.major).$(VERSION.minor)")
     if VERSION > v"1.9"
         ## also add the package version
-        pkgver = Base.pkgversion(GPUCompiler)
         dir = joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
     end
     mkpath(dir)
