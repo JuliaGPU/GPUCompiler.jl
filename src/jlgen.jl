@@ -329,7 +329,8 @@ else
     get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
 end
 
-struct GPUInterpreter <: CC.AbstractInterpreter
+abstract type AbstractGPUInterpreter <: CC.AbstractInterpreter end
+struct GPUInterpreter <: AbstractGPUInterpreter
     world::UInt
     method_table::GPUMethodTableView
 
@@ -460,6 +461,60 @@ function CC.concrete_eval_eligible(interp::GPUInterpreter,
 end
 end
 
+struct DeferredCallInfo <: CC.CallInfo
+    rt::DataType
+    info::CC.CallInfo
+end
+
+function CC.abstract_call_known(interp::AbstractGPUInterpreter, @nospecialize(f),
+        arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+        max_methods::Int = CC.get_max_methods(interp, f, sv))
+    (; fargs, argtypes) = arginfo
+    if f === var"gpuc.deferred"
+        argvec = argtypes[2:end]
+        call = CC.abstract_call(interp, CC.ArgInfo(nothing, argvec), si, sv, max_methods)
+        callinfo = DeferredCallInfo(call.rt, call.info)
+        @static if VERSION < v"1.11.0-"
+            return CC.CallMeta(Ptr{Cvoid}, CC.Effects(), callinfo)
+        else
+            return CC.CallMeta(Ptr{Cvoid}, Union{}, CC.Effects(), callinfo)
+        end
+    end
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f,
+        arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+        max_methods::Int)
+end
+
+# Use the Inlining infrastructure to perform our refinement
+function CC.handle_call!(todo::Vector{Pair{Int,Any}},
+    ir::CC.IRCode, idx::CC.Int, stmt::Expr, info::DeferredCallInfo, flag::UInt8, sig::CC.Signature,
+    state::CC.InliningState)
+
+    minfo = info.info
+    results = minfo.results
+    if length(results.matches) != 1
+        return nothing
+    end
+    match = only(results.matches)
+
+    # lookup the target mi with correct edge tracking
+    case = CC.compileable_specialization(match, CC.Effects(), CC.InliningEdgeTracker(state), info)
+    @assert case isa CC.InvokeCase
+    @assert stmt.head === :call
+
+    args = Any[
+        "extern gpuc.lookup",
+        Ptr{Cvoid},
+        Core.svec(Any, Any, match.spec_types.parameters[2:end]...), # Must use Any for MethodInstance or ftype
+        0,
+        QuoteNode(:llvmcall),
+        case.invoke,
+        stmt.args[2:end]...
+    ]
+    stmt.head = :foreigncall
+    stmt.args = args
+    return nothing
+end
 
 ## world view of the cache
 using Core.Compiler: WorldView

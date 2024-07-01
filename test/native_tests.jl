@@ -162,6 +162,20 @@ end
         ir = fetch(t)
         @test contains(ir, r"add i64 %\d+, 3")
     end
+
+    @testset "deferred" begin
+        @gensym child kernel unrelated
+        @eval @noinline $child(i) = i
+        @eval $kernel(i) = GPUCompiler.var"gpuc.deferred"($child, i)
+
+        # smoke test
+        job, _ = Native.create_job(eval(kernel), (Int64,))
+
+        ci, rt = only(GPUCompiler.code_typed(job))
+        @test rt === Ptr{Cvoid}
+
+        ir = sprint(io->GPUCompiler.code_llvm(io, job))
+    end
 end
 
 ############################################################################################
