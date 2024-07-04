@@ -12,10 +12,11 @@ Base.Experimental.@MethodTable(test_method_table)
 
 struct CompilerParams <: AbstractCompilerParams
     entry_safepoint::Bool
+    use_jlplt::Bool
     method_table
 
-    CompilerParams(entry_safepoint::Bool=false, method_table=test_method_table) =
-        new(entry_safepoint, method_table)
+    CompilerParams(entry_safepoint::Bool=false, use_jlplt::Bool=true, method_table=test_method_table) =
+        new(entry_safepoint, use_jlplt, method_table)
 end
 
 NativeCompilerJob = CompilerJob{NativeCompilerTarget,CompilerParams}
@@ -23,13 +24,16 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = TestRuntime
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
+@static if VERSION > v"1.11.0-DEV.398"
+    GPUCompiler.codegen_params(@nospecialize(job::NativeCompilerJob)) = (;use_jlplt=job.config.params.use_jlplt)
+end
 
 function create_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
-                    entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
+                    entry_abi=:specfunc, entry_safepoint::Bool=false, use_jlplt::Bool=true, always_inline=false,
                     method_table=test_method_table, kwargs...)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget()
-    params = CompilerParams(entry_safepoint, method_table)
+    params = CompilerParams(entry_safepoint, use_jlplt, method_table)
     config = CompilerConfig(target, params; kernel, entry_abi, always_inline)
     CompilerJob(source, config), kwargs
 end
