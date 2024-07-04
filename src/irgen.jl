@@ -718,11 +718,10 @@ function add_kernel_state!(mod::LLVM.Module)
 
     return true
 end
+add_kernel_state!(pm::PassManager) =
+    add!(pm, ModulePass("AddKernelStatePass", add_kernel_state!))
 if LLVM.has_newpm()
     AddKernelStatePass() = NewPMModulePass("AddKernelStatePass", add_kernel_state!)
-else
-    add_kernel_state!(pm::PassManager) =
-        add!(pm, ModulePass("AddKernelStatePass", add_kernel_state!))
 end
 
 # lower calls to the state getter intrinsic. this is a two-step process, so that the state
@@ -775,11 +774,10 @@ function lower_kernel_state!(fun::LLVM.Function)
 
     return changed
 end
+lower_kernel_state!(pm::PassManager) =
+    add!(pm, FunctionPass("LowerKernelStatePass", lower_kernel_state!))
 if LLVM.has_newpm()
     LowerKernelStatePass() = NewPMFunctionPass("LowerKernelStatePass", lower_kernel_state!)
-else
-    lower_kernel_state!(pm::PassManager) =
-        add!(pm, FunctionPass("LowerKernelStatePass", lower_kernel_state!))
 end
 
 function cleanup_kernel_state!(mod::LLVM.Module)
@@ -798,11 +796,10 @@ function cleanup_kernel_state!(mod::LLVM.Module)
 
     return changed
 end
+cleanup_kernel_state!(pm::PassManager) =
+    add!(pm, ModulePass("CleanupKernelStatePass", cleanup_kernel_state!))
 if LLVM.has_newpm()
     CleanupKernelStatePass() = NewPMModulePass("CleanupKernelStatePass", cleanup_kernel_state!)
-else
-    cleanup_kernel_state!(pm::PassManager) =
-        add!(pm, ModulePass("CleanupKernelStatePass", cleanup_kernel_state!))
 end
 
 function kernel_state_intr(mod::LLVM.Module, T_state)

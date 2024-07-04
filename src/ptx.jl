@@ -156,6 +156,8 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
     if use_newpm
         @dispose pb=NewPMPassBuilder() begin
+            register!(pb, NVVMReflectPass())
+
             add!(pb, NewPMFunctionPassManager()) do fpm
                 # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
                 add!(fpm, NVVMReflectPass())
@@ -523,9 +525,8 @@ function nvvm_reflect!(fun::LLVM.Function)
     end
     return changed
 end
+nvvm_reflect!(pm::PassManager) =
+    add!(pm, FunctionPass("NVVMReflect", nvvm_reflect!))
 if LLVM.has_newpm()
-    NVVMReflectPass() = NewPMFunctionPass("nvvm-reflect", nvvm_reflect!)
-else
-    nvvm_reflect!(pm::PassManager) =
-        add!(pm, FunctionPass("NVVMReflect", nvvm_reflect!))
+    NVVMReflectPass() = NewPMFunctionPass("custom-nvvm-reflect", nvvm_reflect!)
 end
