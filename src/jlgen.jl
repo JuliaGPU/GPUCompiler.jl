@@ -639,6 +639,24 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")
     end
 
+    compiled = IdDict()
+    llvm_mod, outstanding = compile_method_instance(job, compiled)
+    worklist = outstanding
+    while !isempty(worklist)
+        source = pop!(worklist)
+        haskey(compiled, source) && continue
+        job2 = CompilerJob(source, job.config)
+        @debug "Processing..." job2
+        llvm_mod2, outstanding = compile_method_instance(job2, compiled)
+        append!(worklist, outstanding)
+        @assert context(llvm_mod) == context(llvm_mod2)
+        link!(llvm_mod, llvm_mod2)
+    end
+
+    return llvm_mod, compiled
+end
+
+function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDict{Any, Any})
     # populate the cache
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
@@ -649,7 +667,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
-    method_instances = []
+    method_instances = Any[]
     if Sys.ARCH == :x86 || Sys.ARCH == :x86_64
         function lookup_fun(mi, min_world, max_world)
             push!(method_instances, mi)
@@ -714,7 +732,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     end
 
     # process all compiled method instances
-    compiled = Dict()
     for mi in method_instances
         ci = ci_cache_lookup(cache, mi, job.world, job.world)
         ci === nothing && continue
@@ -753,7 +770,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # We don't control the interp that codegen constructs for us above.
     # So we have to scan the IR manually.
-    for (mi, (ci::CodeInstance, _, _)) in compiled
+    outstanding = Any[]
+    for mi in method_instances
+        ci = compiled[mi].ci
         src = @atomic :monotonic ci.inferred
         if src isa String
             src = Core.Compiler._uncompressed_ir(mi.def, src)
@@ -763,10 +782,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             if expr.head === :foreigncall &&
                 expr.args[1] == "extern gpuc.lookup"
                 deferred_mi = expr.args[6]
-                # Now push to a worklist and process...
-                # TODO: How do we deal with call duplication?
-                #       Can we codegen into the same module, or do we merge?
-                #       we can check against "compiled" to avoid recursion?
+                if !haskey(compiled, deferred_mi)
+                    push!(outstanding, deferred_mi)
+                end
             end
         end
     end
@@ -774,7 +792,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # ensure that the requested method instance was compiled
     @assert haskey(compiled, job.source)
 
-    return llvm_mod, compiled
+    return llvm_mod, outstanding
 end
 
 # partially revert JuliaLangjulia#49391

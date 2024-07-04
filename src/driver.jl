@@ -204,14 +204,11 @@ const __llvm_initialized = Ref(false)
     end
 
     # deferred code generation
-    has_deferred_jobs = !only_entry && toplevel &&
-                        (haskey(functions(ir), "deferred_codegen") ||
-                         haskey(functions(ir), "gpuc.lookup"))
+    has_deferred_jobs = !only_entry && toplevel && haskey(functions(ir), "deferred_codegen")
 
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
-        dyn_marker = haskey(functions(ir), "deferred_codegen") ? functions(ir)["deferred_codegen"] : nothing
-        dyn_marker_v2 = haskey(functions(ir), "gpuc.lookup") ? functions(ir)["gpuc.lookup"] : nothing
+        dyn_marker = functions(ir)["deferred_codegen"]
 
         # iterative compilation (non-recursive)
         changed = true
@@ -222,38 +219,25 @@ const __llvm_initialized = Ref(false)
             # TODO: recover this information earlier, from the Julia IR
             #       We can do this now with gpuc.lookup
             worklist = Dict{CompilerJob, Vector{LLVM.CallInst}}()
-            if dyn_marker !== nothing
-                for use in uses(dyn_marker)
-                    # decode the call
-                    call = user(use)::LLVM.CallInst
-                    id = convert(Int, first(operands(call)))
+            for use in uses(dyn_marker)
+                # decode the call
+                call = user(use)::LLVM.CallInst
+                id = convert(Int, first(operands(call)))
 
-                    global deferred_codegen_jobs
-                    dyn_val = deferred_codegen_jobs[id]
+                global deferred_codegen_jobs
+                dyn_val = deferred_codegen_jobs[id]
 
-                    # get a job in the appopriate world
-                    dyn_job = if dyn_val isa CompilerJob
-                        # trust that the user knows what they're doing
-                        dyn_val
-                    else
-                        ft, tt = dyn_val
-                        dyn_src = methodinstance(ft, tt, tls_world_age())
-                        CompilerJob(dyn_src, job.config)
-                    end
-
-                    push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
+                # get a job in the appopriate world
+                dyn_job = if dyn_val isa CompilerJob
+                    # trust that the user knows what they're doing
+                    dyn_val
+                else
+                    ft, tt = dyn_val
+                    dyn_src = methodinstance(ft, tt, tls_world_age())
+                    CompilerJob(dyn_src, job.config)
                 end
-            end
 
-            if dyn_marker_v2 !== nothing
-                for use in uses(dyn_marker_v2)
-                    # decode the call
-                    call = user(use)::LLVM.CallInst
-                    dyn_mi = Base.unsafe_pointer_to_objref(
-                        convert(Ptr{Cvoid}, convert(Int, unwrap_constant(operands(call)[1]))))
-                    dyn_job = CompilerJob(dyn_mi, job.config)
-                    push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
-                end
+                push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
             end
 
             # compile and link
@@ -299,11 +283,46 @@ const __llvm_initialized = Ref(false)
             @compiler_assert isempty(uses(dyn_marker)) job
             unsafe_delete!(ir, dyn_marker)
         end
+    end
 
-        if dyn_marker_v2 !== nothing
-            @compiler_assert isempty(uses(dyn_marker_v2)) job
-            unsafe_delete!(ir, dyn_marker_v2)
+    if haskey(functions(ir), "gpuc.lookup")
+        dyn_marker = functions(ir)["gpuc.lookup"]
+
+        worklist = Dict{Any, Vector{LLVM.CallInst}}()
+        for use in uses(dyn_marker)
+            # decode the call
+            call = user(use)::LLVM.CallInst
+            dyn_mi = Base.unsafe_pointer_to_objref(
+                convert(Ptr{Cvoid}, convert(Int, unwrap_constant(operands(call)[1]))))
+            push!(get!(worklist, dyn_mi, LLVM.CallInst[]), call)
         end
+
+        for dyn_mi in keys(worklist)
+            dyn_fn_name = compiled[dyn_mi].specfunc
+            dyn_fn = functions(ir)[dyn_fn_name]
+
+            # insert a pointer to the function everywhere the entry is used
+            T_ptr = convert(LLVMType, Ptr{Cvoid})
+            for call in worklist[dyn_mi]
+                @dispose builder=IRBuilder() begin
+                    position!(builder, call)
+                    fptr = if LLVM.version() >= v"17"
+                        T_ptr = LLVM.PointerType()
+                        bitcast!(builder, dyn_fn, T_ptr)
+                    elseif VERSION >= v"1.12.0-DEV.225"
+                        T_ptr = LLVM.PointerType(LLVM.Int8Type())
+                        bitcast!(builder, dyn_fn, T_ptr)
+                    else
+                        ptrtoint!(builder, dyn_fn, T_ptr)
+                    end
+                    replace_uses!(call, fptr)
+                end
+                unsafe_delete!(LLVM.parent(call), call)
+            end
+        end
+
+        @compiler_assert isempty(uses(dyn_marker)) job
+        unsafe_delete!(ir, dyn_marker)
     end
 
     if toplevel
