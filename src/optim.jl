@@ -648,10 +648,9 @@ function cpu_features!(mod::LLVM.Module)
 
     return changed
 end
+cpu_features!(pm::PassManager) = add!(pm, ModulePass("LowerCPUFeatures", cpu_features!))
 if LLVM.has_newpm()
     CPUFeaturesPass() = NewPMModulePass("GPULowerCPUFeatures", cpu_features!)
-else
-    cpu_features!(pm::PassManager) = add!(pm, ModulePass("LowerCPUFeatures", cpu_features!))
 end
 
 # lower object allocations to to PTX malloc
@@ -711,10 +710,9 @@ function lower_gc_frame!(fun::LLVM.Function)
 
     return changed
 end
+lower_gc_frame!(pm::PassManager) = add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
 if LLVM.has_newpm()
     LowerGCFramePass() = NewPMFunctionPass("GPULowerGCFrame", lower_gc_frame!)
-else
-    lower_gc_frame!(pm::PassManager) = add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
 end
 
 # lower the `julia.ptls_states` intrinsic by removing it, since it is GPU incompatible.
@@ -746,8 +744,7 @@ function lower_ptls!(mod::LLVM.Module)
 
     return changed
 end
+lower_ptls!(pm::PassManager) = add!(pm, ModulePass("LowerPTLS", lower_ptls!))
 if LLVM.has_newpm()
     LowerPTLSPass() = NewPMModulePass("GPULowerPTLS", lower_ptls!)
-else
-    lower_ptls!(pm::PassManager) = add!(pm, ModulePass("LowerPTLS", lower_ptls!))
 end

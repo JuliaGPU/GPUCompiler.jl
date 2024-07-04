@@ -78,12 +78,11 @@ function resolve_cpu_references!(mod::LLVM.Module)
 
     return changed
 end
+resolve_cpu_references!(pm::PassManager) =
+    add!(pm, ModulePass("ResolveCPUReferences", resolve_cpu_references!))
 if LLVM.has_newpm()
     ResolveCPUReferencesPass() =
         NewPMModulePass("ResolveCPUReferences", resolve_cpu_references!)
-else
-    resolve_cpu_references!(pm::PassManager) =
-        add!(pm, ModulePass("ResolveCPUReferences", resolve_cpu_references!))
 end
 
 
