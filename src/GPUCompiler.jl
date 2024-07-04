@@ -53,8 +53,7 @@ _precompile_()
 
 
 compile_cache = "" # defined in __init__()
-const pkgver = @static VERSION > v"1.9" ? Base.pkgversion(GPUCompiler) : ""
-
+const pkgver = @static VERSION > v"1.9" ? Base.pkgversion(GPUCompiler) : nothing
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
@@ -62,8 +61,10 @@ function __init__()
     dir = @get_scratch!("compiled")
     ## add the Julia version
     dir = joinpath(dir, "v$(VERSION.major).$(VERSION.minor)")
-    if VERSION > v"1.9"
-        ## also add the package version
+    ## also add the package version
+    if pkgver !== nothing
+        # XXX: `Base.pkgversion` is buggy and sometimes returns `nothing`, see e.g.
+        #       JuliaLang/PackageCompiler.jl#896 and JuliaGPU/GPUCompiler.jl#593
         dir = joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
     end
     mkpath(dir)
