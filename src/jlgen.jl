@@ -751,6 +751,26 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
     end
 
+    # We don't control the interp that codegen constructs for us above.
+    # So we have to scan the IR manually.
+    for (mi, (ci::CodeInstance, _, _)) in compiled
+        src = @atomic :monotonic ci.inferred
+        if src isa String
+            src = Core.Compiler._uncompressed_ir(mi.def, src)
+        end
+        for expr in src.code
+            expr isa Expr || continue
+            if expr.head === :foreigncall &&
+                expr.args[1] == "extern gpuc.lookup"
+                deferred_mi = expr.args[6]
+                # Now push to a worklist and process...
+                # TODO: How do we deal with call duplication?
+                #       Can we codegen into the same module, or do we merge?
+                #       we can check against "compiled" to avoid recursion?
+            end
+        end
+    end
+
     # ensure that the requested method instance was compiled
     @assert haskey(compiled, job.source)
 
