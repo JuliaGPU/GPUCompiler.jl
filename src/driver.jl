@@ -19,52 +19,22 @@ export JuliaContext
 # unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
 # this helper to a regular `Context()` call.
 function JuliaContext(; opaque_pointers=nothing)
-    if VERSION >= v"1.9.0-DEV.516"
-        # Julia 1.9 knows how to deal with arbitrary contexts,
-        # and uses ORC's thread safe versions.
-        ctx = ThreadSafeContext(; opaque_pointers)
-    elseif VERSION >= v"1.9.0-DEV.115"
-        # Julia 1.9 knows how to deal with arbitrary contexts
-        ctx = Context(; opaque_pointers)
-    else
-        # earlier versions of Julia claim so, but actually use a global context
-        isboxed_ref = Ref{Bool}()
-        typ = LLVMType(ccall(:jl_type_to_llvm, LLVM.API.LLVMTypeRef,
-                       (Any, Ptr{Bool}), Any, isboxed_ref))
-        ctx = context(typ)
-        if opaque_pointers !== nothing && supports_typed_pointers(ctx) !== !opaque_pointers
-            error("Cannot use $(opaque_pointers ? "opaque" : "typed") pointers, as the context has already been configured to use $(supports_typed_pointers(ctx) ? "typed" : "opaque") pointers, and this version of Julia does not support changing that.")
-        end
-    end
-
-    ctx
+    # XXX: remove
+    ThreadSafeContext(; opaque_pointers)
 end
 function JuliaContext(f; kwargs...)
-    if VERSION >= v"1.9.0-DEV.516"
-        ts_ctx = JuliaContext(; kwargs...)
-        # for now, also activate the underlying context
-        # XXX: this is wrong; we can't expose the underlying LLVM context, but should
-        #      instead always go through the callback in order to unlock it properly.
-        #      rework this once we depend on Julia 1.9 or later.
-        ctx = context(ts_ctx)
-        activate(ctx)
-        try
-            f(ctx)
-        finally
-            deactivate(ctx)
-            dispose(ts_ctx)
-        end
-    elseif VERSION >= v"1.9.0-DEV.115"
-        Context(f)
-    else
-        ctx = JuliaContext()
-        activate(ctx)
-        try
-            f(ctx)
-        finally
-            deactivate(ctx)
-            # we cannot dispose of the global unique context
-        end
+    ts_ctx = JuliaContext(; kwargs...)
+    # for now, also activate the underlying context
+    # XXX: this is wrong; we can't expose the underlying LLVM context, but should
+    #      instead always go through the callback in order to unlock it properly.
+    #      rework this once we depend on Julia 1.9 or later.
+    ctx = context(ts_ctx)
+    activate(ctx)
+    try
+        f(ctx)
+    finally
+        deactivate(ctx)
+        dispose(ts_ctx)
     end
 end
 
@@ -118,9 +88,6 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
                  only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob}=nothing)
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
-    elseif VERSION < v"1.9.0-DEV.115" && context() != JuliaContext()
-        error("""Julia <1.9 does not suppport generating code in an arbitrary LLVM context.
-                 Use `JuliaContext()` do-block syntax to get an appropriate one.""")
     end
 
     @timeit_debug to "Validation" begin

@@ -1,10 +1,6 @@
 @testitem "GCN" setup=[GCN, Helpers] begin
 
-if VERSION >= v"1.9.0-DEV.1018"
 @inline sink_gcn(i) = sink(i, Val(5))
-else
-@inline sink_gcn(i) = sink(i, Val(0))
-end
 
 @test GCNCompilerTarget(dev_isa="gfx900") == GCNCompilerTarget("gfx900")
 
@@ -21,19 +17,6 @@ end
     ir = sprint(io->GCN.code_llvm(io, kernel, Tuple{};
                                          dump_module=true, kernel=true))
     @test occursin("amdgpu_kernel", ir)
-end
-
-if VERSION < v"1.9.0-DEV.1018"
-@testset "alloca addrspace" begin
-    function kernel(i)
-        sink(i, Val(0)) # sink provides an alloca in addrspace 0
-        return
-    end
-
-    ir = sprint(io->GCN.code_llvm(io, kernel, Tuple{Int64}; dump_module=true))
-    @test occursin(r"alloca i64, (align 8, )?addrspace\(5\)$"m, ir)
-    @test !occursin(r"alloca i64(, align \d)?$"m, ir)
-end
 end
 
 end

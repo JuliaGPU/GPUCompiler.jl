@@ -264,10 +264,8 @@ end
     ir = sprint(io->Native.code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true))
     @test !occursin("%safepoint", ir)
 
-    if v"1.9.0-DEV.1660" <= VERSION < v"1.9.0-alpha1.57" || VERSION >= v"1.10-"
-        ir = sprint(io->Native.code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true))
-        @test occursin("%safepoint", ir)
-    end
+    ir = sprint(io->Native.code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true))
+    @test occursin("%safepoint", ir)
 end
 
 @testset "always_inline" begin

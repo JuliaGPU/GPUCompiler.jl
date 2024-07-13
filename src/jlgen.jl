@@ -39,11 +39,7 @@ MethodError(ft, tt, world=typemax(UInt)) = Base.MethodError(ft, tt, world)
 
 # generate a LineInfoNode for the current source code location
 macro LineInfoNode(method)
-    if VERSION >= v"1.9.0-DEV.502"
-        Core.LineInfoNode(__module__, method, __source__.file, Int32(__source__.line), Int32(0))
-    else
-        Core.LineInfoNode(__module__, method, __source__.file, __source__.line, 0)
-    end
+    Core.LineInfoNode(__module__, method, __source__.file, Int32(__source__.line), Int32(0))
 end
 
 """
@@ -104,11 +100,6 @@ else
 
 const methodinstance = generic_methodinstance
 
-# on 1.10 (JuliaLang/julia#48611) generated functions know which world to generate code for.
-# we can use this to cache and automatically invalidate method instance look-ups.
-# this isn't perfect, see e.g. JuliaGPU/GPUCompiler.jl#530.
-if VERSION >= v"1.10.0-DEV.873"
-
 function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
     @nospecialize
     @assert CC.isType(ft) && CC.isType(tt)
@@ -162,8 +153,6 @@ end
 @eval function methodinstance(ft, tt)
     $(Expr(:meta, :generated_only))
     $(Expr(:meta, :generated, methodinstance_generator))
-end
-
 end
 
 end
@@ -310,7 +299,7 @@ Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
 
 ## interpreter
 
-@static if VERSION ≥ v"1.11.0-DEV.1498"
+@static if VERSION >= v"1.11.0-DEV.1498"
     import Core.Compiler: get_inference_world
     using Base: get_world_counter
 else
@@ -424,40 +413,26 @@ CC.may_optimize(interp::GPUInterpreter) = true
 CC.may_compress(interp::GPUInterpreter) = true
 CC.may_discard_trees(interp::GPUInterpreter) = true
 CC.verbose_stmt_info(interp::GPUInterpreter) = false
-
-if v"1.8-beta2" <= VERSION < v"1.9-" || VERSION >= v"1.9.0-DEV.120"
 CC.method_table(interp::GPUInterpreter) = interp.method_table
-else
-CC.method_table(interp::GPUInterpreter, sv::CC.InferenceState) = interp.method_table
-end
 
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
-@static if VERSION >= v"1.9.0-beta3"
 function CC.concrete_eval_eligible(interp::GPUInterpreter,
     @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
     # NOTE it's fine to skip overloading with `sv::IRInterpretationState` since we disables
     #      semi-concrete interpretation anyway.
     ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
         f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
-    @static if VERSION ≥ v"1.10.0-DEV.1345"
-        if ret === :semi_concrete_eval
-            return :none
-        end
-    else
-        if ret === false
-            return nothing
-        end
+    if ret === :semi_concrete_eval
+        return :none
     end
     return ret
 end
-elseif VERSION >= v"1.9.0-DEV.1248"
 function CC.concrete_eval_eligible(interp::GPUInterpreter,
     @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo)
     ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
         f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo)
     ret === false && return nothing
     return ret
-end
 end
 
 
@@ -531,11 +506,7 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
         # (because it is normally not supposed to be used ever again).
         # to avoid the need to re-infer, set that field here.
         if ci.inferred === nothing
-            @static if VERSION >= v"1.9.0-DEV.1115"
-                @atomic ci.inferred = src
-            else
-                ci.inferred = src
-            end
+            @atomic ci.inferred = src
         end
     end
 
@@ -644,80 +615,43 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         prefer_specsig     = true,
         gnu_pubnames       = false,
         debug_info_kind    = Cint(debug_info_kind),
-        lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
-    @static if v"1.9.0-DEV.1660" <= VERSION < v"1.9.0-beta1" || VERSION >= v"1.10-"
-        cgparams = merge(cgparams, (;safepoint_on_entry = can_safepoint(job)))
-    end
-    @static if VERSION >= v"1.10.0-DEV.1499"
-        cgparams = merge(cgparams, (;gcstack_arg = false))
-    end
+        lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb),
+        safepoint_on_entry = can_safepoint(job),
+        gcstack_arg        = false)
     params = Base.CodegenParams(; cgparams...)
 
     # generate IR
     GC.@preserve lookup_cb begin
-        native_code = if VERSION >= v"1.9.0-DEV.516"
-            ts_mod = ThreadSafeModule("start")
-
-            # configure the module
-            ts_mod() do mod
-                triple!(mod, llvm_triple(job.config.target))
-                if julia_datalayout(job.config.target) !== nothing
-                    datalayout!(mod, julia_datalayout(job.config.target))
-                end
-                flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
-                    Metadata(ConstantInt(dwarf_version(job.config.target)))
-                flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
-                    Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
+        # create and configure the module
+        ts_mod = ThreadSafeModule("start")
+        ts_mod() do mod
+            triple!(mod, llvm_triple(job.config.target))
+            if julia_datalayout(job.config.target) !== nothing
+                datalayout!(mod, julia_datalayout(job.config.target))
             end
-
-            if VERSION >= v"1.10.0-DEV.645" || v"1.9.0-beta4.23" <= VERSION < v"1.10-"
-                ccall(:jl_create_native, Ptr{Cvoid},
-                      (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t),
-                      [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.world)
-            elseif VERSION >= v"1.10.0-DEV.204" || v"1.9.0-alpha1.55" <= VERSION < v"1.10-"
-                @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
-                      (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint),
-                      [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0)
-            elseif VERSION >= v"1.10.0-DEV.75"
-                @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
-                      (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint),
-                      [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0)
-            else
-                @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
-                      (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint),
-                      [job.source], ts_mod, Ref(params), CompilationPolicyExtern)
-
-            end
-        elseif VERSION >= v"1.9.0-DEV.115"
-            @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
-                  (Vector{MethodInstance}, LLVM.API.LLVMContextRef, Ptr{Base.CodegenParams}, Cint),
-                  [job.source], context(), Ref(params), CompilationPolicyExtern)
-        else
-            @assert context() == JuliaContext()
-            @in_world job.world ccall(:jl_create_native, Ptr{Cvoid},
-                  (Vector{MethodInstance}, Ptr{Base.CodegenParams}, Cint),
-                  [job.source], Ref(params), CompilationPolicyExtern)
+            flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+                Metadata(ConstantInt(dwarf_version(job.config.target)))
+            flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+                Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
         end
+
+        native_code = ccall(:jl_create_native, Ptr{Cvoid},
+                (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t),
+                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.world)
         @assert native_code != C_NULL
-        llvm_mod_ref = if VERSION >= v"1.9.0-DEV.516"
+
+        llvm_mod_ref =
             ccall(:jl_get_llvm_module, LLVM.API.LLVMOrcThreadSafeModuleRef,
                   (Ptr{Cvoid},), native_code)
-        else
-            ccall(:jl_get_llvm_module, LLVM.API.LLVMModuleRef,
-                  (Ptr{Cvoid},), native_code)
-        end
         @assert llvm_mod_ref != C_NULL
-        if VERSION >= v"1.9.0-DEV.516"
-            # XXX: this is wrong; we can't expose the underlying LLVM module, but should
-            #      instead always go through the callback in order to unlock it properly.
-            #      rework this once we depend on Julia 1.9 or later.
-            llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref)
-            llvm_mod = nothing
-            llvm_ts_mod() do mod
-                llvm_mod = mod
-            end
-        else
-            llvm_mod = LLVM.Module(llvm_mod_ref)
+
+        # XXX: this is wrong; we can't expose the underlying LLVM module, but should
+        #      instead always go through the callback in order to unlock it properly.
+        #      rework this once we depend on Julia 1.9 or later.
+        llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref)
+        llvm_mod = nothing
+        llvm_ts_mod() do mod
+            llvm_mod = mod
         end
     end
     if !(Sys.ARCH == :x86 || Sys.ARCH == :x86_64)
@@ -765,19 +699,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # ensure that the requested method instance was compiled
     @assert haskey(compiled, job.source)
 
-    if VERSION < v"1.9.0-DEV.516"
-        # configure the module
-        triple!(llvm_mod, llvm_triple(job.config.target))
-        if julia_datalayout(job.config.target) !== nothing
-            datalayout!(llvm_mod, julia_datalayout(job.config.target))
-        end
-    end
-
     return llvm_mod, compiled
 end
 
-# Narrow this if JuliaLang/julia#54069 get's backported to 1.11
-@static if v"1.11.0-DEV.1603" <= VERSION < v"1.12.0-DEV.347"
+# partially revert JuliaLangjulia#49391
+@static if v"1.11.0-DEV.1603" <= VERSION < v"1.12.0-DEV.347" && # reverted on master
+           !(v"1.11-beta2" <= VERSION < v"1.12")                # reverted on 1.11-beta2
 function CC.typeinf(interp::GPUInterpreter, frame::CC.InferenceState)
     if CC.__measure_typeinf__[]
         CC.Timings.enter_new_timer(frame)
