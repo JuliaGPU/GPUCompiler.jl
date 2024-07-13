@@ -13,7 +13,7 @@ function irgen(@nospecialize(job::CompilerJob))
     # clean up incompatibilities
     @timeit_debug to "clean-up" begin
         for llvmf in functions(mod)
-            if VERSION < v"1.9" || Base.isdebugbuild()
+            if Base.isdebugbuild()
                 # only occurs in debug builds
                 delete!(function_attributes(llvmf),
                         EnumAttribute("sspstrong", 0))

@@ -40,9 +40,6 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     buildEarlySimplificationPipeline(mpm, job, opt_level)
     add!(mpm, AlwaysInlinerPass())
     buildEarlyOptimizerPipeline(mpm, job, opt_level)
-    if VERSION < v"1.10"
-        add!(mpm, LowerSIMDLoopPass())
-    end
     add!(mpm, NewPMFunctionPassManager()) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
@@ -133,9 +130,7 @@ end
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, NewPMLoopPassManager()) do lpm
-        if VERSION >= v"1.10"
-            add!(lpm, LowerSIMDLoopPass())
-        end
+        add!(lpm, LowerSIMDLoopPass())
         if opt_level >= 2
             add!(lpm, LoopRotatePass())
         end
@@ -378,31 +373,7 @@ function optimize_legacypm!(@nospecialize(job::CompilerJob), mod::LLVM.Module; o
         combine_mul_add!(pm)
         div_rem_pairs!(pm)
 
-        if VERSION < v"1.10.0-DEV.1144"
-            # save function attributes to work around JuliaGPU/GPUCompiler#437
-            current_attrs = Dict{String,Any}()
-            for f in functions(mod)
-                attrs = function_attributes(f)
-                length(attrs) == 0 && continue
-                current_attrs[LLVM.name(f)] = collect(attrs)
-            end
-        end
-
         run!(pm, mod)
-
-        if VERSION < v"1.10.0-DEV.1144"
-            # restore function attributes
-            for (fn, attrs) in current_attrs
-                haskey(functions(mod), fn) || continue
-                f = functions(mod)[fn]
-
-                for attr in attrs
-                    # NOTE: there's no function attributes that contain a type,
-                    #       so we can just blindly add them back
-                    push!(function_attributes(f), attr)
-                end
-            end
-        end
     end
 
     # target-specific optimizations

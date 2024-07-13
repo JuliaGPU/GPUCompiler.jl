@@ -97,23 +97,13 @@ function code_warntype_by_type(io::IO, @nospecialize(tt);
                 end
                 print(io, "  ", slotnames[i])
                 if isa(slottypes, Vector{Any})
-                    @static if VERSION >= v"1.9.0-DEV.1297"
-                        # https://github.com/JuliaLang/julia/pull/46574
-                        InteractiveUtils.warntype_type_printer(io; type=slottypes[i], used=true)
-                    else
-                        InteractiveUtils.warntype_type_printer(io, slottypes[i], true)
-                    end
+                    InteractiveUtils.warntype_type_printer(io; type=slottypes[i], used=true)
                 end
                 println(io)
             end
         end
         print(io, "Body")
-        @static if VERSION >= v"1.9.0-DEV.1297"
-            # https://github.com/JuliaLang/julia/pull/46574
-            InteractiveUtils.warntype_type_printer(io; type=rettype, used=true)
-        else
-            InteractiveUtils.warntype_type_printer(io, rettype, true)
-        end
+        InteractiveUtils.warntype_type_printer(io; type=rettype, used=true)
         println(io)
 
         irshow_config = Base.IRShow.IRShowConfig(lineprinter(src), InteractiveUtils.warntype_type_printer)
