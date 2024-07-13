@@ -491,6 +491,31 @@ function CC.handle_call!(todo::Vector{Pair{Int,Any}},
     return nothing
 end
 
+struct DeferredEdges
+    edges::Vector{MethodInstance}
+end
+
+function CC.ipo_dataflow_analysis!(interp::AbstractGPUInterpreter, ir::CC.IRCode, caller::CC.InferenceResult)
+    edges = MethodInstance[]
+    # @aviateks: Can we add this instead in handle_call
+    for stmt in ir.stmts
+        inst = stmt[:inst]
+        @show inst
+        inst isa Expr || continue
+        expr = inst::Expr
+        if expr.head === :foreigncall &&
+            expr.args[1] == "extern gpuc.lookup"
+            deferred_mi = expr.args[6]
+            push!(edges, deferred_mi)
+        end
+    end
+    unique!(edges)
+    if !isempty(edges)
+        CC.stack_analysis_result!(caller, DeferredEdges(edges))
+    end
+    @invoke CC.ipo_dataflow_analysis!(interp::CC.AbstractInterpreter, ir::CC.IRCode, caller::CC.InferenceResult)
+end
+
 ## world view of the cache
 using Core.Compiler: WorldView
 
@@ -768,20 +793,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDi
         compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
     end
 
-    # We don't control the interp that codegen constructs for us above.
-    # So we have to scan the IR manually.
+    # Collect the deferred edges
     outstanding = Any[]
     for mi in method_instances
         ci = compiled[mi].ci
-        src = @atomic :monotonic ci.inferred
-        if src isa String
-            src = Core.Compiler._uncompressed_ir(mi.def, src)
+        edges = CC.traverse_analysis_results(ci) do @nospecialize result
+            return result isa DeferredEdges ? result : return
         end
-        for expr in src.code
-            expr isa Expr || continue
-            if expr.head === :foreigncall &&
-                expr.args[1] == "extern gpuc.lookup"
-                deferred_mi = expr.args[6]
+        @show edges
+        if edges !== nothing
+            for deferred_mi in (edges::DeferredEdges).edges
                 if !haskey(compiled, deferred_mi)
                     push!(outstanding, deferred_mi)
                 end
