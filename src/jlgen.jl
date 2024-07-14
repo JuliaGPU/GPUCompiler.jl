@@ -461,9 +461,9 @@ function CC.abstract_call_known(interp::AbstractGPUInterpreter, @nospecialize(f)
 end
 
 # Use the Inlining infrastructure to perform our refinement
-# TODO: @aviatesk This is not reached on 1.11
+const FlagType = VERSION >= v"1.11.0-" ? UInt32 : UInt8
 function CC.handle_call!(todo::Vector{Pair{Int,Any}},
-    ir::CC.IRCode, idx::CC.Int, stmt::Expr, info::DeferredCallInfo, flag::UInt8, sig::CC.Signature,
+    ir::CC.IRCode, idx::CC.Int, stmt::Expr, info::DeferredCallInfo, flag::FlagType, sig::CC.Signature,
     state::CC.InliningState)
 
     minfo = info.info
