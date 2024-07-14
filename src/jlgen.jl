@@ -461,6 +461,7 @@ function CC.abstract_call_known(interp::AbstractGPUInterpreter, @nospecialize(f)
 end
 
 # Use the Inlining infrastructure to perform our refinement
+# TODO: @aviatesk This is not reached on 1.11
 function CC.handle_call!(todo::Vector{Pair{Int,Any}},
     ir::CC.IRCode, idx::CC.Int, stmt::Expr, info::DeferredCallInfo, flag::UInt8, sig::CC.Signature,
     state::CC.InliningState)
@@ -495,12 +496,11 @@ struct DeferredEdges
     edges::Vector{MethodInstance}
 end
 
-function CC.ipo_dataflow_analysis!(interp::AbstractGPUInterpreter, ir::CC.IRCode, caller::CC.InferenceResult)
+function find_deferred_edges(ir::CC.IRCode)
     edges = MethodInstance[]
-    # @aviateks: Can we add this instead in handle_call
+    # @aviatesk: Can we add this instead in handle_call
     for stmt in ir.stmts
         inst = stmt[:inst]
-        @show inst
         inst isa Expr || continue
         expr = inst::Expr
         if expr.head === :foreigncall &&
@@ -510,10 +510,28 @@ function CC.ipo_dataflow_analysis!(interp::AbstractGPUInterpreter, ir::CC.IRCode
         end
     end
     unique!(edges)
+    return edges
+end
+
+if VERSION >= v"1.11.0-"
+# stack_analysis_result and ipo_dataflow_analysis is 1.11 only
+function CC.ipo_dataflow_analysis!(interp::AbstractGPUInterpreter, ir::CC.IRCode, caller::CC.InferenceResult)
+    edges = find_deferred_edges(ir)
     if !isempty(edges)
         CC.stack_analysis_result!(caller, DeferredEdges(edges))
     end
     @invoke CC.ipo_dataflow_analysis!(interp::CC.AbstractInterpreter, ir::CC.IRCode, caller::CC.InferenceResult)
+end
+else
+# v1.10.0
+function CC.finish(interp::AbstractGPUInterpreter, opt::CC.OptimizationState, ir::CC.IRCode, caller::CC.InferenceResult)
+    edges = find_deferred_edges(ir)
+    if !isempty(edges)
+        # This is a tad bit risky, but nobody should be running EA on our results.
+        caller.argescapes = DeferredEdges(edges)
+    end
+    @invoke CC.finish(interp::CC.AbstractInterpreter, opt::CC.OptimizationState, ir::CC.IRCode, caller::CC.InferenceResult)
+end
 end
 
 ## world view of the cache
@@ -797,10 +815,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDi
     outstanding = Any[]
     for mi in method_instances
         ci = compiled[mi].ci
-        edges = CC.traverse_analysis_results(ci) do @nospecialize result
-            return result isa DeferredEdges ? result : return
+        @static if VERSION >= v"1.11.0-"
+            edges = CC.traverse_analysis_results(ci) do @nospecialize result
+                return result isa DeferredEdges ? result : return
+            end
+        else
+            edges = ci.argescapes
+            if !(edges isa Union{Nothing, DeferredEdges})
+                edges = nothing
+            end
         end
-        @show edges
         if edges !== nothing
             for deferred_mi in (edges::DeferredEdges).edges
                 if !haskey(compiled, deferred_mi)
