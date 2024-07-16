@@ -445,8 +445,9 @@ function CC.abstract_call_known(interp::AbstractGPUInterpreter, @nospecialize(f)
         arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
         max_methods::Int = CC.get_max_methods(interp, f, sv))
     (; fargs, argtypes) = arginfo
-    if f === var"gpuc.deferred"
-        argvec = argtypes[2:end]
+    if f === var"gpuc.deferred" || f === var"gpuc.deferred.with"
+        first_arg = f === var"gpuc.deferred" ? 2 : 3
+        argvec = argtypes[first_arg:end]
         call = CC.abstract_call(interp, CC.ArgInfo(nothing, argvec), si, sv, max_methods)
         callinfo = DeferredCallInfo(call.rt, call.info)
         @static if VERSION < v"1.11.0-"
@@ -478,10 +479,14 @@ function CC.handle_call!(todo::Vector{Pair{Int,Any}},
     @assert case isa CC.InvokeCase
     @assert stmt.head === :call
 
+    f = stmt.args[1]
+    name = f === var"gpuc.deferred" ? "extern gpuc.lookup" : "extern gpuc.lookup.with"
+    with_arg_T = f === var"gpuc.deferred" ? () : (Any,)
+
     args = Any[
-        "extern gpuc.lookup",
+        name,
         Ptr{Cvoid},
-        Core.svec(Any, Any, match.spec_types.parameters[2:end]...), # Must use Any for MethodInstance or ftype
+        Core.svec(Any, Any, with_arg_T..., match.spec_types.parameters[2:end]...), # Must use Any for MethodInstance or ftype
         0,
         QuoteNode(:llvmcall),
         case.invoke,
@@ -507,6 +512,11 @@ function find_deferred_edges(ir::CC.IRCode)
             expr.args[1] == "extern gpuc.lookup"
             deferred_mi = expr.args[6]
             push!(edges, deferred_mi)
+        elseif expr.head === :foreigncall &&
+            expr.args[1] == "extern gpuc.lookup.with"
+            deferred_mi = expr.args[6]
+            with = expr.args[7]
+            @show (deferred_mi, with)
         end
     end
     unique!(edges)

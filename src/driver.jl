@@ -131,9 +131,10 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
 end
 
 # GPUCompiler intrinsic that marks deferred compilation
-# In contrast to `deferred_codegen` this doesn't support arbitrary
-# jobs as call targets.
 function var"gpuc.deferred" end
+
+# GPUCompiler intrinsic that marks deferred compilation, across backends
+function var"gpuc.deferred.with" end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
 # this could both be generalized (e.g. supporting actual function calls, instead of
