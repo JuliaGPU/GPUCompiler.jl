@@ -814,6 +814,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDi
     # Collect the deferred edges
     outstanding = Any[]
     for mi in method_instances
+        !haskey(mi, compiled) && continue # Equivalent to ci_cache_lookup == nothing
         ci = compiled[mi].ci
         @static if VERSION >= v"1.11.0-"
             edges = CC.traverse_analysis_results(ci) do @nospecialize result
