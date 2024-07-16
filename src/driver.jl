@@ -162,6 +162,29 @@ end
     end
 end
 
+function find_base_object(val)
+    while true
+        if val isa ConstantExpr && (opcode(val) == LLVM.API.LLVMIntToPtr ||
+                                    opcode(val) == LLVM.API.LLVMBitCast ||
+                                    opcode(val) == LLVM.API.LLVMAddrSpaceCast)
+            val = first(operands(val))
+        elseif val isa LLVM.IntToPtrInst || val isa LLVM.BitCastInst || val isa LLVM.AddrSpaceCastInst
+            val = first(operands(val))
+        elseif val isa LLVM.LoadInst
+            # In 1.11+ we no longer embed integer constants directly.
+            gv = first(operands(val))
+            if gv isa LLVM.GlobalValue
+                val = LLVM.initializer(gv)
+                continue
+            end
+            break
+        else
+            break
+        end
+    end
+    return val
+end
+
 const __llvm_initialized = Ref(false)
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob);
@@ -190,19 +213,6 @@ const __llvm_initialized = Ref(false)
     # since those modules have been finalized themselves, and we don't want to re-finalize.
     entry = finish_module!(job, ir, entry)
 
-    function unwrap_constant(val)
-        while val isa ConstantExpr
-            if opcode(val) == LLVM.API.LLVMIntToPtr ||
-               opcode(val) == LLVM.API.LLVMBitCast ||
-               opcode(val) == LLVM.API.LLVMAddrSpaceCast
-                val = first(operands(val))
-            else
-                break
-            end
-        end
-        return val
-    end
-
     # deferred code generation
     has_deferred_jobs = !only_entry && toplevel && haskey(functions(ir), "deferred_codegen")
 
@@ -216,8 +226,6 @@ const __llvm_initialized = Ref(false)
             changed = false
 
             # find deferred compiler
-            # TODO: recover this information earlier, from the Julia IR
-            #       We can do this now with gpuc.lookup
             worklist = Dict{CompilerJob, Vector{LLVM.CallInst}}()
             for use in uses(dyn_marker)
                 # decode the call
@@ -292,8 +300,10 @@ const __llvm_initialized = Ref(false)
         for use in uses(dyn_marker)
             # decode the call
             call = user(use)::LLVM.CallInst
+            dyn_mi_inst = find_base_object(operands(call)[1])
+            @compiler_assert isa(dyn_mi_inst, LLVM.ConstantInt) job
             dyn_mi = Base.unsafe_pointer_to_objref(
-                convert(Ptr{Cvoid}, convert(Int, unwrap_constant(operands(call)[1]))))
+                convert(Ptr{Cvoid}, convert(Int, dyn_mi_inst)))
             push!(get!(worklist, dyn_mi, LLVM.CallInst[]), call)
         end
 
