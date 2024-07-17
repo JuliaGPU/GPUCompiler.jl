@@ -16,6 +16,9 @@ using Preferences
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
 
+compile_cache = nothing # set during __init__()
+const pkgver = Base.pkgversion(GPUCompiler)
+
 include("utils.jl")
 include("mangling.jl")
 
@@ -46,12 +49,6 @@ include("execution.jl")
 include("reflection.jl")
 
 include("precompile.jl")
-_precompile_()
-
-
-
-compile_cache = "" # defined in __init__()
-const pkgver = Base.pkgversion(GPUCompiler)
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)

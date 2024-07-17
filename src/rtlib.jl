@@ -120,6 +120,11 @@ end
 const runtime_lock = ReentrantLock()
 
 @locked function load_runtime(@nospecialize(job::CompilerJob))
+    global compile_cache
+    if compile_cache === nothing    # during precompilation
+        return build_runtime(job)
+    end
+
     lock(runtime_lock) do
         slug = runtime_slug(job)
         if !supports_typed_pointers(context())
