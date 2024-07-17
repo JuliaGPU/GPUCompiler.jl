@@ -52,40 +52,37 @@ export compile
 const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 """
-    compile(target::Symbol, job::CompilerJob;
-            libraries=true, optimize=true, strip=false, ...)
+    compile(target::Symbol, job::CompilerJob; kwargs...)
 
 Compile a function `f` invoked with types `tt` for device capability `cap` to one of the
 following formats as specified by the `target` argument: `:julia` for Julia IR, `:llvm` for
 LLVM IR and `:asm` for machine code.
 
 The following keyword arguments are supported:
-- `libraries`: link the GPU runtime and `libdevice` libraries (if required)
-- `optimize`: optimize the code (default: true)
-- `cleanup`: run cleanup passes on the code (default: true)
+- `toplevel`: indicates that this compilation is the outermost invocation of the compiler
+  (default: true)
+- `libraries`: link the GPU runtime and `libdevice` libraries (default: true, if toplevel)
+- `optimize`: optimize the code (default: true, if toplevel)
+- `cleanup`: run cleanup passes on the code (default: true, if toplevel)
+- `validate`: enable optional validation of input and outputs (default: true, if toplevel)
 - `strip`: strip non-functional metadata and debug information (default: false)
-- `validate`: enable optional validation of input and outputs (default: true)
 - `only_entry`: only keep the entry function, remove all others (default: false).
   This option is only for internal use, to implement reflection's `dump_module`.
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
-function compile(target::Symbol, @nospecialize(job::CompilerJob);
-                 libraries::Bool=true, toplevel::Bool=true,
-                 optimize::Bool=true, cleanup::Bool=true, strip::Bool=false,
-                 validate::Bool=true, only_entry::Bool=false)
+function compile(target::Symbol, @nospecialize(job::CompilerJob); kwargs...)
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
 
-    return codegen(target, job;
-                   libraries, toplevel, optimize, cleanup, strip, validate, only_entry)
+    return codegen(target, job; kwargs...)
 end
 
-function codegen(output::Symbol, @nospecialize(job::CompilerJob);
-                 libraries::Bool=true, toplevel::Bool=true, optimize::Bool=true,
-                 cleanup::Bool=true, strip::Bool=false, validate::Bool=true,
-                 only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob}=nothing)
+function codegen(output::Symbol, @nospecialize(job::CompilerJob); toplevel::Bool=true,
+                 libraries::Bool=toplevel, optimize::Bool=toplevel, cleanup::Bool=toplevel,
+                 validate::Bool=toplevel, strip::Bool=false, only_entry::Bool=false,
+                 parent_job::Union{Nothing, CompilerJob}=nothing)
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
@@ -159,9 +156,9 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob);
-                           libraries::Bool=true, toplevel::Bool=true, optimize::Bool=true,
-                           cleanup::Bool=true, only_entry::Bool=false, validate::Bool=true)
+@locked function emit_llvm(@nospecialize(job::CompilerJob); toplevel::Bool,
+                           libraries::Bool, optimize::Bool, cleanup::Bool,
+                           validate::Bool, only_entry::Bool)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -186,8 +183,7 @@ const __llvm_initialized = Ref(false)
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    has_deferred_jobs = !only_entry && toplevel &&
-                        haskey(functions(ir), "deferred_codegen")
+    has_deferred_jobs = toplevel && !only_entry && haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -225,10 +221,8 @@ const __llvm_initialized = Ref(false)
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(jobs, dyn_job) do
-                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; validate=false,
-                                               optimize=false,
-                                               toplevel=false,
-                                               parent_job=job)
+                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; toplevel=false,
+                                                               parent_job=job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     @assert context(dyn_ir) == context(ir)
@@ -264,27 +258,24 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
-    if toplevel
-        # always preload the runtime, and do so early; it cannot be part of any
-        # timing block because it recurses into the compiler
-        if !uses_julia_runtime(job) && libraries
+    if libraries
+        # load the runtime outside of a timing block (because it recurses into the compiler)
+        if !uses_julia_runtime(job)
             runtime = load_runtime(job)
             runtime_fns = LLVM.name.(defs(runtime))
             runtime_intrinsics = ["julia.gc_alloc_obj"]
         end
 
         @timeit_debug to "Library linking" begin
-            if libraries
-                # target-specific libraries
-                undefined_fns = LLVM.name.(decls(ir))
-                @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
+            # target-specific libraries
+            undefined_fns = LLVM.name.(decls(ir))
+            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
 
-                # GPU run-time library
-                if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
-                                                         fn in runtime_intrinsics,
-                                                   undefined_fns)
-                    @timeit_debug to "runtime library" link_library!(ir, runtime)
-                end
+            # GPU run-time library
+            if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
+                                                        fn in runtime_intrinsics,
+                                                undefined_fns)
+                @timeit_debug to "runtime library" link_library!(ir, runtime)
             end
         end
     end
@@ -434,7 +425,7 @@ const __llvm_initialized = Ref(false)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
-                          strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
+                          strip::Bool, validate::Bool, format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
     if strip
         @timeit_debug to "Debug info removal" strip_debuginfo!(ir)
