@@ -70,16 +70,7 @@ jobs:
           arch: ${{ matrix.arch }}
 
       # set-up packages
-      - uses: actions/cache@v4
-        env:
-          cache-name: cache-artifacts
-        with:
-          path: ~/.julia/artifacts
-          key: ${{ runner.os }}-test-${{ env.cache-name }}-${{ hashFiles('**/Project.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-test-${{ env.cache-name }}-
-            ${{ runner.os }}-test-
-            ${{ runner.os }}-
+      - julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
 
       - name: Run tests
@@ -127,16 +118,7 @@ jobs:
           echo $PWD/../julia-*/bin >> $GITHUB_PATH
 
       # set-up packages
-      - uses: actions/cache@v4
-        env:
-          cache-name: cache-artifacts
-        with:
-          path: ~/.julia/artifacts
-          key: ${{ runner.os }}-test-${{ env.cache-name }}-${{ hashFiles('**/Project.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-test-${{ env.cache-name }}-
-            ${{ runner.os }}-test-
-            ${{ runner.os }}-
+      - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
 
       - name: Run tests
