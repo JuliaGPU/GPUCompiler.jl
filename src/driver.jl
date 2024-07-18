@@ -291,8 +291,8 @@ const __llvm_initialized = Ref(false)
                     push!(preserved_gvs, LLVM.name(gvar))
                 end
             end
-            if use_newpm && LLVM.version() >= v"17"
-                run!(InternalizePass(InternalizePassOptions(; preserved_gvs)), ir,
+            if LLVM.version() >= v"17"
+                run!(InternalizePass(; preserved_gvs), ir,
                      llvm_machine(job.config.target))
             else
                 @dispose pm=ModulePassManager() begin
@@ -318,35 +318,17 @@ const __llvm_initialized = Ref(false)
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
                 if has_deferred_jobs
-                    if use_newpm
-                        @dispose pb=NewPMPassBuilder() begin
-                            add!(pb, NewPMFunctionPassManager()) do fpm
-                                add!(fpm, InstCombinePass())
-                            end
-                            add!(pb, AlwaysInlinerPass())
-                            add!(pb, NewPMFunctionPassManager()) do fpm
-                                add!(fpm, SROAPass())
-                                add!(fpm, GVNPass())
-                            end
-                            add!(pb, MergeFunctionsPass())
-                            run!(pb, ir, llvm_machine(job.config.target))
+                    @dispose pb=NewPMPassBuilder() begin
+                        add!(pb, NewPMFunctionPassManager()) do fpm
+                            add!(fpm, InstCombinePass())
                         end
-                    else
-                        @dispose pm=ModulePassManager() begin
-                            # inline and optimize the call to e deferred code. in particular we want
-                            # to remove unnecessary alloca's created by pass-by-ref semantics.
-                            instruction_combining!(pm)
-                            always_inliner!(pm)
-                            scalar_repl_aggregates_ssa!(pm)
-                            promote_memory_to_register!(pm)
-                            gvn!(pm)
-
-                            # merge duplicate functions, since each compilation invocation emits everything
-                            # XXX: ideally we want to avoid emitting these in the first place
-                            merge_functions!(pm)
-
-                            run!(pm, ir)
+                        add!(pb, AlwaysInlinerPass())
+                        add!(pb, NewPMFunctionPassManager()) do fpm
+                            add!(fpm, SROAPass())
+                            add!(fpm, GVNPass())
                         end
+                        add!(pb, MergeFunctionsPass())
+                        run!(pb, ir, llvm_machine(job.config.target))
                     end
                 end
             end
@@ -357,29 +339,13 @@ const __llvm_initialized = Ref(false)
 
         if cleanup
             @timeit_debug to "clean-up" begin
-                if use_newpm
-                    @dispose pb=NewPMPassBuilder() begin
-                        add!(pb, RecomputeGlobalsAAPass())
-                        add!(pb, GlobalOptPass())
-                        add!(pb, GlobalDCEPass())
-                        add!(pb, StripDeadPrototypesPass())
-                        add!(pb, ConstantMergePass())
-                        run!(pb, ir, llvm_machine(job.config.target))
-                    end
-                else
-                    # we can only clean-up now, as optimization may lower or introduce calls to
-                    # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
-                    @dispose pm=ModulePassManager() begin
-                        # eliminate all unused internal functions
-                        global_optimizer!(pm)
-                        global_dce!(pm)
-                        strip_dead_prototypes!(pm)
-
-                        # merge constants (such as exception messages)
-                        constant_merge!(pm)
-
-                        run!(pm, ir)
-                    end
+                @dispose pb=NewPMPassBuilder() begin
+                    add!(pb, RecomputeGlobalsAAPass())
+                    add!(pb, GlobalOptPass())
+                    add!(pb, GlobalDCEPass())
+                    add!(pb, StripDeadPrototypesPass())
+                    add!(pb, ConstantMergePass())
+                    run!(pb, ir, llvm_machine(job.config.target))
                 end
             end
         end

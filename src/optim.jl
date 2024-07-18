@@ -1,11 +1,8 @@
 # LLVM IR optimization
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
-    if use_newpm
-        optimize_newpm!(job, mod; opt_level)
-    else
-        optimize_legacypm!(job, mod; opt_level)
-    end
+    optimize_newpm!(job, mod; opt_level)
+    # TODO: clean up
     return
 end
 
@@ -57,22 +54,20 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     buildCleanupPipeline(mpm, job, opt_level)
 end
 
-if use_newpm
-    const BasicSimplifyCFGOptions =
-        (; convert_switch_range_to_icmp=true,
-           convert_switch_to_lookup_table=true,
-           forward_switch_cond_to_phi=true,
-        )
-    const AggressiveSimplifyCFGOptions =
-        (; convert_switch_range_to_icmp=true,
-           convert_switch_to_lookup_table=true,
-           forward_switch_cond_to_phi=true,
-           # These mess with loop rotation, so only do them after that
-           hoist_common_insts=true,
-           # Causes an SRET assertion error in late-gc-lowering
-           #sink_common_insts=true
-        )
-end
+const BasicSimplifyCFGOptions =
+    (; convert_switch_range_to_icmp=true,
+       convert_switch_to_lookup_table=true,
+       forward_switch_cond_to_phi=true,
+    )
+const AggressiveSimplifyCFGOptions =
+    (; convert_switch_range_to_icmp=true,
+       convert_switch_to_lookup_table=true,
+       forward_switch_cond_to_phi=true,
+       # These mess with loop rotation, so only do them after that
+       hoist_common_insts=true,
+       # Causes an SRET assertion error in late-gc-lowering
+       #sink_common_insts=true
+    )
 
 function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if should_verify()
@@ -619,10 +614,7 @@ function cpu_features!(mod::LLVM.Module)
 
     return changed
 end
-cpu_features!(pm::PassManager) = add!(pm, ModulePass("LowerCPUFeatures", cpu_features!))
-if LLVM.has_newpm()
-    CPUFeaturesPass() = NewPMModulePass("GPULowerCPUFeatures", cpu_features!)
-end
+CPUFeaturesPass() = NewPMModulePass("GPULowerCPUFeatures", cpu_features!)
 
 # lower object allocations to to PTX malloc
 #
@@ -681,10 +673,7 @@ function lower_gc_frame!(fun::LLVM.Function)
 
     return changed
 end
-lower_gc_frame!(pm::PassManager) = add!(pm, FunctionPass("LowerGCFrame", lower_gc_frame!))
-if LLVM.has_newpm()
-    LowerGCFramePass() = NewPMFunctionPass("GPULowerGCFrame", lower_gc_frame!)
-end
+LowerGCFramePass() = NewPMFunctionPass("GPULowerGCFrame", lower_gc_frame!)
 
 # lower the `julia.ptls_states` intrinsic by removing it, since it is GPU incompatible.
 #
@@ -715,7 +704,4 @@ function lower_ptls!(mod::LLVM.Module)
 
     return changed
 end
-lower_ptls!(pm::PassManager) = add!(pm, ModulePass("LowerPTLS", lower_ptls!))
-if LLVM.has_newpm()
-    LowerPTLSPass() = NewPMModulePass("GPULowerPTLS", lower_ptls!)
-end
+LowerPTLSPass() = NewPMModulePass("GPULowerPTLS", lower_ptls!)

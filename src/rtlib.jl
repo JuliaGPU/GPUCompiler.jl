@@ -74,14 +74,7 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
-    if use_newpm
-        run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
-    else
-        @dispose pm=ModulePassManager() begin
-            strip_dead_prototypes!(pm)
-            run!(pm, new_mod)
-        end
-    end
+    run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
 
     temp_name = LLVM.name(meta.entry)
     link!(mod, new_mod)
