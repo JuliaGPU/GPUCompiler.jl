@@ -194,8 +194,8 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     add!(mpm, RemoveNIPass())
 
     # lower GC intrinsics
-    add!(mpm, NewPMFunctionPassManager()) do fpm
-        if !uses_julia_runtime(job)
+    if !uses_julia_runtime(job)
+        add!(mpm, NewPMFunctionPassManager()) do fpm
             add!(fpm, LowerGCFramePass())
         end
     end
