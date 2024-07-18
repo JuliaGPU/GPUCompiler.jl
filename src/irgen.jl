@@ -101,9 +101,9 @@ function irgen(@nospecialize(job::CompilerJob))
         for gvar in globals(mod)
             push!(preserved_gvs, LLVM.name(gvar))
         end
-        if use_newpm && LLVM.version() >= v"17"
+        if LLVM.version() >= v"17"
             @dispose pb=NewPMPassBuilder() begin
-                add!(pb, InternalizePass(InternalizePassOptions(; preserved_gvs)))
+                add!(pb, InternalizePass(; preserved_gvs))
                 add!(pb, AlwaysInlinerPass())
                 run!(pb, mod, llvm_machine(job.config.target))
             end
@@ -718,11 +718,7 @@ function add_kernel_state!(mod::LLVM.Module)
 
     return true
 end
-add_kernel_state!(pm::PassManager) =
-    add!(pm, ModulePass("AddKernelStatePass", add_kernel_state!))
-if LLVM.has_newpm()
-    AddKernelStatePass() = NewPMModulePass("AddKernelStatePass", add_kernel_state!)
-end
+AddKernelStatePass() = NewPMModulePass("AddKernelStatePass", add_kernel_state!)
 
 # lower calls to the state getter intrinsic. this is a two-step process, so that the state
 # argument can be added before optimization, and that optimization can introduce new uses
@@ -774,11 +770,7 @@ function lower_kernel_state!(fun::LLVM.Function)
 
     return changed
 end
-lower_kernel_state!(pm::PassManager) =
-    add!(pm, FunctionPass("LowerKernelStatePass", lower_kernel_state!))
-if LLVM.has_newpm()
-    LowerKernelStatePass() = NewPMFunctionPass("LowerKernelStatePass", lower_kernel_state!)
-end
+LowerKernelStatePass() = NewPMFunctionPass("LowerKernelStatePass", lower_kernel_state!)
 
 function cleanup_kernel_state!(mod::LLVM.Module)
     job = current_job::CompilerJob
@@ -796,11 +788,7 @@ function cleanup_kernel_state!(mod::LLVM.Module)
 
     return changed
 end
-cleanup_kernel_state!(pm::PassManager) =
-    add!(pm, ModulePass("CleanupKernelStatePass", cleanup_kernel_state!))
-if LLVM.has_newpm()
-    CleanupKernelStatePass() = NewPMModulePass("CleanupKernelStatePass", cleanup_kernel_state!)
-end
+CleanupKernelStatePass() = NewPMModulePass("CleanupKernelStatePass", cleanup_kernel_state!)
 
 function kernel_state_intr(mod::LLVM.Module, T_state)
     state_intr = if haskey(functions(mod), "julia.gpu.state_getter")
