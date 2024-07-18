@@ -945,6 +945,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
         # IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
         if intr == LLVM.Intrinsic("llvm.minimum") || intr == LLVM.Intrinsic("llvm.maximum")
             typ = value_type(call)
+            is_minimum = intr == LLVM.Intrinsic("llvm.minimum")
 
             # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
             jltyp = if typ == LLVM.HalfType()
@@ -959,7 +960,12 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
             # create a function that performs the IEEE-compliant operation.
             # normally we'd do this inline, but LLVM.jl doesn't have BB split functionality.
-            new_intr_fn = "air.minimum.f$(8*sizeof(jltyp))"
+            new_intr_fn = if is_minimum
+                "air.minimum.f$(8*sizeof(jltyp))"
+            else 
+                "air.maximum.f$(8*sizeof(jltyp))"
+            end
+
             if haskey(functions(mod), new_intr_fn)
                 new_intr = functions(mod)[new_intr_fn]
             else
@@ -1017,7 +1023,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     position!(builder, bb_compare_zero)
                     arg0_negative = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign,
                                           LLVM.ConstantInt(typ′, 0))
-                    val = if intr == LLVM.Intrinsic("llvm.minimum")
+                    val = if is_minimum
                         select!(builder, arg0_negative, arg0, arg1)
                     else
                         select!(builder, arg0_negative, arg1, arg0)
@@ -1027,7 +1033,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     # finally, it's safe to use the existing minnum/maxnum intrinsics
 
                     position!(builder, bb_fallback)
-                    fallback_intr_fn = if intr == LLVM.Intrinsic("llvm.minimum")
+                    fallback_intr_fn = if is_minimum
                         "air.fmin.f$(8*sizeof(jltyp))"
                     else
                         "air.fmax.f$(8*sizeof(jltyp))"
