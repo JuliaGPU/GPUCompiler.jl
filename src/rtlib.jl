@@ -31,10 +31,20 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         ft = convert(LLVM.FunctionType, rt)
         f = LLVM.Function(mod, rt.llvm_name, ft)
     end
+    if !isdeclaration(f) && rt.name !== :gc_pool_alloc
+        # XXX: uses of the gc_pool_alloc intrinsic can be introduced _after_ the runtime
+        #      is linked, as part of the lower_gc_frame! optimization pass.
+        error("Calling an intrinsic function that clashes with an existing definition: ",
+               string(ft), " ", rt.name)
+    end
 
     # runtime functions are written in Julia, while we're calling from LLVM,
     # this often results in argument type mismatches. try to fix some here.
     args = LLVM.Value[args...]
+    if length(args) != length(parameters(ft))
+        error("Incorrect number of arguments for runtime function: ",
+              "passing ", length(args), " argument(s) to '", string(ft), " ", rt.name, "'")
+    end
     for (i,arg) in enumerate(args)
         if value_type(arg) != parameters(ft)[i]
             if (value_type(arg) isa LLVM.PointerType) &&
