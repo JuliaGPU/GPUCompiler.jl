@@ -94,9 +94,13 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
 end
 
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
+    errors = IRError[]
+
     # Metal never supports double precision
-    check_ir_values(mod, LLVM.DoubleType())
-    check_ir_values(mod, LLVM.IntType(128))
+    append!(errors, check_ir_values(mod, LLVM.DoubleType()))
+    append!(errors, check_ir_values(mod, LLVM.IntType(128)))
+
+    errors
 end
 
 # hide `noreturn` function attributes, which cause issues with the back-end compiler,
@@ -962,7 +966,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             # normally we'd do this inline, but LLVM.jl doesn't have BB split functionality.
             new_intr_fn = if is_minimum
                 "air.minimum.f$(8*sizeof(jltyp))"
-            else 
+            else
                 "air.maximum.f$(8*sizeof(jltyp))"
             end
 
