@@ -94,26 +94,28 @@ struct CompilerConfig{T,P}
     name::Union{Nothing,String}
     entry_abi::Symbol
     always_inline::Bool
+    opt_level::Int
 
     function CompilerConfig(target::AbstractCompilerTarget,
                             params::AbstractCompilerParams;
                             kernel=true,
                             name=nothing,
                             entry_abi=:specfunc,
-                            always_inline=false)
+                            always_inline=false,
+                            opt_level=2)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
         new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
-                                            always_inline)
+                                            always_inline, opt_level)
     end
 end
 
 # copy constructor
 CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
                kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
-               always_inline=cfg.always_inline) =
-    CompilerConfig(target, params; kernel, entry_abi, name, always_inline)
+               always_inline=cfg.always_inline, opt_level=cfg.opt_level) =
+    CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level)
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
     print(io, "CompilerConfig for ", T)
@@ -127,6 +129,7 @@ function Base.hash(cfg::CompilerConfig, h::UInt)
     h = hash(cfg.name, h)
     h = hash(cfg.entry_abi, h)
     h = hash(cfg.always_inline, h)
+    h = hash(cfg.opt_level, h)
 
     return h
 end

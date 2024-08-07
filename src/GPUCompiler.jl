@@ -9,12 +9,15 @@ using ExprTools: splitdef, combinedef
 
 using Libdl
 
+using Serialization
 using Scratch: @get_scratch!
+using Preferences
 
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
 
-const use_newpm = LLVM.has_newpm()
+compile_cache = nothing # set during __init__()
+const pkgver = Base.pkgversion(GPUCompiler)
 
 include("utils.jl")
 include("mangling.jl")
@@ -46,11 +49,6 @@ include("execution.jl")
 include("reflection.jl")
 
 include("precompile.jl")
-_precompile_()
-
-
-
-compile_cache = "" # defined in __init__()
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
@@ -58,9 +56,10 @@ function __init__()
     dir = @get_scratch!("compiled")
     ## add the Julia version
     dir = joinpath(dir, "v$(VERSION.major).$(VERSION.minor)")
-    if VERSION > v"1.9"
-        ## also add the package version
-        pkgver = Base.pkgversion(GPUCompiler)
+    ## also add the package version
+    if pkgver !== nothing
+        # XXX: `Base.pkgversion` is buggy and sometimes returns `nothing`, see e.g.
+        #       JuliaLang/PackageCompiler.jl#896 and JuliaGPU/GPUCompiler.jl#593
         dir = joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
     end
     mkpath(dir)

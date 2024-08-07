@@ -77,26 +77,23 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
 
     # we emit properties (of the air and metal version) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-    if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, RecomputeGlobalsAAPass())
-            add!(mpm, GlobalOptPass())
-            run!(mpm, mod)
-        end
-    else
-        @dispose pm=ModulePassManager() begin
-            global_optimizer!(pm)
-            run!(pm, mod)
-        end
+    @dispose pb=NewPMPassBuilder() begin
+        add!(pb, RecomputeGlobalsAAPass())
+        add!(pb, GlobalOptPass())
+        run!(pb, mod)
     end
 
     return functions(mod)[entry_fn]
 end
 
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
+    errors = IRError[]
+
     # Metal never supports double precision
-    check_ir_values(mod, LLVM.DoubleType())
-    check_ir_values(mod, LLVM.IntType(128))
+    append!(errors, check_ir_values(mod, LLVM.DoubleType()))
+    append!(errors, check_ir_values(mod, LLVM.IntType(128)))
+
+    errors
 end
 
 # hide `noreturn` function attributes, which cause issues with the back-end compiler,
@@ -121,22 +118,13 @@ function hide_noreturn!(mod::LLVM.Module)
     end
     any_noreturn || return false
 
-    if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, AlwaysInlinerPass())
-            add!(mpm, NewPMFunctionPassManager) do fpm
-                add!(fpm, SimplifyCFGPass())
-                add!(fpm, InstCombinePass())
-            end
-            run!(mpm, mod)
+    @dispose pb=NewPMPassBuilder() begin
+        add!(pb, AlwaysInlinerPass())
+        add!(pb, NewPMFunctionPassManager()) do fpm
+            add!(fpm, SimplifyCFGPass())
+            add!(fpm, InstCombinePass())
         end
-    else
-        @dispose pm=ModulePassManager() begin
-            always_inliner!(pm)
-            cfgsimplification!(pm)
-            instruction_combining!(pm)
-            run!(pm, mod)
-        end
+        run!(pb, mod)
     end
 
     return true
@@ -164,22 +152,13 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     end
     if changed
         # lowering may have introduced additional functions marked `alwaysinline`
-        if use_newpm
-            @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                add!(mpm, AlwaysInlinerPass())
-                add!(mpm, NewPMFunctionPassManager) do fpm
-                    add!(fpm, SimplifyCFGPass())
-                    add!(fpm, InstCombinePass())
-                end
-                run!(mpm, mod)
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, AlwaysInlinerPass())
+            add!(pb, NewPMFunctionPassManager()) do fpm
+                add!(fpm, SimplifyCFGPass())
+                add!(fpm, InstCombinePass())
             end
-        else
-            @dispose pm=ModulePassManager() begin
-                always_inliner!(pm)
-                cfgsimplification!(pm)
-                instruction_combining!(pm)
-                run!(pm, mod)
-            end
+            run!(pb, mod)
         end
     end
 
@@ -305,26 +284,13 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     LLVM.name!(new_f, fn)
 
     # clean-up after this pass (which runs after optimization)
-    if use_newpm
-       @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, NewPMFunctionPassManager) do fpm
-                add!(fpm, SimplifyCFGPass())
-                add!(fpm, SROAPass())
-                add!(fpm, EarlyCSEPass())
-                add!(fpm, InstCombinePass())
-            end
+    @dispose pb=NewPMPassBuilder() begin
+        add!(pb, SimplifyCFGPass())
+        add!(pb, SROAPass())
+        add!(pb, EarlyCSEPass())
+        add!(pb, InstCombinePass())
 
-            run!(mpm, mod)
-        end
-    else
-        @dispose pm=ModulePassManager() begin
-            cfgsimplification!(pm)
-            scalar_repl_aggregates!(pm)
-            early_cse!(pm)
-            instruction_combining!(pm)
-
-            run!(pm, mod)
-        end
+        run!(pb, mod)
     end
 
     return new_f
@@ -947,6 +913,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
         # IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
         if intr == LLVM.Intrinsic("llvm.minimum") || intr == LLVM.Intrinsic("llvm.maximum")
             typ = value_type(call)
+            is_minimum = intr == LLVM.Intrinsic("llvm.minimum")
 
             # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
             jltyp = if typ == LLVM.HalfType()
@@ -961,7 +928,12 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
             # create a function that performs the IEEE-compliant operation.
             # normally we'd do this inline, but LLVM.jl doesn't have BB split functionality.
-            new_intr_fn = "air.minimum.f$(8*sizeof(jltyp))"
+            new_intr_fn = if is_minimum
+                "air.minimum.f$(8*sizeof(jltyp))"
+            else
+                "air.maximum.f$(8*sizeof(jltyp))"
+            end
+
             if haskey(functions(mod), new_intr_fn)
                 new_intr = functions(mod)[new_intr_fn]
             else
@@ -1019,7 +991,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     position!(builder, bb_compare_zero)
                     arg0_negative = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign,
                                           LLVM.ConstantInt(typ′, 0))
-                    val = if intr == LLVM.Intrinsic("llvm.minimum")
+                    val = if is_minimum
                         select!(builder, arg0_negative, arg0, arg1)
                     else
                         select!(builder, arg0_negative, arg1, arg0)
@@ -1029,7 +1001,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     # finally, it's safe to use the existing minnum/maxnum intrinsics
 
                     position!(builder, bb_fallback)
-                    fallback_intr_fn = if intr == LLVM.Intrinsic("llvm.minimum")
+                    fallback_intr_fn = if is_minimum
                         "air.fmin.f$(8*sizeof(jltyp))"
                     else
                         "air.fmax.f$(8*sizeof(jltyp))"

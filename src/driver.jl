@@ -19,52 +19,22 @@ export JuliaContext
 # unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
 # this helper to a regular `Context()` call.
 function JuliaContext(; opaque_pointers=nothing)
-    if VERSION >= v"1.9.0-DEV.516"
-        # Julia 1.9 knows how to deal with arbitrary contexts,
-        # and uses ORC's thread safe versions.
-        ctx = ThreadSafeContext(; opaque_pointers)
-    elseif VERSION >= v"1.9.0-DEV.115"
-        # Julia 1.9 knows how to deal with arbitrary contexts
-        ctx = Context(; opaque_pointers)
-    else
-        # earlier versions of Julia claim so, but actually use a global context
-        isboxed_ref = Ref{Bool}()
-        typ = LLVMType(ccall(:jl_type_to_llvm, LLVM.API.LLVMTypeRef,
-                       (Any, Ptr{Bool}), Any, isboxed_ref))
-        ctx = context(typ)
-        if opaque_pointers !== nothing && supports_typed_pointers(ctx) !== !opaque_pointers
-            error("Cannot use $(opaque_pointers ? "opaque" : "typed") pointers, as the context has already been configured to use $(supports_typed_pointers(ctx) ? "typed" : "opaque") pointers, and this version of Julia does not support changing that.")
-        end
-    end
-
-    ctx
+    # XXX: remove
+    ThreadSafeContext(; opaque_pointers)
 end
 function JuliaContext(f; kwargs...)
-    if VERSION >= v"1.9.0-DEV.516"
-        ts_ctx = JuliaContext(; kwargs...)
-        # for now, also activate the underlying context
-        # XXX: this is wrong; we can't expose the underlying LLVM context, but should
-        #      instead always go through the callback in order to unlock it properly.
-        #      rework this once we depend on Julia 1.9 or later.
-        ctx = context(ts_ctx)
-        activate(ctx)
-        try
-            f(ctx)
-        finally
-            deactivate(ctx)
-            dispose(ts_ctx)
-        end
-    elseif VERSION >= v"1.9.0-DEV.115"
-        Context(f)
-    else
-        ctx = JuliaContext()
-        activate(ctx)
-        try
-            f(ctx)
-        finally
-            deactivate(ctx)
-            # we cannot dispose of the global unique context
-        end
+    ts_ctx = JuliaContext(; kwargs...)
+    # for now, also activate the underlying context
+    # XXX: this is wrong; we can't expose the underlying LLVM context, but should
+    #      instead always go through the callback in order to unlock it properly.
+    #      rework this once we depend on Julia 1.9 or later.
+    ctx = context(ts_ctx)
+    activate(ctx)
+    try
+        f(ctx)
+    finally
+        deactivate(ctx)
+        dispose(ts_ctx)
     end
 end
 
@@ -82,45 +52,39 @@ export compile
 const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 """
-    compile(target::Symbol, job::CompilerJob;
-            libraries=true, optimize=true, strip=false, ...)
+    compile(target::Symbol, job::CompilerJob; kwargs...)
 
 Compile a function `f` invoked with types `tt` for device capability `cap` to one of the
 following formats as specified by the `target` argument: `:julia` for Julia IR, `:llvm` for
 LLVM IR and `:asm` for machine code.
 
 The following keyword arguments are supported:
-- `libraries`: link the GPU runtime and `libdevice` libraries (if required)
-- `optimize`: optimize the code (default: true)
-- `cleanup`: run cleanup passes on the code (default: true)
+- `toplevel`: indicates that this compilation is the outermost invocation of the compiler
+  (default: true)
+- `libraries`: link the GPU runtime and `libdevice` libraries (default: true, if toplevel)
+- `optimize`: optimize the code (default: true, if toplevel)
+- `cleanup`: run cleanup passes on the code (default: true, if toplevel)
+- `validate`: enable optional validation of input and outputs (default: true, if toplevel)
 - `strip`: strip non-functional metadata and debug information (default: false)
-- `validate`: enable optional validation of input and outputs (default: true)
 - `only_entry`: only keep the entry function, remove all others (default: false).
   This option is only for internal use, to implement reflection's `dump_module`.
 
 Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
 """
-function compile(target::Symbol, @nospecialize(job::CompilerJob);
-                 libraries::Bool=true, toplevel::Bool=true,
-                 optimize::Bool=true, cleanup::Bool=true, strip::Bool=false,
-                 validate::Bool=true, only_entry::Bool=false)
+function compile(target::Symbol, @nospecialize(job::CompilerJob); kwargs...)
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
 
-    return codegen(target, job;
-                   libraries, toplevel, optimize, cleanup, strip, validate, only_entry)
+    return codegen(target, job; kwargs...)
 end
 
-function codegen(output::Symbol, @nospecialize(job::CompilerJob);
-                 libraries::Bool=true, toplevel::Bool=true, optimize::Bool=true,
-                 cleanup::Bool=true, strip::Bool=false, validate::Bool=true,
-                 only_entry::Bool=false, parent_job::Union{Nothing, CompilerJob}=nothing)
+function codegen(output::Symbol, @nospecialize(job::CompilerJob); toplevel::Bool=true,
+                 libraries::Bool=toplevel, optimize::Bool=toplevel, cleanup::Bool=toplevel,
+                 validate::Bool=toplevel, strip::Bool=false, only_entry::Bool=false,
+                 parent_job::Union{Nothing, CompilerJob}=nothing)
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
-    elseif VERSION < v"1.9.0-DEV.115" && context() != JuliaContext()
-        error("""Julia <1.9 does not suppport generating code in an arbitrary LLVM context.
-                 Use `JuliaContext()` do-block syntax to get an appropriate one.""")
     end
 
     @timeit_debug to "Validation" begin
@@ -184,18 +148,17 @@ end
     # generated functions so use the current world counter, which may be too new
     # for the world we're compiling for.
 
-    pseudo_ptr = reinterpret(Ptr{Cvoid}, id)
     quote
         # TODO: add an edge to this method instance to support method redefinitions
-        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $pseudo_ptr)
+        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
     end
 end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob);
-                           libraries::Bool=true, toplevel::Bool=true, optimize::Bool=true,
-                           cleanup::Bool=true, only_entry::Bool=false, validate::Bool=true)
+@locked function emit_llvm(@nospecialize(job::CompilerJob); toplevel::Bool,
+                           libraries::Bool, optimize::Bool, cleanup::Bool,
+                           validate::Bool, only_entry::Bool)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -220,8 +183,7 @@ const __llvm_initialized = Ref(false)
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    has_deferred_jobs = !only_entry &&
-                        haskey(functions(ir), "deferred_codegen")
+    has_deferred_jobs = !only_entry && haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -259,10 +221,8 @@ const __llvm_initialized = Ref(false)
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(jobs, dyn_job) do
-                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; validate=false,
-                                               optimize=false,
-                                               toplevel=false,
-                                               parent_job=job)
+                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; toplevel=false,
+                                                               parent_job=job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     merge!(jobs, dyn_meta.jobs)
@@ -278,7 +238,10 @@ const __llvm_initialized = Ref(false)
                 for call in worklist[dyn_job]
                     @dispose builder=IRBuilder() begin
                         position!(builder, call)
-                        fptr = if VERSION >= v"1.12.0-DEV.225"
+                        fptr = if LLVM.version() >= v"17"
+                            T_ptr = LLVM.PointerType()
+                            bitcast!(builder, dyn_entry, T_ptr)
+                        elseif VERSION >= v"1.12.0-DEV.225"
                             T_ptr = LLVM.PointerType(LLVM.Int8Type())
                             bitcast!(builder, dyn_entry, T_ptr)
                         else
@@ -296,27 +259,24 @@ const __llvm_initialized = Ref(false)
         unsafe_delete!(ir, dyn_marker)
     end
 
-    if toplevel
-        # always preload the runtime, and do so early; it cannot be part of any
-        # timing block because it recurses into the compiler
-        if !uses_julia_runtime(job) && libraries
+    if libraries
+        # load the runtime outside of a timing block (because it recurses into the compiler)
+        if !uses_julia_runtime(job)
             runtime = load_runtime(job)
             runtime_fns = LLVM.name.(defs(runtime))
             runtime_intrinsics = ["julia.gc_alloc_obj"]
         end
 
         @timeit_debug to "Library linking" begin
-            if libraries
-                # target-specific libraries
-                undefined_fns = LLVM.name.(decls(ir))
-                @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
+            # target-specific libraries
+            undefined_fns = LLVM.name.(decls(ir))
+            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
 
-                # GPU run-time library
-                if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
-                                                         fn in runtime_intrinsics,
-                                                   undefined_fns)
-                    @timeit_debug to "runtime library" link_library!(ir, runtime)
-                end
+            # GPU run-time library
+            if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
+                                                        fn in runtime_intrinsics,
+                                                undefined_fns)
+                @timeit_debug to "runtime library" link_library!(ir, runtime)
             end
         end
     end
@@ -326,16 +286,20 @@ const __llvm_initialized = Ref(false)
         # global variables. this makes sure that the optimizer can, e.g.,
         # rewrite function signatures.
         if toplevel
-            # TODO: there's no good API to use internalize with the new pass manager yet
-            @dispose pm=ModulePassManager() begin
-                exports = collect(values(jobs))
-                for gvar in globals(ir)
-                    if linkage(gvar) == LLVM.API.LLVMExternalLinkage
-                        push!(exports, LLVM.name(gvar))
-                    end
+            preserved_gvs = collect(values(jobs))
+            for gvar in globals(ir)
+                if linkage(gvar) == LLVM.API.LLVMExternalLinkage
+                    push!(preserved_gvs, LLVM.name(gvar))
                 end
-                internalize!(pm, exports)
-                run!(pm, ir)
+            end
+            if LLVM.version() >= v"17"
+                run!(InternalizePass(; preserved_gvs), ir,
+                     llvm_machine(job.config.target))
+            else
+                @dispose pm=ModulePassManager() begin
+                    internalize!(pm, preserved_gvs)
+                    run!(pm, ir)
+                end
             end
         end
 
@@ -349,41 +313,23 @@ const __llvm_initialized = Ref(false)
 
         if optimize
             @timeit_debug to "optimization" begin
-                optimize!(job, ir)
+                optimize!(job, ir; job.config.opt_level)
 
                 # deferred codegen has some special optimization requirements,
                 # which also need to happen _after_ regular optimization.
                 # XXX: make these part of the optimizer pipeline?
                 if has_deferred_jobs
-                    if use_newpm
-                        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                            add!(mpm, NewPMFunctionPassManager) do fpm
-                                add!(fpm, InstCombinePass())
-                            end
-                            add!(mpm, AlwaysInlinerPass())
-                            add!(mpm, NewPMFunctionPassManager) do fpm
-                                add!(fpm, SROAPass())
-                                add!(fpm, GVNPass())
-                            end
-                            add!(mpm, MergeFunctionsPass())
-                            run!(mpm, ir)
+                    @dispose pb=NewPMPassBuilder() begin
+                        add!(pb, NewPMFunctionPassManager()) do fpm
+                            add!(fpm, InstCombinePass())
                         end
-                    else
-                        @dispose pm=ModulePassManager() begin
-                            # inline and optimize the call to e deferred code. in particular we want
-                            # to remove unnecessary alloca's created by pass-by-ref semantics.
-                            instruction_combining!(pm)
-                            always_inliner!(pm)
-                            scalar_repl_aggregates_ssa!(pm)
-                            promote_memory_to_register!(pm)
-                            gvn!(pm)
-
-                            # merge duplicate functions, since each compilation invocation emits everything
-                            # XXX: ideally we want to avoid emitting these in the first place
-                            merge_functions!(pm)
-
-                            run!(pm, ir)
+                        add!(pb, AlwaysInlinerPass())
+                        add!(pb, NewPMFunctionPassManager()) do fpm
+                            add!(fpm, SROAPass())
+                            add!(fpm, GVNPass())
                         end
+                        add!(pb, MergeFunctionsPass())
+                        run!(pb, ir, llvm_machine(job.config.target))
                     end
                 end
             end
@@ -394,29 +340,13 @@ const __llvm_initialized = Ref(false)
 
         if cleanup
             @timeit_debug to "clean-up" begin
-                if use_newpm
-                    @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-                        add!(mpm, RecomputeGlobalsAAPass())
-                        add!(mpm, GlobalOptPass())
-                        add!(mpm, GlobalDCEPass())
-                        add!(mpm, StripDeadPrototypesPass())
-                        add!(mpm, ConstantMergePass())
-                        run!(mpm, ir)
-                    end
-                else
-                    # we can only clean-up now, as optimization may lower or introduce calls to
-                    # functions from the GPU runtime (e.g. julia.gc_alloc_obj -> gpu_gc_pool_alloc)
-                    @dispose pm=ModulePassManager() begin
-                        # eliminate all unused internal functions
-                        global_optimizer!(pm)
-                        global_dce!(pm)
-                        strip_dead_prototypes!(pm)
-
-                        # merge constants (such as exception messages)
-                        constant_merge!(pm)
-
-                        run!(pm, ir)
-                    end
+                @dispose pb=NewPMPassBuilder() begin
+                    add!(pb, RecomputeGlobalsAAPass())
+                    add!(pb, GlobalOptPass())
+                    add!(pb, GlobalDCEPass())
+                    add!(pb, StripDeadPrototypesPass())
+                    add!(pb, ConstantMergePass())
+                    run!(pb, ir, llvm_machine(job.config.target))
                 end
             end
         end
@@ -462,7 +392,7 @@ const __llvm_initialized = Ref(false)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
-                          strip::Bool=false, validate::Bool=true, format::LLVM.API.LLVMCodeGenFileType)
+                          strip::Bool, validate::Bool, format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
     if strip
         @timeit_debug to "Debug info removal" strip_debuginfo!(ir)

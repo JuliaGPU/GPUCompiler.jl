@@ -13,7 +13,7 @@ function irgen(@nospecialize(job::CompilerJob))
     # clean up incompatibilities
     @timeit_debug to "clean-up" begin
         for llvmf in functions(mod)
-            if VERSION < v"1.9" || Base.isdebugbuild()
+            if Base.isdebugbuild()
                 # only occurs in debug builds
                 delete!(function_attributes(llvmf),
                         EnumAttribute("sspstrong", 0))
@@ -95,27 +95,29 @@ function irgen(@nospecialize(job::CompilerJob))
             end
         end
 
-        # TODO: there's no good API to use internalize with the new pass manager yet
-        @dispose pm=ModulePassManager() begin
-            global current_job
-            current_job = job
-
-            linkage!(entry, LLVM.API.LLVMExternalLinkage)
-
-            # internalize all functions, but keep exported global variables
-            exports = String[LLVM.name(entry)]
-            for gvar in globals(mod)
-                push!(exports, LLVM.name(gvar))
-            end
-            internalize!(pm, exports)
-
-            # inline llvmcall bodies
-            always_inliner!(pm)
-
-            can_throw(job) || add!(pm, ModulePass("LowerThrow", lower_throw!))
-
-            run!(pm, mod)
+        # internalize all functions and, but keep exported global variables.
+        linkage!(entry, LLVM.API.LLVMExternalLinkage)
+        preserved_gvs = String[LLVM.name(entry)]
+        for gvar in globals(mod)
+            push!(preserved_gvs, LLVM.name(gvar))
         end
+        if LLVM.version() >= v"17"
+            @dispose pb=NewPMPassBuilder() begin
+                add!(pb, InternalizePass(; preserved_gvs))
+                add!(pb, AlwaysInlinerPass())
+                run!(pb, mod, llvm_machine(job.config.target))
+            end
+        else
+            @dispose pm=ModulePassManager() begin
+                internalize!(pm, preserved_gvs)
+                always_inliner!(pm)
+                run!(pm, mod)
+            end
+        end
+
+        global current_job
+        current_job = job
+        can_throw(job) || lower_throw!(mod)
     end
 
     return mod, compiled
@@ -716,6 +718,7 @@ function add_kernel_state!(mod::LLVM.Module)
 
     return true
 end
+AddKernelStatePass() = NewPMModulePass("AddKernelStatePass", add_kernel_state!)
 
 # lower calls to the state getter intrinsic. this is a two-step process, so that the state
 # argument can be added before optimization, and that optimization can introduce new uses
@@ -767,6 +770,7 @@ function lower_kernel_state!(fun::LLVM.Function)
 
     return changed
 end
+LowerKernelStatePass() = NewPMFunctionPass("LowerKernelStatePass", lower_kernel_state!)
 
 function cleanup_kernel_state!(mod::LLVM.Module)
     job = current_job::CompilerJob
@@ -784,6 +788,7 @@ function cleanup_kernel_state!(mod::LLVM.Module)
 
     return changed
 end
+CleanupKernelStatePass() = NewPMModulePass("CleanupKernelStatePass", cleanup_kernel_state!)
 
 function kernel_state_intr(mod::LLVM.Module, T_state)
     state_intr = if haskey(functions(mod), "julia.gpu.state_getter")

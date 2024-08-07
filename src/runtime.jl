@@ -51,9 +51,6 @@ end
 
 const methods = Dict{Symbol,RuntimeMethodInstance}()
 function get(name::Symbol)
-    if !haskey(methods, name)
-        display(methods)
-    end
     methods[name]
 end
 

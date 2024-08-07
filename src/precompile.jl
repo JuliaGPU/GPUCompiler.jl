@@ -1,65 +1,41 @@
-const __bodyfunction__ = Dict{Method,Any}()
+using PrecompileTools: @setup_workload, @compile_workload
 
-# Find keyword "body functions" (the function that contains the body
-# as written by the developer, called after all missing keyword-arguments
-# have been assigned values), in a manner that doesn't depend on
-# gensymmed names.
-# `mnokw` is the method that gets called when you invoke it without
-# supplying any keywords.
-function __lookup_kwbody__(mnokw::Method)
-    function getsym(arg)
-        isa(arg, Symbol) && return arg
-        @assert isa(arg, GlobalRef)
-        return arg.name
-    end
+@setup_workload begin
+    precompile_module = @eval module $(gensym())
+        using ..GPUCompiler
 
-    f = get(__bodyfunction__, mnokw, nothing)
-    if f === nothing
-        fmod = mnokw.module
-        # The lowered code for `mnokw` should look like
-        #   %1 = mkw(kwvalues..., #self#, args...)
-        #        return %1
-        # where `mkw` is the name of the "active" keyword body-function.
-        ast = Base.uncompressed_ast(mnokw)
-        if isa(ast, Core.CodeInfo) && length(ast.code) >= 2
-            callexpr = ast.code[end-1]
-            if isa(callexpr, Expr) && callexpr.head == :call
-                fsym = callexpr.args[1]
-                if isa(fsym, Symbol)
-                    f = getfield(fmod, fsym)
-                elseif isa(fsym, GlobalRef)
-                    if fsym.mod === Core && fsym.name === :_apply
-                        f = getfield(mnokw.module, getsym(callexpr.args[2]))
-                    elseif fsym.mod === Core && fsym.name === :_apply_iterate
-                        f = getfield(mnokw.module, getsym(callexpr.args[3]))
-                    else
-                        f = getfield(fsym.mod, fsym.name)
-                    end
-                else
-                    f = missing
-                end
-            else
-                f = missing
-            end
-        else
-            f = missing
+        module DummyRuntime
+            # dummy methods
+            signal_exception() = return
+            malloc(sz) = C_NULL
+            report_oom(sz) = return
+            report_exception(ex) = return
+            report_exception_name(ex) = return
+            report_exception_frame(idx, func, file, line) = return
         end
-        __bodyfunction__[mnokw] = f
-    end
-    return f
-end
 
-function _precompile_()
-    ccall(:jl_generating_output, Cint, ()) == 1 || return nothing
-    @assert precompile(Tuple{typeof(GPUCompiler.assign_args!),Expr,Vector{Any}})
-    @assert precompile(Tuple{typeof(GPUCompiler.lower_unreachable!),LLVM.Function})
-    @assert precompile(Tuple{typeof(GPUCompiler.lower_gc_frame!),LLVM.Function})
-    @assert precompile(Tuple{typeof(GPUCompiler.lower_throw!),LLVM.Module})
-    #@assert precompile(Tuple{typeof(GPUCompiler.split_kwargs),Tuple{},Vector{Symbol},Vararg{Vector{Symbol}, N} where N})
-    let fbody = try __lookup_kwbody__(which(GPUCompiler.compile, (Symbol,GPUCompiler.CompilerJob,))) catch missing end
-        if !ismissing(fbody)
-            @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,Bool,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
-            @assert precompile(fbody, (Bool,Bool,Bool,Bool,Bool,Bool,Bool,typeof(GPUCompiler.compile),Symbol,GPUCompiler.CompilerJob,))
+        struct DummyCompilerParams <: AbstractCompilerParams end
+        const DummyCompilerJob = CompilerJob{NativeCompilerTarget, DummyCompilerParams}
+
+        GPUCompiler.runtime_module(::DummyCompilerJob) = DummyRuntime
+    end
+
+    kernel() = nothing
+
+    @compile_workload begin
+        source = methodinstance(typeof(kernel), Tuple{})
+        target = NativeCompilerTarget()
+        params = precompile_module.DummyCompilerParams()
+        config = CompilerConfig(target, params)
+        job = CompilerJob(source, config)
+
+        JuliaContext() do ctx
+            # XXX: on Windows, compiling the GPU runtime leaks GPU code in the native cache,
+            #      so prevent building the runtime library (see JuliaGPU/GPUCompiler.jl#601)
+            GPUCompiler.compile(:asm, job; libraries=false)
         end
     end
+
+    # reset state that was initialized during precompilation
+    __llvm_initialized[] = false
 end

@@ -134,17 +134,10 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
 
     # we emit properties (of the device and ptx isa) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-    if use_newpm
-        @dispose pb=PassBuilder() mpm=NewPMModulePassManager(pb) begin
-            add!(mpm, RecomputeGlobalsAAPass())
-            add!(mpm, GlobalOptPass())
-            run!(mpm, mod)
-        end
-    else
-        @dispose pm=ModulePassManager() begin
-            global_optimizer!(pm)
-            run!(pm, mod)
-        end
+    @dispose pb=NewPMPassBuilder() begin
+        add!(pb, RecomputeGlobalsAAPass())
+        add!(pb, GlobalOptPass())
+        run!(pb, mod, llvm_machine(job.config.target))
     end
 
     return entry
@@ -153,42 +146,52 @@ end
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     tm = llvm_machine(job.config.target)
-    # TODO can't convert to newpm because speculative-execution doesn't have a parameter in the default PassBuilder parser
-    @dispose pm=ModulePassManager() begin
-        add_library_info!(pm, triple(mod))
-        add_transform_info!(pm, tm)
+    # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
+    @dispose pb=NewPMPassBuilder() begin
+        register!(pb, NVVMReflectPass())
 
-        # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
-        add!(pm, FunctionPass("NVVMReflect", nvvm_reflect!))
+        add!(pb, NewPMFunctionPassManager()) do fpm
+            # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
+            add!(fpm, NVVMReflectPass())
 
-        # needed by GemmKernels.jl-like code
-        speculative_execution_if_has_branch_divergence!(pm)
+            # needed by GemmKernels.jl-like code
+            add!(fpm, SpeculativeExecutionPass())
 
-        # NVPTX's target machine info enables runtime unrolling,
-        # but Julia's pass sequence only invokes the simple unroller.
-        loop_unroll!(pm)
-        instruction_combining!(pm)  # clean-up redundancy
-        licm!(pm)                   # the inner runtime check might be outer loop invariant
+            # NVPTX's target machine info enables runtime unrolling,
+            # but Julia's pass sequence only invokes the simple unroller.
+            add!(fpm, LoopUnrollPass(; job.config.opt_level))
+            add!(fpm, InstCombinePass())        # clean-up redundancy
+            add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
+                add!(lpm, LICMPass())           # the inner runtime check might be
+                                                # outer loop invariant
+            end
 
-        # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
-        # that code still needs to be optimized (arguably, multiple unroll passes should be
-        # scheduled by the Julia optimizer). do so here, instead of re-optimizing entirely.
-        early_csemem_ssa!(pm) # TODO: gvn instead? see NVPTXTargetMachine.cpp::addEarlyCSEOrGVNPass
-        dead_store_elimination!(pm)
+            # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
+            # that code still needs to be optimized (arguably, multiple unroll passes should be
+            # scheduled by the Julia optimizer). do so here, instead of re-optimizing entirely.
+            if job.config.opt_level == 2
+                add!(fpm, GVNPass())
+            elseif job.config.opt_level == 1
+                add!(fpm, EarlyCSEPass())
+            end
+            add!(fpm, DSEPass())
 
-        cfgsimplification!(pm)
+            add!(fpm, SimplifyCFGPass())
+        end
 
         # get rid of the internalized functions; now possible unused
-        global_dce!(pm)
+        add!(pb, GlobalDCEPass())
 
-        run!(pm, mod)
+        run!(pb, mod, tm)
     end
 end
 
 function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                     mod::LLVM.Module, entry::LLVM.Function)
-    for f in functions(mod)
-        lower_unreachable!(f)
+    if LLVM.version() < v"17"
+        for f in functions(mod)
+            lower_unreachable!(f)
+        end
     end
 
     if job.config.kernel
@@ -395,20 +398,42 @@ function nvvm_reflect!(fun::LLVM.Function)
     for use in uses(reflect_function)
         call = user(use)
         isa(call, LLVM.CallInst) || continue
-        length(operands(call)) == 2 || error("Wrong number of operands to __nvvm_reflect function")
+        if length(operands(call)) != 2
+            @error """Unrecognized format of __nvvm_reflect call:
+                      $(string(call))
+                      Wrong number of operands: expected 2, got $(length(operands(call)))."""
+            continue
+        end
 
         # decode the string argument
-        str = operands(call)[1]
-        isa(str, LLVM.ConstantExpr) || error("Format of __nvvm__reflect function not recognized")
-        sym = operands(str)[1]
-        if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
-            # CUDA 11.0 or below
-            sym = operands(sym)[1]
+        if LLVM.version() >= v"17"
+            sym = operands(call)[1]
+        else
+            str = operands(call)[1]
+            if !isa(str, LLVM.ConstantExpr) || opcode(str) != LLVM.API.LLVMGetElementPtr
+                @safe_error """Unrecognized format of __nvvm_reflect call:
+                               $(string(call))
+                               Operand should be a GEP instruction, got a $(typeof(str)). Please file an issue."""
+                continue
+            end
+            sym = operands(str)[1]
+            if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
+                # CUDA 11.0 or below
+                sym = operands(sym)[1]
+            end
         end
-        isa(sym, LLVM.GlobalVariable) || error("Format of __nvvm__reflect function not recognized")
+        if !isa(sym, LLVM.GlobalVariable)
+            @safe_error """Unrecognized format of __nvvm_reflect call:
+                           $(string(call))
+                           Operand should be a global variable, got a $(typeof(sym)). Please file an issue."""
+            continue
+        end
         sym_op = operands(sym)[1]
-        isa(sym_op, LLVM.ConstantArray) || isa(sym_op, LLVM.ConstantDataArray) ||
-            error("Format of __nvvm__reflect function not recognized")
+        if !isa(sym_op, LLVM.ConstantArray) && !isa(sym_op, LLVM.ConstantDataArray)
+            @safe_error """Unrecognized format of __nvvm_reflect call:
+                           $(string(call))
+                           Operand should be a constant array, got a $(typeof(sym_op)). Please file an issue."""
+        end
         chars = convert.(Ref(UInt8), collect(sym_op))
         reflect_arg = String(chars[1:end-1])
 
@@ -433,7 +458,10 @@ function nvvm_reflect!(fun::LLVM.Function)
         elseif reflect_arg == "__CUDA_ARCH"
             ConstantInt(reflect_typ, job.config.target.cap.major*100 + job.config.target.cap.minor*10)
         else
-            @warn "Unknown __nvvm_reflect argument: $reflect_arg. Please file an issue."
+            @safe_error """Unrecognized format of __nvvm_reflect call:
+                           $(string(call))
+                           Unknown argument $reflect_arg. Please file an issue."""
+            continue
         end
 
         replace_uses!(call, reflect_val)
@@ -454,3 +482,4 @@ function nvvm_reflect!(fun::LLVM.Function)
     end
     return changed
 end
+NVVMReflectPass() = NewPMFunctionPass("custom-nvvm-reflect", nvvm_reflect!)
