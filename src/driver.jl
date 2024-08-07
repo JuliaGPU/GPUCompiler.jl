@@ -183,7 +183,7 @@ const __llvm_initialized = Ref(false)
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    has_deferred_jobs = toplevel && !only_entry && haskey(functions(ir), "deferred_codegen")
+    has_deferred_jobs = !only_entry && haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -225,6 +225,7 @@ const __llvm_initialized = Ref(false)
                                                                parent_job=job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
+                    merge!(jobs, dyn_meta.jobs)
                     @assert context(dyn_ir) == context(ir)
                     link!(ir, dyn_ir)
                     changed = true
@@ -387,7 +388,7 @@ const __llvm_initialized = Ref(false)
         @timeit_debug to "verification" verify(ir)
     end
 
-    return ir, (; entry, compiled)
+    return ir, (; entry, compiled, jobs)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
