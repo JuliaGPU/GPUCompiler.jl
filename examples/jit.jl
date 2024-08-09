@@ -123,11 +123,11 @@ function compiler(job)
         ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
         # So 1. serialize the module
         buf = convert(MemoryBuffer, ir)
-        buf, meta
+        buf, LLVM.name(meta.entry)
     end
 end
 
-function linker(_, (buf, meta))
+function linker(_, (buf, entry_fn))
     compiler = jit[]
     lljit = compiler.jit
     jd = JITDylib(lljit)
@@ -141,7 +141,7 @@ function linker(_, (buf, meta))
 
         LLVM.add!(lljit, jd, tsm)
     end
-    addr = LLVM.lookup(lljit, meta.entry)
+    addr = LLVM.lookup(lljit, entry_fn)
     pointer(addr)
 end
 
