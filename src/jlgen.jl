@@ -1,6 +1,5 @@
 # Julia compiler integration
 
-
 ## world age lookups
 
 # `tls_world_age` should be used to look up the current world age. in most cases, this is
@@ -11,6 +10,7 @@ if isdefined(Base, :tls_world_age)
 else
     tls_world_age() = ccall(:jl_get_tls_world_age, UInt, ())
 end
+
 
 ## looking up method instances
 
@@ -159,6 +159,7 @@ end
 
 
 ## code instance cache
+
 const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
 
 if !HAS_INTEGRATED_CACHE
@@ -318,7 +319,8 @@ else
     get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
 end
 
-struct GPUInterpreter <: CC.AbstractInterpreter
+abstract type AbstractGPUInterpreter <: CC.AbstractInterpreter end
+struct GPUInterpreter <: AbstractGPUInterpreter
     world::UInt
     method_table::GPUMethodTableView
 
@@ -433,6 +435,112 @@ function CC.concrete_eval_eligible(interp::GPUInterpreter,
         f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo)
     ret === false && return nothing
     return ret
+end
+
+
+## deferred compilation
+
+struct DeferredCallInfo <: CC.CallInfo
+    rt::DataType
+    info::CC.CallInfo
+end
+
+# recognize calls to gpuc.deferred and save DeferredCallInfo metadata
+function CC.abstract_call_known(interp::AbstractGPUInterpreter, @nospecialize(f),
+                                arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+                                max_methods::Int = CC.get_max_methods(interp, f, sv))
+    (; fargs, argtypes) = arginfo
+    if f === var"gpuc.deferred"
+        argvec = argtypes[2:end]
+        call = CC.abstract_call(interp, CC.ArgInfo(nothing, argvec), si, sv, max_methods)
+        callinfo = DeferredCallInfo(call.rt, call.info)
+        @static if VERSION < v"1.11.0-"
+            return CC.CallMeta(Ptr{Cvoid}, CC.Effects(), callinfo)
+        else
+            return CC.CallMeta(Ptr{Cvoid}, Union{}, CC.Effects(), callinfo)
+        end
+    end
+    return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f,
+        arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+        max_methods::Int)
+end
+
+# during inlining, refine deferred calls to gpuc.lookup foreigncalls
+const FlagType = VERSION >= v"1.11.0-" ? UInt32 : UInt8
+function CC.handle_call!(todo::Vector{Pair{Int,Any}}, ir::CC.IRCode, idx::CC.Int,
+                         stmt::Expr, info::DeferredCallInfo, flag::FlagType,
+                         sig::CC.Signature, state::CC.InliningState)
+    minfo = info.info
+    results = minfo.results
+    if length(results.matches) != 1
+        return nothing
+    end
+    match = only(results.matches)
+
+    # lookup the target mi with correct edge tracking
+    case = CC.compileable_specialization(match, CC.Effects(), CC.InliningEdgeTracker(state),
+                                         info)
+    @assert case isa CC.InvokeCase
+    @assert stmt.head === :call
+
+    args = Any[
+        "extern gpuc.lookup",
+        Ptr{Cvoid},
+        Core.svec(Any, Any, match.spec_types.parameters[2:end]...), # Must use Any for MethodInstance or ftype
+        0,
+        QuoteNode(:llvmcall),
+        case.invoke,
+        stmt.args[2:end]...
+    ]
+    stmt.head = :foreigncall
+    stmt.args = args
+    return nothing
+end
+
+struct DeferredEdges
+    edges::Vector{MethodInstance}
+end
+
+function find_deferred_edges(ir::CC.IRCode)
+    edges = MethodInstance[]
+    # XXX: can we add this instead in handle_call?
+    for stmt in ir.stmts
+        inst = stmt[:inst]
+        inst isa Expr || continue
+        expr = inst::Expr
+        if expr.head === :foreigncall &&
+            expr.args[1] == "extern gpuc.lookup"
+            deferred_mi = expr.args[6]
+            push!(edges, deferred_mi)
+        end
+    end
+    unique!(edges)
+    return edges
+end
+
+if VERSION >= v"1.11.0-"
+function CC.ipo_dataflow_analysis!(interp::AbstractGPUInterpreter, ir::CC.IRCode,
+                                   caller::CC.InferenceResult)
+    edges = find_deferred_edges(ir)
+    if !isempty(edges)
+        CC.stack_analysis_result!(caller, DeferredEdges(edges))
+    end
+    @invoke CC.ipo_dataflow_analysis!(interp::CC.AbstractInterpreter, ir::CC.IRCode,
+                                      caller::CC.InferenceResult)
+end
+else # v1.10
+# 1.10 doesn't have stack_analysis_result or ipo_dataflow_analysis
+function CC.finish(interp::AbstractGPUInterpreter, opt::CC.OptimizationState, ir::CC.IRCode,
+                   caller::CC.InferenceResult)
+    edges = find_deferred_edges(ir)
+    if !isempty(edges)
+        # HACK: we store the deferred edges in the argescapes field, which is invalid,
+        #       but nobody should be running EA on our results.
+        caller.argescapes = DeferredEdges(edges)
+    end
+    @invoke CC.finish(interp::CC.AbstractInterpreter, opt::CC.OptimizationState,
+                      ir::CC.IRCode, caller::CC.InferenceResult)
+end
 end
 
 
@@ -584,6 +692,30 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")
     end
 
+    # A poor man's worklist implementation.
+    # `compiled` contains a mapping from `mi->ci, func, specfunc`
+    # FIXME: Since we are disabling Julia internal caching we might
+    #        generate for the same mi multiple LLVM functions. 
+    # `outstanding` are the missing edges that were not compiled by `compile_method_instance`
+    # Currently these edges are generated through deferred codegen.
+    compiled = IdDict()
+    llvm_mod, outstanding = compile_method_instance(job, compiled)
+    worklist = outstanding
+    while !isempty(worklist)
+        source = pop!(worklist)
+        haskey(compiled, source) && continue # We have fulfilled the request already
+        # Create a new compiler job for this edge, reusing the config settings from the inital one
+        job2 = CompilerJob(source, job.config)
+        llvm_mod2, outstanding = compile_method_instance(job2, compiled)
+        append!(worklist, outstanding) # merge worklist with new outstanding edges
+        @assert context(llvm_mod) == context(llvm_mod2)
+        link!(llvm_mod, llvm_mod2)
+    end
+
+    return llvm_mod, compiled
+end
+
+function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDict{Any, Any})
     # populate the cache
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
@@ -594,7 +726,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
-    method_instances = []
+    method_instances = Any[]
     if Sys.ARCH == :x86 || Sys.ARCH == :x86_64
         function lookup_fun(mi, min_world, max_world)
             push!(method_instances, mi)
@@ -659,7 +791,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     end
 
     # process all compiled method instances
-    compiled = Dict()
     for mi in method_instances
         ci = ci_cache_lookup(cache, mi, job.world, job.world)
         ci === nothing && continue
@@ -693,13 +824,39 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
         # NOTE: it's not safe to store raw LLVM functions here, since those may get
         #       removed or renamed during optimization, so we store their name instead.
+        # FIXME: Enable this assert when we have a fully featured worklist
+        # @assert !haskey(compiled, mi)
         compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
+    end
+
+    # Collect the deferred edges
+    outstanding = Any[]
+    for mi in method_instances
+        !haskey(compiled, mi) && continue # Equivalent to ci_cache_lookup == nothing
+        ci = compiled[mi].ci
+        @static if VERSION >= v"1.11.0-"
+            edges = CC.traverse_analysis_results(ci) do @nospecialize result
+                return result isa DeferredEdges ? result : return
+            end
+        else
+            edges = ci.argescapes
+            if !(edges isa Union{Nothing, DeferredEdges})
+                edges = nothing
+            end
+        end
+        if edges !== nothing
+            for deferred_mi in (edges::DeferredEdges).edges
+                if !haskey(compiled, deferred_mi)
+                    push!(outstanding, deferred_mi)
+                end
+            end
+        end
     end
 
     # ensure that the requested method instance was compiled
     @assert haskey(compiled, job.source)
 
-    return llvm_mod, compiled
+    return llvm_mod, outstanding
 end
 
 # partially revert JuliaLangjulia#49391
