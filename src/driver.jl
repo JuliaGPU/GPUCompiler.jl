@@ -271,7 +271,7 @@ const __llvm_initialized = Ref(false)
         # global variables. this makes sure that the optimizer can, e.g.,
         # rewrite function signatures.
         if toplevel
-            preserved_gvs = collect(values(jobs))
+            preserved_gvs = [entry_fn]
             for gvar in globals(ir)
                 if linkage(gvar) == LLVM.API.LLVMExternalLinkage
                     push!(preserved_gvs, LLVM.name(gvar))
