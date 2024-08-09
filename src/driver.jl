@@ -344,10 +344,10 @@ const __llvm_initialized = Ref(false)
         if toplevel
             entry = finish_ir!(job, ir, entry)
 
-            for (job′, fn′) in jobs
-                job′ == job && continue
-                finish_ir!(job′, ir, functions(ir)[fn′])
-            end
+            # for (job′, fn′) in jobs
+            #     job′ == job && continue
+            #     finish_ir!(job′, ir, functions(ir)[fn′])
+            # end
         end
 
         # replace non-entry function definitions with a declaration
