@@ -110,57 +110,12 @@ function lower_throw_extra!(mod::LLVM.Module)
     return changed
 end
 
-function fix_alloca_addrspace!(fn::LLVM.Function)
-    changed = false
-    alloca_as = 5
-
-    for bb in blocks(fn)
-        for insn in instructions(bb)
-            if isa(insn, LLVM.AllocaInst)
-                ty = value_type(insn)
-                ety = eltype(ty)
-                addrspace(ty) == alloca_as && continue
-
-                new_insn = nothing
-                @dispose builder=IRBuilder() begin
-                    position!(builder, insn)
-                    _alloca = alloca!(builder, ety, name(insn))
-                    new_insn = addrspacecast!(builder, _alloca, ty)
-                end
-                replace_uses!(insn, new_insn)
-                unsafe_delete!(LLVM.parent(insn), insn)
-            end
-        end
-    end
-
-    return changed
-end
-
 function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
     trap_ft = LLVM.FunctionType(LLVM.VoidType())
     trap = if haskey(functions(mod), "llvm.trap")
         functions(mod)["llvm.trap"]
     else
         LLVM.Function(mod, "llvm.trap", trap_ft)
-    end
-    if Base.libllvm_version < v"9"
-        rl_ft = LLVM.FunctionType(LLVM.Int32Type(),
-                                  [LLVM.Int32Type()])
-        rl = if haskey(functions(mod), "llvm.amdgcn.readfirstlane")
-            functions(mod)["llvm.amdgcn.readfirstlane"]
-        else
-            LLVM.Function(mod, "llvm.amdgcn.readfirstlane", rl_ft)
-        end
-        # FIXME: Early versions of the AMDGPU target fail to skip machine
-        # blocks with certain side effects when EXEC==0, except when certain
-        # criteria are met within said block. We emit a v_readfirstlane_b32
-        # instruction here, as that is sufficient to trigger a skip. Without
-        # this, the target will only attempt to do a "masked branch", which
-        # only works on vector instructions (trap is a scalar instruction, and
-        # therefore it is executed even when EXEC==0).
-        rl_val = call!(builder, rl_ft, rl, [ConstantInt(Int32(32))])
-        rl_bc = inttoptr!(builder, rl_val, LLVM.PointerType(LLVM.Int32Type()))
-        store!(builder, rl_val, rl_bc)
     end
     call!(builder, trap_ft, trap)
 end
