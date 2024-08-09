@@ -250,7 +250,11 @@ end
                 close(io)
                 # atomic move
                 mkpath(dirname(path))
-                Base.rename(tmppath, path, force=true)
+                @static if VERSION >= v"1.12.0-DEV.1023"
+                    mv(tmppath, path; force=true)
+                else
+                    Base.rename(tmppath, path, force=true)
+                end
             end
         end
 
