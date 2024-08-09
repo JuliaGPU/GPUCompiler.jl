@@ -116,31 +116,39 @@ function get_trampoline(job)
     return addr
 end
 
-# import GPUCompiler: deferred_codegen_jobs
-# @generated function deferred_codegen(f::F, ::Val{tt}, ::Val{world}) where {F,tt,world}
-#     # manual version of native_job because we have a function type
-#     source = methodinstance(F, Base.to_tuple_type(tt), world)
-#     target = NativeCompilerTarget(; jlruntime=true, llvm_always_inline=true)
-#     # XXX: do we actually require the Julia runtime?
-#     #      with jlruntime=false, we reach an unreachable.
-#     params = TestCompilerParams()
-#     config = CompilerConfig(target, params; kernel=false)
-#     job = CompilerJob(source, config, world)
-#     # XXX: invoking GPUCompiler from a generated function is not allowed!
-#     #      for things to work, we need to forward the correct world, at least.
+const runtime_cache = Dict{Any, Ptr{Cvoid}}()
 
-#     addr = get_trampoline(job)
-#     trampoline = pointer(addr)
-#     id = Base.reinterpret(Int, trampoline)
+function compiler(job)
+    JuliaContext() do _
+        ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
+        # So 1. serialize the module
+        buf = convert(MemoryBuffer, ir)
+        buf, meta
+    end
+end
 
-#     deferred_codegen_jobs[id] = job
+function linker(_, (buf, meta))
+    compiler = jit[]
+    lljit = compiler.jit
+    jd = JITDylib(lljit)
 
-#     quote
-#         ptr = ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $trampoline)
-#         assume(ptr != C_NULL)
-#         return ptr
-#     end
-# end
+    # 2. deserialize and wrap by a ThreadSafeModule
+    ThreadSafeContext() do ts_ctx
+        tsm = context!(context(ts_ctx)) do
+            mod = parse(LLVM.Module, buf)
+            ThreadSafeModule(mod)
+        end
+
+        LLVM.add!(lljit, jd, tsm)
+    end
+    addr = LLVM.lookup(lljit, meta.entry)
+    pointer(addr)
+end
+
+function GPUCompiler.var"gpuc.deferred.with"(config::GPUCompiler.CompilerConfig{<:NativeCompilerTarget}, f::F, args...) where F
+    source = methodinstance(F, Base.to_tuple_type(typeof(args)))
+    GPUCompiler.cached_compilation(runtime_cache, source, config, compiler, linker)::Ptr{Cvoid}
+end
 
 @generated function abi_call(f::Ptr{Cvoid}, rt::Type{RT}, tt::Type{T}, func::F, args::Vararg{Any, N}) where {T, RT, F, N}
     argtt    = tt.parameters[1]
@@ -226,7 +234,12 @@ end
     rt = Core.Compiler.return_type(f, tt)
     # FIXME: Horrible idea, have `var"gpuc.deferred"` actually do the work
     #        But that will only be needed here, and in Enzyme...
-    ptr = GPUCompiler.var"gpuc.deferred"(f, args...)
+    target = NativeCompilerTarget(; jlruntime=true, llvm_always_inline=true)
+    # XXX: do we actually require the Julia runtime?
+    #      with jlruntime=false, we reach an unreachable.
+    params = TestCompilerParams()
+    config = CompilerConfig(target, params; kernel=false)
+    ptr = GPUCompiler.var"gpuc.deferred.with"(config, f, args...)
     abi_call(ptr, rt, tt, f, args...)
 end
 

@@ -41,7 +41,19 @@ end
 
 ## deferred compilation
 
+"""
+    var"gpuc.deferred"(f, args...)::Ptr{Cvoid}
+
+As if we were to call `f(args...)` but instead we are
+putting down a marker and return a function pointer to later
+call.
+"""
 function var"gpuc.deferred" end
+
+"""
+    var"gpuc.deferred,with"(config::CompilerConfig, f, args...)::Ptr{Cvoid}
+"""
+function var"gpuc.deferred.with" end
 
 ## compiler entrypoint
 
