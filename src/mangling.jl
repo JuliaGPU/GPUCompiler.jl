@@ -83,8 +83,26 @@ function mangle_param(t, substitutions=String[])
         end
 
         str
-    elseif isa(t, Integer)
-        t > 0 ? "Li$(t)E" : "Lin$(abs(t))E"
+    elseif isa(t, Union{Bool, Cchar, Cuchar, Cshort, Cushort, Cint, Cuint, Clong, Culong, Clonglong, Culonglong, Int128, UInt128})
+        ts = t isa Bool       ? 'b' : # bool
+             t isa Cchar      ? 'a' : # signed char
+             t isa Cuchar     ? 'h' : # unsigned char
+             t isa Cshort     ? 's' : # short
+             t isa Cushort    ? 't' : # unsigned short
+             t isa Cint       ? 'i' : # int
+             t isa Cuint      ? 'j' : # unsigned int
+             t isa Clong      ? 'l' : # long
+             t isa Culong     ? 'm' : # unsigned long
+             t isa Clonglong  ? 'x' : # long long, __int64
+             t isa Culonglong ? 'y' : # unsigned long long, __int64
+             t isa Int128     ? 'n' : # __int128
+             t isa UInt128    ? 'o' : # unsigned __int128
+             error("Invalid type")
+        tn = string(abs(t), base=10)
+        if t < 0
+            tn = 'n'*tn
+        end
+        "L$(ts)$(tn)E"
     else
         tn = safe_name(t)   # TODO: actually does support digits...
         if startswith(tn, r"\d")
