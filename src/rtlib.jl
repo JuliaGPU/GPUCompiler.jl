@@ -153,7 +153,11 @@ const runtime_lock = ReentrantLock()
             temp_path, io = mktemp(dirname(path); cleanup=false)
             write(io, lib)
             close(io)
-            Base.rename(temp_path, path; force=true)
+            @static if VERSION >= v"1.12.0-DEV.1023"
+                mv(temp_path, path; force=true)
+            else
+                Base.rename(temp_path, path, force=true)
+            end
         end
 
         return lib

@@ -244,13 +244,18 @@ end
         @static if VERSION >= v"1.11.0-"
             if !ondisk_hit && path !== nothing && disk_cache_enabled()
                 @debug "Writing out on-disk cache" job path
-                tmppath, io = mktemp(;cleanup=false)
+                mkpath(dirname(path))
                 entry = DiskCacheEntry(src.specTypes, cfg, asm)
+
+                # atomic write to disk
+                tmppath, io = mktemp(dirname(path); cleanup=false)
                 serialize(io, entry)
                 close(io)
-                # atomic move
-                mkpath(dirname(path))
-                Base.rename(tmppath, path, force=true)
+                @static if VERSION >= v"1.12.0-DEV.1023"
+                    mv(tmppath, path; force=true)
+                else
+                    Base.rename(tmppath, path, force=true)
+                end
             end
         end
 
