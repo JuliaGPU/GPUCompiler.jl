@@ -1117,12 +1117,13 @@ function replace_unreachable!(@nospecialize(job::CompilerJob), f::LLVM.Function)
         exit_block = last(exit_blocks)
         ret = terminator(exit_block)
 
-        if first(instructions(exit_block)) == ret && isempty(operands(ret))
-            # if the exit block contains only `ret void`, we can branch to it directly.
+        # create a return block with only the return instruction, so that we only have to
+        # care about any values returned, and not about any other SSA value in the block.
+        if first(instructions(exit_block)) == ret
+            # we can reuse the exit block if it only contains the return
             return_block = exit_block
         else
-            # split the exit block right before the ret, so that we only have to care about
-            # the value that's returned, and not about any other SSA value in the block.
+            # split the exit block right before the ret
             return_block = BasicBlock(f, "ret")
             move_after(return_block, exit_block)
 
@@ -1134,16 +1135,19 @@ function replace_unreachable!(@nospecialize(job::CompilerJob), f::LLVM.Function)
             delete!(exit_block, ret)
             position!(builder, return_block)
             insert!(builder, ret)
+        end
 
-            # if we're returning a value, insert a phi and update the return
-            if !isempty(operands(ret))
-                position!(builder, ret)
-                # XXX: support aggregate returns?
-                val = only(operands(ret))
-                phi = phi!(builder, value_type(val))
-                push!(incoming(phi), (val, exit_block))
-                operands(ret)[1] = phi
+        # when returning a value, add a phi node to the return block, so that we can later
+        # add incoming undef values when branching from `unreachable` blocks
+        if !isempty(operands(ret))
+            position!(builder, ret)
+            # XXX: support aggregate returns?
+            val = only(operands(ret))
+            phi = phi!(builder, value_type(val))
+            for pred in predecessors(return_block)
+                push!(incoming(phi), (val, pred))
             end
+            operands(ret)[1] = phi
         end
 
         # replace the unreachable with a branch to the return block
