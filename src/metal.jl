@@ -1115,9 +1115,10 @@ function replace_unreachable!(@nospecialize(job::CompilerJob), f::LLVM.Function)
         # if we have multiple exit blocks, take the last one, which is hopefully the least
         # divergent (assuming divergent control flow is the root of the problem here).
         exit_block = last(exit_blocks)
-
         ret = terminator(exit_block)
-        if first(instructions(exit_block)) == ret
+
+        if first(instructions(exit_block)) == ret && isempty(operands(ret))
+            # if the exit block contains only `ret void`, we can branch to it directly.
             return_block = exit_block
         else
             # split the exit block right before the ret, so that we only have to care about
@@ -1125,22 +1126,24 @@ function replace_unreachable!(@nospecialize(job::CompilerJob), f::LLVM.Function)
             return_block = BasicBlock(f, "ret")
             move_after(return_block, exit_block)
 
-            # emit a return
+            # emit a branch
+            position!(builder, ret)
+            br!(builder, return_block)
+
+            # move the return
+            delete!(exit_block, ret)
             position!(builder, return_block)
-            if isempty(operands(ret))
-                ret!(builder)
-            else
+            insert!(builder, ret)
+
+            # if we're returning a value, insert a phi and update the return
+            if !isempty(operands(ret))
+                position!(builder, ret)
                 # XXX: support aggregate returns?
                 val = only(operands(ret))
                 phi = phi!(builder, value_type(val))
                 push!(incoming(phi), (val, exit_block))
-                ret!(builder, phi)
+                operands(ret)[1] = phi
             end
-
-            # replace with a branch
-            position!(builder, ret)
-            br!(builder, return_block)
-            unsafe_delete!(exit_block, ret)
         end
 
         # replace the unreachable with a branch to the return block
