@@ -2,7 +2,6 @@
 
 using GPUCompiler
 
-
 # create a PTX-based test compiler, and generate reflection methods for it
 
 include("runtime.jl")

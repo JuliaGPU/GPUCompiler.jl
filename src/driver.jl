@@ -260,6 +260,12 @@ const __llvm_initialized = Ref(false)
         end
     end
 
+    for (name, plugin) in PLUGINS
+        if plugin.finalize_module !== nothing
+            plugin.finalize_module(job, compiled, ir)
+        end
+    end
+
     @timeit_debug to "IR post-processing" begin
         # mark everything internal except for entrypoints and any exported
         # global variables. this makes sure that the optimizer can, e.g.,
@@ -335,7 +341,7 @@ const __llvm_initialized = Ref(false)
         # we want to finish the module after optimization, so we cannot do so
         # during deferred code generation. Instead, process the merged module
         # from all the jobs here.
-        if toplevel
+        if toplevel # TODO: We should be able to remove this now
             entry = finish_ir!(job, ir, entry)
 
             # for (job′, fn′) in jobs

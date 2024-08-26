@@ -3,7 +3,7 @@
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=1)
     tm = llvm_machine(job.config.target)
 
-    global current_job
+    global current_job # ScopedValue?
     current_job = job
 
     @dispose pb=NewPMPassBuilder() begin
@@ -14,6 +14,12 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
         register!(pb, LowerKernelStatePass())
         register!(pb, CleanupKernelStatePass())
 
+        for (name, plugin) in PLUGINS
+            if plugin.pipeline_callback !== nothing
+                register!(pb, CallbackPass(name, plugin.pipeline_callback))
+            end
+        end
+
         add!(pb, NewPMModulePassManager()) do mpm
             buildNewPMPipeline!(mpm, job, opt_level)
         end
@@ -22,6 +28,20 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
     optimize_module!(job, mod)
     run!(DeadArgumentEliminationPass(), mod, tm)
     return
+end
+
+struct Plugin
+    finalize_module # f(@nospecialize(job), compiled, mod::LLVM,Module)
+    pipeline_callback # f(@nospecialize(job), intrinsic, mod::LLVM.Module)
+end
+
+# TODO: Priority heap to provide order between different plugins
+const PLUGINS = Dict{String, Plugin}()
+function register_plugin!(name::String, check::Bool=true; finalize_module = nothing, pipeline_callback = nothing)
+    if check && haskey(PLUGINS, name)
+        error("GPUCompiler plugin with name $name is already registered")
+    end
+    PLUGINS[name] = Plugin(finalize_module, pipeline_callback)
 end
 
 function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
@@ -39,6 +59,11 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
         end
         if isdebug(:optim)
             add!(fpm, WarnMissedTransformationsPass())
+        end
+    end
+    for (name, plugin) in PLUGINS
+        if plugin.pipeline_callback !== nothing
+            add!(mpm, CallbackPass(name, plugin.pipeline_callback))
         end
     end
     buildIntrinsicLoweringPipeline(mpm, job, opt_level)
@@ -423,3 +448,17 @@ function lower_ptls!(mod::LLVM.Module)
     return changed
 end
 LowerPTLSPass() = NewPMModulePass("GPULowerPTLS", lower_ptls!)
+
+
+function callback_pass!(name, callback::F, mod::LLVM.Module) where F
+    job = current_job::CompilerJob
+    changed = false
+
+    if haskey(functions(mod), name)
+        marker = functions(mod)[name]
+        changed = callback(job, marker, mod)
+    end
+    return changed
+end
+
+CallbackPass(name, callback) = NewPMModulePass("CallbackPass<$name>", (mod)->callback_pass!(name, callback, mod))
