@@ -31,9 +31,11 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         ft = convert(LLVM.FunctionType, rt)
         f = LLVM.Function(mod, rt.llvm_name, ft)
     end
-    if !isdeclaration(f) && rt.name !== :gc_pool_alloc
+    if !isdeclaration(f) && (rt.name !== :gc_pool_alloc && rt.name !== :report_exception)
         # XXX: uses of the gc_pool_alloc intrinsic can be introduced _after_ the runtime
         #      is linked, as part of the lower_gc_frame! optimization pass.
+        # XXX: report_exception can also be used after the runtime is linked during 
+        #      CUDA/Enzyme nested compilation
         error("Calling an intrinsic function that clashes with an existing definition: ",
                string(ft), " ", rt.name)
     end
