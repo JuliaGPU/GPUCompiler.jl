@@ -250,6 +250,15 @@ end
     @test "We did not crash!" != ""
 end
 
+@testset "Pipeline callbacks" begin
+    function kernel(x)
+        PTX.mark(x)
+        return
+    end
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Int}))
+    @test !occursin("gpucompuler.mark", ir)
+end
+
 @testset "exception arguments" begin
     function kernel(a)
         unsafe_store!(a, trunc(Int, unsafe_load(a)))

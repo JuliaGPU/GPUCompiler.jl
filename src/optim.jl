@@ -3,7 +3,7 @@
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=1)
     tm = llvm_machine(job.config.target)
 
-    global current_job
+    global current_job # ScopedValue?
     current_job = job
 
     @dispose pb=NewPMPassBuilder() begin
@@ -24,6 +24,8 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
     return
 end
 
+const PIPELINE_CALLBACKS = Dict{String, Any}()
+
 function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     buildEarlySimplificationPipeline(mpm, job, opt_level)
     add!(mpm, AlwaysInlinerPass())
@@ -40,6 +42,9 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
         if isdebug(:optim)
             add!(fpm, WarnMissedTransformationsPass())
         end
+    end
+    for (name, callback) in PIPELINE_CALLBACKS
+        add!(mpm, CallbackPass(name, callback))
     end
     buildIntrinsicLoweringPipeline(mpm, job, opt_level)
     buildCleanupPipeline(mpm, job, opt_level)
@@ -423,3 +428,17 @@ function lower_ptls!(mod::LLVM.Module)
     return changed
 end
 LowerPTLSPass() = NewPMModulePass("GPULowerPTLS", lower_ptls!)
+
+
+function callback_pass!(name, callback::F, mod::LLVM.Module) where F
+    job = current_job::CompilerJob
+    changed = false
+
+    if haskey(functions(mod), name)
+        marker = functions(mod)[name]
+        changed = callback(job, marker, mod)
+    end
+    return changed
+end
+
+CallbackPass(name, callback) = NewPMModulePass("CallbackPass<$name>", (mod)->callback_pass!(name, callback, mod))

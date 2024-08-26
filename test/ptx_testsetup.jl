@@ -16,6 +16,28 @@ end
 GPUCompiler.kernel_state_type(@nospecialize(job::PTXCompilerJob)) = PTXKernelState
 @inline @generated kernel_state() = GPUCompiler.kernel_state_value(PTXKernelState)
 
+function mark(x)
+    ccall("gpucompiler.mark", llvcmall, Nothing, (Int,), x)
+end
+
+function remove_mark!(@nospecialize(job), intrinsic, mod::LLVM.Module)
+    changed = false
+
+    for use in uses(intrinsic)
+        val = user(use)
+        if isempty(uses(val))
+            unsafe_delete!(LLVM.parent(val), val)
+            changed = true
+        else
+            # the validator will detect this
+        end
+    end
+
+    return changed
+end
+
+GPUCompiler.PIPELINE_CALLBACKS["gpucompiler.mark"] = remove_mark!
+
 # a version of the test runtime that has some side effects, loading the kernel state
 # (so that we can test if kernel state arguments are appropriately optimized away)
 module PTXTestRuntime
