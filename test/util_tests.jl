@@ -40,6 +40,7 @@ end
         GPUCompiler.@safe_info "safe_info"
         GPUCompiler.@safe_warn "safe_warn"
         GPUCompiler.@safe_error "safe_error"
+        GPUCompiler.@safe_show "safe_show"
     end
 
     @test begin
@@ -54,10 +55,16 @@ end
                 sleep(0.1)
                 @error "error"
                 sleep(0.1)
+                @show "show"
+                sleep(0.1)
             end
+            pipe = Pipe()
+            Base.link_pipe!(pipe; reader_supports_async=true, writer_supports_async=true)
+            Threads.@spawn print(stdout, read(pipe, String))
             Threads.@spawn Logging.with_logger(YieldingLogger()) do
                 sleep(0.1)
-                f()
+                redirect_stdout(f, pipe)
+                close(pipe)
             end
         end
         true
