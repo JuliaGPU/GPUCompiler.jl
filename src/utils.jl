@@ -61,9 +61,11 @@ for level in [:debug, :info, :warn, :error]
             macrocall.args[1] = Symbol($"@$level")
             quote
                 io = IOContext(Core.stderr, :color=>STDERR_HAS_COLOR[])
-                # global_logger() is more likely to have a sane min_level than
-                # current_logger(), as the latter is more likely to be a custom logger that
-                # relies solely on Logging.shouldlog() for filtering
+                # ideally we call Logging.shouldlog() here, but that is likely to yield,
+                # so instead we rely on the min_enabled_level of the logger.
+                # in the case of custom loggers that may be an issue, because,
+                # they may expect Logging.shouldlog() getting called, so we use
+                # the global_logger()'s min level which is more likely to be usable.
                 min_level = _invoked_min_enabled_level(global_logger())
                 with_logger(Logging.ConsoleLogger(io, min_level)) do
                     $(esc(macrocall))
