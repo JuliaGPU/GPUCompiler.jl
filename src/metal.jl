@@ -134,13 +134,6 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
 
-    # get rid of unreachable control flow (JuliaLang/Metal.jl#370)
-    if job.config.target.macos < v"15"
-        for f in functions(mod)
-            replace_unreachable!(job, f)
-        end
-    end
-
     # add kernel metadata
     if job.config.kernel
         entry = add_address_spaces!(job, mod, entry)
@@ -148,9 +141,18 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         add_argument_metadata!(job, mod, entry)
 
         add_module_metadata!(job, mod)
+    end
 
-        # JuliaLang/Metal.jl#113
-        hide_noreturn!(mod)
+    # JuliaLang/Metal.jl#113
+    hide_noreturn!(mod)
+
+    # get rid of unreachable control flow (JuliaLang/Metal.jl#370).
+    # note that this currently works in tandem with the `hide_noreturn!` pass above,
+    # as `replace_unreachable!` doesn't handle functions that _only_ contain `unreachable`.
+    if job.config.target.macos < v"15"
+        for f in functions(mod)
+            replace_unreachable!(job, f)
+        end
     end
 
     # lower LLVM intrinsics that AIR doesn't support
