@@ -46,8 +46,36 @@ using Logging
 
 const STDERR_HAS_COLOR = Ref{Bool}(false)
 
+struct SafeLogger{L<:Logging.AbstractLogger} <: Logging.AbstractLogger
+    current_logger::L
+    safe_logger::ConsoleLogger
+
+    function SafeLogger(current_logger)
+        io = IOContext(Core.stderr, :color => STDERR_HAS_COLOR[])
+        safe_logger = ConsoleLogger(io, _invoked_min_enabled_level(current_logger))
+        return new{typeof(current_logger)}(current_logger, safe_logger)
+    end
+end
+
+function Logging.handle_message(logger::SafeLogger, args...)
+    return Logging.handle_message(logger.safe_logger, args...)
+end
+
+function Logging.shouldlog(logger::SafeLogger, args...)
+    return _invoked_shouldlog(logger.current_logger, args...)
+end
+
+function Logging.min_enabled_level(logger::SafeLogger)
+    return Logging.min_enabled_level(logger.safe_logger)
+end
+
 # Prevent invalidation when packages define custom loggers
 # Using invoke in combination with @nospecialize eliminates backedges to these methods
+function _invoked_shouldlog(@nospecialize(logger), @nospecialize(args...))
+    types = Tuple{typeof(logger), typeof.(args)...}
+    return invoke(Logging.shouldlog, types, logger, args...)::Bool
+end
+
 function _invoked_min_enabled_level(@nospecialize(logger))
     return invoke(Logging.min_enabled_level, Tuple{typeof(logger)}, logger)::LogLevel
 end
@@ -60,13 +88,9 @@ for level in [:debug, :info, :warn, :error]
             # NOTE: `@placeholder` in order to avoid hard-coding @__LINE__ etc
             macrocall.args[1] = Symbol($"@$level")
             quote
-                old_logger = global_logger()
-                io = IOContext(Core.stderr, :color=>STDERR_HAS_COLOR[])
-                min_level = _invoked_min_enabled_level(old_logger)
-                global_logger(Logging.ConsoleLogger(io, min_level))
-                ret = $(esc(macrocall))
-                global_logger(old_logger)
-                ret
+                with_logger(SafeLogger(current_logger())) do
+                    $(esc(macrocall))
+                end
             end
         end
     end
