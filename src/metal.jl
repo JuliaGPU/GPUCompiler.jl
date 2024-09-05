@@ -136,9 +136,6 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
 
     # add kernel metadata
     if job.config.kernel
-        add_input_arguments!(job, mod, entry)
-        entry = LLVM.functions(mod)[entry_fn]
-        
         entry = add_address_spaces!(job, mod, entry)
 
         add_argument_metadata!(job, mod, entry)
