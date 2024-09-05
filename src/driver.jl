@@ -178,12 +178,15 @@ const __llvm_initialized = Ref(false)
         entry = functions(ir)[entry_fn]
     end
 
+    has_deferred_jobs = toplevel && !only_entry && haskey(functions(ir), "deferred_codegen")
+
     # finalize the current module. this needs to happen before linking deferred modules,
     # since those modules have been finalized themselves, and we don't want to re-finalize.
-    entry = finish_module!(job, ir, entry)
+    if !has_deferred_jobs
+        entry = finish_module!(job, ir, entry)
+    end
 
     # deferred code generation
-    has_deferred_jobs = toplevel && !only_entry && haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -256,6 +259,10 @@ const __llvm_initialized = Ref(false)
         # all deferred compilations should have been resolved
         @compiler_assert isempty(uses(dyn_marker)) job
         unsafe_delete!(ir, dyn_marker)
+    end
+
+    if has_deferred_jobs
+        entry = finish_module!(job, ir, entry)
     end
 
     if libraries

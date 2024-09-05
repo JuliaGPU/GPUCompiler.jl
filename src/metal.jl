@@ -461,11 +461,19 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # iteratively discover functions that use an intrinsic or any function calling it
         worklist_length = length(worklist)
         additions = LLVM.Function[]
-        for f in worklist, use in uses(f)
-            inst = user(use)::Instruction
-            bb = LLVM.parent(inst)
-            new_f = LLVM.parent(bb)
-            in(new_f, worklist) || push!(additions, new_f)
+        for f in worklist
+            recursive_uses = collect(uses(f))
+            for use in recursive_uses
+                val = user(use)
+                if val isa LLVM.ConstantExpr
+                    append!(recursive_uses, uses(val))
+                    continue
+                end
+                inst = val::Instruction
+                bb = LLVM.parent(inst)
+                new_f = LLVM.parent(bb)
+                in(new_f, worklist) || push!(additions, new_f)
+            end
         end
         for f in additions
             push!(worklist, f)
@@ -533,7 +541,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     end
 
     # update other uses of the old function, modifying call sites to pass the arguments
-    function rewrite_uses!(f, new_f)
+    function rewrite_uses!(f, new_f, fty)
         # update uses
         @dispose builder=IRBuilder() begin
             for use in uses(f)
@@ -543,7 +551,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     # forward the arguments
                     position!(builder, val)
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, function_type(new_f), new_f,
+                        call!(builder, fty, new_f,
                               [arguments(val)..., parameters(callee_f)[end-nargs+1:end]...],
                               operand_bundles(val))
                     else
@@ -555,12 +563,22 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
                     unsafe_delete!(LLVM.parent(val), val)
-                elseif val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMBitCast
+                elseif val isa LLVM.ConstantExpr && (opcode(val) == LLVM.API.LLVMBitCast ||
+                                                     opcode(val) == LLVM.API.LLVMPtrToInt ||
+                                                     opcode(val) == LLVM.API.LLVMIntToPtr)
                     # XXX: why isn't this caught by the value materializer above?
                     target = operands(val)[1]
                     @assert target == f
-                    new_val = LLVM.const_bitcast(new_f, value_type(val))
-                    rewrite_uses!(val, new_val)
+                    
+                    new_val = if opcode(val) == LLVM.API.LLVMBitCast
+                        LLVM.const_bitcast(new_f, value_type(val))
+                    elseif opcode(val) == LLVM.API.LLVMPtrToInt
+                        LLVM.const_ptrtoint(new_f, value_type(val))
+                    elseif opcode(val) == LLVM.API.LLVMIntToPtr
+                        LLVM.const_inttoptr(new_f, value_type(val))
+                    end
+                    
+                    rewrite_uses!(val, new_val, fty)
                     # we can't simply replace this constant expression, as it may be used
                     # as a call, taking arguments (so we need to rewrite it to pass the input arguments)
 
@@ -569,6 +587,31 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     if isempty(uses(val))
                         LLVM.unsafe_destroy!(val)
                     end
+                elseif val isa LLVM.Instruction && (opcode(val) == LLVM.API.LLVMBitCast ||
+                                                    opcode(val) == LLVM.API.LLVMPtrToInt ||
+                                                    opcode(val) == LLVM.API.LLVMIntToPtr) &&
+                       all(isa.(operands(val::Instruction), LLVM.ConstantExpr))
+                    # XXX: why isn't this caught by the value materializer above?
+                    target = operands(val)[1]
+                    @assert target == f
+                    
+                    new_val = if opcode(val) == LLVM.API.LLVMBitCast
+                       LLVM.const_bitcast(new_f, value_type(val))
+                    elseif opcode(val) == LLVM.API.LLVMPtrToInt
+                        LLVM.const_ptrtoint(new_f, value_type(val))
+                    elseif opcode(val) == LLVM.API.LLVMIntToPtr
+                        LLVM.const_inttoptr(new_f, value_type(val))
+                    end
+                    
+                    rewrite_uses!(val, new_val, fty)
+                    # we can't simply replace this constant expression, as it may be used
+                    # as a call, taking arguments (so we need to rewrite it to pass the input arguments)
+
+                    # drop the old constant if it is unused
+                    # XXX: can we do this differently?
+                    if isempty(uses(val))
+                        unsafe_delete!(LLVM.parent(val), val)
+                    end
                 else
                     error("Cannot rewrite unknown use of function: $val")
                 end
@@ -576,7 +619,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         end
     end
     for (f, new_f) in workmap
-        rewrite_uses!(f, new_f)
+        rewrite_uses!(f, new_f, function_type(new_f))
         @assert isempty(uses(f))
         unsafe_delete!(mod, f)
     end
