@@ -1,6 +1,10 @@
 # Julia compiler integration
 
 
+include("compiler_plugin.jl")
+import .CCMixin
+import .CCMixin: current_method_table
+
 ## world age lookups
 
 # `tls_world_age` should be used to look up the current world age. in most cases, this is
@@ -318,7 +322,7 @@ else
     get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
 end
 
-struct GPUInterpreter <: CC.AbstractInterpreter
+struct GPUInterpreter <: CCMixin.AbstractGPUInterpreter
     world::UInt
     method_table::GPUMethodTableView
 

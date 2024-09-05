@@ -323,6 +323,19 @@ end
 end
 end # testitem
 
+@testitem "Compiler Plugins" setup=[PTX, CompilerPlugins] begin
+    function kernel(ptr, a, b, c)
+        unsafe_store!(ptr, a*b+c)
+        return
+    end
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Ptr{Float32}, Float32, Float32, Float32}))
+    @test occursin("fmul float", ir)
+    @test occursin("fadd float", ir)
+
+    
+
+end
+
 @testitem "PTX precompile" setup=[Precompile,] begin
 precompile_test_harness("Inference caching") do load_path
     # Write out the PTX test setup as a micro package
