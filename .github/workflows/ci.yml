@@ -70,7 +70,7 @@ jobs:
           arch: ${{ matrix.arch }}
 
       # set-up packages
-      - julia-actions/cache@v2
+      - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
 
       - name: Run tests
