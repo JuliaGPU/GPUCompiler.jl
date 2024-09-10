@@ -82,7 +82,7 @@ function lower_throw_extra!(mod::LLVM.Module)
                     # remove the call
                     nargs = length(parameters(f))
                     call_args = arguments(call)
-                    unsafe_delete!(LLVM.parent(call), call)
+                    erase!(LLVM.parent(call), call)
 
                     # HACK: kill the exceptions' unused arguments
                     for arg in call_args
@@ -90,11 +90,11 @@ function lower_throw_extra!(mod::LLVM.Module)
                         if isa(arg, LLVM.AddrSpaceCastInst)
                             cast = arg
                             arg = first(operands(cast))
-                            isempty(uses(cast)) && unsafe_delete!(LLVM.parent(cast), cast)
+                            isempty(uses(cast)) && erase!(cast)
                         end
 
                         if isa(arg, LLVM.Instruction) && isempty(uses(arg))
-                            unsafe_delete!(LLVM.parent(arg), arg)
+                            erase!(arg)
                         end
                     end
 

@@ -135,7 +135,7 @@ steps:
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("Enzyme"; coverage=true)'
+                Pkg.test("Enzyme"; coverage=true, julia_args=`--depwarn=no`)'
     agents:
       queue: "juliagpu"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft

@@ -290,7 +290,7 @@ function add_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module, 
     fn = LLVM.name(f)
     @assert isempty(uses(f))
     replace_metadata_uses!(f, new_f)
-    unsafe_delete!(mod, f)
+    erase!(f)
     LLVM.name!(new_f, fn)
 
     # clean-up after this pass (which runs after optimization)
@@ -384,7 +384,7 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
-    unsafe_delete!(mod, f)
+    erase!(f)
     LLVM.name!(new_f, fn)
 
     return new_f
@@ -432,7 +432,7 @@ function argument_type_name(typ)
     elseif typ isa LLVM.IntegerType && width(typ) == 32
         "uint"
     elseif typ isa LLVM.VectorType
-         argument_type_name(eltype(typ)) * string(Int(size(typ)))
+         argument_type_name(eltype(typ)) * string(Int(length(typ)))
     else
         error("Cannot encode unknown type `$typ`")
     end
@@ -551,7 +551,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
-                    unsafe_delete!(LLVM.parent(val), val)
+                    erase!(val)
                 elseif val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMBitCast
                     # XXX: why isn't this caught by the value materializer above?
                     target = operands(val)[1]
@@ -575,7 +575,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     for (f, new_f) in workmap
         rewrite_uses!(f, new_f)
         @assert isempty(uses(f))
-        unsafe_delete!(mod, f)
+        erase!(f)
     end
 
     # replace uses of the intrinsics with references to the input arguments
@@ -591,10 +591,10 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             end
 
             @assert isempty(uses(val))
-            unsafe_delete!(LLVM.parent(val), val)
+            erase!(val)
         end
         @assert isempty(uses(intr))
-        unsafe_delete!(mod, intr)
+        erase!(intr)
     end
 
     return
@@ -820,7 +820,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             "llvm.assume"
         ])
         if intr in unsupported_intrinsics
-            unsafe_delete!(bb, call)
+            erase!(call)
             changed = true
         end
 
@@ -854,7 +854,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 elseif typ == LLVM.DoubleType()
                     "f64"
                 elseif typ isa LLVM.VectorType
-                    "v$(size(typ))$(type_suffix(eltype(typ)))"
+                    "v$(length(typ))$(type_suffix(eltype(typ)))"
                 else
                     error("Unsupported intrinsic type: $typ")
                 end
@@ -877,7 +877,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
                 new_value = call!(builder, call_ft, new_intr, arguments(call))
                 replace_uses!(call, new_value)
-                unsafe_delete!(bb, call)
+                erase!(call)
                 changed = true
             end
         end
@@ -915,7 +915,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
                 new_value = bitcast!(builder, new_value, typ)
                 replace_uses!(call, new_value)
-                unsafe_delete!(bb, call)
+                erase!(call)
                 changed = true
             end
         end
@@ -1032,7 +1032,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
                 new_value = call!(builder, call_ft, new_intr, arguments(call))
                 replace_uses!(call, new_value)
-                unsafe_delete!(bb, call)
+                erase!(call)
                 changed = true
             end
         end
@@ -1134,7 +1134,7 @@ function replace_unreachable!(@nospecialize(job::CompilerJob), f::LLVM.Function)
             br!(builder, return_block)
 
             # move the return
-            delete!(exit_block, ret)
+            remove!(ret)
             position!(builder, return_block)
             insert!(builder, ret)
         end
@@ -1159,13 +1159,13 @@ function replace_unreachable!(@nospecialize(job::CompilerJob), f::LLVM.Function)
             # remove preceding traps to avoid reconstructing unreachable control flow
             prev = previnst(unreachable)
             if isa(prev, LLVM.CallInst) && name(called_operand(prev)) == "llvm.trap"
-                unsafe_delete!(bb, prev)
+                erase!(prev)
             end
 
             # replace the unreachable with a branch to the return block
             position!(builder, unreachable)
             br!(builder, return_block)
-            unsafe_delete!(bb, unreachable)
+            erase!(unreachable)
 
             # patch up any phi nodes in the return block
             for inst in instructions(return_block)

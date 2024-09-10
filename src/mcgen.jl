@@ -51,7 +51,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
                     elseif isa(val, LLVM.LoadInst)
                         # resolve
                         replace_uses!(val, dereferenced)
-                        unsafe_delete!(LLVM.parent(val), val)
+                        erase!(val)
                         # FIXME: iterator invalidation?
                         changed = true
                     end
