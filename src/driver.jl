@@ -248,14 +248,14 @@ const __llvm_initialized = Ref(false)
                         end
                         replace_uses!(call, fptr)
                     end
-                    unsafe_delete!(LLVM.parent(call), call)
+                    erase!(call)
                 end
             end
         end
 
         # all deferred compilations should have been resolved
         @compiler_assert isempty(uses(dyn_marker)) job
-        unsafe_delete!(ir, dyn_marker)
+        erase!(dyn_marker)
     end
 
     if libraries

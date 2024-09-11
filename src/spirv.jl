@@ -183,13 +183,13 @@ function rm_trap!(mod::LLVM.Module)
         for use in uses(trap)
             val = user(use)
             if isa(val, LLVM.CallInst)
-                unsafe_delete!(LLVM.parent(val), val)
+                erase!(val)
                 changed = true
             end
         end
 
         @compiler_assert isempty(uses(trap)) job
-        unsafe_delete!(mod, trap)
+        erase!(trap)
     end
 
     end
@@ -208,7 +208,7 @@ function rm_freeze!(mod::LLVM.Module)
             orig = first(operands(inst))
             replace_uses!(inst, orig)
             @compiler_assert isempty(uses(inst)) job
-            unsafe_delete!(bb, inst)
+            erase!(inst)
             changed = true
         end
     end
@@ -305,7 +305,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     fn = LLVM.name(f)
     @assert isempty(uses(f))
     replace_metadata_uses!(f, new_f)
-    unsafe_delete!(mod, f)
+    erase!(f)
     LLVM.name!(new_f, fn)
 
     return new_f

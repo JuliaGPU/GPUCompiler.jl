@@ -324,10 +324,10 @@ function cpu_features!(mod::LLVM.Module)
         # remove the intrinsic and its uses
         for val in materialized
             @assert isempty(uses(val))
-            unsafe_delete!(LLVM.parent(val), val)
+            erase!(val)
         end
         @assert isempty(uses(f))
-        unsafe_delete!(mod, f)
+        erase!(f)
     end
 
     return changed
@@ -368,7 +368,7 @@ function lower_gc_frame!(fun::LLVM.Function)
                 replace_uses!(call, ptr)
             end
 
-            unsafe_delete!(LLVM.parent(call), call)
+            erase!(call)
 
             changed = true
         end
@@ -382,7 +382,7 @@ function lower_gc_frame!(fun::LLVM.Function)
 
         for use in uses(barrier)
             call = user(use)::LLVM.CallInst
-            unsafe_delete!(LLVM.parent(call), call)
+            erase!(call)
             changed = true
         end
 
@@ -412,7 +412,7 @@ function lower_ptls!(mod::LLVM.Module)
         for use in uses(ptls_getter)
             val = user(use)
             if isempty(uses(val))
-                unsafe_delete!(LLVM.parent(val), val)
+                erase!(val)
                 changed = true
             else
                 # the validator will detect this

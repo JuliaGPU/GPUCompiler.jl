@@ -471,12 +471,12 @@ function nvvm_reflect!(fun::LLVM.Function)
     # remove the calls to the function
     for val in to_remove
         @assert isempty(uses(val))
-        unsafe_delete!(LLVM.parent(val), val)
+        erase!(val)
     end
 
     # maybe also delete the function
     if isempty(uses(reflect_function))
-        unsafe_delete!(mod, reflect_function)
+        erase!(reflect_function)
     end
 
     end

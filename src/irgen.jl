@@ -30,7 +30,7 @@ function irgen(@nospecialize(job::CompilerJob))
             # TODO: Do we need to remove these?
             if job.config.entry_abi === :specfunc
                 if startswith(LLVM.name(llvmf), "jfptr_")
-                    unsafe_delete!(mod, llvmf)
+                    erase!(llvmf)
                 end
             end
         end
@@ -39,7 +39,7 @@ function irgen(@nospecialize(job::CompilerJob))
         if Sys.iswindows() && "__julia_personality" in functions(mod)
             llvmf = functions(mod)["__julia_personality"]
             @compiler_assert isempty(uses(llvmf)) job
-            unsafe_delete!(mod, llvmf)
+            erase!(llvmf)
         end
     end
 
@@ -172,7 +172,7 @@ function lower_throw!(mod::LLVM.Module)
 
                 # remove the call
                 call_args = arguments(call)
-                unsafe_delete!(LLVM.parent(call), call)
+                erase!(call)
 
                 # HACK: kill the exceptions' unused arguments
                 #       this is needed for throwing objects with @nospecialize constructors.
@@ -181,11 +181,11 @@ function lower_throw!(mod::LLVM.Module)
                     if isa(arg, LLVM.AddrSpaceCastInst)
                         cast = arg
                         arg = first(operands(cast))
-                        isempty(uses(cast)) && unsafe_delete!(LLVM.parent(cast), cast)
+                        isempty(uses(cast)) && erase!(cast)
                     end
 
                     if isa(arg, LLVM.Instruction) && isempty(uses(arg))
-                        unsafe_delete!(LLVM.parent(arg), arg)
+                        erase!(arg)
                     end
                 end
 
@@ -477,7 +477,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     fn = LLVM.name(f)
     @assert isempty(uses(f))
     replace_metadata_uses!(f, new_f)
-    unsafe_delete!(mod, f)
+    erase!(f)
     LLVM.name!(new_f, fn)
 
     return new_f
@@ -644,7 +644,7 @@ function add_kernel_state!(mod::LLVM.Module)
             end
         end
         replace_metadata_uses!(f, workmap[f])
-        unsafe_delete!(mod, f)
+        erase!(f)
     end
 
     # update uses of the new function, modifying call sites to include the kernel state
@@ -678,7 +678,7 @@ function add_kernel_state!(mod::LLVM.Module)
 
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
-                    unsafe_delete!(LLVM.parent(val), val)
+                    erase!(val)
                 elseif val isa LLVM.CallBase
                     # the function is being passed as an argument. to avoid having to
                     # rewrite the target function, instead case the rewritten function to
@@ -700,7 +700,7 @@ function add_kernel_state!(mod::LLVM.Module)
 
                     replace_uses!(val, new_val)
                     @assert isempty(uses(val))
-                    unsafe_delete!(LLVM.parent(val), val)
+                    erase!(val)
                 elseif val isa LLVM.StoreInst
                     # the function is being stored, which again we'll permit like before.
                 elseif val isa ConstantExpr
@@ -761,7 +761,7 @@ function lower_kernel_state!(fun::LLVM.Function)
                 replace_uses!(inst, state_arg)
 
                 @assert isempty(uses(inst))
-                unsafe_delete!(LLVM.parent(inst), inst)
+                erase!(inst)
 
                 changed = true
             end
@@ -781,7 +781,7 @@ function cleanup_kernel_state!(mod::LLVM.Module)
         intr = functions(mod)["julia.gpu.state_getter"]
         if isempty(uses(intr))
             # if we're not emitting a kernel, we can't resolve the intrinsic to an argument.
-            unsafe_delete!(mod, intr)
+            erase!(intr)
             changed = true
         end
     end

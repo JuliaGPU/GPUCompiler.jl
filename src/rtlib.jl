@@ -3,7 +3,7 @@
 link_library!(mod::LLVM.Module, lib::LLVM.Module) = link_library!(mod, [lib])
 function link_library!(mod::LLVM.Module, libs::Vector{LLVM.Module})
     # linking is destructive, so copy the libraries
-    libs = [LLVM.Module(lib) for lib in libs]
+    libs = [copy(lib) for lib in libs]
 
     for lib in libs
         link!(mod, lib)
@@ -34,7 +34,7 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     if !isdeclaration(f) && (rt.name !== :gc_pool_alloc && rt.name !== :report_exception)
         # XXX: uses of the gc_pool_alloc intrinsic can be introduced _after_ the runtime
         #      is linked, as part of the lower_gc_frame! optimization pass.
-        # XXX: report_exception can also be used after the runtime is linked during 
+        # XXX: report_exception can also be used after the runtime is linked during
         #      CUDA/Enzyme nested compilation
         error("Calling an intrinsic function that clashes with an existing definition: ",
                string(ft), " ", rt.name)
@@ -89,7 +89,7 @@ function emit_function!(mod, config::CompilerConfig, f, method)
         decl = functions(mod)[name]
         @assert value_type(decl) == value_type(entry)
         replace_uses!(decl, entry)
-        unsafe_delete!(mod, decl)
+        erase!(decl)
     end
     LLVM.name!(entry, name)
 end
