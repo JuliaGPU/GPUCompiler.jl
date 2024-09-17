@@ -252,7 +252,11 @@ method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
 
 # the inference parameters to use when constructing the GPUInterpreter
 function inference_params(@nospecialize(job::CompilerJob))
-    return CC.InferenceParams(; unoptimize_throw_blocks=false)
+    if VERSION >= v"1.12.0-DEV.1017"
+        CC.InferenceParams()
+    else
+        CC.InferenceParams(; unoptimize_throw_blocks=false)
+    end
 end
 
 # the optimization parameters to use when constructing the GPUInterpreter
