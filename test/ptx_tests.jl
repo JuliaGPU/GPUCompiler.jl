@@ -27,11 +27,11 @@ end
     end
 
     ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{mod.Aggregate}))
-    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\* ", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr ", ir)
+    @test occursin(r"@julia_kernel\w*\(({ i64 }|\[1 x i64\])\* ", ir) ||
+          occursin(r"@julia_kernel\w*\(ptr ", ir)
 
     ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{mod.Aggregate}; kernel=true))
-    @test occursin(r"@\w*kernel\w*\(.*({ i64 }|\[1 x i64\]) ", ir)
+    @test occursin(r"@_Z6kernel9Aggregate\(.*({ i64 }|\[1 x i64\]) ", ir)
 end
 
 @testset "property_annotations" begin
@@ -83,13 +83,16 @@ end
 @testset "kernel state" begin
     # state should be passed by value to kernel functions
 
-    kernel() = return
+    mod = @eval module $(gensym())
+        export kernel
+        kernel() = return
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{}))
-    @test occursin(r"@\w*kernel\w*\(\)", ir)
+    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{}))
+    @test occursin(r"@julia_kernel\w*\(\)", ir)
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{}; kernel=true))
-    @test occursin(r"@\w*kernel\w*\(\[1 x i64\] %state\)", ir)
+    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{}; kernel=true))
+    @test occursin("@_Z6kernel([1 x i64] %state)", ir)
 
     # state should only passed to device functions that use it
 
@@ -111,13 +114,13 @@ end
                                   kernel=true, dump_module=true))
 
     # kernel should take state argument before all else
-    @test occursin(r"@\w*kernel\w*\(\[1 x i64\] %state", ir)
+    @test occursin(r"@_Z6kernelP5Int64\(\[1 x i64\] %state", ir)
 
     # child1 doesn't use the state
-    @test occursin(r"@\w*child1\w*\((i64|i8\*|ptr)", ir)
+    @test occursin(r"@julia_child1\w*\((i64|i8\*|ptr)", ir)
 
     # child2 does
-    @test occursin(r"@\w*child2\w*\(\[1 x i64\] %state", ir)
+    @test occursin(r"@julia_child2\w*\(\[1 x i64\] %state", ir)
 
     # can't have the unlowered intrinsic
     @test !occursin("julia.gpu.state_getter", ir)
@@ -133,46 +136,58 @@ end
 @testset "child functions" begin
     # we often test using @noinline child functions, so test whether these survive
     # (despite not having side-effects)
-    @noinline child(i) = sink(i)
-    function parent(i)
-        child(i)
-        return
+
+    mod = @eval module $(gensym())
+        import ..sink
+        export child, parent
+
+        @noinline child(i) = sink(i)
+        function parent(i)
+            child(i)
+            return
+        end
     end
 
-    asm = sprint(io->PTX.code_native(io, parent, Tuple{Int64}))
-    @test occursin(r"call.uni\s+julia_.*child_"m, asm)
+    asm = sprint(io->PTX.code_native(io, mod.parent, Tuple{Int64}))
+    @test occursin(r"call.uni\s+julia_child_"m, asm)
 end
 
 @testset "kernel functions" begin
-    @noinline nonentry(i) = sink(i)
-    function entry(i)
-        nonentry(i)
-        return
+    mod = @eval module $(gensym())
+        import ..sink
+        export nonentry, entry
+
+        @noinline nonentry(i) = sink(i)
+        function entry(i)
+            nonentry(i)
+            return
+        end
     end
 
-    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64}; kernel=true))
-    @test occursin(r"\.visible \.entry \w*entry", asm)
-    @test !occursin(r"\.visible \.func \w*nonentry", asm)
-    @test occursin(r"\.func \w*nonentry", asm)
+    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
+                                     kernel=true, dump_module=true))
+    @test occursin(".visible .entry _Z5entry5Int64", asm)
+    @test !occursin(".visible .func julia_nonentry", asm)
+    @test occursin(".func julia_nonentry", asm)
 
 @testset "property_annotations" begin
-    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64}; kernel=true))
+    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64}; kernel=true))
     @test !occursin("maxntid", asm)
 
-    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64};
+    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
                                          kernel=true, maxthreads=42))
     @test occursin(".maxntid 42, 1, 1", asm)
 
-    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64};
+    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
                                          kernel=true, minthreads=42))
     @test occursin(".reqntid 42, 1, 1", asm)
 
-    asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64};
+    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
                                          kernel=true, blocks_per_sm=42))
     @test occursin(".minnctapersm 42", asm)
 
     if LLVM.version() >= v"4.0"
-        asm = sprint(io->PTX.code_native(io, entry, Tuple{Int64};
+        asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
                                              kernel=true, maxregs=42))
         @test occursin(".maxnreg 42", asm)
     end
@@ -183,44 +198,55 @@ end
     # bug: depending on a child function from multiple parents resulted in
     #      the child only being present once
 
-    @noinline child(i) = sink(i)
-    function parent1(i)
-        child(i)
-        return
+    mod = @eval module $(gensym())
+        import ..sink
+        export child, parent1, parent2
+
+        @noinline child(i) = sink(i)
+        function parent1(i)
+            child(i)
+            return
+        end
+        function parent2(i)
+            child(i+1)
+            return
+        end
     end
 
-    asm = sprint(io->PTX.code_native(io, parent1, Tuple{Int}))
-    @test occursin(r".func \w*child_", asm)
+    asm = sprint(io->PTX.code_native(io, mod.parent1, Tuple{Int}))
+    @test occursin(".func julia_child_", asm)
 
-    function parent2(i)
-        child(i+1)
-        return
-    end
-
-    asm = sprint(io->PTX.code_native(io, parent2, Tuple{Int}))
-    @test occursin(r".func \w*child_", asm)
+    asm = sprint(io->PTX.code_native(io, mod.parent2, Tuple{Int}))
+    @test occursin(".func julia_child_", asm)
 end
 
 @testset "child function reuse bis" begin
     # bug: similar, but slightly different issue as above
     #      in the case of two child functions
-    @noinline child1(i) = sink(i)
-    @noinline child2(i) = sink(i+1)
-    function parent1(i)
-        child1(i) + child2(i)
-        return
-    end
-    asm = sprint(io->PTX.code_native(io, parent1, Tuple{Int}))
-    @test occursin(r".func \w*child1_", asm)
-    @test occursin(r".func \w*child2_", asm)
 
-    function parent2(i)
-        child1(i+1) + child2(i+1)
-        return
+    mod = @eval module $(gensym())
+        import ..sink
+        export parent1, parent2, child1, child2
+
+        @noinline child1(i) = sink(i)
+        @noinline child2(i) = sink(i+1)
+        function parent1(i)
+            child1(i) + child2(i)
+            return
+        end
+        function parent2(i)
+            child1(i+1) + child2(i+1)
+            return
+        end
     end
-    asm = sprint(io->PTX.code_native(io, parent2, Tuple{Int}))
-    @test occursin(r".func \w*child1_", asm)
-    @test occursin(r".func \w*child2_", asm)
+
+    asm = sprint(io->PTX.code_native(io, mod.parent1, Tuple{Int}))
+    @test occursin(".func julia_child1_", asm)
+    @test occursin(".func julia_child2_", asm)
+
+    asm = sprint(io->PTX.code_native(io, mod.parent2, Tuple{Int}))
+    @test occursin(".func julia_child1_", asm)
+    @test occursin(".func julia_child2_", asm)
 end
 
 @testset "indirect sysimg function use" begin
@@ -261,6 +287,8 @@ end
 
 @testset "GC and TLS lowering" begin
     mod = @eval module $(gensym())
+        import ..sink
+
         mutable struct PleaseAllocate
             y::Csize_t
         end

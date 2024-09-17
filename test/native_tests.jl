@@ -388,46 +388,61 @@ Base.unsafe_trunc(::Type{Int}, x::CleverType) = unsafe_trunc(Int, x.x)
 end
 
 @testset "invalid LLVM IR" begin
-    foobar(i) = println(i)
+    mod = @eval module $(gensym())
+        export foobar
+        foobar(i) = println(i)
+    end
 
     @test_throws_message(InvalidIRError,
-                         Native.code_execution(foobar, Tuple{Int})) do msg
+                         Native.code_execution(mod.foobar, Tuple{Int})) do msg
         occursin("invalid LLVM IR", msg) &&
         (occursin(GPUCompiler.RUNTIME_FUNCTION, msg) ||
          occursin(GPUCompiler.UNKNOWN_FUNCTION, msg) ||
          occursin(GPUCompiler.DYNAMIC_CALL, msg)) &&
         occursin("[1] println", msg) &&
-        occursin(r"\[2\] .*foobar", msg)
+        occursin("[2] foobar", msg)
     end
 end
 
 @testset "invalid LLVM IR (ccall)" begin
-    foobar(p) = (unsafe_store!(p, ccall(:time, Cint, ())); nothing)
+    mod = @eval module $(gensym())
+        export foobar
+        function foobar(p)
+            unsafe_store!(p, ccall(:time, Cint, ()))
+            return
+        end
+    end
 
     @test_throws_message(InvalidIRError,
-                         Native.code_execution(foobar, Tuple{Ptr{Int}})) do msg
+                         Native.code_execution(mod.foobar, Tuple{Ptr{Int}})) do msg
         if VERSION >= v"1.11-"
             occursin("invalid LLVM IR", msg) &&
             occursin(GPUCompiler.LAZY_FUNCTION, msg) &&
             occursin("call to time", msg) &&
-            occursin(r"\[1\] .*foobar", msg)
+            occursin("[1] foobar", msg)
         else
             occursin("invalid LLVM IR", msg) &&
             occursin(GPUCompiler.POINTER_FUNCTION, msg) &&
-            occursin(r"\[1\] .*foobar", msg)
+            occursin("[1] foobar", msg)
         end
     end
 end
 
 @testset "delayed bindings" begin
-    kernel() = (undefined; return)
+    mod = @eval module $(gensym())
+        export kernel
+        function kernel()
+            undefined
+            return
+        end
+    end
 
     @test_throws_message(InvalidIRError,
-                         Native.code_execution(kernel, Tuple{})) do msg
+                         Native.code_execution(mod.kernel, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DELAYED_BINDING, msg) &&
-        occursin("use of 'undefined'", msg) &&
-        occursin(r"\[1\] .*kernel", msg)
+        occursin(r"use of '.*undefined'", msg) &&
+        occursin("[1] kernel", msg)
     end
 end
 
@@ -442,15 +457,18 @@ end
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to nospecialize_child", msg) &&
-        occursin(r"\[1\] kernel", msg)
+        occursin("[1] kernel", msg)
     end
 end
 
 @testset "dynamic call (apply)" begin
-    func() = println(1)
+    mod = @eval module $(gensym())
+        export func
+        func() = println(1)
+    end
 
     @test_throws_message(InvalidIRError,
-                         Native.code_execution(func, Tuple{})) do msg
+                         Native.code_execution(mod.func, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to println", msg) &&

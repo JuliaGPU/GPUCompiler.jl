@@ -19,13 +19,16 @@ using SPIRV_LLVM_Translator_unified_jll, SPIRV_Tools_jll
 end
 
 @testset "byval workaround" begin
-    kernel(x) = return
+    mod = @eval module $(gensym())
+        export kernel
+        kernel(x) = return
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{Tuple{Int}}))
+    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Tuple{Int}}))
     @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\*", ir) ||
           occursin(r"@\w*kernel\w*\(ptr", ir)
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{Tuple{Int}}; kernel=true))
+    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Tuple{Int}}; kernel=true))
     @test occursin(r"@\w*kernel\w*\(.*{ ({ i64 }|\[1 x i64\]) }\*.+byval", ir) ||
           occursin(r"@\w*kernel\w*\(ptr byval", ir)
 end
@@ -39,34 +42,37 @@ end
 end
 
 @testset "unsupported type detection" begin
-    function kernel(ptr, val)
-        unsafe_store!(ptr, val)
-        return
+    mod = @eval module $(gensym())
+        export kernel
+        function kernel(ptr, val)
+            unsafe_store!(ptr, val)
+            return
+        end
     end
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{Ptr{Float16}, Float16}; validate=true))
+    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float16}, Float16}; validate=true))
     @test occursin("store half", ir)
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{Ptr{Float32}, Float32}; validate=true))
+    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float32}, Float32}; validate=true))
     @test occursin("store float", ir)
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{Ptr{Float64}, Float64}; validate=true))
+    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float64}, Float64}; validate=true))
     @test occursin("store double", ir)
 
     @test_throws_message(InvalidIRError,
-                         SPIRV.code_llvm(devnull, kernel, Tuple{Ptr{Float16}, Float16};
+                         SPIRV.code_llvm(devnull, mod.kernel, Tuple{Ptr{Float16}, Float16};
                                          supports_fp16=false, validate=true)) do msg
         occursin("unsupported use of half value", msg) &&
         occursin("[1] unsafe_store!", msg) &&
-        occursin(r"\[2\] .*kernel", msg)
+        occursin("[2] kernel", msg)
     end
 
     @test_throws_message(InvalidIRError,
-                         SPIRV.code_llvm(devnull, kernel, Tuple{Ptr{Float64}, Float64};
+                         SPIRV.code_llvm(devnull, mod.kernel, Tuple{Ptr{Float64}, Float64};
                                          supports_fp64=false, validate=true)) do msg
         occursin("unsupported use of double value", msg) &&
         occursin("[1] unsafe_store!", msg) &&
-        occursin(r"\[2\] .*kernel", msg)
+        occursin("[2] kernel", msg)
     end
 end
 
