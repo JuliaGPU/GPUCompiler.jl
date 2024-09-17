@@ -322,7 +322,8 @@ function check_ir_values(mod::LLVM.Module, T_bad::LLVMType)
     errors = IRError[]
 
     for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
-        if value_type(inst) == T_bad || any(param->value_type(param) == T_bad, operands(inst))
+        if value_type(inst) == T_bad && !haskey(metadata(inst), "ir_check_ignore") ||
+           any(op -> value_type(op) == T_bad && !(op isa Instruction && haskey(metadata(op), "ir_check_ignore")), operands(inst))
             bt = backtrace(inst)
             push!(errors, ("use of $(string(T_bad)) value", bt, inst))
         end
