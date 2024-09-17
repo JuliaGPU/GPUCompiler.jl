@@ -74,44 +74,51 @@ end
     # bug: depending on a child function from multiple parents resulted in
     #      the child only being present once
 
-    @noinline child(i) = sink_gcn(i)
-    function parent1(i)
-        child(i)
-        return
+    mod = @eval module $(gensym())
+        export child, parent1, parent2
+
+        @noinline child(i) = sink_gcn(i)
+        function parent1(i)
+            child(i)
+            return
+        end
+        function parent2(i)
+            child(i+1)
+            return
+        end
     end
 
-    asm = sprint(io->GCN.code_native(io, parent1, Tuple{Int}; dump_module=true))
+    asm = sprint(io->GCN.code_native(io, mod.parent1, Tuple{Int}; dump_module=true))
     @test occursin(r"\.type.*julia_[[:alnum:]_.]*child_\d*,@function", asm)
 
-    function parent2(i)
-        child(i+1)
-        return
-    end
-
-    asm = sprint(io->GCN.code_native(io, parent2, Tuple{Int}; dump_module=true))
+    asm = sprint(io->GCN.code_native(io, mod.parent2, Tuple{Int}; dump_module=true))
     @test occursin(r"\.type.*julia_[[:alnum:]_.]*child_\d*,@function", asm)
 end
 
 @testset "child function reuse bis" begin
     # bug: similar, but slightly different issue as above
     #      in the case of two child functions
-    @noinline child1(i) = sink_gcn(i)
-    @noinline child2(i) = sink_gcn(i+1)
-    function parent1(i)
-        child1(i) + child2(i)
-        return
+
+    mod = @eval module $(gensym())
+        export parent1, parent2, child1, child2
+
+        @noinline child1(i) = sink_gcn(i)
+        @noinline child2(i) = sink_gcn(i+1)
+        function parent1(i)
+            child1(i) + child2(i)
+            return
+        end
+        function parent2(i)
+            child1(i+1) + child2(i+1)
+            return
+        end
     end
 
-    asm = sprint(io->GCN.code_native(io, parent1, Tuple{Int}; dump_module=true))
+    asm = sprint(io->GCN.code_native(io, mod.parent1, Tuple{Int}; dump_module=true))
     @test occursin(r"\.type.*julia_[[:alnum:]_.]*child1_\d*,@function", asm)
     @test occursin(r"\.type.*julia_[[:alnum:]_.]*child2_\d*,@function", asm)
 
-    function parent2(i)
-        child1(i+1) + child2(i+1)
-        return
-    end
-
-    asm = sprint(io->GCN.code_native(io, parent2, Tuple{Int}; dump_module=true))
+    asm = sprint(io->GCN.code_native(io, mod.parent2, Tuple{Int}; dump_module=true))
     @test occursin(r"\.type.*julia_[[:alnum:]_.]*child1_\d*,@function", asm)
     @test occursin(r"\.type.*julia_[[:alnum:]_.]*child2_\d*,@function", asm)
 end

@@ -95,6 +95,12 @@ end
 # XXX: it's not allowed to switch tasks while under this lock, can we guarantee that?
 #      its probably easier to start using our own LLVM context when that's possible.
 macro locked(ex)
+    if VERSION >= v"1.12.0-DEV.769"
+        # no need to handle locking; it's taken care of by the engine
+        # as long as we use a correct cache owner token.
+        return esc(ex)
+    end
+
     def = splitdef(ex)
     def[:body] = quote
         ccall(:jl_typeinf_lock_begin, Cvoid, ())
@@ -109,6 +115,10 @@ end
 
 # HACK: temporarily unlock again to perform a task switch
 macro unlocked(ex)
+    if VERSION >= v"1.12.0-DEV.769"
+        return esc(ex)
+    end
+
     def = splitdef(ex)
     def[:body] = quote
         ccall(:jl_typeinf_lock_end, Cvoid, ())
