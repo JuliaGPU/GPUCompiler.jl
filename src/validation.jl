@@ -218,6 +218,18 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 @safe_debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=LLVM.parent(inst)
                 push!(errors, (DELAYED_BINDING, bt, nothing))
             end
+        elseif fn == "jl_reresolve_binding_value_seqcst" || fn == "ijl_reresolve_binding_value_seqcst"
+            try
+                # pry the binding from the IR
+                expr = arguments(inst)[1]::ConstantExpr
+                expr = first(operands(expr))::ConstantInt # get rid of inttoptr
+                ptr = Ptr{Any}(convert(Int, expr))
+                obj = Base.unsafe_pointer_to_objref(ptr)
+                push!(errors, (DELAYED_BINDING, bt, obj.globalref))
+            catch e
+                @safe_debug "Decoding arguments to jl_reresolve_binding_value_seqcst failed" inst bb=LLVM.parent(inst)
+                push!(errors, (DELAYED_BINDING, bt, nothing))
+            end
         elseif fn == "jl_invoke" || fn == "ijl_invoke"
             try
                 f, args, nargs, meth = arguments(inst)
