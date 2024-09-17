@@ -24,6 +24,7 @@ jobs:
         llvm_args: ['']
         include:
           # starting with Julia 1.10, we can enable opaque pointers
+          # from Juila 1.12 on, this is the default.
           - version: '1.10'
             os: 'ubuntu-latest'
             arch: 'x64'
@@ -48,18 +49,6 @@ jobs:
             os: 'windows-latest'
             arch: 'x64'
             llvm_args: '--opaque-pointers'
-          #- version: 'nightly'
-          #  os: 'ubuntu-latest'
-          #  arch: 'x64'
-          #  llvm_args: '--opaque-pointers'
-          #- version: 'nightly'
-          #  os: 'macOS-latest'
-          #  arch: 'x64'
-          #  llvm_args: '--opaque-pointers'
-          #- version: 'nightly'
-          #  os: 'windows-latest'
-          #  arch: 'x64'
-          #  llvm_args: '--opaque-pointers'
     steps:
       - uses: actions/checkout@v4
 
