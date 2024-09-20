@@ -79,6 +79,53 @@ end
     @test occursin("air.max.s.v2i64", ir)
 end
 
+@testset "unsupported type detection" begin
+    function kernel1(ptr)
+        buf = reinterpret(Ptr{Float32}, ptr)
+        val = unsafe_load(buf)
+        dval = Cdouble(val)
+        # ccall("extern metal_os_log", llvmcall, Nothing, (Float64,), dval)
+        Base.llvmcall(("""
+        declare void @llvm.va_start(i8*)
+        declare void @llvm.va_end(i8*)
+        declare void @air.os_log(i8*, i64)
+        
+        define void @metal_os_log(...) {
+            %1 = alloca i8*
+            %2 = bitcast i8** %1 to i8*
+            call void @llvm.va_start(i8* %2)
+            %3 = load i8*, i8** %1
+            call void @air.os_log(i8* %3, i64 8)
+            call void @llvm.va_end(i8* %2)
+            ret void
+        }
+
+        define void @entry(double %val) #0 {
+            call void (...) @metal_os_log(double %val)
+            ret void
+        }
+
+        attributes #0 = { alwaysinline }""", "entry"),
+        Nothing, Tuple{Float64}, dval)
+        return
+    end
+
+
+    ir = sprint(io->Metal.code_llvm(io, kernel1, Tuple{Core.LLVMPtr{Float32,1}}; validate=true))
+    @test occursin("@metal_os_log", ir)
+
+    function kernel2(ptr)
+        val = unsafe_load(ptr)
+        res = val * val
+        unsafe_store!(ptr, res)
+        return
+    end
+
+    @test_throws_message(InvalidIRError, Metal.code_llvm(devnull, kernel2, Tuple{Core.LLVMPtr{Float64,1}}; validate=true)) do msg
+        occursin("unsupported use of double value", msg)
+    end
+end
+
 end
 
 end
