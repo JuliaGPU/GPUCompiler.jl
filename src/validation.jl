@@ -330,3 +330,16 @@ function check_ir_values(mod::LLVM.Module, T_bad::LLVMType)
 
     return errors
 end
+
+function check_ir_values(mod::LLVM.Module, T_bad)
+    errors = IRError[]
+
+    for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
+        if T_bad(inst) || any(T_bad, operands(inst))
+            bt = backtrace(inst)
+            push!(errors, ("use of $(string(inst))", bt, inst))
+        end
+    end
+
+    return errors
+end
