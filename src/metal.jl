@@ -90,7 +90,7 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     errors = IRError[]
 
     # Metal never supports double precision
-    append!(errors, check_ir_values(mod, LLVM.DoubleType(), allow=(LLVM.FPExtInst,)))
+    append!(errors, check_ir_values(mod, LLVM.DoubleType()))
     append!(errors, check_ir_values(mod, LLVM.IntType(128)))
 
     errors

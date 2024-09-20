@@ -318,25 +318,15 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
 end
 
 # helper function to check if a LLVM module uses values of a certain type
-function check_ir_values(mod::LLVM.Module, T_bad::LLVMType; allow=())
+function check_ir_values(mod::LLVM.Module, T_bad::LLVMType)
     errors = IRError[]
 
     for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
-        if typeof(inst) in allow
-            continue
+        if value_type(inst) == T_bad && !haskey(metadata(inst), "ir_check_ignore") ||
+           any(op -> value_type(op) == T_bad && !(op isa Instruction && haskey(metadata(op), "ir_check_ignore")), operands(inst))
+            bt = backtrace(inst)
+            push!(errors, ("use of $(string(T_bad)) value", bt, inst))
         end
-
-        if haskey(metadata(inst), "ir_check_ignore")
-            continue
-        end
-
-        if value_type(inst) != T_bad &&
-           all(op -> value_type(op) != T_bad || (op isa Instruction && haskey(metadata(op), "ir_check_ignore")), operands(inst))
-           continue
-        end
-
-        bt = backtrace(inst)
-        push!(errors, ("use of $(string(T_bad)) value", bt, inst))
     end
 
     return errors
