@@ -89,11 +89,11 @@ end
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     errors = IRError[]
 
-    function is_valid_double_use(inst::LLVM.Instruction, errors)
+    # Metal does not support double precision, except for logging
+    function is_illegal_double(val)
         T_bad = LLVM.DoubleType()
-
-        if value_type(inst) != T_bad || all(param->value_type(param) != T_bad, operands(inst))
-            return
+        if value_type(val) != T_bad
+            return false
         end
 
         function used_for_logging(use::LLVM.Use)
@@ -104,21 +104,17 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
                     return true
                 end
             end
-
+            return false
+        end
+        if all(used_for_logging, uses(val))
             return false
         end
 
-        if all(used_for_logging, uses(inst))
-            return
-        end
-
-        bt = backtrace(inst)
-        err = ("use of double value", bt, inst)
-        push!(errors, err)
+        return true
     end
+    append!(errors, check_ir_values(mod, is_illegal_double, "use of double value"))
 
-    # Metal never supports double precision
-    append!(errors, check_ir_values(mod, is_valid_double_use))
+    # Metal never supports 128-bit integers
     append!(errors, check_ir_values(mod, LLVM.IntType(128)))
 
     errors
