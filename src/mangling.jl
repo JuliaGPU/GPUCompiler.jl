@@ -57,6 +57,17 @@ function mangle_param(t, substitutions=String[])
                 str *= mangle_param(t, substitutions)
             end
             str *= "E"
+
+            # handle substitutions
+            sub = findfirst(isequal(str), substitutions)
+            if sub === nothing
+                push!(substitutions, str)
+            elseif sub == 1
+                str = "S_"
+            else
+                seq_id = uppercase(string(sub-2; base=36))
+                str = "S$(seq_id)_"
+            end
         end
 
         str
