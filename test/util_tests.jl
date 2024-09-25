@@ -9,14 +9,43 @@
     @test groups[3] == [:(d=4)]
 end
 
-@testset "mangle" begin
-    struct XX{T} end
-    # values checked with c++filt / cu++filt
-    @test GPUCompiler.mangle_sig(Tuple{typeof(sin), XX{false}})       == "_Z3sin2XXILb0EE"    # "sin(XX<false>)"
-    @test GPUCompiler.mangle_sig(Tuple{typeof(sin), XX{true}})        == "_Z3sin2XXILb1EE"    # "sin(XX<true>)"
-    @test GPUCompiler.mangle_sig(Tuple{typeof(sin), XX{Cshort(10)}})  == "_Z3sin2XXILs10EE"   # "sin(XX<(short)10>)"
-    @test GPUCompiler.mangle_sig(Tuple{typeof(sin), XX{Cshort(0)}})   == "_Z3sin2XXILs0EE"    # "sin(XX<(short)l>)"
-    @test GPUCompiler.mangle_sig(Tuple{typeof(sin), XX{Cshort(-10)}}) == "_Z3sin2XXILsn10EE"  # "sin(XX<(short)-10>)"
+@testset "mangling" begin
+    using demumble_jll
+
+    function mangle(f, argtyps...)
+        mangled = GPUCompiler.mangle_sig(Tuple{typeof(f), argtyps...})
+        chomp(read(`$(demumble_jll.demumble()) $mangled`, String))
+    end
+
+    # basic stuff
+    @test mangle(identity) == "identity"
+    @test mangle(identity, Nothing) == "identity()"
+
+    # primitive types
+    @test mangle(identity, Int32) == "identity(Int32)"
+    @test mangle(identity, Int64) == "identity(Int64)"
+
+    # literals
+    @test mangle(identity, Val{1}) == "identity(Val<1>)"
+    @test mangle(identity, Val{-1}) == "identity(Val<-1>)"
+    @test mangle(identity, Val{Cshort(1)}) == "identity(Val<(short)1>)"
+    @test mangle(identity, Val{1.0}) == "identity(Val<0x1p+0>)"
+    @test mangle(identity, Val{1f0}) == "identity(Val<0x1p+0f>)"
+
+    # unions
+    @test mangle(identity, Union{Int32, Int64}) == "identity(Union<Int32, Int64>)"
+
+    # union alls
+    @test mangle(identity, Array) == "identity(Array<T, N>)"
+
+    # many substitutions
+    @test mangle(identity, Val{1}, Val{2}, Val{3}, Val{4}, Val{5}, Val{6}, Val{7}, Val{8},
+                           Val{9}, Val{10}, Val{11}, Val{12}, Val{13}, Val{14}, Val{15},
+                           Val{16}, Val{16}) ==
+          "identity(Val<1>, Val<2>, Val<3>, Val<4>, Val<5>, Val<6>, Val<7>, Val<8>, Val<9>, Val<10>, Val<11>, Val<12>, Val<13>, Val<14>, Val<15>, Val<16>, Val<16>)"
+
+    # problematic examples
+    @test mangle(identity, String, Matrix{Float32}, Broadcast.Broadcasted{Broadcast.ArrayStyle{Matrix{Float32}}, Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}}, typeof(Base.literal_pow), Tuple{Base.RefValue{typeof(sin)}, Broadcast.Extruded{Matrix{Float32}, Tuple{Bool, Bool}, Tuple{Int64, Int64}}}}) == "identity(String, Array<Float32, 2>, Broadcasted<ArrayStyle<Array<Float32, 2>>, Tuple<OneTo<Int64>, OneTo<Int64>>, literal_pow, Tuple<RefValue<sin>, Extruded<Array<Float32, 2>, Tuple<Bool, Bool>, Tuple<Int64, Int64>>>>)"
 end
 
 @testset "safe loggers" begin
