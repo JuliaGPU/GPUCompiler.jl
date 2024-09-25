@@ -46,7 +46,8 @@ function mangle_param(t, substitutions=String[])
         elseif sub == 1
             str = "S_"
         else
-            str = "S$(sub-2)_"
+            seq_id = uppercase(string(sub-2; base=36))
+            str = "S$(seq_id)_"
         end
 
         # encode typevars as template parameters
