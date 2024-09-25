@@ -29,24 +29,37 @@ safe_name(x) = safe_name(repr(x))
 # we generate function names that look like C++ functions, because many tools, like NVIDIA's
 # profilers, support them (grouping different instantiations of the same kernel together).
 
-function mangle_param(t, substitutions=String[])
+function mangle_param(t, substitutions=Any[])
     t == Nothing && return "v"
+
+    function find_substitution(x)
+        sub = findfirst(isequal(x), substitutions)
+        if sub === nothing
+            nothing
+        elseif sub == 1
+            "S_"
+        else
+            seq_id = uppercase(string(sub-2; base=36))
+            "S$(seq_id)_"
+        end
+    end
 
     if isa(t, DataType) && t <: Ptr
         tn = mangle_param(eltype(t), substitutions)
         "P$tn"
     elseif isa(t, DataType)
-        tn = safe_name(t)
+        # check if we already know this type
+        str = find_substitution(t)
+        if str !== nothing
+            return str
+        end
 
-        # handle substitutions
-        sub = findfirst(isequal(tn), substitutions)
-        if sub === nothing
+        # check if we already know this base type
+        str = find_substitution(t.name.wrapper)
+        if str === nothing
+            tn = safe_name(t)
             str = "$(length(tn))$tn"
-            push!(substitutions, tn)
-        elseif sub == 1
-            str = "S_"
-        else
-            str = "S$(sub-2)_"
+            push!(substitutions, t.name.wrapper)
         end
 
         # encode typevars as template parameters
@@ -56,21 +69,24 @@ function mangle_param(t, substitutions=String[])
                 str *= mangle_param(t, substitutions)
             end
             str *= "E"
+
+            push!(substitutions, t)
         end
 
         str
     elseif isa(t, Union)
-        tn = "Union"
+        # check if we already know this union type
+        str = find_substitution(t)
+        if str !== nothing
+            return str
+        end
 
-        # handle substitutions
-        sub = findfirst(isequal(tn), substitutions)
-        if sub === nothing
+        # check if we already know the Union name
+        str = find_substitution(Union)
+        if str === nothing
+            tn = "Union"
             str = "$(length(tn))$tn"
             push!(substitutions, tn)
-        elseif sub == 1
-            str = "S_"
-        else
-            str = "S$(sub-2)_"
         end
 
         # encode union types as template parameters
@@ -80,9 +96,13 @@ function mangle_param(t, substitutions=String[])
                 str *= mangle_param(t, substitutions)
             end
             str *= "E"
+
+            push!(substitutions, t)
         end
 
         str
+    elseif isa(t, UnionAll)
+        mangle_param(t.body, substitutions)
     elseif isa(t, Union{Bool, Cchar, Cuchar, Cshort, Cushort, Cint, Cuint, Clong, Culong, Clonglong, Culonglong, Int128, UInt128})
         ts = t isa Bool       ? 'b' : # bool
              t isa Cchar      ? 'a' : # signed char
@@ -99,10 +119,20 @@ function mangle_param(t, substitutions=String[])
              t isa UInt128    ? 'o' : # unsigned __int128
              error("Invalid type")
         tn = string(abs(t), base=10)
+        # for legibility, encode Julia-native integers as C-native integers, if possible
+        if t isa Int && typemin(Cint) <= t <= typemax(Cint)
+            ts = 'i'
+        end
         if t < 0
             tn = 'n'*tn
         end
         "L$(ts)$(tn)E"
+    elseif t isa Float32
+        bits = string(reinterpret(UInt32, t); base=16)
+        "Lf$(bits)E"
+    elseif t isa Float64
+        bits = string(reinterpret(UInt64, t); base=16)
+        "Ld$(bits)E"
     else
         tn = safe_name(t)   # TODO: actually does support digits...
         if startswith(tn, r"\d")
@@ -121,7 +151,7 @@ function mangle_sig(sig)
     str = "_Z$(length(fn))$fn"
 
     # mangle each parameter
-    substitutions = String[]
+    substitutions = []
     for t in tt
         str *= mangle_param(t, substitutions)
     end
