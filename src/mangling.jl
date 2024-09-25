@@ -117,6 +117,12 @@ function mangle_param(t, substitutions=String[])
             tn = 'n'*tn
         end
         "L$(ts)$(tn)E"
+    elseif t isa Float32
+        bits = string(reinterpret(UInt32, t); base=16)
+        "Lf$(bits)E"
+    elseif t isa Float64
+        bits = string(reinterpret(UInt64, t); base=16)
+        "Ld$(bits)E"
     else
         tn = safe_name(t)   # TODO: actually does support digits...
         if startswith(tn, r"\d")
