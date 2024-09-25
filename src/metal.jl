@@ -53,6 +53,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
         entry = pass_by_reference!(job, mod, entry)
 
         add_input_arguments!(job, mod, entry)
+        add_globals!(job, mod, entry)
         entry = LLVM.functions(mod)[entry_fn]
     end
 
@@ -622,6 +623,81 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     end
 
     return
+end
+
+function add_globals!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function)
+     if !haskey(functions(mod), "julia.air.get_global.pi8")
+        return
+     end
+
+    T_pint8 = LLVM.PointerType(LLVM.Int8Type())
+
+     for use in uses functions(mod)["julia.air.get_global"]
+        if use isa LLVM.CallInst
+            idx_arg = arguments(use)[1]
+            if idx_arg isa LLVM.ConstantInt
+                gv_name = "metal_global_$idx_arg"
+                gv = if haskey(globals(mod), gv_name)
+                    globals(mode)[gv_name]
+                else
+                    g = GlobalVariable(mod, T_pint8, gv_nam, 2)
+                    linkage!(g, LLVM.API.LLVMInternalLinkage)
+                    unnamed_addr!(g, true)
+                    isextinit!(g, true)
+                    constant!(g, true)
+
+                    # convert(Int32, idx_arg)
+                    add_global_metadata!(mod, entry, g, idx_arg)
+                    g
+                end
+            end
+            replace_uses!(use, gv)
+        else
+     end
+
+     erase!(functions(mod)["julia.air.get_global.pi8"])     
+end
+
+function add_global_metadata!(mod::LLVM.Module, entry::LLVM.Function, glob::LLVM.GlobalVariable, idx::Int32)
+    entry_ft = function_type(entry)
+    arg_num = length(parameters(entry_ft))
+
+    buffer_md = Metadata[]
+
+    push!(buffer_md, Metadata(ConstantInt(Int32(-1))))
+
+    push!(buffer_md, MDString("air.buffer"))
+
+    push!(buffer_md, MDString("air.location_index"))
+    push!(md, Metadata(ConstantInt(Int32(arg_num) + idx)))
+    push!(buffer_md, Metadata(ConstantInt(Int32(1))))
+
+    push!(buffer_md, MDString("air.read_write"))
+
+    push!(buffer_md, MDString("air.address_space"))
+    push!(buffer_md, Metadata(ConstantInt(Int32(1))))
+
+    push!(buffer_md, MDString("air.arg_type_size"))
+    push!(buffer_md, Metadata(ConstantInt(Int32(4))))
+
+    push!(buffer_md, MDString("air.arg_type_align_size"))
+    push!(buffer_md, Metadata(ConstantInt(Int32(4))))
+
+    push!(buffer_md, MDString("air.arg_type_name"))
+    push!(buffer_md, MDString("void"))
+
+    push!(buffer_md, MDString("air.arg_name"))
+    push!(md, MDString(name(glob)))
+
+    buffer_md = MDNode(md)
+
+
+    global_md = Metadata[]
+    push!(global_md, MDString("air.global_binding"))
+    push!(global_md, Metadata(scratch_space))
+    push!(global_md, buffer_md)
+
+    push!(metadata(mod)["air.global_bindings"], MDNode(global_md))
 end
 
 
