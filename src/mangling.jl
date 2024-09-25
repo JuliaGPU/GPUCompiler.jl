@@ -119,6 +119,10 @@ function mangle_param(t, substitutions=Any[])
              t isa UInt128    ? 'o' : # unsigned __int128
              error("Invalid type")
         tn = string(abs(t), base=10)
+        # for legibility, encode Julia-native integers as C-native integers, if possible
+        if t isa Int && typemin(Cint) <= t <= typemax(Cint)
+            ts = 'i'
+        end
         if t < 0
             tn = 'n'*tn
         end
