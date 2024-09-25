@@ -95,6 +95,8 @@ function mangle_param(t, substitutions=String[])
         end
 
         str
+    elseif isa(t, UnionAll)
+        mangle_param(t.body, substitutions)
     elseif isa(t, Union{Bool, Cchar, Cuchar, Cshort, Cushort, Cint, Cuint, Clong, Culong, Clonglong, Culonglong, Int128, UInt128})
         ts = t isa Bool       ? 'b' : # bool
              t isa Cchar      ? 'a' : # signed char
