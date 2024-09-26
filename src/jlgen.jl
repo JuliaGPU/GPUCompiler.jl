@@ -319,8 +319,7 @@ else
     get_method_table_view(world::UInt, mt::MTType) = OverlayMethodTable(world, mt)
 end
 
-abstract type AbstractGPUInterpreter <: CC.AbstractInterpreter end
-struct GPUInterpreter <: AbstractGPUInterpreter
+struct GPUInterpreter <: CC.AbstractInterpreter
     world::UInt
     method_table::GPUMethodTableView
 
@@ -446,7 +445,7 @@ struct DeferredCallInfo <: CC.CallInfo
 end
 
 # recognize calls to gpuc.deferred and save DeferredCallInfo metadata
-function CC.abstract_call_known(interp::AbstractGPUInterpreter, @nospecialize(f),
+function CC.abstract_call_known(interp::GPUInterpreter, @nospecialize(f),
                                 arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
                                 max_methods::Int = CC.get_max_methods(interp, f, sv))
     (; fargs, argtypes) = arginfo
@@ -519,7 +518,7 @@ function find_deferred_edges(ir::CC.IRCode)
 end
 
 if VERSION >= v"1.11.0-"
-function CC.ipo_dataflow_analysis!(interp::AbstractGPUInterpreter, ir::CC.IRCode,
+function CC.ipo_dataflow_analysis!(interp::GPUInterpreter, ir::CC.IRCode,
                                    caller::CC.InferenceResult)
     edges = find_deferred_edges(ir)
     if !isempty(edges)
@@ -530,7 +529,7 @@ function CC.ipo_dataflow_analysis!(interp::AbstractGPUInterpreter, ir::CC.IRCode
 end
 else # v1.10
 # 1.10 doesn't have stack_analysis_result or ipo_dataflow_analysis
-function CC.finish(interp::AbstractGPUInterpreter, opt::CC.OptimizationState, ir::CC.IRCode,
+function CC.finish(interp::GPUInterpreter, opt::CC.OptimizationState, ir::CC.IRCode,
                    caller::CC.InferenceResult)
     edges = find_deferred_edges(ir)
     if !isempty(edges)

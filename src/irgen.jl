@@ -91,6 +91,8 @@ function irgen(@nospecialize(job::CompilerJob))
         compiled[mi] = (; ci, func=safe_name(func), specfunc=safe_name(specfunc))
     end
 
+    # TODO: Should we rewrite gpuc.lookup here?
+
     # minimal required optimization
     @timeit_debug to "rewrite" begin
         if job.config.kernel && needs_byval(job)
@@ -106,9 +108,16 @@ function irgen(@nospecialize(job::CompilerJob))
             end
         end
 
-        # internalize all functions and, but keep exported global variables.
+        # internalize all functions, but keep exported global variables.
         linkage!(entry, LLVM.API.LLVMExternalLinkage)
         preserved_gvs = String[LLVM.name(entry)]
+        for mi in keys(compiled)
+            # delay internalizing of deferred calls since
+            # gpuc.lookup is not yet rewriten.
+            mi == job.source && continue
+            _, _, specfunc = compiled[mi]
+            push!(preserved_gvs, specfunc) # this could be deleted if we rewrite gpuc.lookup earlier
+        end
         for gvar in globals(mod)
             push!(preserved_gvs, LLVM.name(gvar))
         end

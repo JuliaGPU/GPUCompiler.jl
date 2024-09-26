@@ -162,11 +162,10 @@ const __llvm_initialized = Ref(false)
         entry = functions(ir)[entry_fn]
     end
 
-    # finalize the current module. this needs to happen before linking deferred modules,
-    # since those modules have been finalized themselves, and we don't want to re-finalize.
+    # finalize the current module.
     entry = finish_module!(job, ir, entry)
 
-    # deferred code generation
+    # rewrite "gpuc.lookup" for deferred code generation
     run_optimization_for_deferred = false
     if haskey(functions(ir), "gpuc.lookup")
         run_optimization_for_deferred = true
@@ -230,13 +229,13 @@ const __llvm_initialized = Ref(false)
                     end
                     replace_uses!(call, fptr)
                 end
-                unsafe_delete!(LLVM.parent(call), call)
+                erase!( call)
             end
         end
 
         # all deferred compilations should have been resolved
         @compiler_assert isempty(uses(dyn_marker)) job
-        unsafe_delete!(ir, dyn_marker)
+        erase!(dyn_marker)
     end
 
     if libraries
