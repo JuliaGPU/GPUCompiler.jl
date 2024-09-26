@@ -320,6 +320,7 @@ else
 end
 
 struct GPUInterpreter <: CC.AbstractInterpreter
+    meta::Any
     world::UInt
     method_table::GPUMethodTableView
 
@@ -336,6 +337,7 @@ end
 
 @static if HAS_INTEGRATED_CACHE
 function GPUInterpreter(world::UInt=Base.get_world_counter();
+                        meta = nothing,
                         method_table::MTType,
                         token::Any,
                         inf_params::CC.InferenceParams,
@@ -345,19 +347,20 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
     method_table = get_method_table_view(world, method_table)
     inf_cache = Vector{CC.InferenceResult}()
 
-    return GPUInterpreter(world, method_table,
+    return GPUInterpreter(meta, world, method_table,
                           token, inf_cache,
                           inf_params, opt_params)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
+                        meta=interp.meta,
                         world::UInt=interp.world,
                         method_table::GPUMethodTableView=interp.method_table,
                         token::Any=interp.token,
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
                         opt_params::CC.OptimizationParams=interp.opt_params)
-    return GPUInterpreter(world, method_table,
+    return GPUInterpreter(meta, world, method_table,
                           token, inf_cache,
                           inf_params, opt_params)
 end
@@ -365,6 +368,7 @@ end
 else
 
 function GPUInterpreter(world::UInt=Base.get_world_counter();
+                        meta=nothing,
                         method_table::MTType,
                         code_cache::CodeCache,
                         inf_params::CC.InferenceParams,
@@ -374,19 +378,20 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
     method_table = get_method_table_view(world, method_table)
     inf_cache = Vector{CC.InferenceResult}()
 
-    return GPUInterpreter(world, method_table,
+    return GPUInterpreter(meta, world, method_table,
                           code_cache, inf_cache,
                           inf_params, opt_params)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
+                        meta=interp.meta,
                         world::UInt=interp.world,
                         method_table::GPUMethodTableView=interp.method_table,
                         code_cache::CodeCache=interp.code_cache,
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
                         opt_params::CC.OptimizationParams=interp.opt_params)
-    return GPUInterpreter(world, method_table,
+    return GPUInterpreter(meta, world, method_table,
                           code_cache, inf_cache,
                           inf_params, opt_params)
 end
@@ -437,28 +442,76 @@ function CC.concrete_eval_eligible(interp::GPUInterpreter,
 end
 
 
+within_gpucompiler() = false
+
 ## deferred compilation
 
 struct DeferredCallInfo <: CC.CallInfo
+    meta::Any
     rt::DataType
     info::CC.CallInfo
 end
 
 # recognize calls to gpuc.deferred and save DeferredCallInfo metadata
-function CC.abstract_call_known(interp::GPUInterpreter, @nospecialize(f),
-                                arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
-                                max_methods::Int = CC.get_max_methods(interp, f, sv))
+# default implementation, extensible through meta argument. 
+# XXX: (or should we dispatch on `f`)?
+function abstract_call_known(meta::Nothing, interp::GPUInterpreter, @nospecialize(f),
+                             arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+                             max_methods::Int = CC.get_max_methods(interp, f, sv))
     (; fargs, argtypes) = arginfo
     if f === var"gpuc.deferred"
-        argvec = argtypes[2:end]
+        argvec = argtypes[3:end]
         call = CC.abstract_call(interp, CC.ArgInfo(nothing, argvec), si, sv, max_methods)
-        callinfo = DeferredCallInfo(call.rt, call.info)
+        metaT = argtypes[2]
+        meta = CC.singleton_type(metaT)
+        if meta === nothing
+            if metaT isa Core.Const
+                meta = metaT.val
+            else
+                # meta is not a singleton type result may depend on runtime configuration
+                add_remark!(interp, sv, "Skipped gpuc.deferred since meta not constant")
+                @static if VERSION < v"1.11.0-"
+                    return CC.CallMeta(Union{}, CC.Effects(), CC.NoCallInfo())
+                else
+                    return CC.CallMeta(Union{}, Union{}, CC.Effects(), CC.NoCallInfo())
+                end
+            end
+        end
+
+        callinfo = DeferredCallInfo(meta, call.rt, call.info)
         @static if VERSION < v"1.11.0-"
             return CC.CallMeta(Ptr{Cvoid}, CC.Effects(), callinfo)
         else
             return CC.CallMeta(Ptr{Cvoid}, Union{}, CC.Effects(), callinfo)
         end
+    elseif f === within_gpucompiler
+        if length(argtypes) != 1
+            @static if VERSION < v"1.11.0-"
+                return CC.CallMeta(Union{}, CC.Effects(), CC.NoCallInfo())
+            else
+                return CC.CallMeta(Union{}, Union{}, CC.Effects(), CC.NoCallInfo())
+            end
+        end
+        @static if VERSION < v"1.11.0-"
+            return CC.CallMeta(Core.Const(true), CC.EFFECTS_TOTAL, CC.MethodResultPure())
+        else
+            return CC.CallMeta(Core.Const(true), Union{}, CC.EFFECTS_TOTAL, CC.MethodResultPure(),)
+        end
     end
+    return nothing
+end
+
+function CC.abstract_call_known(interp::GPUInterpreter, @nospecialize(f),
+                                arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
+                                max_methods::Int = CC.get_max_methods(interp, f, sv))
+    candidate = abstract_call_known(interp.meta, interp, f, arginfo, si, sv, max_methods)
+    if candidate === nothing && interp.meta !== nothing
+        candidate = abstract_call_known(interp.meta, interp, f, arginfo, si, sv, max_methods)
+    end
+    if candidate !== nothing
+        return candidate
+    end
+    
     return @invoke CC.abstract_call_known(interp::CC.AbstractInterpreter, f,
         arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.AbsIntState,
         max_methods::Int)
@@ -485,23 +538,29 @@ function CC.handle_call!(todo::Vector{Pair{Int,Any}}, ir::CC.IRCode, idx::CC.Int
     args = Any[
         "extern gpuc.lookup",
         Ptr{Cvoid},
-        Core.svec(Any, Any, match.spec_types.parameters[2:end]...), # Must use Any for MethodInstance or ftype
+        Core.svec(Any, Any, Any, match.spec_types.parameters[2:end]...), # Must use Any for MethodInstance or ftype
         0,
         QuoteNode(:llvmcall),
+        info.meta,
         case.invoke,
-        stmt.args[2:end]...
+        stmt.args[3:end]...
     ]
     stmt.head = :foreigncall
     stmt.args = args
     return nothing
 end
 
+struct Edge
+    meta::Any
+    mi::MethodInstance
+end
+
 struct DeferredEdges
-    edges::Vector{MethodInstance}
+    edges::Vector{Edge}
 end
 
 function find_deferred_edges(ir::CC.IRCode)
-    edges = MethodInstance[]
+    edges = Edge[]
     # XXX: can we add this instead in handle_call?
     for stmt in ir.stmts
         inst = stmt[:inst]
@@ -509,8 +568,9 @@ function find_deferred_edges(ir::CC.IRCode)
         expr = inst::Expr
         if expr.head === :foreigncall &&
             expr.args[1] == "extern gpuc.lookup"
-            deferred_mi = expr.args[6]
-            push!(edges, deferred_mi)
+            deferred_meta = expr.args[6]
+            deferred_mi = expr.args[7]
+            push!(edges, Edge(deferred_meta, deferred_mi))
         end
     end
     unique!(edges)
@@ -539,6 +599,116 @@ function CC.finish(interp::GPUInterpreter, opt::CC.OptimizationState, ir::CC.IRC
     end
     @invoke CC.finish(interp::CC.AbstractInterpreter, opt::CC.OptimizationState,
                       ir::CC.IRCode, caller::CC.InferenceResult)
+end
+end
+
+import .CC: CallInfo
+struct NoInlineCallInfo <: CallInfo
+    info::CallInfo # wrapped call
+    tt::Any # ::Type
+    kind::Symbol
+    NoInlineCallInfo(@nospecialize(info::CallInfo), @nospecialize(tt), kind::Symbol) =
+        new(info, tt, kind)
+end
+
+CC.nsplit_impl(info::NoInlineCallInfo) = CC.nsplit(info.info)
+CC.getsplit_impl(info::NoInlineCallInfo, idx::Int) = CC.getsplit(info.info, idx)
+CC.getresult_impl(info::NoInlineCallInfo, idx::Int) = CC.getresult(info.info, idx)
+struct AlwaysInlineCallInfo <: CallInfo
+    info::CallInfo # wrapped call
+    tt::Any # ::Type
+    AlwaysInlineCallInfo(@nospecialize(info::CallInfo), @nospecialize(tt)) = new(info, tt)
+end
+
+CC.nsplit_impl(info::AlwaysInlineCallInfo) = Core.Compiler.nsplit(info.info)
+CC.getsplit_impl(info::AlwaysInlineCallInfo, idx::Int) = CC.getsplit(info.info, idx)
+CC.getresult_impl(info::AlwaysInlineCallInfo, idx::Int) = CC.getresult(info.info, idx)
+
+
+function inlining_handler(meta::Nothing, interp::GPUInterpreter, @nospecialize(atype), callinfo)
+    return nothing
+end
+
+using Core.Compiler: ArgInfo, StmtInfo, AbsIntState
+function CC.abstract_call_gf_by_type(interp::GPUInterpreter, @nospecialize(f), arginfo::ArgInfo,
+                                     si::StmtInfo, @nospecialize(atype), sv::AbsIntState, max_methods::Int)
+    ret = @invoke CC.abstract_call_gf_by_type(interp::CC.AbstractInterpreter, f::Any, arginfo::ArgInfo,
+                                              si::StmtInfo, atype::Any, sv::AbsIntState, max_methods::Int)
+
+    callinfo = nothing
+    if interp.meta !== nothing
+        callinfo = inlining_handler(interp.meta, interp, atype, ret.info)
+    end
+    if callinfo === nothing
+        callinfo = inlining_handler(nothing, interp, atype, ret.info)
+    end
+    if callinfo === nothing
+        callinfo = ret.info
+    end
+    
+    @static if VERSION ≥ v"1.11-"
+        return CC.CallMeta(ret.rt, ret.exct, ret.effects, callinfo)
+    else
+        return CC.CallMeta(ret.rt, ret.effects, callinfo)
+    end
+end
+
+@static if VERSION < v"1.12.0-DEV.45" 
+let # overload `inlining_policy`
+    @static if VERSION ≥ v"1.11.0-DEV.879"
+        sigs_ex = :(
+            interp::GPUInterpreter,
+            @nospecialize(src),
+            @nospecialize(info::CC.CallInfo),
+            stmt_flag::UInt32,
+        )
+        args_ex = :(
+            interp::CC.AbstractInterpreter,
+            src::Any,
+            info::CC.CallInfo,
+            stmt_flag::UInt32,
+        )
+    else
+        sigs_ex = :(
+            interp::GPUInterpreter,
+            @nospecialize(src),
+            @nospecialize(info::CC.CallInfo),
+            stmt_flag::UInt8,
+            mi::MethodInstance,
+            argtypes::Vector{Any},
+        )
+        args_ex = :(
+            interp::CC.AbstractInterpreter,
+            src::Any,
+            info::CC.CallInfo,
+            stmt_flag::UInt8,
+            mi::MethodInstance,
+            argtypes::Vector{Any},
+        )
+    end
+    @eval function CC.inlining_policy($(sigs_ex.args...))
+        if info isa NoInlineCallInfo
+            @safe_debug "Blocking inlining" info.tt info.kind
+            return nothing
+        elseif info isa AlwaysInlineCallInfo
+            @safe_debug "Forcing inlining for" info.tt
+            return src
+        end
+        return @invoke CC.inlining_policy($(args_ex.args...))
+    end
+end
+else
+function CC.src_inlining_policy(interp::GPUInterpreter,
+                                @nospecialize(src), @nospecialize(info::CC.CallInfo), stmt_flag::UInt32)
+                                
+    if info isa NoInlineCallInfo
+        @safe_debug "Blocking inlining" info.tt info.kind
+        return false
+    elseif info isa AlwaysInlineCallInfo
+        @safe_debug "Forcing inlining for" info.tt
+        return true
+    end
+    return @invoke CC.src_inlining_policy(interp::CC.AbstractInterpreter, src, info::CC.CallInfo, stmt_flag::UInt32)
 end
 end
 
@@ -697,14 +867,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     #        generate for the same mi multiple LLVM functions. 
     # `outstanding` are the missing edges that were not compiled by `compile_method_instance`
     # Currently these edges are generated through deferred codegen.
-    compiled = IdDict()
+    compiled = IdDict{Edge, Any}()
     llvm_mod, outstanding = compile_method_instance(job, compiled)
     worklist = outstanding
     while !isempty(worklist)
-        source = pop!(worklist)
-        haskey(compiled, source) && continue # We have fulfilled the request already
+        edge = pop!(worklist)
+        haskey(compiled, edge) && continue # We have fulfilled the request already
+        source = edge.mi
+        meta = edge.meta
         # Create a new compiler job for this edge, reusing the config settings from the inital one
-        job2 = CompilerJob(source, job.config)
+        job2 = CompilerJob(source, CompilerConfig(job.config; meta))
         llvm_mod2, outstanding = compile_method_instance(job2, compiled)
         append!(worklist, outstanding) # merge worklist with new outstanding edges
         @assert context(llvm_mod) == context(llvm_mod2)
@@ -714,7 +886,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     return llvm_mod, compiled
 end
 
-function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDict{Any, Any})
+function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDict{Edge, Any})
     # populate the cache
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
@@ -790,6 +962,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDi
     end
 
     # process all compiled method instances
+    meta = inference_metadata(job)
     for mi in method_instances
         ci = ci_cache_lookup(cache, mi, job.world, job.world)
         ci === nothing && continue
@@ -825,14 +998,15 @@ function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDi
         #       removed or renamed during optimization, so we store their name instead.
         # FIXME: Enable this assert when we have a fully featured worklist
         # @assert !haskey(compiled, mi)
-        compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
+        compiled[Edge(meta, mi)] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
     end
 
     # Collect the deferred edges
-    outstanding = Any[]
+    outstanding = Edge[]
     for mi in method_instances
-        !haskey(compiled, mi) && continue # Equivalent to ci_cache_lookup == nothing
-        ci = compiled[mi].ci
+        edge = Edge(meta, mi)
+        !haskey(compiled, edge) && continue # Equivalent to ci_cache_lookup == nothing
+        ci = compiled[edge].ci
         @static if VERSION >= v"1.11.0-"
             edges = CC.traverse_analysis_results(ci) do @nospecialize result
                 return result isa DeferredEdges ? result : return
@@ -844,16 +1018,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob), compiled::IdDi
             end
         end
         if edges !== nothing
-            for deferred_mi in (edges::DeferredEdges).edges
-                if !haskey(compiled, deferred_mi)
-                    push!(outstanding, deferred_mi)
+            for other in (edges::DeferredEdges).edges
+                if !haskey(compiled, other)
+                    push!(outstanding, other)
                 end
             end
         end
     end
 
     # ensure that the requested method instance was compiled
-    @assert haskey(compiled, job.source)
+    @assert haskey(compiled, Edge(meta, job.source))
 
     return llvm_mod, outstanding
 end

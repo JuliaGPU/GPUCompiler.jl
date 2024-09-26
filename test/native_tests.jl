@@ -43,12 +43,12 @@ end
 
             meth = only(methods(outer, (Int,)))
 
-            mis = filter(mi->mi.def == meth, keys(meta.compiled))
+            mis = filter(edge->edge.mi.def == meth, keys(meta.compiled))
             @test length(mis) == 1
 
-            other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
+            other_mis = filter(edge->edge.mi.def != meth, keys(meta.compiled))
             @test length(other_mis) == 1
-            @test only(other_mis).def in methods(inner)
+            @test only(other_mis).mi.def in methods(inner)
         end
     end
 
@@ -63,11 +63,11 @@ end
 
             meth = only(methods(foo, (Float64,)))
 
-            mis = filter(mi->mi.def == meth, keys(meta.compiled))
+            mis = filter(edge->edge.mi.def == meth, keys(meta.compiled))
             @test length(mis) == 1
 
-            inner_methods = filter(keys(meta.compiled)) do mi
-                mi.def in methods(inner) && mi.specTypes == Tuple{typeof(inner), Float64}
+            inner_methods = filter(keys(meta.compiled)) do edge
+                edge.mi.def in methods(inner) && edge.mi.specTypes == Tuple{typeof(inner), Float64}
             end
             @test length(inner_methods) == 1
         end
@@ -166,7 +166,7 @@ end
     @testset "deferred" begin
         @gensym child kernel unrelated
         @eval @noinline $child(i) = i
-        @eval $kernel(i) = GPUCompiler.var"gpuc.deferred"($child, i)
+        @eval $kernel(i) = GPUCompiler.var"gpuc.deferred"(nothing, $child, i)
 
         # smoke test
         job, _ = Native.create_job(eval(kernel), (Int64,))

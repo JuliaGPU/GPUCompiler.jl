@@ -26,11 +26,12 @@ GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.pa
 
 function create_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
                     entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
-                    method_table=test_method_table, kwargs...)
+                    method_table=test_method_table,
+                    meta=nothing, kwargs...)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget()
     params = CompilerParams(entry_safepoint, method_table)
-    config = CompilerConfig(target, params; kernel, entry_abi, always_inline)
+    config = CompilerConfig(target, params; kernel, entry_abi, always_inline, meta)
     CompilerJob(source, config), kwargs
 end
 

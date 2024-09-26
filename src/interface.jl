@@ -89,6 +89,7 @@ Several keyword arguments can be used to customize the compilation process:
 struct CompilerConfig{T,P}
     target::T
     params::P
+    meta
 
     kernel::Bool
     name::Union{Nothing,String}
@@ -98,6 +99,7 @@ struct CompilerConfig{T,P}
 
     function CompilerConfig(target::AbstractCompilerTarget,
                             params::AbstractCompilerParams;
+                            meta = nothing,
                             kernel=true,
                             name=nothing,
                             entry_abi=:specfunc,
@@ -106,16 +108,16 @@ struct CompilerConfig{T,P}
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
-        new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
+        new{typeof(target), typeof(params)}(target, params, meta, kernel, name, entry_abi,
                                             always_inline, opt_level)
     end
 end
 
 # copy constructor
-CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
+CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params, meta=cfg.meta, 
                kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
                always_inline=cfg.always_inline, opt_level=cfg.opt_level) =
-    CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level)
+    CompilerConfig(target, params; meta, kernel, entry_abi, name, always_inline, opt_level)
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
     print(io, "CompilerConfig for ", T)
@@ -124,6 +126,7 @@ end
 function Base.hash(cfg::CompilerConfig, h::UInt)
     h = hash(cfg.target, h)
     h = hash(cfg.params, h)
+    h = hash(cfg.meta, h)::UInt
 
     h = hash(cfg.kernel, h)
     h = hash(cfg.name, h)
@@ -178,15 +181,17 @@ runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 # check if a function is an intrinsic that can assumed to be always available
 isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
+inference_metadata(@nospecialize(job::CompilerJob)) = job.config.meta
+
 # provide a specific interpreter to use.
 if VERSION >= v"1.11.0-DEV.1552"
 get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table=method_table(job),
+    GPUInterpreter(job.world; meta=inference_metadata(job), method_table=method_table(job),
                    token=ci_cache_token(job), inf_params=inference_params(job),
                    opt_params=optimization_params(job))
 else
 get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table=method_table(job),
+    GPUInterpreter(job.world; meta=inference_metadata(job), method_table=method_table(job),
                    code_cache=ci_cache(job), inf_params=inference_params(job),
                    opt_params=optimization_params(job))
 end
@@ -227,10 +232,11 @@ struct GPUCompilerCacheToken
     target_type::Type
     always_inline::Bool
     method_table::Core.MethodTable
+    metadata
 end
 
 ci_cache_token(@nospecialize(job::CompilerJob)) =
-    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
+    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job), inference_metadata(job))
 
 # the codeinstance cache to use -- should only be used for the constructor
 if VERSION >= v"1.11.0-DEV.1552"

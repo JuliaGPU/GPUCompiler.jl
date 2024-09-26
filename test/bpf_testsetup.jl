@@ -10,7 +10,8 @@ struct CompilerParams <: AbstractCompilerParams end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types);
-                    kernel::Bool=false, always_inline=false, kwargs...)
+                    kernel::Bool=false, always_inline=false,
+                    meta=nothing, kwargs...)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = BPFCompilerTarget()
     params = CompilerParams()
