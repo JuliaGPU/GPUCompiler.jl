@@ -377,6 +377,11 @@ const __llvm_initialized = Ref(false)
         end
     end
 
+    @dispose pb=NewPMPassBuilder() begin
+        add!(pb, ModuleInlinerPass())
+        run!(pb, ir, llvm_machine(job.config.target))
+    end
+
     if validate
         @timeit_debug to "Validation" begin
             check_ir(job, ir)

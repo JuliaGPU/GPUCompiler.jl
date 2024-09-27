@@ -13,7 +13,7 @@ end
 
 # for backwards compatibility
 MetalCompilerTarget(macos::VersionNumber) =
-    MetalCompilerTarget(; macos, air=v"2.4", metal=v"2.4")
+    MetalCompilerTarget(; macos, air=v"2.7", metal=v"3.2")
 
 function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.macos, h)
@@ -160,6 +160,9 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
 
     # add kernel metadata
     if job.config.kernel
+        push!(function_attributes(entry), EnumAttribute("mustprogress"))
+        push!(function_attributes(entry), EnumAttribute("nounwind"))
+
         entry = add_address_spaces!(job, mod, entry)
 
         add_argument_metadata!(job, mod, entry)
@@ -168,16 +171,16 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     end
 
     # JuliaLang/Metal.jl#113
-    hide_noreturn!(mod)
+    # hide_noreturn!(mod)
 
     # get rid of unreachable control flow (JuliaLang/Metal.jl#370).
     # note that this currently works in tandem with the `hide_noreturn!` pass above,
     # as `replace_unreachable!` doesn't handle functions that _only_ contain `unreachable`.
-    if job.config.target.macos < v"15"
-        for f in functions(mod)
-            replace_unreachable!(job, f)
-        end
-    end
+    # if job.config.target.macos < v"15"
+    #     for f in functions(mod)
+    #         replace_unreachable!(job, f)
+    #     end
+    # end
 
     # lower LLVM intrinsics that AIR doesn't support
     changed = false
@@ -711,13 +714,20 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     arg_infos = MDNode(arg_infos)
 
 
+    max_work_group_size_md = Metadata[]
+    push!(max_work_group_size_md, MDString("air.max_work_group_size"))
+    push!(max_work_group_size_md, Metadata(ConstantInt(Int32(64))))
+    max_work_group_size_md = MDNode(max_work_group_size_md)
+
     ## stage info
     stage_infos = Metadata[]
     stage_infos = MDNode(stage_infos)
 
-    kernel_md = MDNode([entry, stage_infos, arg_infos])
+    kernel_md = MDNode([entry, stage_infos, arg_infos, max_work_group_size_md])
     push!(metadata(mod)["air.kernel"], kernel_md)
 
+    push!(function_attributes(entry), StringAttribute("max-work-group-size", "64"))
+    push!(function_attributes(entry), StringAttribute("min-legal-vector-width", "0"))
     return
 end
 
@@ -1090,7 +1100,8 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
         # synchronization
         if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
             add_attributes("nounwind", "convergent")
-
+        elseif fn == "llvm.trap"
+            add_attributes("nounwind")
         # atomics
         elseif match(r"air.atomic.(local|global).load", fn) !== nothing
             # TODO: "memory(argmem: read)" on LLVM 16+

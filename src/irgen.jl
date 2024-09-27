@@ -249,7 +249,8 @@ function emit_trap!(@nospecialize(job::CompilerJob), builder, mod, inst)
     else
         LLVM.Function(mod, "llvm.trap", trap_ft)
     end
-    call!(builder, trap_ft, trap)
+    ci = call!(builder, trap_ft, trap)
+    tailcall!(ci, true)
 end
 
 
