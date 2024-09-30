@@ -17,6 +17,8 @@ MetalCompilerTarget(macos::VersionNumber) =
 
 function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.macos, h)
+    h = hash(target.air, h)
+    h = hash(target.metal, h)
 end
 
 source_code(target::MetalCompilerTarget) = "text"
