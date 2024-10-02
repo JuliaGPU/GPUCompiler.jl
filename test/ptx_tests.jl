@@ -504,4 +504,28 @@ end
     ir = sprint(io->PTX.code_llvm(io, kernel_inline, Tuple{Ptr{Int64}, Int64}, meta=Plugin.NeverInlineMeta()))
     @test occursin("call fastcc i64 @julia_inline", ir)
 end
+
+@testset "Mock Enzyme" begin
+    function f(x)
+        x^2
+    end
+    
+    function kernel(a, x)
+        y = Plugin.autodiff(f, x)
+        unsafe_store!(a, y)
+        nothing
+    end
+
+    # This tests deferred_codegen with kernel=true
+    @show PTX.code_typed(kernel, Tuple{Ptr{Float64}, Float64})
+
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Ptr{Float64}, Float64}, optimize=false))
+    @test occursin("call double @__autodiff", ir)
+    @test !occursin("call fastcc double @julia_f", ir)
+
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Ptr{Float64}, Float64}, optimize=true))
+    @test !occursin("call double @__autodiff", ir)
+    @test occursin("call fastcc double @julia_f", ir)
+end
+
 end #testitem

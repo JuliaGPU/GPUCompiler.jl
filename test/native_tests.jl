@@ -171,8 +171,6 @@ end
         # smoke test
         job, _ = Native.create_job(eval(kernel), (Int64,))
 
-        # TODO: Add a `kernel=true` test
-
         ci, rt = only(GPUCompiler.code_typed(job))
         @test rt === Ptr{Cvoid}
 
