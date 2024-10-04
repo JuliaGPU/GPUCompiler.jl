@@ -42,7 +42,7 @@ end
 ## deferred compilation
 
 """
-    var"gpuc.deferred"(f, args...)::Ptr{Cvoid}
+    var"gpuc.deferred"(meta, f, args...)::Ptr{Cvoid}
 
 As if we were to call `f(args...)` but instead we are
 putting down a marker and return a function pointer to later
@@ -154,10 +154,11 @@ const __llvm_initialized = Ref(false)
 
     @timeit_debug to "IR generation" begin
         ir, compiled = irgen(job)
+        edge = Edge(inference_metadata(job), job.source)
         if job.config.entry_abi === :specfunc
-            entry_fn = compiled[job.source].specfunc
+            entry_fn = compiled[edge].specfunc
         else
-            entry_fn = compiled[job.source].func
+            entry_fn = compiled[edge].func
         end
         entry = functions(ir)[entry_fn]
     end
@@ -198,24 +199,28 @@ const __llvm_initialized = Ref(false)
             return val
         end
 
-        worklist = Dict{Any, Vector{LLVM.CallInst}}()
+        worklist = Dict{Edge, Vector{LLVM.CallInst}}()
         for use in uses(dyn_marker)
             # decode the call
             call = user(use)::LLVM.CallInst
-            dyn_mi_inst = find_base_object(operands(call)[1])
+            dyn_meta_inst = find_base_object(operands(call)[1])
+            @compiler_assert isa(dyn_meta_inst, LLVM.ConstantInt) job
+            dyn_mi_inst = find_base_object(operands(call)[2])
             @compiler_assert isa(dyn_mi_inst, LLVM.ConstantInt) job
+            dyn_meta = Base.unsafe_pointer_to_objref(
+                convert(Ptr{Cvoid}, convert(Int, dyn_meta_inst)))
             dyn_mi = Base.unsafe_pointer_to_objref(
-                convert(Ptr{Cvoid}, convert(Int, dyn_mi_inst)))
-            push!(get!(worklist, dyn_mi, LLVM.CallInst[]), call)
+                convert(Ptr{Cvoid}, convert(Int, dyn_mi_inst)))::MethodInstance
+            push!(get!(worklist, Edge(dyn_meta, dyn_mi), LLVM.CallInst[]), call)
         end
 
-        for dyn_mi in keys(worklist)
-            dyn_fn_name = compiled[dyn_mi].specfunc
+        for dyn_edge in keys(worklist)
+            dyn_fn_name = compiled[dyn_edge].specfunc
             dyn_fn = functions(ir)[dyn_fn_name]
 
             # insert a pointer to the function everywhere the entry is used
             T_ptr = convert(LLVMType, Ptr{Cvoid})
-            for call in worklist[dyn_mi]
+            for call in worklist[dyn_edge]
                 @dispose builder=IRBuilder() begin
                     position!(builder, call)
                     fptr = if LLVM.version() >= v"17"

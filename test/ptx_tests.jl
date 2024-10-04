@@ -277,6 +277,19 @@ end
     @test "We did not crash!" != ""
 end
 
+@testset "within_gpucompiler" begin
+    function kernel(a)
+        unsafe_store!(a, GPUCompiler.within_gpucompiler())
+    end
+    ir = sprint(io->InteractiveUtils.code_llvm(io, kernel, Tuple{Ptr{Bool}}))
+    @test occursin("store i8 0,", ir)
+    @test !occursin("store i8 1,", ir)
+
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Ptr{Bool}}))
+    @test !occursin("store i8 0,", ir)
+    @test occursin("store i8 1,", ir)
+end
+
 @testset "exception arguments" begin
     function kernel(a)
         unsafe_store!(a, trunc(Int, unsafe_load(a)))
@@ -424,5 +437,71 @@ import InteractiveUtils
     @test occursin("gpucompiler.mark", ir)
     ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Int}))
     @test !occursin("gpucompiler.mark", ir)
+end
+
+@testset "current_inlinestate" begin
+    function kernel(a)
+        state = Plugin.current_inlinestate()
+        if state === nothing
+            unsafe_store!(a, 0)
+        elseif state === Plugin.NeverInlineMeta()
+            unsafe_store!(a, 1)
+        elseif state === Plugin.AlwaysInlineMeta()
+            unsafe_store!(a, 2)
+        end
+        return nothing
+    end
+    ir = sprint(io->InteractiveUtils.code_llvm(io, kernel, Tuple{Ptr{Int64}}))
+    @test occursin("store i64 0,", ir)
+    @test !occursin("store i64 1,", ir)
+    @test !occursin("store i64 2,", ir)
+
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Ptr{Int64}}))
+    @test occursin("store i64 0,", ir)
+    @test !occursin("store i64 1,", ir)
+    @test !occursin("store i64 2,", ir)
+
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Ptr{Int64}}, meta=Plugin.NeverInlineMeta()))
+    @test !occursin("store i64 0,", ir)
+    @test occursin("call fastcc void @julia_unsafe_store", ir) # call fastcc void @julia_unsafe_store__1397(i64 zeroext %0, i64 signext 1)
+    @test !occursin("store i64 2,", ir)
+
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Ptr{Int64}}, meta=Plugin.AlwaysInlineMeta()))
+    @test !occursin("store i64 0,", ir)
+    @test !occursin("store i64 1,", ir)
+    @test occursin("store i64 2,", ir)
+end
+
+@testset "InlineStateMeta" begin
+
+    @noinline function noinline(x)
+        x^2
+    end
+
+    @inline function inline(x)
+        x^2
+    end
+
+    function kernel_noinline(a, x)
+        unsafe_store!(a, noinline(x))
+        nothing
+    end
+    
+    function kernel_inline(a, x)
+        unsafe_store!(a, inline(x))
+        nothing
+    end
+
+    ir = sprint(io->PTX.code_llvm(io, kernel_noinline, Tuple{Ptr{Int64}, Int64}))
+    @test occursin("call fastcc i64 @julia_noinline", ir)
+    
+    ir = sprint(io->PTX.code_llvm(io, kernel_noinline, Tuple{Ptr{Int64}, Int64}, meta=Plugin.AlwaysInlineMeta()))
+    @test !occursin("call fastcc i64 @julia_noinline", ir)
+
+    ir = sprint(io->PTX.code_llvm(io, kernel_inline, Tuple{Ptr{Int64}, Int64}))
+    @test !occursin("call fastcc i64 @julia_inline", ir)
+    
+    ir = sprint(io->PTX.code_llvm(io, kernel_inline, Tuple{Ptr{Int64}, Int64}, meta=Plugin.NeverInlineMeta()))
+    @test occursin("call fastcc i64 @julia_inline", ir)
 end
 end #testitem

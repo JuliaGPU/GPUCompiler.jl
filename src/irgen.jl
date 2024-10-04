@@ -2,10 +2,11 @@
 
 function irgen(@nospecialize(job::CompilerJob))
     mod, compiled = @timeit_debug to "emission" compile_method_instance(job)
+    edge = Edge(inference_metadata(job), job.source)
     if job.config.entry_abi === :specfunc
-        entry_fn = compiled[job.source].specfunc
+        entry_fn = compiled[edge].specfunc
     else
-        entry_fn = compiled[job.source].func
+        entry_fn = compiled[edge].func
     end
     @assert entry_fn !== nothing
     entry = functions(mod)[entry_fn]
@@ -70,25 +71,25 @@ function irgen(@nospecialize(job::CompilerJob))
         entry = deprecation_marker
     end
     if job.config.entry_abi === :specfunc
-        func = compiled[job.source].func
+        func = compiled[edge].func
         specfunc = LLVM.name(entry)
     else
         func = LLVM.name(entry)
-        specfunc = compiled[job.source].specfunc
+        specfunc = compiled[edge].specfunc
     end
 
-    compiled[job.source] =
-        (; compiled[job.source].ci, func, specfunc)
+    compiled[edge] =
+        (; compiled[edge].ci, func, specfunc)
 
     # Earlier we sanitize global names, this invalidates the
     # func, specfunc names safed in compiled. Update the names now,
     # such that when when use the compiled mappings to lookup the
     # llvm function for a methodinstance (deferred codegen) we have 
     # valid targets.
-    for mi in keys(compiled)
-        mi == job.source && continue
-        ci, func, specfunc = compiled[mi]
-        compiled[mi] = (; ci, func=safe_name(func), specfunc=safe_name(specfunc))
+    for other in keys(compiled)
+        other == edge && continue
+        ci, func, specfunc = compiled[other]
+        compiled[other] = (; ci, func=safe_name(func), specfunc=safe_name(specfunc))
     end
 
     # TODO: Should we rewrite gpuc.lookup here?
@@ -111,11 +112,11 @@ function irgen(@nospecialize(job::CompilerJob))
         # internalize all functions, but keep exported global variables.
         linkage!(entry, LLVM.API.LLVMExternalLinkage)
         preserved_gvs = String[LLVM.name(entry)]
-        for mi in keys(compiled)
+        for other in keys(compiled)
             # delay internalizing of deferred calls since
             # gpuc.lookup is not yet rewriten.
-            mi == job.source && continue
-            _, _, specfunc = compiled[mi]
+            other == edge && continue
+            _, _, specfunc = compiled[other]
             push!(preserved_gvs, specfunc) # this could be deleted if we rewrite gpuc.lookup earlier
         end
         for gvar in globals(mod)

@@ -22,7 +22,7 @@ runtests(GPUCompiler; nworkers=min(Sys.CPU_THREADS,4), nworker_threads=1,
         end
     end
 
-    if ti.name in ["PTX", "GCN", "PTX precompile"] && Sys.isapple()
+    if ti.name in ["PTX", "GCN", "PTX precompile", "PTX plugin"] && Sys.isapple()
         # support for AMDGPU and NVTX on macOS has been removed from Julia's LLVM build
         return false
     end
