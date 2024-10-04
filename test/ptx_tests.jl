@@ -1,6 +1,7 @@
 @testitem "PTX" setup=[PTX, Helpers] begin
 
 using LLVM
+import InteractiveUtils
 
 ############################################################################################
 
@@ -406,7 +407,22 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(identity_mi, token)
     end
 end
+end # testitem
 
 ############################################################################################
 
+@testitem "PTX plugin" setup=[PTX, Plugin] begin
+
+import InteractiveUtils
+
+@testset "Pipeline callbacks" begin
+    function kernel(x)
+        Plugin.mark(x)
+        return
+    end
+    ir = sprint(io->InteractiveUtils.code_llvm(io, kernel, Tuple{Int}))
+    @test occursin("gpucompiler.mark", ir)
+    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Int}))
+    @test !occursin("gpucompiler.mark", ir)
 end
+end #testitem
