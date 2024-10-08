@@ -374,14 +374,14 @@ Base.unsafe_trunc(::Type{Int}, x::CleverType) = unsafe_trunc(Int, x.x)
 
     @test_throws_message(KernelError,
                          Native.code_execution(foobar, Tuple{BigInt})) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
+        occursin("passing non-bitstype argument", msg) &&
         occursin("BigInt", msg)
     end
 
     # test that we get information about fields and reason why something is not isbits
     @test_throws_message(KernelError,
                          Native.code_execution(foobar, Tuple{CleverType{BigInt}})) do msg
-        occursin("passing and using non-bitstype argument", msg) &&
+        occursin("passing non-bitstype argument", msg) &&
         occursin("CleverType", msg) &&
         occursin("BigInt", msg)
     end

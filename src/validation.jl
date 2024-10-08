@@ -89,9 +89,13 @@ function check_invocation(@nospecialize(job::CompilerJob))
         end
 
         if !isbitstype(dt)
-            throw(KernelError(job, "passing and using non-bitstype argument",
-                """Argument $arg_i to your kernel function is of type $dt, which is not isbits:
-                    $(explain_nonisbits(dt))"""))
+            throw(KernelError(job, "passing non-bitstype argument",
+                """Argument $arg_i to your kernel function is of type $dt, which is not a bitstype:
+                   $(explain_nonisbits(dt))
+
+                   Only bitstypes, which are "plain data" types that are immutable
+                   and contain no references to other values, can be used in GPU kernels.
+                   For more information, see the `Base.isbitstype` function."""))
         end
     end
 
