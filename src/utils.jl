@@ -15,7 +15,7 @@ enable_timings() = (TimerOutputs.enable_debug_timings(GPUCompiler); return)
 
 should_verify() = ccall(:jl_is_debugbuild, Cint, ()) == 1 ||
                   Base.JLOptions().debug_level >= 2 ||
-                  parse(Bool, get(ENV, "CI", "false"))
+                  something(tryparse(Bool, get(ENV, "CI", "false")), true)
 
 isdebug(group, mod=GPUCompiler) =
     Base.CoreLogging.current_logger_for_env(Base.CoreLogging.Debug, group, mod) !== nothing
