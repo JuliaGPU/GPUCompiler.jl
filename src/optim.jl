@@ -1,15 +1,15 @@
 # LLVM IR optimization
 
-function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=1)
+function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
     tm = llvm_machine(job.config.target)
 
     global current_job
     current_job = job
 
     @dispose pb=NewPMPassBuilder() begin
-        register!(pb, CPUFeaturesPass())
-        register!(pb, LowerPTLSPass())
-        register!(pb, LowerGCFramePass())
+        register!(pb, GPULowerCPUFeaturesPass())
+        register!(pb, GPULowerPTLSPass())
+        register!(pb, GPULowerGCFramePass())
         register!(pb, AddKernelStatePass())
         register!(pb, LowerKernelStatePass())
         register!(pb, CleanupKernelStatePass())
@@ -94,7 +94,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
             add!(fpm, LowerConstantIntrinsicsPass())
         end
     end
-    add!(mpm, CPUFeaturesPass())
+    add!(mpm, GPULowerCPUFeaturesPass())
     if opt_level >= 1
         add!(mpm, NewPMFunctionPassManager()) do fpm
             if opt_level >= 2
@@ -196,7 +196,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     # lower GC intrinsics
     if !uses_julia_runtime(job)
         add!(mpm, NewPMFunctionPassManager()) do fpm
-            add!(fpm, LowerGCFramePass())
+            add!(fpm, GPULowerGCFramePass())
         end
     end
 
@@ -217,7 +217,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         add!(mpm, NewPMFunctionPassManager()) do fpm
             add!(fpm, ADCEPass())
         end
-        add!(mpm, LowerPTLSPass())
+        add!(mpm, GPULowerPTLSPass())
     end
 
     add!(mpm, NewPMFunctionPassManager()) do fpm
@@ -332,7 +332,7 @@ function cpu_features!(mod::LLVM.Module)
 
     return changed
 end
-CPUFeaturesPass() = NewPMModulePass("GPULowerCPUFeatures", cpu_features!)
+GPULowerCPUFeaturesPass() = NewPMModulePass("GPULowerCPUFeatures", cpu_features!)
 
 # lower object allocations to to PTX malloc
 #
@@ -391,7 +391,7 @@ function lower_gc_frame!(fun::LLVM.Function)
 
     return changed
 end
-LowerGCFramePass() = NewPMFunctionPass("GPULowerGCFrame", lower_gc_frame!)
+GPULowerGCFramePass() = NewPMFunctionPass("GPULowerGCFrame", lower_gc_frame!)
 
 # lower the `julia.ptls_states` intrinsic by removing it, since it is GPU incompatible.
 #
@@ -422,4 +422,4 @@ function lower_ptls!(mod::LLVM.Module)
 
     return changed
 end
-LowerPTLSPass() = NewPMModulePass("GPULowerPTLS", lower_ptls!)
+GPULowerPTLSPass() = NewPMModulePass("GPULowerPTLS", lower_ptls!)
