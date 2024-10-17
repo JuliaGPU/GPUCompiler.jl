@@ -79,7 +79,6 @@ if VERSION >= v"1.11.0-DEV.1552"
 @inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
                                 world::Integer=tls_world_age())
     sig = signature_type_by_tt(ft, tt)
-    @assert Base.isdispatchtuple(sig)   # JuliaLang/julia#52233
 
     mi = ccall(:jl_method_lookup_by_tt, Any,
                (Any, Csize_t, Any),
