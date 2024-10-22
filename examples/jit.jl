@@ -116,31 +116,31 @@ function get_trampoline(job)
     return addr
 end
 
-import GPUCompiler: deferred_codegen_jobs
-@generated function deferred_codegen(f::F, ::Val{tt}, ::Val{world}) where {F,tt,world}
-    # manual version of native_job because we have a function type
-    source = methodinstance(F, Base.to_tuple_type(tt), world)
-    target = NativeCompilerTarget(; jlruntime=true, llvm_always_inline=true)
-    # XXX: do we actually require the Julia runtime?
-    #      with jlruntime=false, we reach an unreachable.
-    params = TestCompilerParams()
-    config = CompilerConfig(target, params; kernel=false)
-    job = CompilerJob(source, config, world)
-    # XXX: invoking GPUCompiler from a generated function is not allowed!
-    #      for things to work, we need to forward the correct world, at least.
+# import GPUCompiler: deferred_codegen_jobs
+# @generated function deferred_codegen(f::F, ::Val{tt}, ::Val{world}) where {F,tt,world}
+#     # manual version of native_job because we have a function type
+#     source = methodinstance(F, Base.to_tuple_type(tt), world)
+#     target = NativeCompilerTarget(; jlruntime=true, llvm_always_inline=true)
+#     # XXX: do we actually require the Julia runtime?
+#     #      with jlruntime=false, we reach an unreachable.
+#     params = TestCompilerParams()
+#     config = CompilerConfig(target, params; kernel=false)
+#     job = CompilerJob(source, config, world)
+#     # XXX: invoking GPUCompiler from a generated function is not allowed!
+#     #      for things to work, we need to forward the correct world, at least.
 
-    addr = get_trampoline(job)
-    trampoline = pointer(addr)
-    id = Base.reinterpret(Int, trampoline)
+#     addr = get_trampoline(job)
+#     trampoline = pointer(addr)
+#     id = Base.reinterpret(Int, trampoline)
 
-    deferred_codegen_jobs[id] = job
+#     deferred_codegen_jobs[id] = job
 
-    quote
-        ptr = ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $trampoline)
-        assume(ptr != C_NULL)
-        return ptr
-    end
-end
+#     quote
+#         ptr = ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $trampoline)
+#         assume(ptr != C_NULL)
+#         return ptr
+#     end
+# end
 
 @generated function abi_call(f::Ptr{Cvoid}, rt::Type{RT}, tt::Type{T}, func::F, args::Vararg{Any, N}) where {T, RT, F, N}
     argtt    = tt.parameters[1]
@@ -224,8 +224,9 @@ end
 @inline function call_delayed(f::F, args...) where F
     tt = Tuple{map(Core.Typeof, args)...}
     rt = Core.Compiler.return_type(f, tt)
-    world = GPUCompiler.tls_world_age()
-    ptr = deferred_codegen(f, Val(tt), Val(world))
+    # FIXME: Horrible idea, have `var"gpuc.deferred"` actually do the work
+    #        But that will only be needed here, and in Enzyme...
+    ptr = GPUCompiler.var"gpuc.deferred"(f, args...)
     abi_call(ptr, rt, tt, f, args...)
 end
 
