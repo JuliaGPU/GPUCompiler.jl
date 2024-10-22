@@ -71,34 +71,7 @@ function generic_methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type)
     return mi::MethodInstance
 end
 
-# on 1.11 (JuliaLang/julia#52572, merged as part of JuliaLang/julia#52233) we can use
-# Julia's cached method lookup to simply look up method instances at run time.
-if VERSION >= v"1.11.0-DEV.1552"
-
-# XXX: version of Base.method_instance that uses a function type
-@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
-                                world::Integer=tls_world_age())
-    sig = signature_type_by_tt(ft, tt)
-    @assert Base.isdispatchtuple(sig)   # JuliaLang/julia#52233
-
-    mi = ccall(:jl_method_lookup_by_tt, Any,
-               (Any, Csize_t, Any),
-               sig, world, #=method_table=# nothing)
-    mi === nothing && throw(MethodError(ft, tt, world))
-    mi = mi::MethodInstance
-
-    # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
-    if !Base.isdispatchtuple(mi.specTypes)
-        mi = CC.specialize_method(mi.def, sig, mi.sparam_vals)::MethodInstance
-    end
-
-    return mi
-end
-
-# on older versions of Julia, we always need to use the generic lookup
-else
-
-const methodinstance = generic_methodinstance
+const methodinstance_internal = generic_methodinstance
 
 function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
     @nospecialize
@@ -150,11 +123,43 @@ function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
     return new_ci
 end
 
-@eval function methodinstance(ft, tt)
+@eval function methodinstance_internal(ft, tt)
     $(Expr(:meta, :generated_only))
     $(Expr(:meta, :generated, methodinstance_generator))
 end
 
+# on 1.11 (JuliaLang/julia#52572, merged as part of JuliaLang/julia#52233) we can use
+# Julia's cached method lookup to simply look up method instances at run time.
+if VERSION >= v"1.11.0-DEV.1552"
+
+# XXX: version of Base.method_instance that uses a function type
+@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
+                                world::Integer=tls_world_age())
+    sig = signature_type_by_tt(ft, tt)
+    if Base.isdispatchtuple(sig)
+        mi = ccall(:jl_method_lookup_by_tt, Any,
+                   (Any, Csize_t, Any),
+                   sig, world, #=method_table=# nothing)
+        mi === nothing && throw(MethodError(ft, tt, world))
+        mi = mi::MethodInstance
+
+        # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
+        if !Base.isdispatchtuple(mi.specTypes)
+            mi = CC.specialize_method(mi.def, sig, mi.sparam_vals)::MethodInstance
+        end
+    else
+        return methodinstance_internal(ft, tt, world)
+    end
+
+    return mi
+end
+
+# on older versions of Julia, we always need to use the generic lookup
+else
+
+const methodinstance = methodinstance_internal
+@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
+                                world::Integer=tls_world_age())
 end
 
 
