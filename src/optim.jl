@@ -266,7 +266,9 @@ end
 function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if opt_level >= 2
         add!(mpm, NewPMFunctionPassManager()) do fpm
-            add!(fpm, CombineMulAddPass())
+            if VERSION < v"1.12.0-DEV.1390"
+                add!(fpm, CombineMulAddPass())
+            end
             add!(fpm, DivRemPairsPass())
         end
     end
