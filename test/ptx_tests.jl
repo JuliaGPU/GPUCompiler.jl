@@ -403,7 +403,7 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(kernel_mi, token)
 
         # check that identity survived
-        @test check_presence(identity_mi, token)
+        @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"
     end
 end
 
