@@ -88,6 +88,12 @@ function check_invocation(@nospecialize(job::CompilerJob))
                    This is a CPU-only object not supported by GPUCompiler."""))
         end
 
+        # If an object doesn't have fields, it can only be used by identity, so we can allow
+        # them to be passed to the GPU (this also applies to e.g. Symbols).
+        if fieldcount(dt) == 0
+            continue
+        end
+
         if !isbitstype(dt)
             throw(KernelError(job, "passing non-bitstype argument",
                 """Argument $arg_i to your kernel function is of type $dt, which is not a bitstype:

@@ -162,6 +162,18 @@ end
         ir = fetch(t)
         @test contains(ir, r"add i64 %\d+, 3")
     end
+
+    @testset "allowed mutable types" begin
+        # when types have no fields, we should always allow them
+        mod = @eval module $(gensym())
+            struct Empty end
+        end
+
+        Native.code_execution(Returns(nothing), (mod.Empty,))
+
+        # this also applies to Symbols
+        Native.code_execution(Returns(nothing), (Symbol,))
+    end
 end
 
 ############################################################################################
