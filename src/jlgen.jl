@@ -73,7 +73,7 @@ end
 
 # on 1.11 (JuliaLang/julia#52572, merged as part of JuliaLang/julia#52233) we can use
 # Julia's cached method lookup to simply look up method instances at run time.
-if VERSION >= v"1.11.0-DEV.1552"
+@static if VERSION >= v"1.11.0-DEV.1552"
 
 # XXX: version of Base.method_instance that uses a function type
 @inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
@@ -395,7 +395,7 @@ CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
 CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
 #=CC.=#get_inference_world(interp::GPUInterpreter) = interp.world
 CC.get_inference_cache(interp::GPUInterpreter) = interp.inf_cache
-if HAS_INTEGRATED_CACHE
+@static if HAS_INTEGRATED_CACHE
     CC.cache_owner(interp::GPUInterpreter) = interp.token
 else
     CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
