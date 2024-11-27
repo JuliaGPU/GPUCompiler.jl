@@ -668,6 +668,19 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         cache_gbl = nothing
     end
 
+    if VERSION >= v"1.12.0-DEV.1703"
+        # on sufficiently recent versions of Julia, we can query the MIs compiled.
+        # this is required after the move to `invokce(::CodeInstance)`, because our
+        # lookup function (used to populate method_instances) isn't always called then.
+
+        num_mis = Ref{Csize_t}(0)
+        @ccall jl_get_llvm_mis(native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
+                               C_NULL::Ptr{Cvoid})::Nothing
+        resize!(method_instances, num_mis[])
+        @ccall jl_get_llvm_mis(native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
+                               method_instances::Ptr{Cvoid})::Nothing
+    end
+
     # process all compiled method instances
     compiled = Dict()
     for mi in method_instances
