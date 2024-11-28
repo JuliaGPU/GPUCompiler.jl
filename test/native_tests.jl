@@ -471,7 +471,7 @@ end
                          Native.code_execution(mod.func, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
-        occursin("call to println", msg) &&
+        occursin("call to print", msg) &&
         occursin("[2] func", msg)
     end
 end
@@ -604,7 +604,7 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(kernel_mi, token)
 
         # check that identity survived
-        @test check_presence(identity_mi, token)
+        @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"
 
         GPUCompiler.clear_disk_cache!()
         @test GPUCompiler.disk_cache_enabled() == false

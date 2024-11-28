@@ -73,7 +73,7 @@ end
 
 # on 1.11 (JuliaLang/julia#52572, merged as part of JuliaLang/julia#52233) we can use
 # Julia's cached method lookup to simply look up method instances at run time.
-if VERSION >= v"1.11.0-DEV.1552"
+@static if VERSION >= v"1.11.0-DEV.1552"
 
 # XXX: version of Base.method_instance that uses a function type
 @inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
@@ -395,7 +395,7 @@ CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
 CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
 #=CC.=#get_inference_world(interp::GPUInterpreter) = interp.world
 CC.get_inference_cache(interp::GPUInterpreter) = interp.inf_cache
-if HAS_INTEGRATED_CACHE
+@static if HAS_INTEGRATED_CACHE
     CC.cache_owner(interp::GPUInterpreter) = interp.token
 else
     CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
@@ -412,7 +412,9 @@ end
 CC.may_optimize(interp::GPUInterpreter) = true
 CC.may_compress(interp::GPUInterpreter) = true
 CC.may_discard_trees(interp::GPUInterpreter) = true
+@static if VERSION <= v"1.12.0-DEV.1531"
 CC.verbose_stmt_info(interp::GPUInterpreter) = false
+end
 CC.method_table(interp::GPUInterpreter) = interp.method_table
 
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
@@ -615,9 +617,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         prefer_specsig     = true,
         gnu_pubnames       = false,
         debug_info_kind    = Cint(debug_info_kind),
-        lookup             = Base.unsafe_convert(Ptr{Nothing}, lookup_cb),
         safepoint_on_entry = can_safepoint(job),
         gcstack_arg        = false)
+    if VERSION < v"1.12.0-DEV.1667"
+        cgparams = (; lookup = Base.unsafe_convert(Ptr{Nothing}, lookup_cb), cgparams... )
+    end
     params = Base.CodegenParams(; cgparams...)
 
     # generate IR
@@ -635,9 +639,15 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
         end
 
-        native_code = ccall(:jl_create_native, Ptr{Cvoid},
+        native_code = if VERSION >= v"1.12.0-DEV.1667"
+            ccall(:jl_create_native, Ptr{Cvoid},
+                (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t, Ptr{Cvoid}),
+                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.world, Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
+        else
+            ccall(:jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t),
                 [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.world)
+        end
         @assert native_code != C_NULL
 
         llvm_mod_ref =
@@ -656,6 +666,19 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     end
     if !(Sys.ARCH == :x86 || Sys.ARCH == :x86_64)
         cache_gbl = nothing
+    end
+
+    if VERSION >= v"1.12.0-DEV.1703"
+        # on sufficiently recent versions of Julia, we can query the MIs compiled.
+        # this is required after the move to `invokce(::CodeInstance)`, because our
+        # lookup function (used to populate method_instances) isn't always called then.
+
+        num_mis = Ref{Csize_t}(0)
+        @ccall jl_get_llvm_mis(native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
+                               C_NULL::Ptr{Cvoid})::Nothing
+        resize!(method_instances, num_mis[])
+        @ccall jl_get_llvm_mis(native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
+                               method_instances::Ptr{Cvoid})::Nothing
     end
 
     # process all compiled method instances
