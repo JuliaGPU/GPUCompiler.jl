@@ -200,10 +200,12 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     end
 
     # perform codegen passes that would normally run during machine code emission
-    # XXX: codegen passes don't seem available in the new pass manager yet
-    @dispose pm=ModulePassManager() begin
-        expand_reductions!(pm)
-        run!(pm, mod)
+    if LLVM.has_oldpm()
+        # XXX: codegen passes don't seem available in the new pass manager yet
+        @dispose pm=ModulePassManager() begin
+            expand_reductions!(pm)
+            run!(pm, mod)
+        end
     end
 
     return functions(mod)[entry_fn]
