@@ -359,37 +359,40 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
         linkage!(new_gv, linkage(gv))
         visibility!(new_gv, visibility(gv))
 
-        global_map[gv] = new_gv
+        # we can't map the global variable directly, as the type change won't be applied
+        # recursively. so instead map a constant expression converting the value of the
+        # global into one with the old address space, avoiding a type change.
+        ptr = const_addrspacecast(new_gv, value_type(gv))
+
+        global_map[gv] = ptr
     end
     isempty(global_map) && return entry
 
     # determine which functions we need to update
     function_worklist = Set{LLVM.Function}()
-    for gv in keys(global_map), use in uses(gv)
-        inst = user(use)
-        bb = LLVM.parent(inst)
-        f = LLVM.parent(bb)
+    function check_user(val)
+        if val isa LLVM.Instruction
+            bb = LLVM.parent(val)
+            f = LLVM.parent(bb)
 
-        push!(function_worklist, f)
+            push!(function_worklist, f)
+        elseif val isa LLVM.ConstantExpr
+            for use in uses(val)
+                check_user(user(use))
+            end
+        end
+    end
+    for gv in keys(global_map), use in uses(gv)
+        check_user(user(use))
     end
 
     # update functions that use the global
     if !isempty(function_worklist)
-        # we can't map the global variable directly, as the type change won't be applied
-        # recursively. so instead map a constant expression converting the value of the
-        # global into one with the correct address space.
-        value_map = Dict{LLVM.Value,LLVM.Value}()
-        for (gv, new_gv) in global_map
-            ptr = const_addrspacecast(new_gv, value_type(gv))
-            @assert ptr isa LLVM.ConstantExpr
-            value_map[gv] = ptr
-        end
-
         entry_fn = LLVM.name(entry)
         for fun in function_worklist
             fn = LLVM.name(fun)
 
-            new_fun = clone(fun; value_map)
+            new_fun = clone(fun; value_map=global_map)
             replace_uses!(fun, new_fun)
             replace_metadata_uses!(fun, new_fun)
             erase!(fun)
@@ -400,10 +403,18 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
     end
 
     # delete old globals
-    for (gv, new_gv) in global_map
-        @assert isempty(uses(gv))
-        replace_metadata_uses!(gv, new_gv)
-        erase!(gv)
+    for (old, new) in global_map
+        for use in uses(old)
+            val = user(use)
+            if val isa ConstantExpr
+                # XXX: shouldn't clone_into! remove unused CEs?
+                isempty(uses(val)) || error("old function still has uses (via a constant expr)")
+                LLVM.unsafe_destroy!(val)
+            end
+        end
+        @assert isempty(uses(old))
+        replace_metadata_uses!(old, new)
+        erase!(old)
     end
 
     return entry
