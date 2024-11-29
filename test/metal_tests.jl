@@ -89,7 +89,7 @@ end
         declare void @llvm.va_start(i8*)
         declare void @llvm.va_end(i8*)
         declare void @air.os_log(i8*, i64)
-        
+
         define void @metal_os_log(...) {
             %1 = alloca i8*
             %2 = bitcast i8** %1 to i8*
@@ -124,6 +124,22 @@ end
     @test_throws_message(InvalidIRError, Metal.code_llvm(devnull, kernel2, Tuple{Core.LLVMPtr{Float64,1}}; validate=true)) do msg
         occursin("unsupported use of double value", msg)
     end
+end
+
+@testset "constant globals" begin
+    mod = @eval module $(gensym())
+        const xs = (1.0f0, 2f0)
+
+        function kernel(ptr, i)
+            unsafe_store!(ptr, xs[i])
+
+            return
+        end
+    end
+
+    ir = sprint(io->Metal.code_llvm(io, mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int};
+                                    dump_module=true, kernel=true))
+    @test occursin("addrspace(2) constant [2 x float]", ir)
 end
 
 end
