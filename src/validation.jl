@@ -14,8 +14,18 @@ function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
 end
 
 function typeinf_type(mi::MethodInstance; interp::CC.AbstractInterpreter)
-    ty = Core.Compiler.typeinf_type(interp, mi.def, mi.specTypes, mi.sparam_vals)
-    return something(ty, Any)
+    @static if VERSION < v"1.11.0"
+        code = Core.Compiler.get(Core.Compiler.code_cache(interp), mi, nothing)
+        if code isa Core.Compiler.CodeInstance
+            return code.rettype
+        end
+        result = Core.Compiler.InferenceResult(mi, Core.Compiler.typeinf_lattice(interp))
+        Core.Compiler.typeinf(interp, result, :global)
+        Core.Compiler.is_inferred(result) || return Any
+        Core.Compiler.widenconst(Core.Compiler.ignorelimited(result.result))
+    else
+        something(Core.Compiler.typeinf_type(interp, mi), Any)
+    end
 end
 
 function check_method(@nospecialize(job::CompilerJob))
