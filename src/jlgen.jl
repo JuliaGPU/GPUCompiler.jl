@@ -543,23 +543,6 @@ end
     CompilationPolicyExtern = 1
 end
 
-# HACK: in older versions of Julia, `jl_create_native` doesn't take a world argument
-#       but instead always generates code for the current world. note that this doesn't
-#       actually change the world age, but just spoofs the counter `jl_create_native` reads.
-# XXX: Base.get_world_counter is supposed to be monotonically increasing and is runtime global.
-macro in_world(world, ex)
-    quote
-        actual_world = Base.get_world_counter()
-        world_counter = cglobal(:jl_world_counter, Csize_t)
-        unsafe_store!(world_counter, $(esc(world)))
-        try
-            $(esc(ex))
-        finally
-            unsafe_store!(world_counter, actual_world)
-        end
-    end
-end
-
 """
     precompile(job::CompilerJob)
 
