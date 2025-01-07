@@ -480,8 +480,30 @@ end # HAS_INTEGRATED_CACHE
 ## codegen/inference integration
 
 function ci_cache_populate(interp, cache, mi, min_world, max_world)
-    if VERSION >= v"1.12.0-DEV.15"
-        inferred_ci = CC.typeinf_ext_toplevel(interp, mi, CC.SOURCE_MODE_FORCE_SOURCE) # or SOURCE_MODE_FORCE_SOURCE_UNCACHED?
+    @static if VERSION >= v"1.12.0-DEV.1434"
+        # see typeinfer.jl: typeinf_ext_toplevel
+        ci = CC.typeinf_ext(interp, mi, CC.SOURCE_MODE_NOT_REQUIRED)
+        inspected = IdSet{CodeInstance}()
+        tocompile = CodeInstance[ci]
+        while !isempty(tocompile)
+            callee = pop!(tocompile)
+            callee in inspected && continue
+            push!(inspected, callee)
+            # now make sure everything has source code, if desired
+            mi = CC.get_ci_mi(callee)
+            def = mi.def
+            if CC.use_const_api(callee)
+                src = CC.codeinfo_for_const(interp, mi, ci.rettype_const)
+            else
+                # TODO: typeinf_code could return something with different edges/ages/owner/abi (needing an update to callee), which we don't handle here
+                src = CC.typeinf_code(interp, mi, true)
+            end
+            if src isa CodeInfo
+                CC.collectinvokes!(tocompile, src)
+            end
+        end
+    elseif VERSION >= v"1.12.0-DEV.15"
+        inferred_ci = CC.typeinf_ext_toplevel(interp, mi, CC.SOURCE_MODE_FORCE_SOURCE)
         @assert inferred_ci !== nothing "Inference of $mi failed"
 
         # inference should have populated our cache
@@ -518,7 +540,7 @@ end
 function ci_cache_lookup(cache, mi, min_world, max_world)
     wvc = WorldView(cache, min_world, max_world)
     ci = CC.get(wvc, mi, nothing)
-    if ci !== nothing && ci.inferred === nothing
+    if VERSION < v"1.12.0-DEV.1434" && ci !== nothing && ci.inferred === nothing
         # if for some reason we did end up with a codeinfo without inferred source, e.g.,
         # because of calling `Base.return_types` which only sets rettyp, pretend we didn't
         # run inference so that we re-infer now and not during codegen (which is disallowed)
@@ -622,7 +644,13 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
         end
 
-        native_code = if VERSION >= v"1.12.0-DEV.1667"
+        native_code = if VERSION >= v"1.12.0-DEV.1823"
+            # each item in the list should be a CodeInstance followed by a CodeInfo
+            # indicating something to compile
+            codeinstance = ci_cache_lookup(cache, job.source, job.world, job.world)::CodeInstance
+            codeinfo = CC.typeinf_code(interp, job.source, #=trim=# true)::CodeInfo
+            @ccall jl_emit_native([codeinstance, codeinfo]::Vector{Any}, ts_mod::LLVM.API.LLVMOrcThreadSafeModuleRef, Ref(params)::Ptr{Base.CodegenParams}, #=extern linkage=# false::Cint)::Ptr{Cvoid}
+        elseif VERSION >= v"1.12.0-DEV.1667"
             ccall(:jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t, Ptr{Cvoid}),
                 [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.world, Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
