@@ -16,10 +16,10 @@ using Test
     @test contains(ir, "MethodInstance for identity")
 
     ir = sprint(io->GPUCompiler.code_llvm(io, job))
-    @test contains(ir, "julia_identity")
+    @test contains(ir, r"(julia|j)_identity")
 
     asm = sprint(io->GPUCompiler.code_native(io, job))
-    @test contains(asm, "julia_identity")
+    @test contains(asm, r"(julia|j)_identity")
 end
 
 @testset "compilation" begin
@@ -187,7 +187,7 @@ end
     ir = sprint(io->Native.code_llvm(io, valid_kernel, Tuple{}; optimize=false, dump_module=true))
 
     # module should contain our function + a generic call wrapper
-    @test occursin(r"define\ .* void\ @.*julia_valid_kernel.*\(\)"x, ir)
+    @test occursin(r"define\ .* void\ @.*(julia|j)_valid_kernel.*\(\)"x, ir)
     @test !occursin("define %jl_value_t* @jlcall_", ir)
 
     # there should be no debug metadata
@@ -208,7 +208,7 @@ end
     parent(i) = child(i)
 
     ir = sprint(io->Native.code_llvm(io, parent, Tuple{Int}))
-    @test occursin(r"call .+ @julia.+child.+", ir)
+    @test occursin(r"call .+ @(julia|j).+child.+", ir)
 end
 
 @testset "sysimg" begin
@@ -295,18 +295,18 @@ end
     end
 
     ir = sprint(io->Native.code_llvm(io, mod.g, Tuple{Int64}; dump_module=true, kernel=true))
-    @test occursin(r"^define.*julia_f_expensive"m, ir)
+    @test occursin(r"^define.*(julia|j)_f_expensive"m, ir)
 
     ir = sprint(io->Native.code_llvm(io, mod.g, Tuple{Int64}; dump_module=true, kernel=true,
                                      always_inline=true))
-    @test !occursin(r"^define.*julia_f_expensive"m, ir)
+    @test !occursin(r"^define.*(julia|j)_f_expensive"m, ir)
 
     ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true,
                                      always_inline=true))
-    @test !occursin(r"^define.*julia_f_expensive"m, ir)
+    @test !occursin(r"^define.*(julia|j)_f_expensive"m, ir)
 
     ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true))
-    @test occursin(r"^define.*julia_f_expensive"m, ir)
+    @test occursin(r"^define.*(julia|j)_f_expensive"m, ir)
 end
 
 @testset "function attributes" begin

@@ -27,8 +27,8 @@ end
     end
 
     ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{mod.Aggregate}))
-    @test occursin(r"@julia_kernel\w*\(({ i64 }|\[1 x i64\])\* ", ir) ||
-          occursin(r"@julia_kernel\w*\(ptr ", ir)
+    @test occursin(r"@(julia|j)_kernel\w*\(({ i64 }|\[1 x i64\])\* ", ir) ||
+          occursin(r"@(julia|j)_kernel\w*\(ptr ", ir)
 
     ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{mod.Aggregate}; kernel=true))
     @test occursin(r"@_Z6kernel9Aggregate\(.*({ i64 }|\[1 x i64\]) ", ir)
@@ -89,7 +89,7 @@ end
     end
 
     ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{}))
-    @test occursin(r"@julia_kernel\w*\(\)", ir)
+    @test occursin(r"@(julia|j)_kernel\w*\(\)", ir)
 
     ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{}; kernel=true))
     @test occursin("@_Z6kernel([1 x i64] %state)", ir)
@@ -117,10 +117,10 @@ end
     @test occursin(r"@_Z6kernelP5Int64\(\[1 x i64\] %state", ir)
 
     # child1 doesn't use the state
-    @test occursin(r"@julia_child1\w*\((i64|i8\*|ptr)", ir)
+    @test occursin(r"@(julia|j)_child1\w*\((i64|i8\*|ptr)", ir)
 
     # child2 does
-    @test occursin(r"@julia_child2\w*\(\[1 x i64\] %state", ir)
+    @test occursin(r"@(julia|j)_child2\w*\(\[1 x i64\] %state", ir)
 
     # can't have the unlowered intrinsic
     @test !occursin("julia.gpu.state_getter", ir)
@@ -149,7 +149,7 @@ end
     end
 
     asm = sprint(io->PTX.code_native(io, mod.parent, Tuple{Int64}))
-    @test occursin(r"call.uni\s+julia_child_"m, asm)
+    @test occursin(r"call.uni\s+(julia|j)_child_"m, asm)
 end
 
 @testset "kernel functions" begin
@@ -167,8 +167,8 @@ end
     asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
                                      kernel=true, dump_module=true))
     @test occursin(".visible .entry _Z5entry5Int64", asm)
-    @test !occursin(".visible .func julia_nonentry", asm)
-    @test occursin(".func julia_nonentry", asm)
+    @test !occursin(r"\.visible \.func (julia|j)_nonentry", asm)
+    @test occursin(r"\.func (julia|j)_nonentry", asm)
 
 @testset "property_annotations" begin
     asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64}; kernel=true))
@@ -214,10 +214,10 @@ end
     end
 
     asm = sprint(io->PTX.code_native(io, mod.parent1, Tuple{Int}))
-    @test occursin(".func julia_child_", asm)
+    @test occursin(r"\.func (julia|j)_child_", asm)
 
     asm = sprint(io->PTX.code_native(io, mod.parent2, Tuple{Int}))
-    @test occursin(".func julia_child_", asm)
+    @test occursin(r"\.func (julia|j)_child_", asm)
 end
 
 @testset "child function reuse bis" begin
@@ -241,12 +241,12 @@ end
     end
 
     asm = sprint(io->PTX.code_native(io, mod.parent1, Tuple{Int}))
-    @test occursin(".func julia_child1_", asm)
-    @test occursin(".func julia_child2_", asm)
+    @test occursin(r"\.func (julia|j)_child1_", asm)
+    @test occursin(r"\.func (julia|j)_child2_", asm)
 
     asm = sprint(io->PTX.code_native(io, mod.parent2, Tuple{Int}))
-    @test occursin(".func julia_child1_", asm)
-    @test occursin(".func julia_child2_", asm)
+    @test occursin(r"\.func (julia|j)_child1_", asm)
+    @test occursin(r"\.func (julia|j)_child2_", asm)
 end
 
 @testset "indirect sysimg function use" begin

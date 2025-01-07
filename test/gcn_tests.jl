@@ -53,8 +53,8 @@ end
     end
 
     asm = sprint(io->GCN.code_native(io, parent, Tuple{Int64}; dump_module=true))
-    @test occursin(r"s_add_u32.*julia_child_.*@rel32@", asm)
-    @test occursin(r"s_addc_u32.*julia_child_.*@rel32@", asm)
+    @test occursin(r"s_add_u32.*(julia|j)_child_.*@rel32@", asm)
+    @test occursin(r"s_addc_u32.*(julia|j)_child_.*@rel32@", asm)
 end
 
 @testset "kernel functions" begin
@@ -89,10 +89,10 @@ end
     end
 
     asm = sprint(io->GCN.code_native(io, mod.parent1, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*julia_[[:alnum:]_.]*child_\d*,@function", asm)
+    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child_\d*,@function", asm)
 
     asm = sprint(io->GCN.code_native(io, mod.parent2, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*julia_[[:alnum:]_.]*child_\d*,@function", asm)
+    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child_\d*,@function", asm)
 end
 
 @testset "child function reuse bis" begin
@@ -115,12 +115,12 @@ end
     end
 
     asm = sprint(io->GCN.code_native(io, mod.parent1, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*julia_[[:alnum:]_.]*child1_\d*,@function", asm)
-    @test occursin(r"\.type.*julia_[[:alnum:]_.]*child2_\d*,@function", asm)
+    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child1_\d*,@function", asm)
+    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child2_\d*,@function", asm)
 
     asm = sprint(io->GCN.code_native(io, mod.parent2, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*julia_[[:alnum:]_.]*child1_\d*,@function", asm)
-    @test occursin(r"\.type.*julia_[[:alnum:]_.]*child2_\d*,@function", asm)
+    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child1_\d*,@function", asm)
+    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child2_\d*,@function", asm)
 end
 
 @testset "indirect sysimg function use" begin

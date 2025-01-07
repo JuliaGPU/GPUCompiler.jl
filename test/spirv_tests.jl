@@ -89,7 +89,7 @@ end
     end
 
     asm = sprint(io->SPIRV.code_native(io, kernel, Tuple{Bool}; kernel=true))
-    @test occursin(r"OpFunctionCall %void %julia_error", asm)
+    @test occursin(r"OpFunctionCall %void %(julia|j)_error", asm)
 end
 
 end
