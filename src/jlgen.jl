@@ -480,6 +480,7 @@ end # HAS_INTEGRATED_CACHE
 ## codegen/inference integration
 
 function ci_cache_populate(interp, cache, mi, min_world, max_world)
+    codeinfos = Pair{CodeInstance,CodeInfo}[]
     @static if VERSION >= v"1.12.0-DEV.1434"
         # see typeinfer.jl: typeinf_ext_toplevel
         ci = CC.typeinf_ext(interp, mi, CC.SOURCE_MODE_NOT_REQUIRED)
@@ -500,6 +501,7 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
             end
             if src isa CodeInfo
                 CC.collectinvokes!(tocompile, src)
+                push!(codeinfos, callee => src)
             end
         end
     elseif VERSION >= v"1.12.0-DEV.15"
@@ -534,7 +536,7 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
         end
     end
 
-    return ci::CodeInstance
+    return codeinfos
 end
 
 function ci_cache_lookup(cache, mi, min_world, max_world)
@@ -579,10 +581,7 @@ function Base.precompile(@nospecialize(job::CompilerJob))
     # populate the cache
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
-    if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
-        ci_cache_populate(interp, cache, job.source, job.world, job.world)
-        return ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
-    end
+    ci_cache_populate(interp, cache, job.source, job.world, job.world)
     return true
 end
 
@@ -594,10 +593,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # populate the cache
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
-    if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
-        ci_cache_populate(interp, cache, job.source, job.world, job.world)
-        @assert ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
-    end
+    populated = ci_cache_populate(interp, cache, job.source, job.world, job.world)
 
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
@@ -645,11 +641,14 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
 
         native_code = if VERSION >= v"1.12.0-DEV.1823"
-            # each item in the list should be a CodeInstance followed by a CodeInfo
-            # indicating something to compile
-            codeinstance = ci_cache_lookup(cache, job.source, job.world, job.world)::CodeInstance
-            codeinfo = CC.typeinf_code(interp, job.source, #=trim=# true)::CodeInfo
-            @ccall jl_emit_native([codeinstance, codeinfo]::Vector{Any}, ts_mod::LLVM.API.LLVMOrcThreadSafeModuleRef, Ref(params)::Ptr{Base.CodegenParams}, #=extern linkage=# false::Cint)::Ptr{Cvoid}
+            codeinfos = Any[]
+            for (ci, src) in populated
+                # each item in the list should be a CodeInstance followed by a CodeInfo
+                # indicating something to compile
+                push!(codeinfos, ci::CodeInstance)
+                push!(codeinfos, src::CodeInfo)
+            end
+            @ccall jl_emit_native(codeinfos::Vector{Any}, ts_mod::LLVM.API.LLVMOrcThreadSafeModuleRef, Ref(params)::Ptr{Base.CodegenParams}, #=extern linkage=# false::Cint)::Ptr{Cvoid}
         elseif VERSION >= v"1.12.0-DEV.1667"
             ccall(:jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t, Ptr{Cvoid}),
