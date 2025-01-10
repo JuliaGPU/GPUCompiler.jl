@@ -1,9 +1,3 @@
-@testsetup module Helpers
-
-using Test
-
-export @test_throws_message, sink
-
 # @test_throw, with additional testing for the exception message
 macro test_throws_message(f, typ, ex...)
     quote
@@ -40,6 +34,4 @@ end
                      %value = load volatile i64, i64$(as_str)* %slot
                      ret i64 %value"""
     return :(Base.llvmcall($llvmcall_str, T, Tuple{T}, i))
-end
-
 end

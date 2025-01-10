@@ -1,7 +1,3 @@
-@testitem "BPF" setup=[BPF, Helpers] begin
-
-############################################################################################
-
 @testset "No-op" begin
     kernel() = 0
 
@@ -39,6 +35,4 @@ end
 
         @test_throws GPUCompiler.InvalidIRError BPF.code_execution(kernel, (Int,))
     end
-end
-
 end

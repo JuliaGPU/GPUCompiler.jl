@@ -1,9 +1,3 @@
-@testitem "PTX" setup=[PTX, Helpers] begin
-
-using LLVM
-
-############################################################################################
-
 @testset "IR" begin
 
 @testset "exceptions" begin
@@ -347,66 +341,5 @@ end
     @test occursin("jl_box_float32", ir)
     PTX.code_native(devnull, kernel, Tuple{Float32,Ptr{Float32}})
 end
-
-end
-end # testitem
-
-@testitem "PTX precompile" setup=[Precompile,] begin
-precompile_test_harness("Inference caching") do load_path
-    # Write out the PTX test setup as a micro package
-    create_standalone(load_path, "PTXCompiler", "ptx_testsetup.jl")
-
-    write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
-        import PTXCompiler
-        import GPUCompiler
-        using PrecompileTools
-
-        function kernel()
-            return
-        end
-
-        let
-            job, _ = PTXCompiler.create_job(kernel, ())
-            precompile(job)
-        end
-
-        # identity is foreign
-        @setup_workload begin
-            job, _ = PTXCompiler.create_job(identity, (Int,))
-            @compile_workload begin
-                precompile(job)
-            end
-        end
-    end) |> string)
-
-    Base.compilecache(Base.PkgId("InferenceCaching"))
-    @eval let
-        import PTXCompiler
-
-        # Check that no cached entry is present
-        identity_mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Int})
-
-        token = let
-            job, _ = PTXCompiler.create_job(identity, (Int,))
-            GPUCompiler.ci_cache_token(job)
-        end
-        ci = isdefined(identity_mi, :cache) ? identity_mi.cache : nothing
-        while ci !== nothing
-            @test ci.owner !== token
-            ci = isdefined(ci, :next) ? ci.next : nothing
-        end
-
-        using InferenceCaching
-
-        # Check that kernel survived
-        kernel_mi = GPUCompiler.methodinstance(typeof(InferenceCaching.kernel), Tuple{})
-        @test check_presence(kernel_mi, token)
-
-        # check that identity survived
-        @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"
-    end
-end
-
-############################################################################################
 
 end

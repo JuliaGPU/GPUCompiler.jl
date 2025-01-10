@@ -1,18 +1,16 @@
-@testsetup module GCN
+module SPIRV
 
-using GPUCompiler
+using ..GPUCompiler
+import ..TestRuntime
 
-
-# create a GCN-based test compiler, and generate reflection methods for it
-
-include("runtime.jl")
 struct CompilerParams <: AbstractCompilerParams end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types);
-                 kernel::Bool=false, always_inline=false, kwargs...)
+                   kernel::Bool=false, always_inline=false,
+                   supports_fp16=true, supports_fp64=true, kwargs...)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = GCNCompilerTarget(dev_isa="gfx900")
+    target = SPIRVCompilerTarget(; supports_fp16, supports_fp64)
     params = CompilerParams()
     config = CompilerConfig(target, params; kernel, always_inline)
     CompilerJob(source, config), kwargs

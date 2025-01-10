@@ -1,11 +1,7 @@
-@testsetup module Native
+module Native
 
-using GPUCompiler
-
-
-# create a native test compiler, and generate reflection methods for it
-
-include("runtime.jl")
+using ..GPUCompiler
+import ..TestRuntime
 
 # local method table for device functions
 Base.Experimental.@MethodTable(test_method_table)

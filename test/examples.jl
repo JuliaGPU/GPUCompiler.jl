@@ -1,5 +1,3 @@
-@testitem "examples" begin
-
 function find_sources(path::String, sources=String[])
     if isdir(path)
         for entry in readdir(path)
@@ -22,6 +20,4 @@ cd(dir) do
         cmd = `$(Base.julia_cmd()) --project=$(Base.active_project())`
         @test success(pipeline(`$cmd $example`, stderr=stderr))
     end
-end
-
 end
