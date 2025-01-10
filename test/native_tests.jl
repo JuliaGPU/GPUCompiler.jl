@@ -440,6 +440,18 @@ end
     end
 end
 
+@static if VERSION > v"1.11.0-DEV.398"
+    # TODO: teach the verifier to accept ccalls without the plt
+    @testset "invalid LLVM IR (ccall)" begin
+        foobar(p) = (unsafe_store!(p, ccall(:time, Cint, ())); nothing)
+
+        @test_throws_message(InvalidIRError,
+                            Native.code_execution(foobar, Tuple{Ptr{Int}}), use_jlplt=true) do msg
+            occursin("Reason: unsupported call to the Julia runtime", msg)
+        end
+    end
+end
+
 @testset "delayed bindings" begin
     mod = @eval module $(gensym())
         export kernel

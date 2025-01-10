@@ -623,6 +623,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     if VERSION < v"1.12.0-DEV.1667"
         cgparams = (; lookup = Base.unsafe_convert(Ptr{Nothing}, lookup_cb), cgparams... )
     end
+    cgparams = merge(cgparams, codegen_params(job))
     params = Base.CodegenParams(; cgparams...)
 
     # generate IR
