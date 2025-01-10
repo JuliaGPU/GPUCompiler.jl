@@ -250,9 +250,30 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 @safe_debug "Decoding arguments to jl_reresolve_binding_value_seqcst failed" inst bb=LLVM.parent(inst)
                 push!(errors, (DELAYED_BINDING, bt, nothing))
             end
-        elseif fn == "jl_invoke" || fn == "ijl_invoke"
+        elseif startswith(fn, "tojlinvoke")
             try
-                f, args, nargs, meth = arguments(inst)
+                fun, args, nargs = arguments(inst)
+                fun = first(operands(fun::ConstantExpr))::ConstantInt
+                fun = convert(Int, fun)
+                fun = Ptr{Cvoid}(fun)
+                fun = Base.unsafe_pointer_to_objref(fun)::Base.Function
+                push!(errors, (DYNAMIC_CALL, bt, fun))
+                # XXX: an invoke trampoline happens when codegen doesn't have access to code
+                #      which suggests a GPUCompiler.jl bug. throw an error instead?
+            catch e
+                @safe_debug "Decoding arguments to jl_invoke failed" inst bb = LLVM.parent(inst)
+                push!(errors, (DYNAMIC_CALL, bt, nothing))
+            end
+        elseif fn == "jl_invoke" || fn == "ijl_invoke"
+            # most invokes are contained in a trampoline handled above,
+            # but some direct ones remain (e.g., with `@nospecialize`)
+            # XXX: this shouldn't be true on 1.12+ anymore; jl_invoke is always trampolined
+            caller = LLVM.parent(LLVM.parent(inst))
+            if startswith(LLVM.name(caller), "tojlinvoke")
+                return
+            end
+            try
+                fun, args, nargs, meth = arguments(inst)
                 meth = first(operands(meth::ConstantExpr))::ConstantInt
                 meth = convert(Int, meth)
                 meth = Ptr{Cvoid}(meth)

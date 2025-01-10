@@ -480,8 +480,32 @@ end # HAS_INTEGRATED_CACHE
 ## codegen/inference integration
 
 function ci_cache_populate(interp, cache, mi, min_world, max_world)
-    if VERSION >= v"1.12.0-DEV.15"
-        inferred_ci = CC.typeinf_ext_toplevel(interp, mi, CC.SOURCE_MODE_FORCE_SOURCE) # or SOURCE_MODE_FORCE_SOURCE_UNCACHED?
+    codeinfos = Pair{CodeInstance, CodeInfo}[]
+    @static if VERSION >= v"1.12.0-DEV.1434"
+        # see typeinfer.jl: typeinf_ext_toplevel
+        ci = CC.typeinf_ext(interp, mi, CC.SOURCE_MODE_NOT_REQUIRED)
+        inspected = IdSet{CodeInstance}()
+        tocompile = CodeInstance[ci]
+        while !isempty(tocompile)
+            callee = pop!(tocompile)
+            callee in inspected && continue
+            push!(inspected, callee)
+            # now make sure everything has source code, if desired
+            mi = CC.get_ci_mi(callee)
+            def = mi.def
+            if CC.use_const_api(callee)
+                src = CC.codeinfo_for_const(interp, mi, ci.rettype_const)
+            else
+                # TODO: typeinf_code could return something with different edges/ages/owner/abi (needing an update to callee), which we don't handle here
+                src = CC.typeinf_code(interp, mi, true)
+            end
+            if src isa CodeInfo
+                CC.collectinvokes!(tocompile, src)
+                push!(codeinfos, callee => src)
+            end
+        end
+    elseif VERSION >= v"1.12.0-DEV.15"
+        inferred_ci = CC.typeinf_ext_toplevel(interp, mi, CC.SOURCE_MODE_FORCE_SOURCE)
         @assert inferred_ci !== nothing "Inference of $mi failed"
 
         # inference should have populated our cache
@@ -512,13 +536,13 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
         end
     end
 
-    return ci::CodeInstance
+    return codeinfos
 end
 
 function ci_cache_lookup(cache, mi, min_world, max_world)
     wvc = WorldView(cache, min_world, max_world)
     ci = CC.get(wvc, mi, nothing)
-    if ci !== nothing && ci.inferred === nothing
+    if VERSION < v"1.12.0-DEV.1434" && ci !== nothing && ci.inferred === nothing
         # if for some reason we did end up with a codeinfo without inferred source, e.g.,
         # because of calling `Base.return_types` which only sets rettyp, pretend we didn't
         # run inference so that we re-infer now and not during codegen (which is disallowed)
@@ -543,23 +567,6 @@ end
     CompilationPolicyExtern = 1
 end
 
-# HACK: in older versions of Julia, `jl_create_native` doesn't take a world argument
-#       but instead always generates code for the current world. note that this doesn't
-#       actually change the world age, but just spoofs the counter `jl_create_native` reads.
-# XXX: Base.get_world_counter is supposed to be monotonically increasing and is runtime global.
-macro in_world(world, ex)
-    quote
-        actual_world = Base.get_world_counter()
-        world_counter = cglobal(:jl_world_counter, Csize_t)
-        unsafe_store!(world_counter, $(esc(world)))
-        try
-            $(esc(ex))
-        finally
-            unsafe_store!(world_counter, actual_world)
-        end
-    end
-end
-
 """
     precompile(job::CompilerJob)
 
@@ -574,10 +581,7 @@ function Base.precompile(@nospecialize(job::CompilerJob))
     # populate the cache
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
-    if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
-        ci_cache_populate(interp, cache, job.source, job.world, job.world)
-        return ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
-    end
+    ci_cache_populate(interp, cache, job.source, job.world, job.world)
     return true
 end
 
@@ -589,10 +593,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # populate the cache
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
-    if ci_cache_lookup(cache, job.source, job.world, job.world) === nothing
-        ci_cache_populate(interp, cache, job.source, job.world, job.world)
-        @assert ci_cache_lookup(cache, job.source, job.world, job.world) !== nothing
-    end
+    populated = ci_cache_populate(interp, cache, job.source, job.world, job.world)
 
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
@@ -639,7 +640,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
         end
 
-        native_code = if VERSION >= v"1.12.0-DEV.1667"
+        native_code = if VERSION >= v"1.12.0-DEV.1823"
+            codeinfos = Any[]
+            for (ci, src) in populated
+                # each item in the list should be a CodeInstance followed by a CodeInfo
+                # indicating something to compile
+                push!(codeinfos, ci::CodeInstance)
+                push!(codeinfos, src::CodeInfo)
+            end
+            @ccall jl_emit_native(codeinfos::Vector{Any}, ts_mod::LLVM.API.LLVMOrcThreadSafeModuleRef, Ref(params)::Ptr{Base.CodegenParams}, #=extern linkage=# false::Cint)::Ptr{Cvoid}
+        elseif VERSION >= v"1.12.0-DEV.1667"
             ccall(:jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t, Ptr{Cvoid}),
                 [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.world, Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
