@@ -261,7 +261,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 # XXX: an invoke trampoline happens when codegen doesn't have access to code
                 #      which suggests a GPUCompiler.jl bug. throw an error instead?
             catch e
-                @safe_debug "Decoding arguments to jl_invoke failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_invoke failed" inst bb = LLVM.parent(inst)
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
         elseif fn == "jl_invoke" || fn == "ijl_invoke"

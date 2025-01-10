@@ -480,7 +480,7 @@ end # HAS_INTEGRATED_CACHE
 ## codegen/inference integration
 
 function ci_cache_populate(interp, cache, mi, min_world, max_world)
-    codeinfos = Pair{CodeInstance,CodeInfo}[]
+    codeinfos = Pair{CodeInstance, CodeInfo}[]
     @static if VERSION >= v"1.12.0-DEV.1434"
         # see typeinfer.jl: typeinf_ext_toplevel
         ci = CC.typeinf_ext(interp, mi, CC.SOURCE_MODE_NOT_REQUIRED)
