@@ -389,7 +389,7 @@ for (testname, (resp,)) in results
         Test.pop_testset()
     end
 end
-for test in all_tests
+for test in tests
     (test in completed_tests) && continue
     fake = Test.DefaultTestSet(test)
     Test.record(fake, Test.Error(:test_interrupted, test, nothing,
