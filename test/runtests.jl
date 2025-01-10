@@ -124,6 +124,9 @@ if !(SPIRV_LLVM_Translator_unified_jll.is_available() && SPIRV_Tools_jll.is_avai
     # SPIRV needs it's tools to be available
     push!(skip_tests, "spirv")
 end
+if VERSION < v"1.11"
+    append!(skip_tests, ["ptx/precompile", "native/precompile"])
+end
 ## finalize
 skip_tests = filter(test->any(skip->occursin(skip,test), skip_tests), tests)
 if !isempty(skip_tests)
