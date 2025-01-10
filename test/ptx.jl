@@ -1,9 +1,3 @@
-@testitem "PTX" setup=[PTX, Helpers] begin
-
-using LLVM
-
-############################################################################################
-
 @testset "IR" begin
 
 @testset "exceptions" begin
@@ -349,16 +343,17 @@ end
 end
 
 end
-end # testitem
 
-@testitem "PTX precompile" setup=[Precompile,] begin
+############################################################################################
+
+@testset "precompile" begin
+
 precompile_test_harness("Inference caching") do load_path
-    # Write out the PTX test setup as a micro package
-    create_standalone(load_path, "PTXCompiler", "ptx_testsetup.jl")
+    # Write out the PTX test helpers as a micro package
+    create_standalone(load_path, "TestCompiler", "ptx.jl")
 
     write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
-        import PTXCompiler
-        import GPUCompiler
+        import TestCompiler
         using PrecompileTools
 
         function kernel()
@@ -366,13 +361,13 @@ precompile_test_harness("Inference caching") do load_path
         end
 
         let
-            job, _ = PTXCompiler.create_job(kernel, ())
+            job, _ = TestCompiler.PTX.create_job(kernel, ())
             precompile(job)
         end
 
         # identity is foreign
         @setup_workload begin
-            job, _ = PTXCompiler.create_job(identity, (Int,))
+            job, _ = TestCompiler.PTX.create_job(identity, (Int,))
             @compile_workload begin
                 precompile(job)
             end
@@ -381,13 +376,13 @@ precompile_test_harness("Inference caching") do load_path
 
     Base.compilecache(Base.PkgId("InferenceCaching"))
     @eval let
-        import PTXCompiler
+        import TestCompiler
 
         # Check that no cached entry is present
         identity_mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Int})
 
         token = let
-            job, _ = PTXCompiler.create_job(identity, (Int,))
+            job, _ = PTX.create_job(identity, (Int,))
             GPUCompiler.ci_cache_token(job)
         end
         ci = isdefined(identity_mi, :cache) ? identity_mi.cache : nothing
@@ -406,7 +401,5 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"
     end
 end
-
-############################################################################################
 
 end

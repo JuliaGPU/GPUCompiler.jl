@@ -1,5 +1,3 @@
-@testitem "util" begin
-
 @testset "split_kwargs" begin
     kwargs = [:(a=1), :(b=2), :(c=3), :(d=4)]
     groups = GPUCompiler.split_kwargs(kwargs, [:a], [:b, :c])
@@ -46,58 +44,4 @@ end
 
     # problematic examples
     @test mangle(identity, String, Matrix{Float32}, Broadcast.Broadcasted{Broadcast.ArrayStyle{Matrix{Float32}}, Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}}, typeof(Base.literal_pow), Tuple{Base.RefValue{typeof(sin)}, Broadcast.Extruded{Matrix{Float32}, Tuple{Bool, Bool}, Tuple{Int64, Int64}}}}) == "identity(String, Array<Float32, 2>, Broadcasted<ArrayStyle<Array<Float32, 2>>, Tuple<OneTo<Int64>, OneTo<Int64>>, literal_pow, Tuple<RefValue<sin>, Extruded<Array<Float32, 2>, Tuple<Bool, Bool>, Tuple<Int64, Int64>>>>)"
-end
-
-@testset "safe loggers" begin
-    using Logging: Logging
-
-    struct YieldingLogger <: Logging.AbstractLogger
-        logger::Logging.AbstractLogger
-        YieldingLogger() = new(Logging.current_logger())
-    end
-
-    function Logging.handle_message(logger::YieldingLogger, args...)
-        yield()
-        return Logging.handle_message(logger.logger, args...)
-    end
-
-    Logging.shouldlog(::YieldingLogger, ::Any...) = true
-    Logging.min_enabled_level(::YieldingLogger) = Logging.Debug
-
-    GPUCompiler.@locked function f()
-        GPUCompiler.@safe_debug "safe_debug"
-        GPUCompiler.@safe_info "safe_info"
-        GPUCompiler.@safe_warn "safe_warn"
-        GPUCompiler.@safe_error "safe_error"
-        GPUCompiler.@safe_show "safe_show"
-    end
-
-    @test begin
-        @sync begin
-            Threads.@spawn begin
-                sleep(0.1)
-                @debug "debug"
-                sleep(0.1)
-                @info "info"
-                sleep(0.1)
-                @warn "warn"
-                sleep(0.1)
-                @error "error"
-                sleep(0.1)
-                @show "show"
-                sleep(0.1)
-            end
-            pipe = Pipe()
-            Base.link_pipe!(pipe; reader_supports_async=true, writer_supports_async=true)
-            Threads.@spawn print(stdout, read(pipe, String))
-            Threads.@spawn Logging.with_logger(YieldingLogger()) do
-                sleep(0.1)
-                redirect_stdout(f, pipe)
-                close(pipe)
-            end
-        end
-        true
-    end
-end
-
 end

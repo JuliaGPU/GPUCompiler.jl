@@ -1,9 +1,3 @@
-@testitem "SPIRV" setup=[SPIRV, Helpers] begin
-
-using SPIRV_LLVM_Translator_unified_jll, SPIRV_Tools_jll
-
-############################################################################################
-
 @testset "IR" begin
 
 @testset "kernel functions" begin
@@ -91,9 +85,5 @@ end
     asm = sprint(io->SPIRV.code_native(io, kernel, Tuple{Bool}; kernel=true))
     @test occursin(r"OpFunctionCall %void %(julia|j)_error", asm)
 end
-
-end
-
-############################################################################################
 
 end

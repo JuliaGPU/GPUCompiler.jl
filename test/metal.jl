@@ -1,9 +1,3 @@
-@testitem "Metal" setup=[Metal, Helpers] begin
-
-using LLVM
-
-############################################################################################
-
 @testset "IR" begin
 
 @testset "kernel functions" begin
@@ -110,7 +104,6 @@ end
         return
     end
 
-
     ir = sprint(io->Metal.code_llvm(io, kernel1, Tuple{Core.LLVMPtr{Float32,1}}; validate=true))
     @test occursin("@metal_os_log", ir)
 
@@ -140,8 +133,6 @@ end
     ir = sprint(io->Metal.code_llvm(io, mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int};
                                     dump_module=true, kernel=true))
     @test occursin("addrspace(2) constant [2 x float]", ir)
-end
-
 end
 
 end
