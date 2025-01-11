@@ -45,3 +45,30 @@ end
     # problematic examples
     @test mangle(identity, String, Matrix{Float32}, Broadcast.Broadcasted{Broadcast.ArrayStyle{Matrix{Float32}}, Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}}, typeof(Base.literal_pow), Tuple{Base.RefValue{typeof(sin)}, Broadcast.Extruded{Matrix{Float32}, Tuple{Bool, Bool}, Tuple{Int64, Int64}}}}) == "identity(String, Array<Float32, 2>, Broadcasted<ArrayStyle<Array<Float32, 2>>, Tuple<OneTo<Int64>, OneTo<Int64>>, literal_pow, Tuple<RefValue<sin>, Extruded<Array<Float32, 2>, Tuple<Bool, Bool>, Tuple<Int64, Int64>>>>)"
 end
+
+@testset "highlighting" begin
+    ansi_color = "\x1B[3"  # beginning of any foreground color change
+
+    @testset "PTX" begin
+        sample = """
+            max.s64         %rd24, %rd18, 0;
+            add.s64         %rd7, %rd23, -1;
+            setp.lt.u64     %p2, %rd7, %rd24;
+            @%p2 bra        \$L__BB0_3;
+        """
+        can_highlight = GPUCompiler.pygmentize_support("ptx")
+        highlighted = sprint(GPUCompiler.highlight, sample, "ptx"; context=(:color => true))
+        @test occursin(ansi_color, highlighted) skip=!can_highlight
+    end
+
+    @testset "GCN" begin
+        sample = """
+            v_add_u32     v3, vcc, s0, v0
+            v_mov_b32     v4, s1
+            v_addc_u32    v4, vcc, v4, 0, vcc
+        """
+        can_highlight = GPUCompiler.pygmentize_support("gcn")
+        highlighted = sprint(GPUCompiler.highlight, sample, "gcn"; context=(:color => true))
+        @test occursin(ansi_color, highlighted) skip=!can_highlight
+    end
+end
