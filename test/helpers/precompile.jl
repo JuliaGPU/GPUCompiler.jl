@@ -4,27 +4,18 @@ function precompile_test_harness(@nospecialize(f), testset::String)
     end
 end
 function precompile_test_harness(@nospecialize(f), separate::Bool)
-    load_path = mktempdir()
-    load_cache_path = separate ? mktempdir() : load_path
+    # XXX: clean-up may fail on Windows, because opened files are not deletable.
+    #      fix this by running the harness in a separate process, such that the
+    #      compilation cache files are not opened?
+    load_path = mktempdir(cleanup=true)
+    load_cache_path = separate ? mktempdir(cleanup=true) : load_path
     try
         pushfirst!(LOAD_PATH, load_path)
         pushfirst!(DEPOT_PATH, load_cache_path)
         f(load_path)
     finally
-        try
-            rm(load_path, force=true, recursive=true)
-        catch err
-            @show err
-        end
-        if separate
-            try
-                rm(load_cache_path, force=true, recursive=true)
-            catch err
-                @show err
-            end
-        end
-        filter!((≠)(load_path), LOAD_PATH)
-        separate && filter!((≠)(load_cache_path), DEPOT_PATH)
+        popfirst!(DEPOT_PATH)
+        popfirst!(LOAD_PATH)
     end
     nothing
 end

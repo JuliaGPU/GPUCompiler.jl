@@ -1,9 +1,10 @@
 precompile_test_harness("Inference caching") do load_path
     # Write out the PTX test helpers as a micro package
-    create_standalone(load_path, "TestCompiler", "ptx.jl")
+    create_standalone(load_path, "PTXCompiler", "ptx.jl")
 
-    write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
-        import TestCompiler
+    write(joinpath(load_path, "PTXBackend.jl"), :(
+        module PTXBackend
+        import PTXCompiler
         using PrecompileTools
 
         function kernel()
@@ -11,22 +12,22 @@ precompile_test_harness("Inference caching") do load_path
         end
 
         let
-            job, _ = TestCompiler.PTX.create_job(kernel, ())
+            job, _ = PTXCompiler.PTX.create_job(kernel, ())
             precompile(job)
         end
 
         # identity is foreign
         @setup_workload begin
-            job, _ = TestCompiler.PTX.create_job(identity, (Int,))
+            job, _ = PTXCompiler.PTX.create_job(identity, (Int,))
             @compile_workload begin
                 precompile(job)
             end
         end
     end) |> string)
 
-    Base.compilecache(Base.PkgId("InferenceCaching"))
+    Base.compilecache(Base.PkgId("PTXBackend"))
     @eval let
-        import TestCompiler
+        import PTXCompiler
 
         # Check that no cached entry is present
         identity_mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Int})
@@ -41,10 +42,10 @@ precompile_test_harness("Inference caching") do load_path
             ci = isdefined(ci, :next) ? ci.next : nothing
         end
 
-        using InferenceCaching
+        using PTXBackend
 
         # Check that kernel survived
-        kernel_mi = GPUCompiler.methodinstance(typeof(InferenceCaching.kernel), Tuple{})
+        kernel_mi = GPUCompiler.methodinstance(typeof(PTXBackend.kernel), Tuple{})
         @test check_presence(kernel_mi, token)
 
         # check that identity survived
