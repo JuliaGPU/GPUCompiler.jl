@@ -1,11 +1,8 @@
-@testsetup module BPF
+module BPF
 
-using GPUCompiler
+using ..GPUCompiler
+import ..TestRuntime
 
-
-# create a native test compiler, and generate reflection methods for it
-
-include("runtime.jl")
 struct CompilerParams <: AbstractCompilerParams end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 

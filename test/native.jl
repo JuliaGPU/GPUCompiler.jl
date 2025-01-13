@@ -1,9 +1,3 @@
-@testitem "native" setup=[Native, Helpers] begin
-
-using Test
-
-############################################################################################
-
 @testset "reflection" begin
     job, _ = Native.create_job(identity, (Int,))
 
@@ -233,7 +227,7 @@ end
     @test "We did not crash!" != ""
 end
 
-@testset "CUDAnative.jl#278" begin
+@testset "CUDAjl#278" begin
     # codegen idempotency
     # NOTE: this isn't fixed, but surfaces here due to bad inference of checked_sub
     # NOTE: with the fix to print_to_string this doesn't error anymore,
@@ -562,83 +556,4 @@ end
     @test !any(f->occursin(f, ir),
                ["jl_invoke", "apply_iterate",
                 "inttoptr", "apply_type"])
-end
-end # testitem
-
-@testitem "native precompile" setup=[Precompile,] begin
-
-using Test
-precompile_test_harness("Inference caching") do load_path
-    # Write out the Native test setup as a micro package
-    create_standalone(load_path, "NativeCompiler", "native_testsetup.jl")
-
-    write(joinpath(load_path, "InferenceCaching.jl"), :(module InferenceCaching
-        import NativeCompiler
-        import GPUCompiler
-        using PrecompileTools
-
-        function kernel(A, x)
-            A[1] = x
-            return
-        end
-
-        let
-            job, _ = NativeCompiler.create_job(kernel, (Vector{Int}, Int))
-            precompile(job)
-        end
-
-        # identity is foreign
-        @setup_workload begin
-            job, _ = NativeCompiler.create_job(identity, (Int,))
-            @compile_workload begin
-                precompile(job)
-            end
-        end
-    end) |> string)
-
-    Base.compilecache(Base.PkgId("InferenceCaching"))
-    @eval let
-        import NativeCompiler
-
-        # Check that no cached entry is present
-        identity_mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Int})
-
-        token = let
-            job, _ = NativeCompiler.create_job(identity, (Int,))
-            GPUCompiler.ci_cache_token(job)
-        end
-        @test !check_presence(identity_mi, token)
-
-        using InferenceCaching
-
-        # Check that kernel survived
-        kernel_mi = GPUCompiler.methodinstance(typeof(InferenceCaching.kernel), Tuple{Vector{Int}, Int})
-        @test check_presence(kernel_mi, token)
-
-        # check that identity survived
-        @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"
-
-        GPUCompiler.clear_disk_cache!()
-        @test GPUCompiler.disk_cache_enabled() == false
-
-        GPUCompiler.enable_disk_cache!()
-        @test GPUCompiler.disk_cache_enabled() == true
-
-        job, _ = NativeCompiler.create_job(InferenceCaching.kernel, (Vector{Int}, Int))
-        @assert job.source == kernel_mi
-        ci = GPUCompiler.ci_cache_lookup(GPUCompiler.ci_cache(job), job.source, job.world, job.world)
-        @assert ci !== nothing
-        @assert ci.inferred !== nothing
-        path = GPUCompiler.cache_file(ci, job.config)
-        @test path !== nothing
-        @test !ispath(path)
-        NativeCompiler.cached_execution(InferenceCaching.kernel, (Vector{Int}, Int))
-        @test ispath(path)
-        GPUCompiler.clear_disk_cache!()
-        @test !ispath(path)
-    end
-end
-
-############################################################################################
-
 end

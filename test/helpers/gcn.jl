@@ -1,18 +1,15 @@
-@testsetup module Metal
+module GCN
 
-using GPUCompiler
+using ..GPUCompiler
+import ..TestRuntime
 
-
-# create a Metal test compiler, and generate reflection methods for it
-
-include("runtime.jl")
 struct CompilerParams <: AbstractCompilerParams end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types);
-                    kernel::Bool=false, always_inline=false, kwargs...)
+                 kernel::Bool=false, always_inline=false, kwargs...)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    target = GCNCompilerTarget(dev_isa="gfx900")
     params = CompilerParams()
     config = CompilerConfig(target, params; kernel, always_inline)
     CompilerJob(source, config), kwargs

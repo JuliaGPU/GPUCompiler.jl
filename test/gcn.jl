@@ -1,11 +1,3 @@
-@testitem "GCN" setup=[GCN, Helpers] begin
-
-@inline sink_gcn(i) = sink(i, Val(5))
-
-@test GCNCompilerTarget(dev_isa="gfx900") == GCNCompilerTarget("gfx900")
-
-############################################################################################
-
 @testset "IR" begin
 
 @testset "kernel calling convention" begin
@@ -220,9 +212,5 @@ end
     @test occursin("jl_box_float32", ir)
     GCN.code_native(devnull, kernel, Tuple{Float32,Ptr{Float32}})
 end
-
-end
-
-############################################################################################
 
 end

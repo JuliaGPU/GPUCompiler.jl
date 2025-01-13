@@ -1,37 +1,21 @@
-@testsetup module Precompile
-
-using Test
-using ReTestItems
-
-export precompile_test_harness, check_presence, create_standalone
-
 function precompile_test_harness(@nospecialize(f), testset::String)
     @testset "$testset" begin
         precompile_test_harness(f, true)
     end
 end
 function precompile_test_harness(@nospecialize(f), separate::Bool)
-    load_path = mktempdir()
-    load_cache_path = separate ? mktempdir() : load_path
+    # XXX: clean-up may fail on Windows, because opened files are not deletable.
+    #      fix this by running the harness in a separate process, such that the
+    #      compilation cache files are not opened?
+    load_path = mktempdir(cleanup=true)
+    load_cache_path = separate ? mktempdir(cleanup=true) : load_path
     try
         pushfirst!(LOAD_PATH, load_path)
         pushfirst!(DEPOT_PATH, load_cache_path)
         f(load_path)
     finally
-        try
-            rm(load_path, force=true, recursive=true)
-        catch err
-            @show err
-        end
-        if separate
-            try
-                rm(load_cache_path, force=true, recursive=true)
-            catch err
-                @show err
-            end
-        end
-        filter!((≠)(load_path), LOAD_PATH)
-        separate && filter!((≠)(load_cache_path), DEPOT_PATH)
+        popfirst!(DEPOT_PATH)
+        popfirst!(LOAD_PATH)
     end
     nothing
 end
@@ -50,19 +34,18 @@ function check_presence(mi, token)
 end
 
 function create_standalone(load_path, name::String, file)
-    cp(joinpath(@__DIR__, "runtime.jl"), joinpath(load_path, "runtime.jl"), force=true)
+    code = :(
+        module $(Symbol(name))
 
-    TS = include(file)
-    code = TS.code
-    if code.head == :begin
-        code.head = :block
-    end
-    @assert code.head == :block
-    code = Expr(:module, true, Symbol(name), code)
+        using GPUCompiler
+
+        include($(joinpath(@__DIR__, "runtime.jl")))
+        include($(joinpath(@__DIR__, file)))
+
+        end
+    )
 
     # Write out the test setup as a micro package
     write(joinpath(load_path, "$name.jl"), string(code))
     Base.compilecache(Base.PkgId(name))
 end
-
-end # testsetup

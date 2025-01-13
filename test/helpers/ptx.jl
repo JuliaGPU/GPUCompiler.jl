@@ -1,11 +1,8 @@
-@testsetup module PTX
+module PTX
 
-using GPUCompiler
+using ..GPUCompiler
+import ..TestRuntime
 
-
-# create a PTX-based test compiler, and generate reflection methods for it
-
-include("runtime.jl")
 struct CompilerParams <: AbstractCompilerParams end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
