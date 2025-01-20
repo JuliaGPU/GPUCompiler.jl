@@ -16,7 +16,7 @@ function pygmentize()
     return _pygmentize[]
 end
 
-const _pygmentize_version = Ref{Union{VersionNumber,Nothing}}()
+const _pygmentize_version = Ref{Union{VersionNumber, Nothing}}()
 function pygmentize_version()
     isassigned(_pygmentize_version) && return _pygmentize_version[]
 
@@ -53,13 +53,13 @@ function pygmentize_support(lexer)
     highlighter_ver = pygmentize_version()
     if isnothing(highlighter_ver)
         @warn "Syntax highlighting of $lexer code relies on Pygments.\n\
-               Use `pip install pygments` to install the lastest version" maxlog=1
+               Use `pip install pygments` to install the lastest version" maxlog = 1
         return false
     elseif lexer == "ptx"
         if highlighter_ver < v"2.16"
             @warn "Pygments supports PTX highlighting starting from version 2.16\n\
                    Detected version $highlighter_ver\n\
-                   Please update with `pip install pygments -U`" maxlog=1
+                   Please update with `pip install pygments -U`" maxlog = 1
             return false
         end
         return true
@@ -67,7 +67,7 @@ function pygmentize_support(lexer)
         if highlighter_ver < v"2.8"
             @warn "Pygments supports GCN highlighting starting from version 2.8\n\
                    Detected version $highlighter_ver\n\
-                   Please update with `pip install pygments -U`" maxlog=1
+                   Please update with `pip install pygments -U`" maxlog = 1
             return false
         end
         return true

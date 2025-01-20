@@ -57,8 +57,8 @@ end
             @%p2 bra        \$L__BB0_3;
         """
         can_highlight = GPUCompiler.pygmentize_support("ptx")
-        highlighted = sprint(GPUCompiler.highlight, sample, "ptx"; context=(:color => true))
-        @test occursin(ansi_color, highlighted) skip=!can_highlight
+        highlighted = sprint(GPUCompiler.highlight, sample, "ptx"; context = (:color => true))
+        @test occursin(ansi_color, highlighted) skip = !can_highlight
     end
 
     @testset "GCN" begin
@@ -68,7 +68,7 @@ end
             v_addc_u32    v4, vcc, v4, 0, vcc
         """
         can_highlight = GPUCompiler.pygmentize_support("gcn")
-        highlighted = sprint(GPUCompiler.highlight, sample, "gcn"; context=(:color => true))
-        @test occursin(ansi_color, highlighted) skip=!can_highlight
+        highlighted = sprint(GPUCompiler.highlight, sample, "gcn"; context = (:color => true))
+        @test occursin(ansi_color, highlighted) skip = !can_highlight
     end
 end
