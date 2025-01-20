@@ -16,23 +16,92 @@ function pygmentize()
     return _pygmentize[]
 end
 
+const _pygmentize_version = Ref{Union{VersionNumber, Nothing}}()
+function pygmentize_version()
+    isassigned(_pygmentize_version) && return _pygmentize_version[]
+
+    pygmentize_cmd = pygmentize()
+    if isnothing(pygmentize_cmd)
+        return _pygmentize_version[] = nothing
+    end
+
+    cmd = `$pygmentize_cmd -V`
+    @static if Sys.iswindows()
+        # Avoid encoding issues with pipes on Windows by using cmd.exe to capture stdout for us
+        cmd = `cmd.exe /C $cmd`
+        cmd = addenv(cmd, "PYTHONUTF8" => 1)
+    end
+    version_str = readchomp(cmd)
+
+    pos = findfirst("Pygments version ", version_str)
+    if !isnothing(pos)
+        version_start = last(pos) + 1
+        version_end = findnext(',', version_str, version_start) - 1
+        version = tryparse(VersionNumber, version_str[version_start:version_end])
+    else
+        version = nothing
+    end
+
+    if isnothing(version)
+        @warn "Could not parse Pygments version:\n$version_str"
+    end
+
+    return _pygmentize_version[] = version
+end
+
+function pygmentize_support(lexer)
+    highlighter_ver = pygmentize_version()
+    if isnothing(highlighter_ver)
+        @warn "Syntax highlighting of $lexer code relies on Pygments.\n\
+               Use `pip install pygments` to install the lastest version" maxlog = 1
+        return false
+    elseif lexer == "ptx"
+        if highlighter_ver < v"2.16"
+            @warn "Pygments supports PTX highlighting starting from version 2.16\n\
+                   Detected version $highlighter_ver\n\
+                   Please update with `pip install pygments -U`" maxlog = 1
+            return false
+        end
+        return true
+    elseif lexer == "gcn"
+        if highlighter_ver < v"2.8"
+            @warn "Pygments supports GCN highlighting starting from version 2.8\n\
+                   Detected version $highlighter_ver\n\
+                   Please update with `pip install pygments -U`" maxlog = 1
+            return false
+        end
+        return true
+    else
+        return false
+    end
+end
+
 function highlight(io::IO, code, lexer)
-    highlighter = pygmentize()
     have_color = get(io, :color, false)
     if !have_color
         print(io, code)
     elseif lexer == "llvm"
         InteractiveUtils.print_llvm(io, code)
-    elseif highlighter !== nothing
-        custom_lexer = joinpath(dirname(@__DIR__), "res", "pygments", "$lexer.py")
-        if isfile(custom_lexer)
-            lexer = `$custom_lexer -x`
+    elseif pygmentize_support(lexer)
+        lexer = lexer == "gcn" ? "amdgpu" : lexer
+        pygments_args = String[pygmentize(), "-f", "terminal", "-P", "bg=dark", "-l", lexer]
+        @static if Sys.iswindows()
+            # Avoid encoding issues with pipes on Windows by using a temporary file
+            mktemp() do tmp_path, tmp_io
+                println(tmp_io, code)
+                close(tmp_io)
+                push!(pygments_args, "-o", tmp_path, tmp_path)
+                cmd = Cmd(pygments_args)
+                wait(open(cmd))  # stdout and stderr go to devnull
+                print(io, read(tmp_path, String))
+            end
+        else
+            cmd = Cmd(pygments_args)
+            pipe = open(cmd, "r+")
+            print(pipe, code)
+            close(pipe.in)
+            print(io, read(pipe, String))
         end
-
-        pipe = open(`$highlighter -f terminal -P bg=dark -l $lexer`, "r+")
-        print(pipe, code)
-        close(pipe.in)
-        print(io, read(pipe, String))
     else
         print(io, code)
     end
