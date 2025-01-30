@@ -46,7 +46,14 @@ llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "
 
 function llvm_machine(target::PTXCompilerTarget)
     triple = llvm_triple(target)
-    t = Target(triple=triple)
+
+    # Julia does not ship NVPTX support in its LLVM on Apple
+    t = @static if !Sys.isapple()
+        Target(triple=triple)
+    else
+        Target()
+    end
+
 
     tm = TargetMachine(t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
                        "+ptx$(target.ptx.major)$(target.ptx.minor)")
