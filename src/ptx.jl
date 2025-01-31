@@ -51,7 +51,7 @@ function llvm_machine(target::PTXCompilerTarget)
     t = @static if !Sys.isapple()
         Target(triple=triple)
     else
-        Target()
+        Target(triple="")
     end
 
 
