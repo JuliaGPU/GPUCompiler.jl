@@ -48,10 +48,14 @@ function llvm_machine(target::PTXCompilerTarget)
     triple = llvm_triple(target)
 
     # Julia does not ship NVPTX support in its LLVM on Apple
+    # We fail to run passes therefore during a cross compile on Apple
+    # In that case, just use the local machine triple (since we can't
+    # run nvptx locally anyways, and the only use case is a cross
+    # compile to local architectures).
     t = @static if !Sys.isapple()
         Target(triple=triple)
     else
-        Target(triple="")
+        Target(triple=Sys.MACHINE)
     end
 
 
