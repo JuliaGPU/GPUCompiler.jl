@@ -5,6 +5,9 @@ using SPIRV_LLVM_Translator_unified_jll, SPIRV_Tools_jll
 # include all helpers
 include(joinpath(@__DIR__, "helpers", "runtime.jl"))
 for file in readdir(joinpath(@__DIR__, "helpers"))
+    if endswith(file, ".cov")
+        continue
+    end
     if file != "runtime.jl"
         include(joinpath(@__DIR__, "helpers", file))
     end
