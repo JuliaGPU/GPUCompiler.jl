@@ -46,18 +46,7 @@ llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "
 
 function llvm_machine(target::PTXCompilerTarget)
     triple = llvm_triple(target)
-
-    # Julia does not ship NVPTX support in its LLVM on Apple
-    # We fail to run passes therefore during a cross compile on Apple
-    # In that case, just use the local machine triple (since we can't
-    # run nvptx locally anyways, and the only use case is a cross
-    # compile to local architectures).
-    t = @static if !Sys.isapple()
-        Target(triple=triple)
-    else
-        Target(triple=Sys.MACHINE)
-    end
-
+    t = Target(triple=triple)
 
     tm = TargetMachine(t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
                        "+ptx$(target.ptx.major)$(target.ptx.minor)")
@@ -148,7 +137,14 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     @dispose pb=NewPMPassBuilder() begin
         add!(pb, RecomputeGlobalsAAPass())
         add!(pb, GlobalOptPass())
-        run!(pb, mod, llvm_machine(job.config.target))
+        # Julia does not ship NVPTX support in its LLVM on Apple
+        # We fail to run passes therefore during a cross compile on Apple
+        # In that case, don't pass a TM.
+        @static if !Sys.isapple()
+          run!(pb, mod, llvm_machine(job.config.target))
+        else
+          run!(pb, mod)
+        end
     end
 
     return entry
