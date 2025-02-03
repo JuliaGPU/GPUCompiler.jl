@@ -45,14 +45,21 @@ source_code(target::PTXCompilerTarget) = "ptx"
 llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
 function llvm_machine(target::PTXCompilerTarget)
-    triple = llvm_triple(target)
-    t = Target(triple=triple)
-
-    tm = TargetMachine(t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
-                       "+ptx$(target.ptx.major)$(target.ptx.minor)")
-    asm_verbosity!(tm, true)
-
-    return tm
+    # Julia does not ship NVPTX support in its LLVM on Apple
+    # We fail to run passes therefore during a cross compile on Apple
+    # In that case, don't pass a TM.
+    @static if !Sys.isapple()
+        triple = llvm_triple(target)
+        t = Target(triple=triple)
+    
+        tm = TargetMachine(t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
+                           "+ptx$(target.ptx.major)$(target.ptx.minor)")
+        asm_verbosity!(tm, true)
+    
+        return tm
+    else
+        return nothing
+    end
 end
 
 # the default datalayout does not match the one in the NVPTX user guide
@@ -137,14 +144,7 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     @dispose pb=NewPMPassBuilder() begin
         add!(pb, RecomputeGlobalsAAPass())
         add!(pb, GlobalOptPass())
-        # Julia does not ship NVPTX support in its LLVM on Apple
-        # We fail to run passes therefore during a cross compile on Apple
-        # In that case, don't pass a TM.
-        @static if !Sys.isapple()
-          run!(pb, mod, llvm_machine(job.config.target))
-        else
-          run!(pb, mod)
-        end
+        run!(pb, mod, llvm_machine(job.config.target))
     end
 
     return entry
