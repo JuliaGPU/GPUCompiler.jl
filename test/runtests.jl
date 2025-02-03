@@ -118,7 +118,7 @@ end
 end
 if Sys.isapple()
     # support for AMDGPU and NVTX on macOS has been removed from Julia's LLVM build
-    append!(skip_tests, ["ptx", "gcn"])
+    append!(skip_tests, ["gcn"])
 end
 if !(SPIRV_LLVM_Translator_unified_jll.is_available() && SPIRV_Tools_jll.is_available())
     # SPIRV needs it's tools to be available
