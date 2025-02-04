@@ -52,7 +52,7 @@ function llvm_machine(target::PTXCompilerTarget)
     t = Target(triple=triple)
 
     tm = TargetMachine(t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
-                        "+ptx$(target.ptx.major)$(target.ptx.minor)")
+                       "+ptx$(target.ptx.major)$(target.ptx.minor)")
     asm_verbosity!(tm, true)
 
     return tm
