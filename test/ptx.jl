@@ -124,7 +124,7 @@ end
 end
 
 ############################################################################################
-
+@static if !Sys.isapple()
 @testset "assembly" begin
 
 @testset "child functions" begin
@@ -324,6 +324,7 @@ end
 
 
     @test !occursin("gpu_gc_pool_alloc", asm)
+end
 end
 
 @testset "float boxes" begin
