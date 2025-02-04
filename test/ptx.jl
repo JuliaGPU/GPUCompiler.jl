@@ -124,7 +124,7 @@ end
 end
 
 ############################################################################################
-@static if !Sys.isapple()
+if :NVPTX in LLVM.backends()
 @testset "assembly" begin
 
 @testset "child functions" begin
@@ -325,7 +325,6 @@ end
 
     @test !occursin("gpu_gc_pool_alloc", asm)
 end
-end
 
 @testset "float boxes" begin
     function kernel(a,b)
@@ -344,3 +343,4 @@ end
 end
 
 end
+end # NVPTX in LLVM.backends()

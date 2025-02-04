@@ -23,6 +23,7 @@ source_code(@nospecialize(target::AbstractCompilerTarget)) = "text"
 
 llvm_triple(@nospecialize(target::AbstractCompilerTarget)) = error("Not implemented")
 
+# may return nothing if the target is not support by the current version of LLVM.
 function llvm_machine(@nospecialize(target::AbstractCompilerTarget))
     triple = llvm_triple(target)
 

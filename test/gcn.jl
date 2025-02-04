@@ -14,7 +14,7 @@ end
 end
 
 ############################################################################################
-
+if :AMDGPU in LLVM.backends()
 @testset "assembly" begin
 
 @testset "skip scalar trap" begin
@@ -214,3 +214,4 @@ end
 end
 
 end
+end # :AMDGPU in LLVM.backends()
