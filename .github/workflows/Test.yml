@@ -73,12 +73,15 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-          file: lcov.info
+          files: lcov.info
 
   # fetching builds from Buildkite
   buildkite_test:
     name: Julia ${{ matrix.version }} ${{ matrix.build }} ${{ matrix.llvm_args }}
     runs-on: ${{ matrix.os }}
+    # This job requires accessing a secret, which isn't available in PRs from
+    # forks.  Skip this job entirely if it's a pull request from a fork.
+    if: ${{ github.event_name != 'pull_request' || ! github.event.pull_request.head.repo.fork }}
     strategy:
       fail-fast: false
       matrix:
@@ -121,4 +124,4 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-          file: lcov.info
+          files: lcov.info
