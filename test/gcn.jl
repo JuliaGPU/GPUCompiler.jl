@@ -1,3 +1,4 @@
+if :AMDGPU in LLVM.backends()
 @testset "IR" begin
 
 @testset "kernel calling convention" begin
@@ -14,7 +15,6 @@ end
 end
 
 ############################################################################################
-
 @testset "assembly" begin
 
 @testset "skip scalar trap" begin
@@ -214,3 +214,4 @@ end
 end
 
 end
+end # :AMDGPU in LLVM.backends()

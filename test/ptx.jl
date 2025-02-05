@@ -124,7 +124,7 @@ end
 end
 
 ############################################################################################
-
+if :NVPTX in LLVM.backends()
 @testset "assembly" begin
 
 @testset "child functions" begin
@@ -343,3 +343,4 @@ end
 end
 
 end
+end # NVPTX in LLVM.backends()

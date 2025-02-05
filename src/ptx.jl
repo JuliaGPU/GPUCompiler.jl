@@ -45,6 +45,9 @@ source_code(target::PTXCompilerTarget) = "ptx"
 llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
 function llvm_machine(target::PTXCompilerTarget)
+    @static if :NVPTX ∉ LLVM.backends()
+        return nothing
+    end
     triple = llvm_triple(target)
     t = Target(triple=triple)
 
