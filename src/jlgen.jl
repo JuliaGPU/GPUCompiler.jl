@@ -32,6 +32,7 @@ function unsafe_function_from_type(ft::Type)
         Ref{ft}()[]
     end
 end
+global MethodError
 function MethodError(ft::Type{<:Function}, tt::Type, world::Integer=typemax(UInt))
     Base.MethodError(unsafe_function_from_type(ft), tt, world)
 end
