@@ -30,6 +30,8 @@ struct LazyModule
     LazyModule(name, uuid) = new(Base.PkgId(uuid, name))
 end
 
+isavailable(lazy_mod::LazyModule) = haskey(Base.loaded_modules, getfield(lazy_mod, :pkg))
+
 function Base.getproperty(lazy_mod::LazyModule, sym::Symbol)
     pkg = getfield(lazy_mod, :pkg)
     mod = get(Base.loaded_modules, pkg, nothing)

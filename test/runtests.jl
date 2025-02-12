@@ -116,10 +116,6 @@ end
         push!(skip_tests, "metal")
     end
 end
-if !(SPIRV_LLVM_Translator_unified_jll.is_available() && SPIRV_Tools_jll.is_available())
-    # SPIRV needs it's tools to be available
-    push!(skip_tests, "spirv")
-end
 if VERSION < v"1.11"
     append!(skip_tests, ["ptx/precompile", "native/precompile"])
 end
