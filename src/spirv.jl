@@ -4,8 +4,15 @@
 # https://github.com/KhronosGroup/LLVM-SPIRV-Backend/blob/master/llvm/docs/SPIR-V-Backend.rst
 # https://github.com/KhronosGroup/SPIRV-LLVM-Translator/blob/master/docs/SPIRVRepresentationInLLVM.rst
 
-const SPIRV_LLVM_Translator_unified_jll = LazyModule("SPIRV_LLVM_Translator_unified_jll", UUID("85f0d8ed-5b39-5caa-b1ae-7472de402361"))
-const SPIRV_Tools_jll = LazyModule("SPIRV_Tools_jll", UUID("6ac6d60f-d740-5983-97d7-a4482c0689f4"))
+const SPIRV_LLVM_Backend_jll =
+    LazyModule("SPIRV_LLVM_Backend_jll",
+               UUID("4376b9bf-cff8-51b6-bb48-39421dff0d0c"))
+const SPIRV_LLVM_Translator_unified_jll =
+    LazyModule("SPIRV_LLVM_Translator_unified_jll",
+               UUID("85f0d8ed-5b39-5caa-b1ae-7472de402361"))
+const SPIRV_Tools_jll =
+    LazyModule("SPIRV_Tools_jll",
+               UUID("6ac6d60f-d740-5983-97d7-a4482c0689f4"))
 
 
 ## target
@@ -13,12 +20,29 @@ const SPIRV_Tools_jll = LazyModule("SPIRV_Tools_jll", UUID("6ac6d60f-d740-5983-9
 export SPIRVCompilerTarget
 
 Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
+    version::Union{Nothing,VersionNumber} = nothing
     extensions::Vector{String} = []
     supports_fp16::Bool = true
     supports_fp64::Bool = true
+
+    backend::Symbol = isavailable(SPIRV_LLVM_Backend_jll) ? :llvm : :khronos
+    # XXX: these don't really belong in the _target_ struct
+    validate::Bool = false
+    optimize::Bool = false
 end
 
-llvm_triple(::SPIRVCompilerTarget) = Int===Int64 ? "spir64-unknown-unknown" : "spirv-unknown-unknown"
+function llvm_triple(target::SPIRVCompilerTarget)
+    if target.backend == :llvm
+        architecture = Int===Int64 ? "spirv64" : "spirv32"  # could also be "spirv" for logical addressing
+        subarchitecture = target.version === nothing ? "" : "v$(target.version.major).$(target.version.minor)"
+        vendor = "unknown"  # could also be AMD
+        os = "unknown"
+        environment = "unknown"
+        return "$architecture$subarchitecture-$vendor-$os-$environment"
+    elseif target.backend == :khronos
+        return Int===Int64 ? "spir64-unknown-unknown" : "spirv-unknown-unknown"
+    end
+end
 
 # SPIRV is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::SPIRVCompilerTarget) = nothing
@@ -32,7 +56,8 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) = "spirv"
+runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) =
+    "spirv-" * String(job.config.target.backend)
 
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     # update calling convention
@@ -90,47 +115,57 @@ end
     # (SPIRV-LLVM-Translator#1140)
     rm_freeze!(mod)
 
-
     # translate to SPIR-V
     input = tempname(cleanup=false) * ".bc"
     translated = tempname(cleanup=false) * ".spv"
-    options = `--spirv-debug-info-version=ocl-100`
-    if !isempty(job.config.target.extensions)
-        str = join(map(ext->"+$ext", job.config.target.extensions), ",")
-        options = `$options --spirv-ext=$str`
-    end
     write(input, mod)
-    let cmd = `$(SPIRV_LLVM_Translator_unified_jll.llvm_spirv()) $options -o $translated $input`
-        proc = run(ignorestatus(cmd))
-        if !success(proc)
-            error("""Failed to translate LLVM code to SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(input).""")
+    if job.config.target.backend === :llvm
+        cmd = `$(SPIRV_LLVM_Backend_jll.llc()) $input -filetype=obj -o $translated`
+
+        if !isempty(job.config.target.extensions)
+            str = join(map(ext->"+$ext", job.config.target.extensions), ",")
+            cmd = `$(cmd) -spirv-ext=$str`
         end
+    elseif job.config.target.backend === :khronos
+        cmd = `$(SPIRV_LLVM_Translator_unified_jll.llvm_spirv()) -o $translated $input --spirv-debug-info-version=ocl-100`
+
+        if !isempty(job.config.target.extensions)
+            str = join(map(ext->"+$ext", job.config.target.extensions), ",")
+            cmd = `$(cmd) --spirv-ext=$str`
+        end
+
+        if job.config.target.version !== nothing
+            cmd = `$(cmd) --spirv-max-version=$(job.config.target.version.major).$(job.config.target.version.minor)`
+        end
+    end
+    proc = run(ignorestatus(cmd))
+    if !success(proc)
+        error("""Failed to translate LLVM code to SPIR-V.
+                 If you think this is a bug, please file an issue and attach $(input).""")
     end
 
     # validate
-    # XXX: parameterize this on the `validate` driver argument
-    # XXX: our code currently doesn't pass the validator
-    #if Base.JLOptions().debug_level >= 2
-    #    cmd = `$(SPIRV_Tools_jll.spirv_val()) $translated`
-    #    proc = run(ignorestatus(cmd))
-    #    if !success(proc)
-    #        error("""Failed to validate generated SPIR-V.
-    #                 If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
-    #    end
-    #end
+    if job.config.target.validate
+       cmd = `$(SPIRV_Tools_jll.spirv_val()) $translated`
+       proc = run(ignorestatus(cmd))
+       if !success(proc)
+           error("""Failed to validate generated SPIR-V.
+                    If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+       end
+    end
 
     # optimize
-    # XXX: parameterize this on the `optimize` driver argument
-    # XXX: the optimizer segfaults on some of our code
     optimized = tempname(cleanup=false) * ".spv"
-    #let cmd = `$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation $translated -o $optimized`
-    #    proc = run(ignorestatus(cmd))
-    #    if !success(proc)
-    #        error("""Failed to optimize generated SPIR-V.
-    #                 If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
-    #    end
-    #end
+    if job.config.target.optimize
+        cmd = `$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation $translated -o $optimized`
+       proc = run(ignorestatus(cmd))
+       if !success(proc)
+           error("""Failed to optimize generated SPIR-V.
+                    If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+       end
+    else
+        cp(translated, optimized)
+    end
 
     output = if format == LLVM.API.LLVMObjectFile
         read(translated)
@@ -141,7 +176,7 @@ end
 
     rm(input)
     rm(translated)
-    #rm(optimized)
+    rm(optimized)
 
     return output
 end
