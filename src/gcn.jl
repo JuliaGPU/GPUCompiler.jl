@@ -12,6 +12,8 @@ GCNCompilerTarget(dev_isa; features="") = GCNCompilerTarget(dev_isa, features)
 
 llvm_triple(::GCNCompilerTarget) = "amdgcn-amd-amdhsa"
 
+source_code(target::GCNCompilerTarget) = "gcn"
+
 function llvm_machine(target::GCNCompilerTarget)
     @static if :AMDGPU ∉ LLVM.backends()
         return nothing
