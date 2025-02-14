@@ -135,7 +135,7 @@ session-dependent objects (e.g., a `CuModule`).
 """
 function cached_compilation(cache::AbstractDict{<:Any,V},
                             src::MethodInstance, cfg::CompilerConfig,
-                            compiler::Function, linker::Function; kwargs...) where {V}
+                            compiler::Function, linker::Function) where {V}
     # NOTE: we index the cach both using (mi, world, cfg) keys, for the fast look-up,
     #       and using CodeInfo keys for the slow look-up. we need to cache both for
     #       performance, but cannot use a separate private cache for the ci->obj lookup
@@ -156,7 +156,7 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
     unlock(cache_lock)
 
     if obj === nothing || compile_hook[] !== nothing
-        obj = actual_compilation(cache, src, world, cfg, compiler, linker; kwargs...)::V
+        obj = actual_compilation(cache, src, world, cfg, compiler, linker)::V
         lock(cache_lock)
         cache[key] = obj
         unlock(cache_lock)
@@ -196,9 +196,8 @@ struct DiskCacheEntry
 end
 
 @noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
-                                      cfg::CompilerConfig, compiler::Function, linker::Function;
-                                      kwargs...)
-    job = CompilerJob(src, cfg, world; kwargs...)
+                                      cfg::CompilerConfig, compiler::Function, linker::Function)
+    job = CompilerJob(src, cfg, world)
     obj = nothing
 
     # fast path: find an applicable CodeInstance and see if we have compiled it before

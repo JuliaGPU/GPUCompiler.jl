@@ -67,7 +67,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob))
 
     @timeit_debug to "Validation" begin
         check_method(job)   # not optional
-        job.validate && check_invocation(job)
+        job.config.validate && check_invocation(job)
     end
 
     prepare_job!(job)
@@ -78,7 +78,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob))
     ir, ir_meta = emit_llvm(job)
 
     if output == :llvm
-        if job.strip
+        if job.config.strip
             @timeit_debug to "strip debug info" strip_debuginfo!(ir)
         end
 
@@ -159,7 +159,7 @@ const __llvm_initialized = Ref(false)
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    has_deferred_jobs = job.toplevel && !job.only_entry && haskey(functions(ir), "deferred_codegen")
+    has_deferred_jobs = job.toplevel && !job.config.only_entry && haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -234,7 +234,7 @@ const __llvm_initialized = Ref(false)
         erase!(dyn_marker)
     end
 
-    if job.libraries
+    if job.toplevel && job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
             runtime = load_runtime(job)
@@ -286,7 +286,7 @@ const __llvm_initialized = Ref(false)
             #       so that we can reconstruct the CompileJob instead of setting it globally
         end
 
-        if job.optimize
+        if job.toplevel && job.config.optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir; job.config.opt_level)
 
@@ -313,7 +313,7 @@ const __llvm_initialized = Ref(false)
             entry = functions(ir)[entry_fn]
         end
 
-        if job.cleanup
+        if job.toplevel && job.config.cleanup
             @timeit_debug to "clean-up" begin
                 @dispose pb=NewPMPassBuilder() begin
                     add!(pb, RecomputeGlobalsAAPass())
@@ -343,7 +343,7 @@ const __llvm_initialized = Ref(false)
         # replace non-entry function definitions with a declaration
         # NOTE: we can't do this before optimization, because the definitions of called
         #       functions may affect optimization.
-        if job.only_entry
+        if job.config.only_entry
             for f in functions(ir)
                 f == entry && continue
                 isdeclaration(f) && continue
@@ -353,7 +353,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    if job.validate
+    if job.toplevel && job.config.validate
         @timeit_debug to "Validation" begin
             check_ir(job, ir)
         end
@@ -369,7 +369,7 @@ end
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
                           format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
-    if job.strip
+    if job.config.strip
         @timeit_debug to "Debug info removal" strip_debuginfo!(ir)
     end
 

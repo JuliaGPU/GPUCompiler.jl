@@ -26,10 +26,10 @@ using PrecompileTools: @setup_workload, @compile_workload
         source = methodinstance(typeof(kernel), Tuple{})
         target = NativeCompilerTarget()
         params = precompile_module.DummyCompilerParams()
-        config = CompilerConfig(target, params)
         # XXX: on Windows, compiling the GPU runtime leaks GPU code in the native cache,
         #      so prevent building the runtime library (see JuliaGPU/GPUCompiler.jl#601)
-        job = CompilerJob(source, config; libraries=false)
+        config = CompilerConfig(target, params; libraries=false)
+        job = CompilerJob(source, config)
 
         JuliaContext() do ctx
             GPUCompiler.compile(:asm, job)
