@@ -20,14 +20,15 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = TestRuntime
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
-function create_job(@nospecialize(func), @nospecialize(types); kernel::Bool=false,
-                    entry_abi=:specfunc, entry_safepoint::Bool=false, always_inline=false,
-                    method_table=test_method_table, kwargs...)
+function create_job(@nospecialize(func), @nospecialize(types);
+                    entry_safepoint::Bool=false, method_table=test_method_table, kwargs...)
+    config_kwargs, job_kwargs, kwargs =
+        split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS, GPUCompiler.JOB_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget()
     params = CompilerParams(entry_safepoint, method_table)
-    config = CompilerConfig(target, params; kernel, entry_abi, always_inline)
-    CompilerJob(source, config), kwargs
+    config = CompilerConfig(target, params; kernel=false, config_kwargs...)
+    CompilerJob(source, config; job_kwargs...), kwargs
 end
 
 function code_typed(@nospecialize(func), @nospecialize(types); kwargs...)
@@ -71,7 +72,7 @@ const runtime_cache = Dict{Any, Any}()
 
 function compiler(job)
     JuliaContext() do ctx
-        GPUCompiler.compile(:asm, job, validate=false)
+        GPUCompiler.compile(:asm, job)
     end
 end
 
@@ -81,8 +82,9 @@ end
 
 # simulates cached codegen
 function cached_execution(@nospecialize(func), @nospecialize(types); kwargs...)
-    job, kwargs = create_job(func, types; kwargs...)
-    GPUCompiler.cached_compilation(runtime_cache, job.source, job.config, compiler, linker)
+    job, kwargs = create_job(func, types)
+    GPUCompiler.cached_compilation(runtime_cache, job.source, job.config, compiler, linker;
+                                   validate=false, kwargs...)
 end
 
 end

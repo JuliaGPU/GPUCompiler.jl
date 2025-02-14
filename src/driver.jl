@@ -43,53 +43,31 @@ end
 
 export compile
 
-# NOTE: the keyword arguments to compile/codegen control those aspects of compilation that
-#       might have to be changed (e.g. set libraries=false when recursing, or set
-#       strip=true for reflection). What remains defines the compilation job itself,
-#       and those values are contained in the CompilerJob struct.
-
 # (::CompilerJob)
 const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 """
-    compile(target::Symbol, job::CompilerJob; kwargs...)
+    compile(target::Symbol, job::CompilerJob)
 
-Compile a function `f` invoked with types `tt` for device capability `cap` to one of the
-following formats as specified by the `target` argument: `:julia` for Julia IR, `:llvm` for
-LLVM IR and `:asm` for machine code.
-
-The following keyword arguments are supported:
-- `toplevel`: indicates that this compilation is the outermost invocation of the compiler
-  (default: true)
-- `libraries`: link the GPU runtime and `libdevice` libraries (default: true, if toplevel)
-- `optimize`: optimize the code (default: true, if toplevel)
-- `cleanup`: run cleanup passes on the code (default: true, if toplevel)
-- `validate`: enable optional validation of input and outputs (default: true, if toplevel)
-- `strip`: strip non-functional metadata and debug information (default: false)
-- `only_entry`: only keep the entry function, remove all others (default: false).
-  This option is only for internal use, to implement reflection's `dump_module`.
-
-Other keyword arguments can be found in the documentation of [`cufunction`](@ref).
+Compile a `job` to one of the following formats as specified by the `target` argument:
+`:julia` for Julia IR, `:llvm` for LLVM IR and `:asm` for machine code.
 """
-function compile(target::Symbol, @nospecialize(job::CompilerJob); kwargs...)
+function compile(target::Symbol, @nospecialize(job::CompilerJob))
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
 
-    return codegen(target, job; kwargs...)
+    return codegen(target, job)
 end
 
-function codegen(output::Symbol, @nospecialize(job::CompilerJob); toplevel::Bool=true,
-                 libraries::Bool=toplevel, optimize::Bool=toplevel, cleanup::Bool=toplevel,
-                 validate::Bool=toplevel, strip::Bool=false, only_entry::Bool=false,
-                 parent_job::Union{Nothing, CompilerJob}=nothing)
+function codegen(output::Symbol, @nospecialize(job::CompilerJob))
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
 
     @timeit_debug to "Validation" begin
         check_method(job)   # not optional
-        validate && check_invocation(job)
+        job.validate && check_invocation(job)
     end
 
     prepare_job!(job)
@@ -97,10 +75,10 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob); toplevel::Bool
 
     ## LLVM IR
 
-    ir, ir_meta = emit_llvm(job; libraries, toplevel, optimize, cleanup, only_entry, validate)
+    ir, ir_meta = emit_llvm(job)
 
     if output == :llvm
-        if strip
+        if job.strip
             @timeit_debug to "strip debug info" strip_debuginfo!(ir)
         end
 
@@ -117,7 +95,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob); toplevel::Bool
     else
         error("Unknown assembly format $output")
     end
-    asm, asm_meta = emit_asm(job, ir; strip, validate, format)
+    asm, asm_meta = emit_asm(job, ir, format)
 
     if output == :asm || output == :obj
         return asm, (; asm_meta..., ir_meta..., ir)
@@ -156,9 +134,7 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob); toplevel::Bool,
-                           libraries::Bool, optimize::Bool, cleanup::Bool,
-                           validate::Bool, only_entry::Bool)
+@locked function emit_llvm(@nospecialize(job::CompilerJob))
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -183,7 +159,7 @@ const __llvm_initialized = Ref(false)
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    has_deferred_jobs = toplevel && !only_entry && haskey(functions(ir), "deferred_codegen")
+    has_deferred_jobs = job.toplevel && !job.only_entry && haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -221,8 +197,8 @@ const __llvm_initialized = Ref(false)
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(jobs, dyn_job) do
-                    dyn_ir, dyn_meta = codegen(:llvm, dyn_job; toplevel=false,
-                                                               parent_job=job)
+                    dyn_ir, dyn_meta =
+                        codegen(:llvm, CompilerJob(dyn_job; toplevel=false, parent=job))
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     @assert context(dyn_ir) == context(ir)
@@ -258,7 +234,7 @@ const __llvm_initialized = Ref(false)
         erase!(dyn_marker)
     end
 
-    if libraries
+    if job.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
             runtime = load_runtime(job)
@@ -284,7 +260,7 @@ const __llvm_initialized = Ref(false)
         # mark everything internal except for entrypoints and any exported
         # global variables. this makes sure that the optimizer can, e.g.,
         # rewrite function signatures.
-        if toplevel
+        if job.toplevel
             preserved_gvs = collect(values(jobs))
             for gvar in globals(ir)
                 if linkage(gvar) == LLVM.API.LLVMExternalLinkage
@@ -310,7 +286,7 @@ const __llvm_initialized = Ref(false)
             #       so that we can reconstruct the CompileJob instead of setting it globally
         end
 
-        if optimize
+        if job.optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir; job.config.opt_level)
 
@@ -337,7 +313,7 @@ const __llvm_initialized = Ref(false)
             entry = functions(ir)[entry_fn]
         end
 
-        if cleanup
+        if job.cleanup
             @timeit_debug to "clean-up" begin
                 @dispose pb=NewPMPassBuilder() begin
                     add!(pb, RecomputeGlobalsAAPass())
@@ -355,7 +331,7 @@ const __llvm_initialized = Ref(false)
         # we want to finish the module after optimization, so we cannot do so
         # during deferred code generation. instead, process the deferred jobs
         # here.
-        if toplevel
+        if job.toplevel
             entry = finish_ir!(job, ir, entry)
 
             for (job′, fn′) in jobs
@@ -367,7 +343,7 @@ const __llvm_initialized = Ref(false)
         # replace non-entry function definitions with a declaration
         # NOTE: we can't do this before optimization, because the definitions of called
         #       functions may affect optimization.
-        if only_entry
+        if job.only_entry
             for f in functions(ir)
                 f == entry && continue
                 isdeclaration(f) && continue
@@ -377,7 +353,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    if validate
+    if job.validate
         @timeit_debug to "Validation" begin
             check_ir(job, ir)
         end
@@ -390,10 +366,10 @@ const __llvm_initialized = Ref(false)
     return ir, (; entry, compiled)
 end
 
-@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
-                          strip::Bool, validate::Bool, format::LLVM.API.LLVMCodeGenFileType)
+@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
+                          format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
-    if strip
+    if job.strip
         @timeit_debug to "Debug info removal" strip_debuginfo!(ir)
     end
 

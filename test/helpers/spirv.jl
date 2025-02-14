@@ -7,15 +7,16 @@ struct CompilerParams <: AbstractCompilerParams end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types);
-                   kernel::Bool=false, always_inline=false,
-                   supports_fp16=true, supports_fp64=true,
-                   backend::Symbol, kwargs...)
+                   supports_fp16=true, supports_fp64=true, backend::Symbol,
+                   kwargs...)
+    config_kwargs, job_kwargs, kwargs =
+        split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS, GPUCompiler.JOB_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = SPIRVCompilerTarget(; backend, validate=true, optimize=true,
                                    supports_fp16, supports_fp64)
     params = CompilerParams()
-    config = CompilerConfig(target, params; kernel, always_inline)
-    CompilerJob(source, config), kwargs
+    config = CompilerConfig(target, params; kernel=false, config_kwargs...)
+    CompilerJob(source, config; job_kwargs...), kwargs
 end
 
 function code_typed(@nospecialize(func), @nospecialize(types); kwargs...)

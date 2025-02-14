@@ -50,10 +50,10 @@ end
         @noinline inner(x) = x+1
         foo(x) = sum(inner, fill(x, 10, 10))
 
-        job, _ = Native.create_job(foo, (Float64,))
+        job, _ = Native.create_job(foo, (Float64,); validate=false)
         JuliaContext() do ctx
             # shouldn't segfault
-            ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
+            ir, meta = GPUCompiler.compile(:llvm, job)
 
             meth = only(methods(foo, (Float64,)))
 

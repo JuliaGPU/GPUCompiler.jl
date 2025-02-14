@@ -8,12 +8,20 @@ export split_kwargs, assign_args!
 # split keyword arguments expressions into groups. returns vectors of keyword argument
 # values, one more than the number of groups (unmatched keywords in the last vector).
 # intended for use in macros; the resulting groups can be used in expressions.
+# can be used at run time, but not in performance critical code.
 function split_kwargs(kwargs, kw_groups...)
     kwarg_groups = ntuple(_->[], length(kw_groups) + 1)
     for kwarg in kwargs
         # decode
-        Meta.isexpr(kwarg, :(=)) || throw(ArgumentError("non-keyword argument like option '$kwarg'"))
-        key, val = kwarg.args
+        if Meta.isexpr(kwarg, :(=))
+            # use in macros
+            key, val = kwarg.args
+        elseif kwarg isa Pair{Symbol,<:Any}
+            # use in functions
+            key, val = kwarg
+        else
+            throw(ArgumentError("non-keyword argument like option '$kwarg'"))
+        end
         isa(key, Symbol) || throw(ArgumentError("non-symbolic keyword '$key'"))
 
         # find a matching group
@@ -127,7 +135,7 @@ session-dependent objects (e.g., a `CuModule`).
 """
 function cached_compilation(cache::AbstractDict{<:Any,V},
                             src::MethodInstance, cfg::CompilerConfig,
-                            compiler::Function, linker::Function) where {V}
+                            compiler::Function, linker::Function; kwargs...) where {V}
     # NOTE: we index the cach both using (mi, world, cfg) keys, for the fast look-up,
     #       and using CodeInfo keys for the slow look-up. we need to cache both for
     #       performance, but cannot use a separate private cache for the ci->obj lookup
@@ -148,7 +156,7 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
     unlock(cache_lock)
 
     if obj === nothing || compile_hook[] !== nothing
-        obj = actual_compilation(cache, src, world, cfg, compiler, linker)::V
+        obj = actual_compilation(cache, src, world, cfg, compiler, linker; kwargs...)::V
         lock(cache_lock)
         cache[key] = obj
         unlock(cache_lock)
@@ -182,14 +190,15 @@ end
 end
 
 struct DiskCacheEntry
-    src::Type # Originally MethodInstance, but upon deserialize they were not uniqued... 
+    src::Type # Originally MethodInstance, but upon deserialize they were not uniqued...
     cfg::CompilerConfig
     asm
 end
 
 @noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
-                                      cfg::CompilerConfig, compiler::Function, linker::Function)
-    job = CompilerJob(src, cfg, world)
+                                      cfg::CompilerConfig, compiler::Function, linker::Function;
+                                      kwargs...)
+    job = CompilerJob(src, cfg, world; kwargs...)
     obj = nothing
 
     # fast path: find an applicable CodeInstance and see if we have compiled it before

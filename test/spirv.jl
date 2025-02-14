@@ -48,28 +48,28 @@ end
     end
 
     ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float16}, Float16};
-                                    backend, validate=true))
+                                    backend))
     @test occursin("store half", ir)
 
     ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float32}, Float32};
-                                    backend, validate=true))
+                                    backend))
     @test occursin("store float", ir)
 
     ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float64}, Float64};
-                                    backend, validate=true))
+                                    backend))
     @test occursin("store double", ir)
 
     @test_throws_message(InvalidIRError,
-                         SPIRV.code_llvm(devnull, mod.kernel, Tuple{Ptr{Float16}, Float16};
-                                         backend, supports_fp16=false, validate=true)) do msg
+                         SPIRV.code_execution(mod.kernel, Tuple{Ptr{Float16}, Float16};
+                                              backend, supports_fp16=false)) do msg
         occursin("unsupported use of half value", msg) &&
         occursin("[1] unsafe_store!", msg) &&
         occursin("[2] kernel", msg)
     end
 
     @test_throws_message(InvalidIRError,
-                         SPIRV.code_llvm(devnull, mod.kernel, Tuple{Ptr{Float64}, Float64};
-                                         backend, supports_fp64=false, validate=true)) do msg
+                         SPIRV.code_execution(mod.kernel, Tuple{Ptr{Float64}, Float64};
+                                              backend, supports_fp64=false)) do msg
         occursin("unsupported use of double value", msg) &&
         occursin("[1] unsafe_store!", msg) &&
         occursin("[2] kernel", msg)

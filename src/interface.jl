@@ -63,6 +63,8 @@ export CompilerConfig
 
 # the configuration of the compiler
 
+const CONFIG_KWARGS = [:kernel, :entry_abi, :name, :always_inline]
+
 """
     CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, name=nothing,
                                    always_inline=false)
@@ -75,7 +77,7 @@ Several keyword arguments can be used to customize the compilation process:
 - `kernel`: specifies if the function should be compiled as a kernel, or as a regular
    function. This is used to determine the calling convention and for validation purposes.
 - `entry_abi`: can be either `:specfunc` the default, or `:func`. `:specfunc` expects the
-  arguments to be passed in registers, simple return values are returned in registers as
+   arguments to be passed in registers, simple return values are returned in registers as
    well, and complex return values are returned on the stack using `sret`, the calling
    convention is `fastcc`. The `:func` abi is simpler with a calling convention of the first
    argument being the function itself (to support closures), the second argument being a
@@ -144,23 +146,58 @@ using Core: MethodInstance
 
 # a specific invocation of the compiler, bundling everything needed to generate code
 
+const JOB_KWARGS = [:toplevel, :libraries, :optimize, :cleanup, :validate, :strip, :only_entry]
+
+"""
+    CompilerJob(source::MethodInstance, config::CompilerConfig;
+                world=tls_world_age(), toplevel=true, libraries=toplevel,
+                optimize=toplevel, cleanup=toplevel, validate=toplevel, strip=false,
+                only_entry=false, parent=nothing)
+
+Construct a `CompilerJob` that will be used to drive compilation for the given `source` and
+`config` in a given `world`.
+
+The following keyword arguments are supported:
+- `toplevel`: indicates that this compilation is the outermost invocation of the compiler
+  (default: true)
+- `libraries`: link the GPU runtime and `libdevice` libraries (default: true, if toplevel)
+- `optimize`: optimize the code (default: true, if toplevel)
+- `cleanup`: run cleanup passes on the code (default: true, if toplevel)
+- `validate`: enable optional validation of input and outputs (default: true, if toplevel)
+- `strip`: strip non-functional metadata and debug information (default: false)
+- `only_entry`: only keep the entry function, remove all others (default: false).
+  This option is only for internal use, to implement reflection's `dump_module`.
+"""
 struct CompilerJob{T,P}
     source::MethodInstance
     config::CompilerConfig{T,P}
     world::UInt
 
-    CompilerJob(src::MethodInstance, cfg::CompilerConfig{T,P},
-                world=tls_world_age()) where {T,P} =
-        new{T,P}(src, cfg, world)
+    toplevel::Bool
+    libraries::Bool
+    optimize::Bool
+    cleanup::Bool
+    validate::Bool
+    strip::Bool
+    only_entry::Bool
+    parent::Union{Nothing, CompilerJob}
+
+    CompilerJob(source::MethodInstance, config::CompilerConfig{T,P},
+                world=tls_world_age(); toplevel::Bool=true,
+                libraries::Bool=toplevel, optimize::Bool=toplevel, cleanup::Bool=toplevel,
+                validate::Bool=toplevel, strip::Bool=false, only_entry::Bool=false,
+                parent::Union{Nothing, CompilerJob}=nothing) where {T,P} =
+        new{T,P}(source, config, world, toplevel, libraries, optimize, cleanup, validate,
+                 strip, only_entry, parent)
 end
 
-function Base.hash(job::CompilerJob, h::UInt)
-    h = hash(job.source, h)
-    h = hash(job.config, h)
-    h = hash(job.world, h)
-
-    return h
-end
+# copy constructor
+CompilerJob(job::CompilerJob; source=job.source, config=job.config, world=job.world,
+            toplevel=job.toplevel, libraries=job.libraries, optimize=job.optimize,
+            cleanup=job.cleanup, validate=job.validate, strip=job.strip,
+            only_entry=job.only_entry, parent=job.parent) =
+    CompilerJob(source, config, world; toplevel, libraries, optimize, cleanup, validate,
+             strip, only_entry, parent)
 
 
 ## default definitions that can be overridden to influence GPUCompiler's behavior
