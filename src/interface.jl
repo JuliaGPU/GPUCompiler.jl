@@ -75,27 +75,26 @@ and `params`.
 
 Several keyword arguments can be used to customize the compilation process:
 
-- `kernel`: specifies if the function should be compiled as a kernel, or as a regular
-   function. This is used to determine the calling convention and for validation purposes.
-- `entry_abi`: can be either `:specfunc` the default, or `:func`. `:specfunc` expects the
-   arguments to be passed in registers, simple return values are returned in registers as
-   well, and complex return values are returned on the stack using `sret`, the calling
-   convention is `fastcc`. The `:func` abi is simpler with a calling convention of the first
-   argument being the function itself (to support closures), the second argument being a
-   pointer to a vector of boxed Julia values and the third argument being the number of
-   values, the return value will also be boxed. The `:func` abi will internally call the
-   `:specfunc` abi, but is generally easier to invoke directly.
+- `kernel`: specifies if the function should be compiled as a kernel (the default) or as a
+   plain function. This toggles certain optimizations, rewrites and validations.
+- `entry_abi`: can be either `:specfunc` (the default), or `:func`.
+   - `:specfunc` expects the arguments to be passed in registers, simple return values are
+     returned in registers as well, and complex return values are returned on the stack
+     using `sret`, the calling convention is `fastcc`.
+   - The `:func` abi is simpler with a calling convention of the first argument being the
+     function itself (to support closures), the second argument being a pointer to a vector
+     of boxed Julia values and the third argument being the number of values, the return
+     value will also be boxed. The `:func` abi will internally call the `:specfunc` abi, but
+     is generally easier to invoke directly.
 - `name`: the name that will be used for the entrypoint function. If `nothing` (the
    default), the name will be generated automatically.
 - `always_inline` specifies if the Julia front-end should inline all functions into one if
    possible.
-- `libraries`: link the GPU runtime and `libdevice` libraries (default: true, if toplevel)
-- `optimize`: optimize the code (default: true, if toplevel)
-- `cleanup`: run cleanup passes on the code (default: true, if toplevel)
-- `validate`: enable optional validation of input and outputs (default: true, if toplevel)
+- `libraries`: link the GPU runtime and `libdevice` libraries (default: true)
+- `optimize`: optimize the code (default: true)
+- `cleanup`: run cleanup passes on the code (default: true)
+- `validate`: enable optional validation of input and outputs (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
-- `only_entry`: only keep the entry function, remove all others (default: false).
-   This option is only for internal use, to implement reflection's `dump_module`.
 """
 struct CompilerConfig{T,P}
     target::T
@@ -111,6 +110,8 @@ struct CompilerConfig{T,P}
     cleanup::Bool
     validate::Bool
     strip::Bool
+
+    # internal
     only_entry::Bool
 
     function CompilerConfig(target::AbstractCompilerTarget, params::AbstractCompilerParams;
