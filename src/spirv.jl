@@ -149,8 +149,9 @@ end
        cmd = `$(SPIRV_Tools_jll.spirv_val()) $translated`
        proc = run(ignorestatus(cmd))
        if !success(proc)
-           error("""Failed to validate generated SPIR-V.
-                    If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+            run(`$(SPIRV_Tools_jll.spirv_dis()) $translated -o -`)
+            error("""Failed to validate generated SPIR-V.
+                     If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
        end
     end
 
@@ -168,10 +169,10 @@ end
     end
 
     output = if format == LLVM.API.LLVMObjectFile
-        read(translated)
+        read(optimized)
     else
         # disassemble
-        read(`$(SPIRV_Tools_jll.spirv_dis()) $translated`, String)
+        read(`$(SPIRV_Tools_jll.spirv_dis()) $optimized`, String)
     end
 
     rm(input)
