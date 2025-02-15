@@ -8,12 +8,20 @@ export split_kwargs, assign_args!
 # split keyword arguments expressions into groups. returns vectors of keyword argument
 # values, one more than the number of groups (unmatched keywords in the last vector).
 # intended for use in macros; the resulting groups can be used in expressions.
+# can be used at run time, but not in performance critical code.
 function split_kwargs(kwargs, kw_groups...)
     kwarg_groups = ntuple(_->[], length(kw_groups) + 1)
     for kwarg in kwargs
         # decode
-        Meta.isexpr(kwarg, :(=)) || throw(ArgumentError("non-keyword argument like option '$kwarg'"))
-        key, val = kwarg.args
+        if Meta.isexpr(kwarg, :(=))
+            # use in macros
+            key, val = kwarg.args
+        elseif kwarg isa Pair{Symbol,<:Any}
+            # use in functions
+            key, val = kwarg
+        else
+            throw(ArgumentError("non-keyword argument like option '$kwarg'"))
+        end
         isa(key, Symbol) || throw(ArgumentError("non-symbolic keyword '$key'"))
 
         # find a matching group
@@ -182,7 +190,7 @@ end
 end
 
 struct DiskCacheEntry
-    src::Type # Originally MethodInstance, but upon deserialize they were not uniqued... 
+    src::Type # Originally MethodInstance, but upon deserialize they were not uniqued...
     cfg::CompilerConfig
     asm
 end
@@ -262,7 +270,16 @@ end
         obj = linker(job, asm)
 
         if ci === nothing
-            ci = ci_cache_lookup(ci_cache(job), src, world, world)::CodeInstance
+            ci = ci_cache_lookup(ci_cache(job), src, world, world)
+            if ci === nothing
+                error("""Did not find CodeInstance for $job.
+
+                         Pleaase make sure that the `compiler` function passed to `cached_compilation`
+                         invokes GPUCompiler with exactly the same configuration as passed to the API.
+
+                         Note that you should do this by calling `GPUCompiler.compile`, and not by
+                         using reflection functions (which alter the compiler configuration).""")
+            end
             key = (ci, cfg)
         end
         cache[key] = obj

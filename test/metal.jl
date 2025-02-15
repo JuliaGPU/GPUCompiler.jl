@@ -114,7 +114,7 @@ end
         return
     end
 
-    @test_throws_message(InvalidIRError, Metal.code_llvm(devnull, kernel2, Tuple{Core.LLVMPtr{Float64,1}}; validate=true)) do msg
+    @test_throws_message(InvalidIRError, Metal.code_execution(kernel2, Tuple{Core.LLVMPtr{Float64,1}})) do msg
         occursin("unsupported use of double value", msg)
     end
 end

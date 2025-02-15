@@ -56,7 +56,7 @@ precompile_test_harness("Inference caching") do load_path
         GPUCompiler.enable_disk_cache!()
         @test GPUCompiler.disk_cache_enabled() == true
 
-        job, _ = NativeCompiler.Native.create_job(NativeBackend.kernel, (Vector{Int}, Int))
+        job, _ = NativeCompiler.Native.create_job(NativeBackend.kernel, (Vector{Int}, Int); validate=false)
         @assert job.source == kernel_mi
         ci = GPUCompiler.ci_cache_lookup(GPUCompiler.ci_cache(job), job.source, job.world, job.world)
         @assert ci !== nothing
