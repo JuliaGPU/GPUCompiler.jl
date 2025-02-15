@@ -63,8 +63,8 @@ export CompilerConfig
 
 # the configuration of the compiler
 
-const CONFIG_KWARGS = [:kernel, :entry_abi, :name, :always_inline, :libraries,
-                       :optimize, :cleanup, :validate, :strip, :only_entry]
+const CONFIG_KWARGS = [:kernel, :name, :entry_abi, :always_inline, :opt_level,
+                       :libraries, :optimize, :cleanup, :validate, :strip]
 
 """
     CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, name=nothing,
@@ -77,6 +77,8 @@ Several keyword arguments can be used to customize the compilation process:
 
 - `kernel`: specifies if the function should be compiled as a kernel (the default) or as a
    plain function. This toggles certain optimizations, rewrites and validations.
+- `name`: the name that will be used for the entrypoint function. If `nothing` (the
+   default), the name will be generated automatically.
 - `entry_abi`: can be either `:specfunc` (the default), or `:func`.
    - `:specfunc` expects the arguments to be passed in registers, simple return values are
      returned in registers as well, and complex return values are returned on the stack
@@ -86,10 +88,9 @@ Several keyword arguments can be used to customize the compilation process:
      of boxed Julia values and the third argument being the number of values, the return
      value will also be boxed. The `:func` abi will internally call the `:specfunc` abi, but
      is generally easier to invoke directly.
-- `name`: the name that will be used for the entrypoint function. If `nothing` (the
-   default), the name will be generated automatically.
 - `always_inline` specifies if the Julia front-end should inline all functions into one if
    possible.
+- `opt_level`: the optimization level to use (default: 2)
 - `libraries`: link the GPU runtime and `libdevice` libraries (default: true)
 - `optimize`: optimize the code (default: true)
 - `cleanup`: run cleanup passes on the code (default: true)
@@ -172,8 +173,6 @@ using Core: MethodInstance
 
 # a specific invocation of the compiler, bundling everything needed to generate code
 
-const JOB_KWARGS = [:parent]
-
 """
     CompilerJob(source::MethodInstance, config::CompilerConfig, [world=tls_world_age()])
 
@@ -185,25 +184,20 @@ struct CompilerJob{T,P}
     config::CompilerConfig{T,P}
     world::UInt
 
-    # internal
-    parent::Union{Nothing, CompilerJob}
-
-    CompilerJob(source::MethodInstance, config::CompilerConfig{T,P}, world=tls_world_age();
-                parent::Union{Nothing, CompilerJob}=nothing) where {T,P} =
-        new{T,P}(source, config, world, parent)
+    CompilerJob(source::MethodInstance, config::CompilerConfig{T,P},
+                world=tls_world_age()) where {T,P} =
+        new{T,P}(source, config, world)
 end
 
 # copy constructor
-CompilerJob(job::CompilerJob; source=job.source, config=job.config, world=job.world,
-            parent=job.parent) =
-    CompilerJob(source, config, world; parent)
+CompilerJob(job::CompilerJob; source=job.source, config=job.config, world=job.world) =
+    CompilerJob(source, config, world)
 
 function Base.hash(job::CompilerJob, h::UInt)
     h = hash(job.source, h)
     h = hash(job.config, h)
     h = hash(job.world, h)
 
-    h = hash(job.parent, h)
     return h
 end
 

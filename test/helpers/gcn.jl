@@ -7,13 +7,12 @@ struct CompilerParams <: AbstractCompilerParams end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types); kwargs...)
-    config_kwargs, job_kwargs, kwargs =
-        split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS, GPUCompiler.JOB_KWARGS)
+    config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = GCNCompilerTarget(dev_isa="gfx900")
     params = CompilerParams()
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
-    CompilerJob(source, config; job_kwargs...), kwargs
+    CompilerJob(source, config), kwargs
 end
 
 function code_typed(@nospecialize(func), @nospecialize(types); kwargs...)

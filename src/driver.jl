@@ -199,8 +199,7 @@ const __llvm_initialized = Ref(false)
                 # cached compilation
                 dyn_entry_fn = get!(jobs, dyn_job) do
                     config = CompilerConfig(dyn_job.config; toplevel=false)
-                    dyn_ir, dyn_meta =
-                        codegen(:llvm, CompilerJob(dyn_job; config, parent=job))
+                    dyn_ir, dyn_meta = codegen(:llvm, CompilerJob(dyn_job; config))
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     @assert context(dyn_ir) == context(ir)
