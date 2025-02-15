@@ -159,7 +159,8 @@ const __llvm_initialized = Ref(false)
     entry = finish_module!(job, ir, entry)
 
     # deferred code generation
-    has_deferred_jobs = job.toplevel && !job.config.only_entry && haskey(functions(ir), "deferred_codegen")
+    has_deferred_jobs = job.config.toplevel && !job.config.only_entry &&
+                        haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -197,8 +198,9 @@ const __llvm_initialized = Ref(false)
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(jobs, dyn_job) do
+                    config = CompilerConfig(dyn_job.config; toplevel=false)
                     dyn_ir, dyn_meta =
-                        codegen(:llvm, CompilerJob(dyn_job; toplevel=false, parent=job))
+                        codegen(:llvm, CompilerJob(dyn_job; config, parent=job))
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     @assert context(dyn_ir) == context(ir)
@@ -234,7 +236,7 @@ const __llvm_initialized = Ref(false)
         erase!(dyn_marker)
     end
 
-    if job.toplevel && job.config.libraries
+    if job.config.toplevel && job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
             runtime = load_runtime(job)
@@ -260,7 +262,7 @@ const __llvm_initialized = Ref(false)
         # mark everything internal except for entrypoints and any exported
         # global variables. this makes sure that the optimizer can, e.g.,
         # rewrite function signatures.
-        if job.toplevel
+        if job.config.toplevel
             preserved_gvs = collect(values(jobs))
             for gvar in globals(ir)
                 if linkage(gvar) == LLVM.API.LLVMExternalLinkage
@@ -286,7 +288,7 @@ const __llvm_initialized = Ref(false)
             #       so that we can reconstruct the CompileJob instead of setting it globally
         end
 
-        if job.toplevel && job.config.optimize
+        if job.config.toplevel && job.config.optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir; job.config.opt_level)
 
@@ -313,7 +315,7 @@ const __llvm_initialized = Ref(false)
             entry = functions(ir)[entry_fn]
         end
 
-        if job.toplevel && job.config.cleanup
+        if job.config.toplevel && job.config.cleanup
             @timeit_debug to "clean-up" begin
                 @dispose pb=NewPMPassBuilder() begin
                     add!(pb, RecomputeGlobalsAAPass())
@@ -331,7 +333,7 @@ const __llvm_initialized = Ref(false)
         # we want to finish the module after optimization, so we cannot do so
         # during deferred code generation. instead, process the deferred jobs
         # here.
-        if job.toplevel
+        if job.config.toplevel
             entry = finish_ir!(job, ir, entry)
 
             for (job′, fn′) in jobs
@@ -353,7 +355,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    if job.toplevel && job.config.validate
+    if job.config.toplevel && job.config.validate
         @timeit_debug to "Validation" begin
             check_ir(job, ir)
         end

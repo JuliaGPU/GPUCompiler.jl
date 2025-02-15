@@ -112,18 +112,20 @@ struct CompilerConfig{T,P}
     strip::Bool
 
     # internal
+    toplevel::Bool
     only_entry::Bool
 
     function CompilerConfig(target::AbstractCompilerTarget, params::AbstractCompilerParams;
                             kernel=true, name=nothing, entry_abi=:specfunc,
                             always_inline=false, opt_level=2, libraries=true, optimize=true,
-                            cleanup=true, validate=true, strip=false, only_entry=false)
+                            cleanup=true, validate=true, strip=false,
+                            toplevel=true, only_entry=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
         new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
                                             always_inline, opt_level, libraries, optimize,
-                                            cleanup, validate, strip, only_entry)
+                                            cleanup, validate, strip, toplevel, only_entry)
     end
 end
 
@@ -132,9 +134,10 @@ CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
                kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
                always_inline=cfg.always_inline, opt_level=cfg.opt_level,
                libraries=cfg.libraries, optimize=cfg.optimize, cleanup=cfg.cleanup,
-               validate=cfg.validate, strip=cfg.strip, only_entry=cfg.only_entry) =
+               validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
+               only_entry=cfg.only_entry) =
     CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
-                   libraries, optimize, cleanup, validate, strip, only_entry)
+                   libraries, optimize, cleanup, validate, strip, toplevel, only_entry)
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
     print(io, "CompilerConfig for ", T)
@@ -154,6 +157,7 @@ function Base.hash(cfg::CompilerConfig, h::UInt)
     h = hash(cfg.cleanup, h)
     h = hash(cfg.validate, h)
     h = hash(cfg.strip, h)
+    h = hash(cfg.toplevel, h)
     h = hash(cfg.only_entry, h)
 
     return h
@@ -168,46 +172,37 @@ using Core: MethodInstance
 
 # a specific invocation of the compiler, bundling everything needed to generate code
 
-const JOB_KWARGS = [:toplevel, :parent]
+const JOB_KWARGS = [:parent]
 
 """
-    CompilerJob(source::MethodInstance, config::CompilerConfig;
-                world=tls_world_age(), toplevel=true, libraries=toplevel,
-                optimize=toplevel, cleanup=toplevel, validate=toplevel, strip=false,
-                only_entry=false, parent=nothing)
+    CompilerJob(source::MethodInstance, config::CompilerConfig, [world=tls_world_age()])
 
 Construct a `CompilerJob` that will be used to drive compilation for the given `source` and
 `config` in a given `world`.
-
-The following keyword arguments are supported:
-
-- `toplevel`: indicates that this compilation is the outermost invocation of the compiler
-  (default: true)
 """
 struct CompilerJob{T,P}
     source::MethodInstance
     config::CompilerConfig{T,P}
     world::UInt
 
-    toplevel::Bool
+    # internal
     parent::Union{Nothing, CompilerJob}
 
     CompilerJob(source::MethodInstance, config::CompilerConfig{T,P}, world=tls_world_age();
-                toplevel::Bool=true, parent::Union{Nothing, CompilerJob}=nothing) where {T,P} =
-        new{T,P}(source, config, world, toplevel, parent)
+                parent::Union{Nothing, CompilerJob}=nothing) where {T,P} =
+        new{T,P}(source, config, world, parent)
 end
 
 # copy constructor
 CompilerJob(job::CompilerJob; source=job.source, config=job.config, world=job.world,
-            toplevel=job.toplevel, parent=job.parent) =
-    CompilerJob(source, config, world; toplevel, parent)
+            parent=job.parent) =
+    CompilerJob(source, config, world; parent)
 
 function Base.hash(job::CompilerJob, h::UInt)
     h = hash(job.source, h)
     h = hash(job.config, h)
     h = hash(job.world, h)
 
-    h = hash(job.toplevel, h)
     h = hash(job.parent, h)
     return h
 end
