@@ -202,6 +202,15 @@ CompilerJob(job::CompilerJob; source=job.source, config=job.config, world=job.wo
             toplevel=job.toplevel, parent=job.parent) =
     CompilerJob(source, config, world; toplevel, parent)
 
+function Base.hash(job::CompilerJob, h::UInt)
+    h = hash(job.source, h)
+    h = hash(job.config, h)
+    h = hash(job.world, h)
+
+    h = hash(job.toplevel, h)
+    h = hash(job.parent, h)
+    return h
+end
 
 ## default definitions that can be overridden to influence GPUCompiler's behavior
 

@@ -270,7 +270,16 @@ end
         obj = linker(job, asm)
 
         if ci === nothing
-            ci = ci_cache_lookup(ci_cache(job), src, world, world)::CodeInstance
+            ci = ci_cache_lookup(ci_cache(job), src, world, world)
+            if ci === nothing
+                error("""Did not find CodeInstance for $job.
+
+                         Pleaase make sure that the `compiler` function passed to `cached_compilation`
+                         invokes GPUCompiler with exactly the same configuration as passed to the API.
+
+                         Note that you should do this by calling `GPUCompiler.compile`, and not by
+                         using reflection functions (which alter the compiler configuration).""")
+            end
             key = (ci, cfg)
         end
         cache[key] = obj

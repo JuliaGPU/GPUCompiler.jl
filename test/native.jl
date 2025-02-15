@@ -87,8 +87,10 @@ end
         invocations = Ref(0)
         function compiler(job)
             invocations[] += 1
-            ir = sprint(io->GPUCompiler.code_llvm(io, job))
-            return ir
+            JuliaContext() do ctx
+                ir, ir_meta = GPUCompiler.compile(:llvm, job)
+                string(ir)
+            end
         end
         linker(job, compiled) = compiled
         cache = Dict()
