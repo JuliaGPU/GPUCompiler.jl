@@ -201,6 +201,7 @@ function Base.hash(job::CompilerJob, h::UInt)
     return h
 end
 
+
 ## default definitions that can be overridden to influence GPUCompiler's behavior
 
 # Has the runtime available and does not require special handling
