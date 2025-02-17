@@ -9,7 +9,7 @@
 [buildkite-img]: https://badge.buildkite.com/512eb7dd35ca5b427ddf3240e2b4b3022f0c4f9925f1bdafa8.svg?branch=master
 [buildkite-url]: https://buildkite.com/julialang/gpucompiler-dot-jl
 
-[gha-img]: https://github.com/JuliaGPU/GPUCompiler.jl/workflows/CI/badge.svg?branch=master
+[gha-img]: https://github.com/JuliaGPU/GPUCompiler.jl/actions/workflows/Test.yml/badge.svg?branch=master
 [gha-url]: https://github.com/JuliaGPU/GPUCompiler.jl/actions?query=workflow%3ACI
 
 [pkgeval-img]: https://juliaci.github.io/NanosoldierReports/pkgeval_badges/G/GPUCompiler.svg
