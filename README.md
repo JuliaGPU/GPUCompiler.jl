@@ -21,4 +21,4 @@
 This package offers reusable compiler infrastructure and tooling for
 implementing GPU compilers in Julia. **It is not intended for end users!**
 Instead, you should use one of the packages that builds on GPUCompiler.jl, such
-as [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl) or [AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl).
+as [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl), [AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl), [Metal.jl](https://github.com/JuliaGPU/Metal.jl), [oneAPI.jl](https://github.com/JuliaGPU/oneAPI.jl), or [OpenCL.jl](https://github.com/JuliaGPU/OpenCL.jl).
