@@ -117,10 +117,10 @@ struct CompilerConfig{T,P}
     only_entry::Bool
 
     function CompilerConfig(target::AbstractCompilerTarget, params::AbstractCompilerParams;
-                            kernel=true, name=nothing, entry_abi=:specfunc,
-                            always_inline=false, opt_level=2, libraries=true, optimize=true,
-                            cleanup=true, validate=true, strip=false,
-                            toplevel=true, only_entry=false)
+                            kernel=true, name=nothing, entry_abi=:specfunc, toplevel=true,
+                            always_inline=false, opt_level=2, optimize=toplevel,
+                            libraries=toplevel, cleanup=toplevel, validate=toplevel,
+                            strip=false, only_entry=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
@@ -131,14 +131,24 @@ struct CompilerConfig{T,P}
 end
 
 # copy constructor
-CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
-               kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
-               always_inline=cfg.always_inline, opt_level=cfg.opt_level,
-               libraries=cfg.libraries, optimize=cfg.optimize, cleanup=cfg.cleanup,
-               validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
-               only_entry=cfg.only_entry) =
+function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
+                        kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
+                        always_inline=cfg.always_inline, opt_level=cfg.opt_level,
+                        libraries=cfg.libraries, optimize=cfg.optimize, cleanup=cfg.cleanup,
+                        validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
+                        only_entry=cfg.only_entry)
+    # deriving a non-toplevel job disables certain features
+    # XXX: should we keep track if any of these were set explicitly in the first place?
+    #      see how PkgEval does that.
+    if !toplevel
+        optimize = false
+        libraries = false
+        cleanup = false
+        validate = false
+    end
     CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
                    libraries, optimize, cleanup, validate, strip, toplevel, only_entry)
+end
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
     print(io, "CompilerConfig for ", T)
