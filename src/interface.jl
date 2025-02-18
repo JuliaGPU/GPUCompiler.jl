@@ -63,6 +63,9 @@ export CompilerConfig
 
 # the configuration of the compiler
 
+const CONFIG_KWARGS = [:kernel, :name, :entry_abi, :always_inline, :opt_level,
+                       :libraries, :optimize, :cleanup, :validate, :strip]
+
 """
     CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, name=nothing,
                                    always_inline=false)
@@ -72,20 +75,27 @@ and `params`.
 
 Several keyword arguments can be used to customize the compilation process:
 
-- `kernel`: specifies if the function should be compiled as a kernel, or as a regular
-   function. This is used to determine the calling convention and for validation purposes.
-- `entry_abi`: can be either `:specfunc` the default, or `:func`. `:specfunc` expects the
-  arguments to be passed in registers, simple return values are returned in registers as
-   well, and complex return values are returned on the stack using `sret`, the calling
-   convention is `fastcc`. The `:func` abi is simpler with a calling convention of the first
-   argument being the function itself (to support closures), the second argument being a
-   pointer to a vector of boxed Julia values and the third argument being the number of
-   values, the return value will also be boxed. The `:func` abi will internally call the
-   `:specfunc` abi, but is generally easier to invoke directly.
+- `kernel`: specifies if the function should be compiled as a kernel (the default) or as a
+   plain function. This toggles certain optimizations, rewrites and validations.
 - `name`: the name that will be used for the entrypoint function. If `nothing` (the
    default), the name will be generated automatically.
+- `entry_abi`: can be either `:specfunc` (the default), or `:func`.
+   - `:specfunc` expects the arguments to be passed in registers, simple return values are
+     returned in registers as well, and complex return values are returned on the stack
+     using `sret`, the calling convention is `fastcc`.
+   - The `:func` abi is simpler with a calling convention of the first argument being the
+     function itself (to support closures), the second argument being a pointer to a vector
+     of boxed Julia values and the third argument being the number of values, the return
+     value will also be boxed. The `:func` abi will internally call the `:specfunc` abi, but
+     is generally easier to invoke directly.
 - `always_inline` specifies if the Julia front-end should inline all functions into one if
    possible.
+- `opt_level`: the optimization level to use (default: 2)
+- `libraries`: link the GPU runtime and `libdevice` libraries (default: true)
+- `optimize`: optimize the code (default: true)
+- `cleanup`: run cleanup passes on the code (default: true)
+- `validate`: enable optional validation of input and outputs (default: true)
+- `strip`: strip non-functional metadata and debug information (default: false)
 """
 struct CompilerConfig{T,P}
     target::T
@@ -96,27 +106,49 @@ struct CompilerConfig{T,P}
     entry_abi::Symbol
     always_inline::Bool
     opt_level::Int
+    libraries::Bool
+    optimize::Bool
+    cleanup::Bool
+    validate::Bool
+    strip::Bool
 
-    function CompilerConfig(target::AbstractCompilerTarget,
-                            params::AbstractCompilerParams;
-                            kernel=true,
-                            name=nothing,
-                            entry_abi=:specfunc,
-                            always_inline=false,
-                            opt_level=2)
+    # internal
+    toplevel::Bool
+    only_entry::Bool
+
+    function CompilerConfig(target::AbstractCompilerTarget, params::AbstractCompilerParams;
+                            kernel=true, name=nothing, entry_abi=:specfunc, toplevel=true,
+                            always_inline=false, opt_level=2, optimize=toplevel,
+                            libraries=toplevel, cleanup=toplevel, validate=toplevel,
+                            strip=false, only_entry=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
         new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
-                                            always_inline, opt_level)
+                                            always_inline, opt_level, libraries, optimize,
+                                            cleanup, validate, strip, toplevel, only_entry)
     end
 end
 
 # copy constructor
-CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
-               kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
-               always_inline=cfg.always_inline, opt_level=cfg.opt_level) =
-    CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level)
+function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
+                        kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
+                        always_inline=cfg.always_inline, opt_level=cfg.opt_level,
+                        libraries=cfg.libraries, optimize=cfg.optimize, cleanup=cfg.cleanup,
+                        validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
+                        only_entry=cfg.only_entry)
+    # deriving a non-toplevel job disables certain features
+    # XXX: should we keep track if any of these were set explicitly in the first place?
+    #      see how PkgEval does that.
+    if !toplevel
+        optimize = false
+        libraries = false
+        cleanup = false
+        validate = false
+    end
+    CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
+                   libraries, optimize, cleanup, validate, strip, toplevel, only_entry)
+end
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
     print(io, "CompilerConfig for ", T)
@@ -131,6 +163,13 @@ function Base.hash(cfg::CompilerConfig, h::UInt)
     h = hash(cfg.entry_abi, h)
     h = hash(cfg.always_inline, h)
     h = hash(cfg.opt_level, h)
+    h = hash(cfg.libraries, h)
+    h = hash(cfg.optimize, h)
+    h = hash(cfg.cleanup, h)
+    h = hash(cfg.validate, h)
+    h = hash(cfg.strip, h)
+    h = hash(cfg.toplevel, h)
+    h = hash(cfg.only_entry, h)
 
     return h
 end
@@ -144,15 +183,25 @@ using Core: MethodInstance
 
 # a specific invocation of the compiler, bundling everything needed to generate code
 
+"""
+    CompilerJob(source::MethodInstance, config::CompilerConfig, [world=tls_world_age()])
+
+Construct a `CompilerJob` that will be used to drive compilation for the given `source` and
+`config` in a given `world`.
+"""
 struct CompilerJob{T,P}
     source::MethodInstance
     config::CompilerConfig{T,P}
     world::UInt
 
-    CompilerJob(src::MethodInstance, cfg::CompilerConfig{T,P},
+    CompilerJob(source::MethodInstance, config::CompilerConfig{T,P},
                 world=tls_world_age()) where {T,P} =
-        new{T,P}(src, cfg, world)
+        new{T,P}(source, config, world)
 end
+
+# copy constructor
+CompilerJob(job::CompilerJob; source=job.source, config=job.config, world=job.world) =
+    CompilerJob(source, config, world)
 
 function Base.hash(job::CompilerJob, h::UInt)
     h = hash(job.source, h)

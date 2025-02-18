@@ -50,10 +50,10 @@ end
         @noinline inner(x) = x+1
         foo(x) = sum(inner, fill(x, 10, 10))
 
-        job, _ = Native.create_job(foo, (Float64,))
+        job, _ = Native.create_job(foo, (Float64,); validate=false)
         JuliaContext() do ctx
             # shouldn't segfault
-            ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
+            ir, meta = GPUCompiler.compile(:llvm, job)
 
             meth = only(methods(foo, (Float64,)))
 
@@ -87,8 +87,10 @@ end
         invocations = Ref(0)
         function compiler(job)
             invocations[] += 1
-            ir = sprint(io->GPUCompiler.code_llvm(io, job))
-            return ir
+            JuliaContext() do ctx
+                ir, ir_meta = GPUCompiler.compile(:llvm, job)
+                string(ir)
+            end
         end
         linker(job, compiled) = compiled
         cache = Dict()
