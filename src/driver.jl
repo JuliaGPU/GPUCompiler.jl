@@ -53,24 +53,31 @@ Compile a `job` to one of the following formats as specified by the `target` arg
 `:julia` for Julia IR, `:llvm` for LLVM IR and `:asm` for machine code.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob); kwargs...)
+    # XXX: remove on next major version
     if !isempty(kwargs)
         Base.depwarn("The GPUCompiler `compile` API does not take keyword arguments anymore. Use CompilerConfig instead.", :compile)
         config = CompilerConfig(job.config; kwargs...)
         job = CompilerJob(job.source, config)
     end
+
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
 
-    return codegen(target, job)
+    return compile_unhooked(target, job)
 end
 
+# XXX: remove on next major version
 function codegen(output::Symbol, @nospecialize(job::CompilerJob); kwargs...)
     if !isempty(kwargs)
-        Base.depwarn("The GPUCompiler `codegen` API does not take keyword arguments anymore. Use CompilerConfig instead.", :codegen)
+        Base.depwarn("The GPUCompiler `codegen` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :codegen)
         config = CompilerConfig(job.config; kwargs...)
         job = CompilerJob(job.source, config)
     end
+    compile_unhooked(output, job)
+end
+
+function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob); kwargs...)
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
@@ -144,7 +151,14 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob))
+@locked function emit_llvm(@nospecialize(job::CompilerJob); kwargs...)
+    # XXX: remove on next major version
+    if !isempty(kwargs)
+        Base.depwarn("The GPUCompiler `emit_llvm` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :emit_llvm)
+        config = CompilerConfig(job.config; kwargs...)
+        job = CompilerJob(job.source, config)
+    end
+
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
