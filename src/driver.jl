@@ -52,7 +52,12 @@ const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 Compile a `job` to one of the following formats as specified by the `target` argument:
 `:julia` for Julia IR, `:llvm` for LLVM IR and `:asm` for machine code.
 """
-function compile(target::Symbol, @nospecialize(job::CompilerJob))
+function compile(target::Symbol, @nospecialize(job::CompilerJob); kwargs...)
+    if !isempty(kwargs)
+        Base.depwarn("The GPUCompiler `compile` API does not take keyword arguments anymore. Use CompilerConfig instead.", :compile)
+        config = CompilerConfig(job.config; kwargs...)
+        job = CompilerJob(job.source, config)
+    end
     if compile_hook[] !== nothing
         compile_hook[](job)
     end
@@ -60,7 +65,12 @@ function compile(target::Symbol, @nospecialize(job::CompilerJob))
     return codegen(target, job)
 end
 
-function codegen(output::Symbol, @nospecialize(job::CompilerJob))
+function codegen(output::Symbol, @nospecialize(job::CompilerJob); kwargs...)
+    if !isempty(kwargs)
+        Base.depwarn("The GPUCompiler `codegen` API does not take keyword arguments anymore. Use CompilerConfig instead.", :codegen)
+        config = CompilerConfig(job.config; kwargs...)
+        job = CompilerJob(job.source, config)
+    end
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
