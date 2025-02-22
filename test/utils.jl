@@ -29,18 +29,36 @@ end
     @test mangle(identity, Val{Cshort(1)}) == "identity(Val<(short)1>)"
     @test mangle(identity, Val{1.0}) == "identity(Val<0x1p+0>)"
     @test mangle(identity, Val{1f0}) == "identity(Val<0x1p+0f>)"
+    @test mangle(identity, Val{'a'}) == "identity(Val<97u>)"
+    @test mangle(identity, Val{'∅'}) == "identity(Val<8709u>)"
 
     # unions
     @test mangle(identity, Union{Int32, Int64}) == "identity(Union<Int32, Int64>)"
+    @test mangle(identity, Union, Int, Union{Int64, Int32}) == "identity(Union, Int64, Union<Int32, Int64>)"
 
     # union alls
     @test mangle(identity, Array) == "identity(Array<T, N>)"
+    @test mangle(identity, Tuple) == "identity(Tuple)"
+    @test mangle(identity, Vector) == "identity(Array<T, 1>)"
+    @test mangle(identity, NTuple{2, I} where {I <: Integer}) == "identity(Tuple<I__Integer, I__Integer>)"
+
+    # Vararg
+    @test mangle(identity, Vararg{Int}) == "identity(Int64, ...)"
+    @test mangle(identity, Vararg{Int, 2}) == "identity(Int64, Int64)"
+    @test mangle(identity, Tuple{1, 2}, Tuple{}, Tuple) == "identity(Tuple<1, 2>, Tuple<>, Tuple)"
+    @test mangle(identity, NTuple{2, Int}) == "identity(Tuple<Int64, Int64>)"
+    @test mangle(identity, Tuple{Vararg{Int}}) == "identity(Tuple<>)"
 
     # many substitutions
     @test mangle(identity, Val{1}, Val{2}, Val{3}, Val{4}, Val{5}, Val{6}, Val{7}, Val{8},
                            Val{9}, Val{10}, Val{11}, Val{12}, Val{13}, Val{14}, Val{15},
                            Val{16}, Val{16}) ==
           "identity(Val<1>, Val<2>, Val<3>, Val<4>, Val<5>, Val<6>, Val<7>, Val<8>, Val<9>, Val<10>, Val<11>, Val<12>, Val<13>, Val<14>, Val<15>, Val<16>, Val<16>)"
+
+    # intertwined substitutions
+    @test mangle(identity, Val{1}, Ptr{Tuple{Ptr{Int}}}, Ptr{Int}, Val{1}, Val{2},
+                           Tuple{Ptr{Int}}, Tuple{Int8}, Int64, Int8) ==
+          "identity(Val<1>, Tuple<Int64*>*, Int64*, Val<1>, Val<2>, Tuple<Int64*>, Tuple<Int8>, Int64, Int8)"
 
     # problematic examples
     @test mangle(identity, String, Matrix{Float32}, Broadcast.Broadcasted{Broadcast.ArrayStyle{Matrix{Float32}}, Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}}, typeof(Base.literal_pow), Tuple{Base.RefValue{typeof(sin)}, Broadcast.Extruded{Matrix{Float32}, Tuple{Bool, Bool}, Tuple{Int64, Int64}}}}) == "identity(String, Array<Float32, 2>, Broadcasted<ArrayStyle<Array<Float32, 2>>, Tuple<OneTo<Int64>, OneTo<Int64>>, literal_pow, Tuple<RefValue<sin>, Extruded<Array<Float32, 2>, Tuple<Bool, Bool>, Tuple<Int64, Int64>>>>)"

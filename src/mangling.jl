@@ -29,12 +29,12 @@ safe_name(x) = safe_name(repr(x))
 # we generate function names that look like C++ functions, because many tools, like NVIDIA's
 # profilers, support them (grouping different instantiations of the same kernel together).
 
-function mangle_param(t, substitutions=Any[])
+function mangle_param(t, substitutions=Any[], top=false)
     t == Nothing && return "v"
 
     function find_substitution(x)
         sub = findfirst(isequal(x), substitutions)
-        if sub === nothing
+        res = if sub === nothing
             nothing
         elseif sub == 1
             "S_"
@@ -42,18 +42,20 @@ function mangle_param(t, substitutions=Any[])
             seq_id = uppercase(string(sub-2; base=36))
             "S$(seq_id)_"
         end
+        return res
+    end
+
+    # check if we already know this type
+    str = find_substitution(t)
+    if str !== nothing
+        return str
     end
 
     if isa(t, DataType) && t <: Ptr
         tn = mangle_param(eltype(t), substitutions)
+        push!(substitutions, t)
         "P$tn"
     elseif isa(t, DataType)
-        # check if we already know this type
-        str = find_substitution(t)
-        if str !== nothing
-            return str
-        end
-
         # check if we already know this base type
         str = find_substitution(t.name.wrapper)
         if str === nothing
@@ -62,47 +64,66 @@ function mangle_param(t, substitutions=Any[])
             push!(substitutions, t.name.wrapper)
         end
 
-        # encode typevars as template parameters
-        if !isempty(t.parameters)
-            str *= "I"
-            for t in t.parameters
-                str *= mangle_param(t, substitutions)
+        if t.name.wrapper == t && !isa(t.name.wrapper, UnionAll)
+            # a type with no typevars
+            str
+        else
+            # encode typevars as template parameters
+            if isempty(t.parameters)
+                w_types = t.name.wrapper.types
+                if !isempty(w_types) && !isempty(w_types[end] isa Core.TypeofVararg)
+                    # If the type accepts a variable amount of parameters,
+                    # e.g. `Tuple{}`, then we mark it as empty: "Tuple<>"
+                    str *= "IJEE"
+                end
+            else
+                str *= "I"
+                for tp in t.parameters
+                    str *= mangle_param(tp, substitutions)
+                end
+                str *= "E"
             end
-            str *= "E"
-
             push!(substitutions, t)
+            str
         end
-
-        str
     elseif isa(t, Union)
-        # check if we already know this union type
-        str = find_substitution(t)
-        if str !== nothing
-            return str
-        end
-
         # check if we already know the Union name
         str = find_substitution(Union)
         if str === nothing
             tn = "Union"
             str = "$(length(tn))$tn"
-            push!(substitutions, tn)
+            push!(substitutions, Union)
         end
 
         # encode union types as template parameters
-        if !isempty(Base.uniontypes(t))
-            str *= "I"
-            for t in Base.uniontypes(t)
-                str *= mangle_param(t, substitutions)
-            end
-            str *= "E"
-
-            push!(substitutions, t)
+        str *= "I"
+        for tp in Base.uniontypes(t)  # cannot be empty as `Union{}` is not a `Union`
+            str *= mangle_param(tp, substitutions)
         end
+        str *= "E"
 
+        push!(substitutions, t)
         str
     elseif isa(t, UnionAll)
-        mangle_param(t.body, substitutions)
+        mangle_param(Base.unwrap_unionall(t), substitutions)
+    elseif isa(t, Core.TypeofVararg)
+        T = isdefined(t, :T) ? t.T : Any
+        if isdefined(t, :N)
+            # For NTuple, repeat the type as needed
+            str = ""
+            for _ in 1:t.N
+                str *= mangle_param(T, substitutions)
+            end
+            str
+        elseif top
+            # Variadic arguments only make sense for function arguments
+            mangle_param(T, substitutions) * "z"  # T...
+        else
+            # Treat variadic arguments for a type as no arguments
+            ""
+        end
+    elseif isa(t, Char)
+        mangle_param(UInt32(t), substitutions)
     elseif isa(t, Union{Bool, Cchar, Cuchar, Cshort, Cushort, Cint, Cuint, Clong, Culong, Clonglong, Culonglong, Int128, UInt128})
         ts = t isa Bool       ? 'b' : # bool
              t isa Cchar      ? 'a' : # signed char
@@ -153,7 +174,7 @@ function mangle_sig(sig)
     # mangle each parameter
     substitutions = []
     for t in tt
-        str *= mangle_param(t, substitutions)
+        str *= mangle_param(t, substitutions, true)
     end
 
     return str
