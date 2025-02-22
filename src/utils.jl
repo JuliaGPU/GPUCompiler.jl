@@ -132,3 +132,10 @@ macro unlocked(ex)
     end
     esc(combinedef(def))
 end
+
+function callsite_attribute!(call, attributes)
+    # TODO: Make a nice API for this in LLVM.jl
+    for attribute in attributes
+        LLVM.API.LLVMAddCallSiteAttribute(call, LLVM.API.LLVMAttributeFunctionIndex, attribute)
+    end
+end
