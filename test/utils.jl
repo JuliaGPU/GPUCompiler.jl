@@ -56,9 +56,11 @@ end
           "identity(Val<1>, Val<2>, Val<3>, Val<4>, Val<5>, Val<6>, Val<7>, Val<8>, Val<9>, Val<10>, Val<11>, Val<12>, Val<13>, Val<14>, Val<15>, Val<16>, Val<16>)"
 
     # intertwined substitutions
-    @test mangle(identity, Val{1}, Ptr{Tuple{Ptr{Int}}}, Ptr{Int}, Val{1}, Val{2},
-                           Tuple{Ptr{Int}}, Tuple{Int8}, Int64, Int8) ==
-          "identity(Val<1>, Tuple<Int64*>*, Int64*, Val<1>, Val<2>, Tuple<Int64*>, Tuple<Int8>, Int64, Int8)"
+    @test mangle(
+        identity, Val{1}, Ptr{Tuple{Ptr{Int}}}, Ptr{Int}, Val{1}, Val{2},
+        Tuple{Ptr{Int}}, Tuple{Int8}, Int64, Int8
+    ) ==
+        "identity(Val<1>, Tuple<Int64*>*, Int64*, Val<1>, Val<2>, Tuple<Int64*>, Tuple<Int8>, Int64, Int8)"
 
     # problematic examples
     @test mangle(identity, String, Matrix{Float32}, Broadcast.Broadcasted{Broadcast.ArrayStyle{Matrix{Float32}}, Tuple{Base.OneTo{Int64}, Base.OneTo{Int64}}, typeof(Base.literal_pow), Tuple{Base.RefValue{typeof(sin)}, Broadcast.Extruded{Matrix{Float32}, Tuple{Bool, Bool}, Tuple{Int64, Int64}}}}) == "identity(String, Array<Float32, 2>, Broadcasted<ArrayStyle<Array<Float32, 2>>, Tuple<OneTo<Int64>, OneTo<Int64>>, literal_pow, Tuple<RefValue<sin>, Extruded<Array<Float32, 2>, Tuple<Bool, Bool>, Tuple<Int64, Int64>>>>)"

@@ -29,7 +29,7 @@ safe_name(x) = safe_name(repr(x))
 # we generate function names that look like C++ functions, because many tools, like NVIDIA's
 # profilers, support them (grouping different instantiations of the same kernel together).
 
-function mangle_param(t, substitutions=Any[], top=false)
+function mangle_param(t, substitutions = Any[], top = false)
     t == Nothing && return "v"
 
     function find_substitution(x)
