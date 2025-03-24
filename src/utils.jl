@@ -132,3 +132,20 @@ macro unlocked(ex)
     end
     esc(combinedef(def))
 end
+
+
+## constant expression pruning
+
+# for some reason, after cloning the LLVM IR can contain unused constant expressions.
+# these result in false positives when checking that values are unused and can be deleted.
+# this helper function removes such unused constant expression uses of a value.
+# the process needs to be recursive, as constant expressions can refer to one another.
+function prune_constexpr_uses!(root::LLVM.Value)
+    for use in uses(root)
+        val = user(use)
+        if val isa ConstantExpr
+            prune_constexpr_uses!(val)
+            isempty(uses(val)) && LLVM.unsafe_destroy!(val)
+        end
+    end
+end
