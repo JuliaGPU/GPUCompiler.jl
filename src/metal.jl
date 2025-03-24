@@ -406,14 +406,7 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
 
     # delete old globals
     for (old, new) in global_map
-        for use in uses(old)
-            val = user(use)
-            if val isa ConstantExpr
-                # XXX: shouldn't clone_into! remove unused CEs?
-                isempty(uses(val)) || error("old function still has uses (via a constant expr)")
-                LLVM.unsafe_destroy!(val)
-            end
-        end
+        prune_constexpr_uses!(old)
         @assert isempty(uses(old))
         replace_metadata_uses!(old, new)
         erase!(old)
@@ -637,12 +630,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # drop unused constants that may be referring to the old functions
     # XXX: can we do this differently?
     for f in worklist
-        for use in uses(f)
-            val = user(use)
-            if val isa LLVM.ConstantExpr && isempty(uses(val))
-                LLVM.unsafe_destroy!(val)
-            end
-        end
+        prune_constexpr_uses!(f)
     end
 
     # update other uses of the old function, modifying call sites to pass the arguments

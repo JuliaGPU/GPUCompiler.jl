@@ -633,16 +633,8 @@ function add_kernel_state!(mod::LLVM.Module)
 
     # ensure the old (stateless) functions don't have uses anymore, and remove them
     for f in keys(workmap)
-        for use in uses(f)
-            val = user(use)
-            if val isa ConstantExpr
-                # XXX: shouldn't clone_into! remove unused CEs?
-                isempty(uses(val)) || error("old function still has uses (via a constant expr)")
-                LLVM.unsafe_destroy!(val)
-            else
-                error("old function still has uses")
-            end
-        end
+        prune_constexpr_uses!(f)
+        @assert isempty(uses(f))
         replace_metadata_uses!(f, workmap[f])
         erase!(f)
     end
