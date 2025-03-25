@@ -238,7 +238,8 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 @safe_debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=LLVM.parent(inst)
                 push!(errors, (DELAYED_BINDING, bt, nothing))
             end
-        elseif fn == "jl_reresolve_binding_value_seqcst" || fn == "ijl_reresolve_binding_value_seqcst"
+        elseif fn == "jl_reresolve_binding_value_seqcst" || fn == "ijl_reresolve_binding_value_seqcst" ||
+               fn == "jl_get_binding_value_seqcst" || fn == "ijl_get_binding_value_seqcst"
             try
                 # pry the binding from the IR
                 expr = arguments(inst)[1]::ConstantExpr
