@@ -624,8 +624,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     if VERSION < v"1.12.0-DEV.1667"
         cgparams = (; lookup = Base.unsafe_convert(Ptr{Nothing}, lookup_cb), cgparams... )
     end
-    if VERSION > v"1.13.0-DEV.248"
-        cgparams = (; force_emit_const = true , cgparams...)
+    if VERSION > v"1.13.0-DEV.285"
+        cgparams = (; force_emit_all = true , cgparams...)
     end
     params = Base.CodegenParams(; cgparams...)
 
