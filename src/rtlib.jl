@@ -99,7 +99,7 @@ function build_runtime(@nospecialize(job::CompilerJob))
 
     # the compiler job passed into here is identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
-    config = CompilerConfig(job.config; kernel=false, toplevel=true)
+    config = CompilerConfig(job.config; kernel=false, toplevel=false)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
