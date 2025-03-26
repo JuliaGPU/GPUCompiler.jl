@@ -259,8 +259,7 @@ const __llvm_initialized = Ref(false)
         erase!(dyn_marker)
     end
 
-    # if job.config.toplevel && job.config.libraries
-    if job.config.libraries
+    if job.config.toplevel && job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
             runtime = load_runtime(job)
@@ -312,8 +311,7 @@ const __llvm_initialized = Ref(false)
             #       so that we can reconstruct the CompileJob instead of setting it globally
         end
 
-        # if job.config.toplevel && job.config.optimize
-        if job.config.optimize
+        if job.config.toplevel && job.config.optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir; job.config.opt_level)
 
@@ -340,8 +338,7 @@ const __llvm_initialized = Ref(false)
             entry = functions(ir)[entry_fn]
         end
 
-        # if job.config.toplevel && job.config.cleanup
-        if job.config.cleanup
+        if job.config.toplevel && job.config.cleanup
             @timeit_debug to "clean-up" begin
                 @dispose pb=NewPMPassBuilder() begin
                     add!(pb, RecomputeGlobalsAAPass())
@@ -381,8 +378,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    # if job.config.toplevel && job.config.validate
-    if job.config.validate
+    if job.config.toplevel && job.config.validate
         @timeit_debug to "Validation" begin
             check_ir(job, ir)
         end
