@@ -87,7 +87,7 @@ steps:
 
        julia -e 'println("+++ :julia: Running tests")
                  using Pkg
-                 Pkg.test("AMDGPU"; coverage=true)'
+                 Pkg.test("AMDGPU"; coverage=true, test_args=["kernelabstractions"])'
     agents:
       queue: "juliagpu"
       rocm: "*"
