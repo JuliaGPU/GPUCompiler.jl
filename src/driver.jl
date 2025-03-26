@@ -259,7 +259,8 @@ const __llvm_initialized = Ref(false)
         erase!(dyn_marker)
     end
 
-    if job.config.toplevel && job.config.libraries
+    # if job.config.toplevel && job.config.libraries
+    if job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
             runtime = load_runtime(job)
