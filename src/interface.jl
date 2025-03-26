@@ -140,12 +140,12 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
     # deriving a non-toplevel job disables certain features
     # XXX: should we keep track if any of these were set explicitly in the first place?
     #      see how PkgEval does that.
-    # if !toplevel
-    #     optimize = false
-    #     libraries = false
-    #     cleanup = false
-    #     validate = false
-    # end
+    if !toplevel
+        optimize = false
+        libraries = false
+        cleanup = false
+        validate = false
+    end
     CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
                    libraries, optimize, cleanup, validate, strip, toplevel, only_entry)
 end
