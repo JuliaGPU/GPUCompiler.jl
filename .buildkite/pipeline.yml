@@ -82,6 +82,7 @@ steps:
     command: |
        julia -e 'println("--- :julia: Instantiating project")
                  using Pkg
+                 Pkg.develop(; path=pwd())
                  Pkg.add(; name="AMDGPU", rev="pxl-th/debug")' || exit 3
 
 
