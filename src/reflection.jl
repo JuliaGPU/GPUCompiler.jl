@@ -218,7 +218,9 @@ See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 function code_native(io::IO, @nospecialize(job::CompilerJob);
                      raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
+    @assert config.only_entry == !dump_module
     asm, meta = JuliaContext() do ctx
+        @assert config.only_entry == !dump_module
         compile(:asm, CompilerJob(job; config); strip=!raw, only_entry=!dump_module, validate=false)
     end
     highlight(io, asm, source_code(job.config.target))
