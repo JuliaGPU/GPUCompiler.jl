@@ -72,6 +72,7 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob);
 
     @timeit_debug to "Validation" begin
         check_method(job)   # not optional
+        @assert validate == job.config.validate
         validate && check_invocation(job)
     end
 
@@ -244,6 +245,8 @@ const __llvm_initialized = Ref(false)
         erase!(dyn_marker)
     end
 
+    @assert toplevel == job.config.toplevel
+    @assert libraries == job.config.libraries
     if toplevel && libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
@@ -296,6 +299,8 @@ const __llvm_initialized = Ref(false)
             #       so that we can reconstruct the CompileJob instead of setting it globally
         end
 
+        @assert toplevel == job.config.toplevel
+        @assert optimize == job.config.optimize
         if toplevel && optimize
             @timeit_debug to "optimization" begin
                 optimize!(job, ir; job.config.opt_level)
@@ -323,6 +328,8 @@ const __llvm_initialized = Ref(false)
             entry = functions(ir)[entry_fn]
         end
 
+        @assert toplevel == job.config.toplevel
+        @assert cleanup == job.config.cleanup
         if toplevel && cleanup
             @timeit_debug to "clean-up" begin
                 @dispose pb=NewPMPassBuilder() begin
@@ -353,6 +360,7 @@ const __llvm_initialized = Ref(false)
         # replace non-entry function definitions with a declaration
         # NOTE: we can't do this before optimization, because the definitions of called
         #       functions may affect optimization.
+        @assert only_entry == job.config.only_entry
         if only_entry
             for f in functions(ir)
                 f == entry && continue
@@ -363,6 +371,8 @@ const __llvm_initialized = Ref(false)
         end
     end
 
+    @assert toplevel == job.config.toplevel
+    @assert validate == job.config.validate
     if toplevel && validate
         @timeit_debug to "Validation" begin
             check_ir(job, ir)
@@ -379,6 +389,7 @@ end
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module;
                           strip::Bool, validate::Bool, format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
+    @assert strip == job.config.strip
     if strip
         @timeit_debug to "Debug info removal" strip_debuginfo!(ir)
     end
