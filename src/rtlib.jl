@@ -68,7 +68,7 @@ end
 function emit_function!(mod, config::CompilerConfig, f, method)
     tt = Base.to_tuple_type(method.types)
     source = generic_methodinstance(f, tt)
-    new_mod, meta = codegen(:llvm, CompilerJob(source, config); toplevel=false)
+    new_mod, meta = codegen(:llvm, CompilerJob(source, config))
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
     if return_type(ft) != return_type(expected_ft)
@@ -99,7 +99,7 @@ function build_runtime(@nospecialize(job::CompilerJob))
 
     # the compiler job passed into here is identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
-    config = CompilerConfig(job.config; kernel=false)
+    config = CompilerConfig(job.config; kernel=false, toplevel=false)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)

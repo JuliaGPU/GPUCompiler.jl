@@ -186,8 +186,9 @@ See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false, kwargs...)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
+    config = CompilerConfig(job.config; optimize, validate=false, strip=false)
     str = JuliaContext() do ctx
-        ir, meta = compile(:llvm, job; optimize=optimize, strip=false, validate=false, kwargs...)
+        ir, meta = compile(:llvm, CompilerJob(job; config))
         ts_mod = ThreadSafeModule(ir)
         entry_fn = meta.entry
         GC.@preserve ts_mod entry_fn begin
@@ -216,8 +217,9 @@ See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
 function code_native(io::IO, @nospecialize(job::CompilerJob);
                      raw::Bool=false, dump_module::Bool=false)
+    config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
     asm, meta = JuliaContext() do ctx
-        compile(:asm, job; strip=!raw, only_entry=!dump_module, validate=false)
+        compile(:asm, CompilerJob(job; config))
     end
     highlight(io, asm, source_code(job.config.target))
 end
