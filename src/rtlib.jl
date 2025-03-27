@@ -68,7 +68,7 @@ end
 function emit_function!(mod, config::CompilerConfig, f, method)
     tt = Base.to_tuple_type(method.types)
     source = generic_methodinstance(f, tt)
-    new_mod, meta = compile_unhooked(:llvm, CompilerJob(source, CompilerConfig(config; toplevel=false)))
+    new_mod, meta = codegen(:llvm, CompilerJob(source, config); toplevel=false)
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
     if return_type(ft) != return_type(expected_ft)
