@@ -83,7 +83,7 @@ steps:
        julia -e 'println("--- :julia: Instantiating project")
                  using Pkg
                  Pkg.develop(; path=pwd())
-                 Pkg.develop(; name="AMDGPU")' || exit 3
+                 Pkg.develop(; name="AMDGPU", rev="pxl-th/debug")' || exit 3
 
        julia -e 'println("+++ :julia: Running tests")
                  using Pkg
@@ -92,32 +92,9 @@ steps:
       queue: "juliagpu"
       rocm: "*"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
-    timeout_in_minutes: 120
-    soft_fail: true
-
-  - label: "AMDGPU.jl 1.11 opaque pointers"
-    plugins:
-      - JuliaCI/julia#v1:
-          version: "1.11"
-      - JuliaCI/julia-coverage#v1:
-          codecov: true
-    command: |
-       julia -e 'println("--- :julia: Instantiating project")
-                 using Pkg
-                 Pkg.develop(; path=pwd())
-                 Pkg.develop(; name="AMDGPU")' || exit 3
-
-       julia -e 'println("+++ :julia: Running tests")
-                 using Pkg
-                 Pkg.test("AMDGPU"; coverage=true)'
-    agents:
-      queue: "juliagpu"
-      rocm: "*"
-    if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
-    timeout_in_minutes: 120
-    soft_fail: true
-    env:
-      JULIA_LLVM_ARGS: "-opaque-pointers"
+    timeout_in_minutes: 30
+    soft_fail:
+      - exit_status: 3
 
   - label: "Enzyme.jl"
     plugins:
