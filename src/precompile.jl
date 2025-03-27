@@ -32,7 +32,7 @@ using PrecompileTools: @setup_workload, @compile_workload
         JuliaContext() do ctx
             # XXX: on Windows, compiling the GPU runtime leaks GPU code in the native cache,
             #      so prevent building the runtime library (see JuliaGPU/GPUCompiler.jl#601)
-            GPUCompiler.compile(:asm, job)
+            GPUCompiler.compile(:asm, job; libraries=false)
         end
     end
 
