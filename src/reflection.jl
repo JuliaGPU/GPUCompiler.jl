@@ -186,7 +186,7 @@ See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false, kwargs...)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
-    config = CompilerConfig(job.config; validate=false, strip=false)
+    config = CompilerConfig(job.config; validate=false, strip=false, optimize)
     str = JuliaContext() do ctx
         ir, meta = compile(:llvm, CompilerJob(job; config))
         ts_mod = ThreadSafeModule(ir)
