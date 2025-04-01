@@ -69,8 +69,17 @@ for level in [:debug, :info, :warn, :error]
                 # they may expect Logging.shouldlog() getting called, so we use
                 # the global_logger()'s min level which is more likely to be usable.
                 min_level = _invoked_min_enabled_level(global_logger())
-                with_logger(Logging.ConsoleLogger(io, min_level)) do
+                safe_logger = Logging.ConsoleLogger(io, min_level)
+                # cannot use with_logger in generated functions because it requires a closure
+                # copy with_logstate implementation instead
+                safe_logstate = Base.CoreLogging.LogState(safe_logger)
+                t = current_task()
+                old_logstate = t.logstate
+                try
+                    t.logstate = safe_logstate
                     $(esc(macrocall))
+                finally
+                    t.logstate = old_logstate
                 end
             end
         end
