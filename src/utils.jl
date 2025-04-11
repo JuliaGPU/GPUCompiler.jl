@@ -56,7 +56,7 @@ end
 
 # execute an expression with a custom logstate without creating a closure
 macro safe_with_logstate(logstate, expr)
-    @static if VERSION < v"1.11-"
+    return @static if VERSION < v"1.11-"
         quote
             t = current_task()
             old_logstate = t.logstate
