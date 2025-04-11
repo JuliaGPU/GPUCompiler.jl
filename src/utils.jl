@@ -54,6 +54,24 @@ function _invoked_min_enabled_level(@nospecialize(logger))
     return invoke(Logging.min_enabled_level, Tuple{typeof(logger)}, logger)::LogLevel
 end
 
+# execute an expression with a custom logstate without creating a closure
+macro safe_with_logstate(logstate, expr)
+    @static if VERSION < v"1.11-"
+        quote
+            t = current_task()
+            old_logstate = t.logstate
+            try
+                t.logstate = $logstate
+                $expr
+            finally
+                t.logstate = old_logstate
+            end
+        end
+    else
+        :(Base.ScopedValues.@with(Base.CoreLogging.CURRENT_LOGSTATE => $logstate, $expr))
+    end
+end
+
 # define safe loggers for use in generated functions (where task switches are not allowed)
 for level in [:debug, :info, :warn, :error]
     @eval begin
@@ -70,17 +88,8 @@ for level in [:debug, :info, :warn, :error]
                 # the global_logger()'s min level which is more likely to be usable.
                 min_level = _invoked_min_enabled_level(global_logger())
                 safe_logger = Logging.ConsoleLogger(io, min_level)
-                # cannot use with_logger in generated functions because it requires a closure
-                # copy with_logstate implementation instead
                 safe_logstate = Base.CoreLogging.LogState(safe_logger)
-                t = current_task()
-                old_logstate = t.logstate
-                try
-                    t.logstate = safe_logstate
-                    $(esc(macrocall))
-                finally
-                    t.logstate = old_logstate
-                end
+                @safe_with_logstate safe_logstate $(esc(macrocall))
             end
         end
     end
