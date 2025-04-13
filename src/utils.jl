@@ -69,8 +69,23 @@ for level in [:debug, :info, :warn, :error]
                 # they may expect Logging.shouldlog() getting called, so we use
                 # the global_logger()'s min level which is more likely to be usable.
                 min_level = _invoked_min_enabled_level(global_logger())
-                with_logger(Logging.ConsoleLogger(io, min_level)) do
-                    $(esc(macrocall))
+                safe_logger = Logging.ConsoleLogger(io, min_level)
+                # using with_logger would create a closure, which is incompatible with
+                # generated functions, so instead we reproduce its implementation here
+                safe_logstate = Base.CoreLogging.LogState(safe_logger)
+                @static if VERSION < v"1.11-"
+                    t = current_task()
+                    old_logstate = t.logstate
+                    try
+                        t.logstate = safe_logstate
+                        $(esc(macrocall))
+                    finally
+                        t.logstate = old_logstate
+                    end
+                else
+                    Base.ScopedValues.@with(
+                        Base.CoreLogging.CURRENT_LOGSTATE => safe_logstate, $(esc(macrocall))
+                    )
                 end
             end
         end
