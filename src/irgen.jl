@@ -1,7 +1,7 @@
 # LLVM IR generation
 
 function irgen(@nospecialize(job::CompilerJob))
-    mod, compiled = @timeit_debug to "emission" compile_method_instance(job)
+    mod, compiled = @tracepoint "emission" compile_method_instance(job)
     if job.config.entry_abi === :specfunc
         entry_fn = compiled[job.source].specfunc
     else
@@ -11,7 +11,7 @@ function irgen(@nospecialize(job::CompilerJob))
     entry = functions(mod)[entry_fn]
 
     # clean up incompatibilities
-    @timeit_debug to "clean-up" begin
+    @tracepoint "clean-up" begin
         for llvmf in functions(mod)
             if Base.isdebugbuild()
                 # only occurs in debug builds
@@ -81,7 +81,7 @@ function irgen(@nospecialize(job::CompilerJob))
         (; compiled[job.source].ci, func, specfunc)
 
     # minimal required optimization
-    @timeit_debug to "rewrite" begin
+    @tracepoint "rewrite" begin
         if job.config.kernel && needs_byval(job)
             # pass all bitstypes by value; by default Julia passes aggregates by reference
             # (this improves performance, and is mandated by certain back-ends like SPIR-V).
@@ -136,7 +136,7 @@ end
 function lower_throw!(mod::LLVM.Module)
     job = current_job::CompilerJob
     changed = false
-    @timeit_debug to "lower throw" begin
+    @tracepoint "lower throw" begin
 
     throw_functions = [
         # unsupported runtime functions that are used to throw specific exceptions
@@ -370,7 +370,7 @@ end
 # https://reviews.llvm.org/D79744
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)
-    @timeit_debug to "lower byval" begin
+    @tracepoint "lower byval" begin
 
     # classify the arguments
     args = classify_arguments(job, ft)

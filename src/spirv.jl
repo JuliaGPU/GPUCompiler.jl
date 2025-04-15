@@ -212,7 +212,7 @@ end
 function rm_trap!(mod::LLVM.Module)
     job = current_job::CompilerJob
     changed = false
-    @timeit_debug to "remove trap" begin
+    @tracepoint "remove trap" begin
 
     if haskey(functions(mod), "llvm.trap")
         trap = functions(mod)["llvm.trap"]
@@ -238,7 +238,7 @@ end
 function rm_freeze!(mod::LLVM.Module)
     job = current_job::CompilerJob
     changed = false
-    @timeit_debug to "remove freeze" begin
+    @tracepoint "remove freeze" begin
 
     for f in functions(mod), bb in blocks(f), inst in instructions(bb)
         if inst isa LLVM.FreezeInst

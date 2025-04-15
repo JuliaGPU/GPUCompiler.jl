@@ -61,7 +61,7 @@ end
 function lower_throw_extra!(mod::LLVM.Module)
     job = current_job::CompilerJob
     changed = false
-    @timeit_debug to "lower throw (extra)" begin
+    @tracepoint "lower throw (extra)" begin
 
     throw_functions = [
         r"julia_bounds_error.*",

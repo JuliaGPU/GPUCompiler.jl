@@ -387,7 +387,7 @@ function nvvm_reflect!(fun::LLVM.Function)
     job = current_job::CompilerJob
     mod = LLVM.parent(fun)
     changed = false
-    @timeit_debug to "nvvmreflect" begin
+    @tracepoint "nvvmreflect" begin
 
     # find and sanity check the nnvm-reflect function
     # TODO: also handle the llvm.nvvm.reflect intrinsic
