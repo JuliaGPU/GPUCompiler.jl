@@ -2,15 +2,6 @@ defs(mod::LLVM.Module)  = filter(f -> !isdeclaration(f), collect(functions(mod))
 decls(mod::LLVM.Module) = filter(f ->  isdeclaration(f) && !LLVM.isintrinsic(f),
                                  collect(functions(mod)))
 
-## timings
-
-const to = TimerOutput()
-
-timings() = (TimerOutputs.print_timer(to); println())
-
-enable_timings() = (TimerOutputs.enable_debug_timings(GPUCompiler); return)
-
-
 ## debug verification
 
 should_verify() = ccall(:jl_is_debugbuild, Cint, ()) == 1 ||

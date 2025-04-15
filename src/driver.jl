@@ -82,7 +82,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob); kwarg
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
 
-    @timeit_debug to "Validation" begin
+    @tracepoint "Validation" begin
         check_method(job)   # not optional
         job.config.validate && check_invocation(job)
     end
@@ -96,7 +96,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob); kwarg
 
     if output == :llvm
         if job.config.strip
-            @timeit_debug to "strip debug info" strip_debuginfo!(ir)
+            @tracepoint "strip debug info" strip_debuginfo!(ir)
         end
 
         return ir, ir_meta
@@ -168,7 +168,7 @@ const __llvm_initialized = Ref(false)
         __llvm_initialized[] = true
     end
 
-    @timeit_debug to "IR generation" begin
+    @tracepoint "IR generation" begin
         ir, compiled = irgen(job)
         if job.config.entry_abi === :specfunc
             entry_fn = compiled[job.source].specfunc
@@ -267,21 +267,21 @@ const __llvm_initialized = Ref(false)
             runtime_intrinsics = ["julia.gc_alloc_obj"]
         end
 
-        @timeit_debug to "Library linking" begin
+        @tracepoint "Library linking" begin
             # target-specific libraries
             undefined_fns = LLVM.name.(decls(ir))
-            @timeit_debug to "target libraries" link_libraries!(job, ir, undefined_fns)
+            @tracepoint "target libraries" link_libraries!(job, ir, undefined_fns)
 
             # GPU run-time library
             if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
                                                         fn in runtime_intrinsics,
                                                 undefined_fns)
-                @timeit_debug to "runtime library" link_library!(ir, runtime)
+                @tracepoint "runtime library" link_library!(ir, runtime)
             end
         end
     end
 
-    @timeit_debug to "IR post-processing" begin
+    @tracepoint "IR post-processing" begin
         # mark everything internal except for entrypoints and any exported
         # global variables. this makes sure that the optimizer can, e.g.,
         # rewrite function signatures.
@@ -312,7 +312,7 @@ const __llvm_initialized = Ref(false)
         end
 
         if job.config.toplevel && job.config.optimize
-            @timeit_debug to "optimization" begin
+            @tracepoint "optimization" begin
                 optimize!(job, ir; job.config.opt_level)
 
                 # deferred codegen has some special optimization requirements,
@@ -339,7 +339,7 @@ const __llvm_initialized = Ref(false)
         end
 
         if job.config.toplevel && job.config.cleanup
-            @timeit_debug to "clean-up" begin
+            @tracepoint "clean-up" begin
                 @dispose pb=NewPMPassBuilder() begin
                     add!(pb, RecomputeGlobalsAAPass())
                     add!(pb, GlobalOptPass())
@@ -379,13 +379,13 @@ const __llvm_initialized = Ref(false)
     end
 
     if job.config.toplevel && job.config.validate
-        @timeit_debug to "Validation" begin
+        @tracepoint "Validation" begin
             check_ir(job, ir)
         end
     end
 
     if should_verify()
-        @timeit_debug to "verification" verify(ir)
+        @tracepoint "verification" verify(ir)
     end
 
     return ir, (; entry, compiled)
@@ -395,13 +395,13 @@ end
                           format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
     if job.config.strip
-        @timeit_debug to "Debug info removal" strip_debuginfo!(ir)
+        @tracepoint "Debug info removal" strip_debuginfo!(ir)
     end
 
-    @timeit_debug to "LLVM back-end" begin
-        @timeit_debug to "preparation" prepare_execution!(job, ir)
+    @tracepoint "LLVM back-end" begin
+        @tracepoint "preparation" prepare_execution!(job, ir)
 
-        code = @timeit_debug to "machine-code generation" mcgen(job, ir, format)
+        code = @tracepoint "machine-code generation" mcgen(job, ir, format)
     end
 
     return code, ()
