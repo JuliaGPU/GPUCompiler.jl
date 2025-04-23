@@ -46,14 +46,14 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
 end
 
 const BasicSimplifyCFGOptions =
-    (; convert_switch_range_to_icmp=true,
-       convert_switch_to_lookup_table=true,
-       forward_switch_cond_to_phi=true,
+    (; switch_range_to_icmp=true,
+       switch_to_lookup=true,
+       forward_switch_cond=true,
     )
 const AggressiveSimplifyCFGOptions =
-    (; convert_switch_range_to_icmp=true,
-       convert_switch_to_lookup_table=true,
-       forward_switch_cond_to_phi=true,
+    (; switch_range_to_icmp=true,
+       switch_to_lookup=true,
+       forward_switch_cond=true,
        # These mess with loop rotation, so only do them after that
        hoist_common_insts=true,
        # Causes an SRET assertion error in late-gc-lowering
