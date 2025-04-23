@@ -3,7 +3,7 @@ module GPUCompiler
 using LLVM
 using LLVM.Interop
 
-using TimerOutputs
+using Tracy
 
 using ExprTools: splitdef, combinedef
 
@@ -64,6 +64,8 @@ function __init__()
     end
     mkpath(dir)
     global compile_cache = dir
+
+    Tracy.@register_tracepoints()
 end
 
 end # module
