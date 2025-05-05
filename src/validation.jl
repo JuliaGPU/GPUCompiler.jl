@@ -154,7 +154,7 @@ function Base.showerror(io::IO, err::InvalidIRError)
     printstyled(
         io,
         ": catch this exception as `err` and call `code_typed(err; interactive = true)` to",
-        " introspect the erronous code with Cthulhu.jl";
+        " introspect the erroneous code with Cthulhu.jl";
         color = :cyan,
     )
     return
