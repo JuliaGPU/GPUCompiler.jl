@@ -49,7 +49,7 @@ end
 for level in [:debug, :info, :warn, :error]
     @eval begin
         macro $(Symbol("safe_$level"))(ex...)
-            macrocall = :(@placeholder $(ex...))
+            macrocall = :(@placeholder $(ex...) _file=$(String(__source__.file)) _line=$(__source__.line))
             # NOTE: `@placeholder` in order to avoid hard-coding @__LINE__ etc
             macrocall.args[1] = Symbol($"@$level")
             quote
