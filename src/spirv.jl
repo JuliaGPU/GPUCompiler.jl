@@ -10,6 +10,9 @@ const SPIRV_LLVM_Backend_jll =
 const SPIRV_LLVM_Translator_unified_jll =
     LazyModule("SPIRV_LLVM_Translator_unified_jll",
                UUID("85f0d8ed-5b39-5caa-b1ae-7472de402361"))
+const SPIRV_LLVM_Translator_jll =
+    LazyModule("SPIRV_LLVM_Translator_jll",
+               UUID("4a5d46fc-d8cf-5151-a261-86b458210efb"))
 const SPIRV_Tools_jll =
     LazyModule("SPIRV_Tools_jll",
                UUID("6ac6d60f-d740-5983-97d7-a4482c0689f4"))
@@ -127,7 +130,14 @@ end
             cmd = `$(cmd) -spirv-ext=$str`
         end
     elseif job.config.target.backend === :khronos
-        cmd = `$(SPIRV_LLVM_Translator_unified_jll.llvm_spirv()) -o $translated $input --spirv-debug-info-version=ocl-100`
+        translator = if isavailable(SPIRV_LLVM_Translator_jll)
+            SPIRV_LLVM_Translator_jll.llvm_spirv()
+        elseif isavailable(SPIRV_LLVM_Translator_unified_jll)
+            SPIRV_LLVM_Translator_unified_jll.llvm_spirv()
+        else
+            error("This functionality requires the SPIRV_LLVM_Translator_jll or SPIRV_LLVM_Translator_unified_jll package, which should be installed and loaded first.")
+        end
+        cmd = `$translator -o $translated $input --spirv-debug-info-version=ocl-100`
 
         if !isempty(job.config.target.extensions)
             str = join(map(ext->"+$ext", job.config.target.extensions), ",")
