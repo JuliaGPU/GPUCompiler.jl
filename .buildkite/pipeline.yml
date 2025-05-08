@@ -114,6 +114,7 @@ steps:
                 Pkg.test("OpenCL"; coverage=true)'
     agents:
       queue: "juliaecosystem"
+      os: "linux"
       arch: "x86_64"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 120
@@ -137,7 +138,8 @@ steps:
                 Pkg.test("Enzyme"; coverage=true, julia_args=`--depwarn=no`)'
     agents:
       queue: "juliaecosystem"
-      arch: "aarch64"
+      os: "linux"
+      arch: "x86_64"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 60
     soft_fail:
