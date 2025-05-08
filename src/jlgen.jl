@@ -485,15 +485,25 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
     @static if VERSION >= v"1.12.0-DEV.1434"
         # see typeinfer.jl: typeinf_ext_toplevel
         ci = CC.typeinf_ext(interp, mi, CC.SOURCE_MODE_NOT_REQUIRED)
-        inspected = IdSet{CodeInstance}()
-        tocompile = CodeInstance[ci]
-        while !isempty(tocompile)
-            callee = pop!(tocompile)
-            callee in inspected && continue
-            push!(inspected, callee)
+        if VERSION >= v"1.13.0-DEV.499"
+            workqueue = CC.CompilationQueue(; interp)
+            push!(workqueue, ci)
+        else
+            workqueue = CodeInstance[ci]
+            inspected = IdSet{CodeInstance}()
+        end
+        while !isempty(workqueue)
+            callee = pop!(workqueue)
+            if VERSION >= v"1.13.0-DEV.499"
+                CC.isinspected(workqueue, callee) && continue
+                CC.markinspected!(workqueue, callee)
+            else
+                callee in inspected && continue
+                push!(inspected, callee)
+            end
+
             # now make sure everything has source code, if desired
             mi = CC.get_ci_mi(callee)
-            def = mi.def
             if CC.use_const_api(callee)
                 src = CC.codeinfo_for_const(interp, mi, ci.rettype_const)
             else
@@ -501,7 +511,12 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
                 src = CC.typeinf_code(interp, mi, true)
             end
             if src isa CodeInfo
-                CC.collectinvokes!(tocompile, src)
+                if VERSION >= v"1.13.0-DEV.499"
+                    sptypes = CC.sptypes_from_meth_instance(mi)
+                    CC.collectinvokes!(workqueue, src, sptypes)
+                else
+                    CC.collectinvokes!(workqueue, src)
+                end
                 push!(codeinfos, callee => src)
             end
         end
@@ -575,8 +590,8 @@ Compile the GPUCompiler job. In particular this will run inference using the for
 abstract interpreter.
 """
 function Base.precompile(@nospecialize(job::CompilerJob))
-    if job.source.def.primary_world > job.world || job.world > job.source.def.deleted_world
-        error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")
+    if job.source.def.primary_world > job.world
+        error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
     end
 
     # populate the cache
@@ -587,8 +602,8 @@ function Base.precompile(@nospecialize(job::CompilerJob))
 end
 
 function compile_method_instance(@nospecialize(job::CompilerJob))
-    if job.source.def.primary_world > job.world || job.world > job.source.def.deleted_world
-        error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")
+    if job.source.def.primary_world > job.world
+        error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
     end
 
     # populate the cache
