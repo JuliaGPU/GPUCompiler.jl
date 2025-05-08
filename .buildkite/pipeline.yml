@@ -99,7 +99,7 @@ steps:
   - label: "OpenCL.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.11"
+          version: "1.10"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
