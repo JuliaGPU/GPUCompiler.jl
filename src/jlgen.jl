@@ -591,8 +591,8 @@ Compile the GPUCompiler job. In particular this will run inference using the for
 abstract interpreter.
 """
 function Base.precompile(@nospecialize(job::CompilerJob))
-    if job.source.def.primary_world > job.world || job.world > job.source.def.deleted_world
-        error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")
+    if job.source.def.primary_world > job.world
+        error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
     end
 
     # populate the cache
@@ -603,8 +603,8 @@ function Base.precompile(@nospecialize(job::CompilerJob))
 end
 
 function compile_method_instance(@nospecialize(job::CompilerJob))
-    if job.source.def.primary_world > job.world || job.world > job.source.def.deleted_world
-        error("Cannot compile $(job.source) for world $(job.world); method is only valid in worlds $(job.source.def.primary_world) to $(job.source.def.deleted_world)")
+    if job.source.def.primary_world > job.world
+        error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
     end
 
     # populate the cache
