@@ -2,7 +2,7 @@ steps:
   - label: "CUDA.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -25,7 +25,7 @@ steps:
   - label: "oneAPI.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -52,7 +52,7 @@ steps:
   - label: "Metal.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -76,7 +76,7 @@ steps:
   - label: "AMDGPU.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -99,7 +99,7 @@ steps:
   - label: "OpenCL.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -121,7 +121,7 @@ steps:
   - label: "Enzyme.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
