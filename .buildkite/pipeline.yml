@@ -134,7 +134,7 @@ steps:
                 using Pkg
                 Pkg.test("Enzyme"; coverage=true, julia_args=`--depwarn=no`)'
     agents:
-      queue: "juliagpu"
+      queue: "juliaecosystem"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 60
     soft_fail:
