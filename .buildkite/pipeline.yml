@@ -113,9 +113,10 @@ steps:
                 using Pkg
                 Pkg.test("OpenCL"; coverage=true)'
     agents:
-      queue: "juliaecosystem"
-      os: "linux"
-      arch: "x86_64"
+      # XXX: not on "juliaecosystem" because those workers don't have libc-dev
+      #      see JuliaGPU/OpenCL.jl#303
+      queue: "juliagpu"
+      cuda: "*"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 120
     soft_fail:
