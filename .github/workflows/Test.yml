@@ -137,13 +137,12 @@ jobs:
       - name: Install Julia
         uses: julia-actions/setup-julia@v2
         with:
-          version: 1.10
+          version: "1.10"
           arch: x64
 
       - name: Install OpenCL.jl
         run: |
-          julia -e 'println("--- :julia: Instantiating project")
-                    using Pkg
+          julia -e 'using Pkg
                     Pkg.develop(; path=pwd())
                     Pkg.develop(; name="OpenCL")
                     Pkg.develop(; name="SPIRVIntrinsics")' || exit 3
@@ -153,8 +152,7 @@ jobs:
 
       - name: Run tests
         run: |
-          julia -e 'println("+++ :julia: Running tests")
-                    using Pkg
+          julia -e 'using Pkg
                     Pkg.test("OpenCL"; coverage=true)'
 
       - name: Process coverage
