@@ -2,7 +2,7 @@ steps:
   - label: "CUDA.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -25,7 +25,7 @@ steps:
   - label: "oneAPI.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -52,7 +52,7 @@ steps:
   - label: "Metal.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -76,7 +76,7 @@ steps:
   - label: "AMDGPU.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -96,10 +96,36 @@ steps:
     soft_fail:
       - exit_status: 3
 
-  - label: "Enzyme.jl"
+  - label: "OpenCL.jl"
     plugins:
       - JuliaCI/julia#v1:
           version: "1.10"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+      julia -e 'println("--- :julia: Instantiating project")
+                using Pkg
+                Pkg.develop(; path=pwd())
+                Pkg.develop(; name="OpenCL")
+                Pkg.develop(; name="SPIRVIntrinsics")' || exit 3
+
+       julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("OpenCL"; coverage=true)'
+    agents:
+      # XXX: not on "juliaecosystem" because those workers don't have libc-dev
+      #      see JuliaGPU/OpenCL.jl#303
+      queue: "juliagpu"
+      cuda: "*"
+    if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
+    timeout_in_minutes: 120
+    soft_fail:
+      - exit_status: 3
+
+  - label: "Enzyme.jl"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -112,7 +138,9 @@ steps:
                 using Pkg
                 Pkg.test("Enzyme"; coverage=true, julia_args=`--depwarn=no`)'
     agents:
-      queue: "juliagpu"
+      queue: "juliaecosystem"
+      os: "linux"
+      arch: "x86_64"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 60
     soft_fail:
@@ -120,4 +148,3 @@ steps:
 
 env:
   JULIA_PKG_SERVER: "" # it often struggles with our large artifacts
-  SECRET_CODECOV_TOKEN: "ya+qhtTvHdnO/U1KSoTcdCRB4WCCFU7Or2wt7YlzSZJWqITbLxidDfvqxTMG0mPo6M9I2XW6GULCleA9okq06reF5//14WSmxiF8qPwBONj6m+ImdkLpju2FfLCAtISFJYRM5OJRdDuQ5hKz+FyNoDG/jWBm/vrHoXzrVOHpcHGOPvrEtSwkdo8ew0prFq5RTi6c0Pe+Vj+xRMH7o8QhIPisYUd4RWsA/BL3ukxqSSzpU1+ZJ4F5v6eZILSaKSPb04FzpotkbH+UUCvJSn28Cif+JQANJ9HDLgaa1BbSlOAcu7syktS2fJOyOTfE67er9Lu8utqz6973Evnqjfbclw==;U2FsdGVkX19sIzsESyU7ZuRndlTrQy67iOsrPzevxn+W/dWZBd3ds5Soh1ig5ivoUi4tLZrqUv/ZyPIHohVy0A=="
