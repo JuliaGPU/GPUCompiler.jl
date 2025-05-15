@@ -52,24 +52,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # install Julia
-      - uses: julia-actions/setup-julia@v2
+      - name: Install Julia
+        uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
           arch: ${{ matrix.arch }}
 
-      # set-up packages
-      - uses: julia-actions/cache@v2
-      - uses: julia-actions/julia-buildpkg@v1
+      - name: Set-up cache
+        uses: julia-actions/cache@v2
 
       - name: Run tests
         uses: julia-actions/julia-runtest@v1
         env:
           JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
 
-      # post-process
-      - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v5
+      - name: Process coverage
+        uses: julia-actions/julia-processcoverage@v1
+      - name: Submit coverage
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
@@ -109,18 +109,58 @@ jobs:
           rm julia.tar.gz
           echo $PWD/../julia-*/bin >> $GITHUB_PATH
 
-      # set-up packages
-      - uses: julia-actions/cache@v2
-      - uses: julia-actions/julia-buildpkg@v1
+      - name: Set-up cache
+        uses: julia-actions/cache@v2
 
       - name: Run tests
         uses: julia-actions/julia-runtest@v1
         env:
           JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
 
-      # post-process
-      - uses: julia-actions/julia-processcoverage@v1
-      - uses: codecov/codecov-action@v5
+      - name: Process coverage
+        uses: julia-actions/julia-processcoverage@v1
+      - name: Submit coverage
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          files: lcov.info
+
+  # XXX: move to Buildkite -- currently done here because the juliaecosystem workers trigger
+  #      bugs in pocl_jll (OpenCL.jl#303) and the juliagpu workers encounter test failures.
+  opencl_test:
+    name: "OpenCL.jl"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Julia
+        uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.version }}
+          arch: ${{ matrix.arch }}
+
+      - name: Install OpenCL.jl
+        run: |
+          julia -e 'println("--- :julia: Instantiating project")
+                    using Pkg
+                    Pkg.develop(; path=pwd())
+                    Pkg.develop(; name="OpenCL")
+                    Pkg.develop(; name="SPIRVIntrinsics")' || exit 3
+
+      - name: Set-up cache
+        uses: julia-actions/cache@v2
+
+      - name: Run tests
+        run: |
+          julia -e 'println("+++ :julia: Running tests")
+                    using Pkg
+                    Pkg.test("OpenCL"; coverage=true)'
+
+      - name: Process coverage
+        uses: julia-actions/julia-processcoverage@v1
+      - name: Submit coverage
+        uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
