@@ -137,8 +137,8 @@ jobs:
       - name: Install Julia
         uses: julia-actions/setup-julia@v2
         with:
-          version: ${{ matrix.version }}
-          arch: ${{ matrix.arch }}
+          version: 1.10
+          arch: x64
 
       - name: Install OpenCL.jl
         run: |
