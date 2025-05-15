@@ -140,15 +140,15 @@ jobs:
           version: "1.10"
           arch: x64
 
+      - name: Set-up cache
+        uses: julia-actions/cache@v2
+
       - name: Install OpenCL.jl
         run: |
           julia -e 'using Pkg
                     Pkg.develop(; path=pwd())
                     Pkg.develop(; name="OpenCL")
                     Pkg.develop(; name="SPIRVIntrinsics")' || exit 3
-
-      - name: Set-up cache
-        uses: julia-actions/cache@v2
 
       - name: Run tests
         run: |
