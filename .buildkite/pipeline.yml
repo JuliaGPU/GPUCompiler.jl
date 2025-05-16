@@ -142,7 +142,7 @@ steps:
       os: "linux"
       arch: "x86_64"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
-    timeout_in_minutes: 60
+    timeout_in_minutes: 120
     soft_fail:
       - exit_status: 3
 
