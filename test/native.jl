@@ -273,7 +273,9 @@ end
     @test !occursin("%safepoint", ir)
 
     ir = sprint(io->Native.code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true))
-    @test occursin("%safepoint", ir)
+    @test occursin("%safepoint", ir) broken=(VERSION >= v"1.13.0-DEV.533")
+    # XXX: broken by JuliaLang/julia#57010,
+    #      see https://github.com/JuliaLang/julia/pull/57010/files#r2079576894
 end
 
 @testset "always_inline" begin
