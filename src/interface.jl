@@ -56,6 +56,8 @@ export AbstractCompilerParams
 
 abstract type AbstractCompilerParams end
 
+# whether the external user supports the disk cache
+supports_disk_cache(@nospecialize(::AbstractCompilerParams)) = true
 
 ## config
 
