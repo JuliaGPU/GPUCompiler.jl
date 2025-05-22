@@ -698,6 +698,26 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         cache_gbl = nothing
     end
 
+    if VERSION >= v"1.13.0-DEV.623"
+        # Since Julia 1.13, the caller is responsible for initializing global variables that
+        # point to global values or bindings with their address in memory.
+        num_gvars = Ref{Csize_t}(0)
+        @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                               C_NULL::Ptr{Cvoid})::Nothing
+        gvs = Vector{Ptr{LLVM.API.LLVMOpaqueValue}}(undef, num_gvars[])
+        @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                               gvs::Ptr{LLVM.API.LLVMOpaqueValue})::Nothing
+        inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
+        @ccall jl_get_llvm_gv_inits(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                                    inits::Ptr{Cvoid})::Nothing
+
+        for (gv_ref, init) in zip(gvs, inits)
+            gv = GlobalVariable(gv_ref)
+            val = const_inttoptr(ConstantInt(Int64(init)), value_type(gv))
+            initializer!(gv, val)
+        end
+    end
+
     if VERSION >= v"1.12.0-DEV.1703"
         # on sufficiently recent versions of Julia, we can query the MIs compiled.
         # this is required after the move to `invokce(::CodeInstance)`, because our
