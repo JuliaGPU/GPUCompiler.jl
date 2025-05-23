@@ -713,7 +713,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
-            val = const_inttoptr(ConstantInt(Int64(init)), value_type(gv))
+            val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
             initializer!(gv, val)
         end
     end
