@@ -48,6 +48,9 @@ have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
 
 dwarf_version(target::AbstractCompilerTarget) = Int32(4) # It seems every target supports v4 bar cuda
 
+# If your target performs nested compilation, this function should reconstruct your target with a new inner target
+nest_target(target::AbstractCompilerTarget, parent::AbstractCompilerTarget) = target
+
 ## params
 
 export AbstractCompilerParams
