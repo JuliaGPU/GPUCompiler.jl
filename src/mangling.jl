@@ -10,12 +10,16 @@ safe_name(fn::String) = replace(fn, r"[^A-Za-z0-9]"=>"_")
 safe_name(t::DataType) = safe_name(String(nameof(t)))
 function safe_name(t::Type{<:Function})
     # like Base.nameof, but for function types
-    mt = t.name.mt
-    fn = if mt === Symbol.name.mt
-        # uses shared method table, so name is not unique to this function type
-        nameof(t)
+    fn = if VERSION >= v"1.13.0-DEV.647"
+        t.name.singletonname
     else
-        mt.name
+        mt = t.name.mt
+        if mt === Symbol.name.mt
+            # uses shared method table, so name is not unique to this function type
+            nameof(t)
+        else
+            mt.name
+        end
     end
     safe_name(string(fn))
 end
