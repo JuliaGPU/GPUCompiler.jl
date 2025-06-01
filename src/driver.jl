@@ -223,7 +223,8 @@ const __llvm_initialized = Ref(false)
                 # cached compilation
                 dyn_entry_fn = get!(jobs, dyn_job) do
                     target = nest_target(dyn_job.config.target, job.config.target)
-                    config = CompilerConfig(dyn_job.config; toplevel=false, target)
+                    params = nest_params(dyn_job.config.params, job.config.params)
+                    config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
                     dyn_ir, dyn_meta = codegen(:llvm, CompilerJob(dyn_job; config))
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
