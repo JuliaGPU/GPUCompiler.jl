@@ -59,6 +59,8 @@ export AbstractCompilerParams
 
 abstract type AbstractCompilerParams end
 
+nest_params(params::AbstractCompilerParams, parent::AbstractCompilerParams) = params
+
 
 ## config
 
