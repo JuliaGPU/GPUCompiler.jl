@@ -121,6 +121,8 @@ end
 
 const runtime_lock = ReentrantLock()
 
+const runtime_cache = Dict{String, Vector{UInt8}}()
+
 @locked function load_runtime(@nospecialize(job::CompilerJob))
     global compile_cache
     if compile_cache === nothing    # during precompilation
@@ -135,15 +137,14 @@ const runtime_lock = ReentrantLock()
         name = "runtime_$(slug).bc"
         path = joinpath(compile_cache, name)
 
-        lib = try
-            if ispath(path)
-                open(path) do io
-                    parse(LLVM.Module, read(io))
-                end
+        # cache the runtime library on disk and in memory
+        lib = if haskey(runtime_cache, slug)
+            parse(LLVM.Module, runtime_cache[slug])
+        elseif ispath(path)
+            runtime_cache[slug] = open(path) do io
+                read(io)
             end
-        catch ex
-            @warn "Failed to load GPU runtime library at $path" exception=(ex, catch_backtrace())
-            nothing
+            parse(LLVM.Module, runtime_cache[slug])
         end
 
         if lib === nothing
