@@ -148,32 +148,33 @@ end
             cmd = `$(cmd) --spirv-max-version=$(job.config.target.version.major).$(job.config.target.version.minor)`
         end
     end
-    proc = run(ignorestatus(cmd))
-    if !success(proc)
+    try
+        run(cmd)
+    catch e
         error("""Failed to translate LLVM code to SPIR-V.
                  If you think this is a bug, please file an issue and attach $(input).""")
     end
 
     # validate
     if job.config.target.validate
-       cmd = `$(SPIRV_Tools_jll.spirv_val()) $translated`
-       proc = run(ignorestatus(cmd))
-       if !success(proc)
-            run(`$(SPIRV_Tools_jll.spirv_dis()) $translated -o -`)
+        try
+            run(`$(SPIRV_Tools_jll.spirv_val()) $translated`)
+        catch e
             error("""Failed to validate generated SPIR-V.
                      If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
-       end
+        end
     end
 
     # optimize
     optimized = tempname(cleanup=false) * ".spv"
     if job.config.target.optimize
-        cmd = `$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation $translated -o $optimized`
-       proc = run(ignorestatus(cmd))
-       if !success(proc)
-           error("""Failed to optimize generated SPIR-V.
-                    If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
-       end
+        try
+            run(```$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation
+                                                  $translated -o $optimized```)
+        catch
+            error("""Failed to optimize generated SPIR-V.
+                     If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+        end
     else
         cp(translated, optimized)
     end
