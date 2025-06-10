@@ -10,7 +10,7 @@ safe_name(fn::String) = replace(fn, r"[^A-Za-z0-9]"=>"_")
 safe_name(t::DataType) = safe_name(String(nameof(t)))
 function safe_name(t::Type{<:Function})
     # like Base.nameof, but for function types
-    fn = if VERSION >= v"1.13.0-DEV.647"
+    fn = @static if !hasfield(Core.TypeName, :mt)
         t.name.singletonname
     else
         mt = t.name.mt
