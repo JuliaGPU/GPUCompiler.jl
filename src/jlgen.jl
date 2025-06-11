@@ -401,7 +401,7 @@ end
 
 function GPUInterpreter(interp::GPUInterpreter;
                         world::UInt=interp.world,
-                        method_table::GPUMethodTableView=interp.method_table,
+                        method_table::Core.MethodTable=interp.method_table_view,
                         token::Any=interp.token,
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
