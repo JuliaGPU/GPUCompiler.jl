@@ -358,6 +358,7 @@ else
     import Core.Compiler: get_world_counter, get_world_counter as get_inference_world
 end
 
+const MTType = Core.MethodTable
 if isdefined(Core.Compiler, :CachedMethodTable)
     using Core.Compiler: CachedMethodTable
     maybe_cached(mtv::CC.MethodTableView) = CachedMethodTable(mtv)

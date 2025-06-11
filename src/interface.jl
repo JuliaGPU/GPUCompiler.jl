@@ -231,7 +231,7 @@ isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 # provide a specific interpreter to use.
 if VERSION >= v"1.11.0-DEV.1552"
 get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table=method_table(job),
+    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
                    token=ci_cache_token(job), inf_params=inference_params(job),
                    opt_params=optimization_params(job))
 else
