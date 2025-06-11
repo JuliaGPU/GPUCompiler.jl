@@ -297,6 +297,93 @@ end # !HAS_INTEGRATED_CACHE
 
 Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
 
+# Implements a priority lookup for method tables, where the first match in the stack get's returned.
+# An alternative to this would be to use a "Union" where we would query the parent method table and
+# do a most-specific match.
+struct StackedMethodTable{MTV<:CC.MethodTableView} <: CC.MethodTableView
+    world::UInt
+    mt::Core.MethodTable
+    parent::MTV
+end
+StackedMethodTable(world::UInt, mt::Core.MethodTable) = StackedMethodTable(world, mt, CC.InternalMethodTable(world))
+StackedMethodTable(world::UInt, mt::Core.MethodTable, parent::Core.MethodTable) = StackedMethodTable(world, mt, StackedMethodTable(world, parent))
+
+CC.isoverlayed(::StackedMethodTable) = true
+
+@static if VERSION >= v"1.11.0-DEV.363"
+    # https://github.com/JuliaLang/julia/pull/51078
+    # same API as before but without returning isoverlayed flag
+    function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int=-1)
+        result = CC._findall(sig, table.mt, table.world, limit)
+        result === nothing && return nothing # to many matches
+        nr = CC.length(result)
+        if nr ≥ 1 && CC.getindex(result, nr).fully_covers
+            # no need to fall back to the parent method view
+            return result
+        end
+    
+        parent_result = CC.findall(sig, table.parent; limit)::Union{Nothing, CC.MethodLookupResult}
+        parent_result === nothing && return nothing #too many matches
+    
+        # merge the parent match results with the internal method table
+        return CC.MethodLookupResult(
+            CC.vcat(result.matches, parent_result.matches),
+            CC.WorldRange(
+                CC.max(result.valid_worlds.min_world, parent_result.valid_worlds.min_world),
+                CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)),
+            result.ambig | parent_result.ambig)
+    end
+
+    function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
+        match, valid_worlds = CC._findsup(sig, table.mt, table.world)
+        match !== nothing && return match, valid_worlds
+        parent_match, parent_valid_worlds = CC.findsup(sig, table.parent)
+        return (
+            parent_match,
+            CC.WorldRange(
+                max(valid_worlds.min_world, parent_valid_worlds.min_world),
+                min(valid_worlds.max_world, parent_valid_worlds.max_world))
+            )
+    end
+else
+    function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int=-1)
+        result = CC._findall(sig, table.mt, table.world, limit)
+        result === nothing && return nothing # to many matches
+        nr = CC.length(result)
+        if nr ≥ 1 && CC.getindex(result, nr).fully_covers
+            # no need to fall back to the parent method view
+            return CC.MethodMatchResult(result, true)
+        end
+    
+        parent_result = CC.findall(sig, table.parent; limit)::Union{Nothing, CC.MethodMatchResult}
+        parent_result === nothing && return nothing #too many matches
+    
+        overlayed = parent_result.overlayed | !CC.isempty(result)
+        parent_result = parent_result.matches::CC.MethodLookupResult
+        
+        # merge the parent match results with the internal method table
+        return CC.MethodMatchResult(
+        CC.MethodLookupResult(
+            CC.vcat(result.matches, parent_result.matches),
+            CC.WorldRange(
+                CC.max(result.valid_worlds.min_world, parent_result.valid_worlds.min_world),
+                CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)),
+            result.ambig | parent_result.ambig),
+        overlayed)
+    end
+
+    function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
+        match, valid_worlds = CC._findsup(sig, table.mt, table.world)
+        match !== nothing && return match, valid_worlds, true
+        parent_match, parent_valid_worlds, overlayed = CC.findsup(sig, table.parent)
+        return (
+            parent_match,
+            CC.WorldRange(
+                max(valid_worlds.min_world, parent_valid_worlds.min_world),
+                min(valid_worlds.max_world, parent_valid_worlds.max_world)),
+            overlayed)
+    end
+end
 
 ## interpreter
 
