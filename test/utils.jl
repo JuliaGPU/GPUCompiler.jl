@@ -93,11 +93,11 @@ end
     end
 end
 
+Base.Experimental.@MethodTable(LayerMT)
+Base.Experimental.@MethodTable(OtherMT)
+
 @testset "StackedMethodTable" begin
     import GPUCompiler: StackedMethodTable
-
-    Base.Experimental.@MethodTable(LayerMT)
-    Base.Experimental.@MethodTable(OtherMT)
     import Core.Compiler: findsup, findall, isoverlayed
 
     OverlayMT() = Core.Compiler.OverlayMethodTable(Base.get_world_counter(), LayerMT)
