@@ -298,6 +298,7 @@ end
 end
 
 # the method table to use
+# deprecate method_table on next-breaking release
 method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
 method_table_view(@nospecialize(job::CompilerJob)) = get_method_table_view(job.world, method_table(job))
 
