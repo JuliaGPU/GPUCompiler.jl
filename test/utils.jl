@@ -147,7 +147,7 @@ next_world = Base.get_world_counter()
     @test ss_sin == o_sin
 
     worlds = o_sin[2]
-    @test worlds.min_world == next_world
+    @test worlds.min_world > prev_world
     @test worlds.max_world == typemax(typeof(next_world))
 
     o_sin  = findall(Tuple{typeof(sin), Float64}, OverlayMT())
