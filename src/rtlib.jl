@@ -49,10 +49,16 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     end
     for (i,arg) in enumerate(args)
         if value_type(arg) != parameters(ft)[i]
-            if (value_type(arg) isa LLVM.PointerType) &&
+            args[i] = if (value_type(arg) isa LLVM.PointerType) &&
                (parameters(ft)[i] isa LLVM.IntegerType)
-                # Julia pointers are passed as integers
-                args[i] = ptrtoint!(builder, args[i], parameters(ft)[i])
+                # pointers are passed as integers on Julia 1.11 and earlier
+                ptrtoint!(builder, args[i], parameters(ft)[i])
+            elseif value_type(arg) isa LLVM.PointerType &&
+                   parameters(ft)[i] isa LLVM.PointerType &&
+                   addrspace(value_type(arg)) != addrspace(parameters(ft)[i])
+                # runtime functions are always in the default address space,
+                # while arguments may come from globals in other address spaces.
+                addrspacecast!(builder, args[i], parameters(ft)[i])
             else
                 error("Don't know how to convert ", arg, " argument to ", parameters(ft)[i])
             end
