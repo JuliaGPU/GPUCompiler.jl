@@ -152,6 +152,23 @@ end
 end
 end
 
+@testset "Mock Enzyme" begin
+    function kernel(a)
+        unsafe_store!(a, unsafe_load(a)^2)
+        return
+    end
+    
+    function dkernel(a)
+        ptr = Enzyme.deferred_codegen(typeof(kernel), Tuple{Ptr{Float64}})
+        ccall(ptr, Cvoid, (Ptr{Float64},), a)
+        return
+    end
+
+    ir = sprint(io->Native.code_llvm(io, dkernel, Tuple{Ptr{Float64}}; debuginfo=:none))
+    @test !occursin("deferred_codegen", ir)
+    @test occursin("call void @julia_", ir)
+end
+
 end
 
 ############################################################################################
