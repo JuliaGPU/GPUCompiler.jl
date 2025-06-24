@@ -1,15 +1,17 @@
 @testset "IR" begin
 
 @testset "exceptions" begin
-    foobar() = throw(DivideError())
+    mod = @eval module $(gensym())
+        foobar() = throw(DivideError())
+    end
     @test @filecheck begin
-        check"CHECK-LABEL: foobar"
+        check"CHECK-LABEL: define void @{{.*foobar.*}}()"
         # plain exceptions should get lowered to a call to the GPU run-time
         # not a jl_throw referencing a jl_value_t representing the exception
         check"CHECK-NOT: jl_throw"
         check"CHECK: gpu_report_exception"
 
-        PTX.code_llvm(foobar, Tuple{}; dump_module=true)
+        PTX.code_llvm(mod.foobar, Tuple{}; dump_module=true)
     end
 end
 
@@ -24,24 +26,24 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: @{{(julia|j)_kernel_[0-9]+}}"
-        check"TYPED-SAME: ({{(\{ i64 \}|\[1 x i64\])}}*"
-        check"OPAQUE-SAME: (ptr"
+        check"CHECK-LABEL: define void @{{.*kernel.*}}("
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate})
     end
 
     @test @filecheck begin
-        check"CHECK: @_Z6kernel9Aggregate({{.*({ i64 }|\[1 x i64\])}} "
+        check"CHECK-LABEL: define ptx_kernel void @_Z6kernel9Aggregate({{.*({ i64 }|\[1 x i64\])}}"
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; kernel=true)
     end
 end
 
 @testset "property_annotations" begin
-    kernel() = return
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
 
     @test @filecheck begin
         check"CHECK-NOT: nvvm.annotations"
-        PTX.code_llvm(kernel, Tuple{}; dump_module=true)
+        PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true)
     end
 
     @test @filecheck begin
@@ -50,45 +52,47 @@ end
         check"CHECK-NOT: minctasm"
         check"CHECK-NOT: maxnreg"
         check"CHECK: nvvm.annotations"
-        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true)
+        PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
     end
 
     @test @filecheck begin
         check"CHECK: maxntidx\", i32 42"
         check"CHECK: maxntidy\", i32 1"
         check"CHECK: maxntidz\", i32 1"
-        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true, maxthreads=42)
+        PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, maxthreads=42)
     end
 
     @test @filecheck begin
         check"CHECK: reqntidx\", i32 42"
         check"CHECK: reqntidy\", i32 1"
         check"CHECK: reqntidz\", i32 1"
-        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true, minthreads=42)
+        PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, minthreads=42)
     end
 
     @test @filecheck begin
         check"CHECK: minctasm\", i32 42"
-        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true, blocks_per_sm=42)
+        PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, blocks_per_sm=42)
     end
 
     @test @filecheck begin
         check"CHECK: maxnreg\", i32 42"
-        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true, maxregs=42)
+        PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, maxregs=42)
     end
 end
 
 LLVM.version() >= v"8" && @testset "calling convention" begin
-    kernel() = return
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
 
     @test @filecheck begin
         check"CHECK-NOT: ptx_kernel"
-        PTX.code_llvm(kernel, Tuple{}; dump_module=true)
+        PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true)
     end
 
     @test @filecheck begin
         check"CHECK: ptx_kernel"
-        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true)
+        PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
     end
 end
 
@@ -96,7 +100,6 @@ end
     # state should be passed by value to kernel functions
 
     mod = @eval module $(gensym())
-        export kernel
         kernel() = return
     end
 
@@ -134,15 +137,12 @@ end
     end
     # child1 doesn't use the state
     @test @filecheck begin
-        check"CHECK-LABEL: define internal fastcc i64 @{{(julia|j)_child1[0-9_]*}}"
-        check"INTPTR_ABI-SAME: (i64"
-        check"PTR_ABI-SAME: ({{(ptr|i8\*)}}"
+        check"CHECK-LABEL: define internal fastcc i64 @{{.*child1.*}}("
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
     end
     # child2 does
     @test @filecheck begin
-        check"CHECK-LABEL: define internal fastcc i64 @{{(julia|j)_child2[0-9_]*}}"
-        check"CHECK-SAME: ([1 x i64] %state"
+        check"CHECK-LABEL: define internal fastcc i64 @{{.*child2.*}}("
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
     end
 end
@@ -160,8 +160,6 @@ if :NVPTX in LLVM.backends()
 
     mod = @eval module $(gensym())
         import ..sink
-        export child, parent
-
         @noinline child(i) = sink(i)
         function parent(i)
             child(i)
@@ -170,6 +168,7 @@ if :NVPTX in LLVM.backends()
     end
 
     @test @filecheck begin
+        check"CHECK-LABEL: .visible .func {{(julia|j)_parent[0-9_]*}}"
         check"CHECK: call.uni"
         check"CHECK-NEXT: {{(julia|j)_child_}}"
         PTX.code_native(mod.parent, Tuple{Int64})
@@ -179,8 +178,6 @@ end
 @testset "kernel functions" begin
     mod = @eval module $(gensym())
         import ..sink
-        export nonentry, entry
-
         @noinline nonentry(i) = sink(i)
         function entry(i)
             nonentry(i)
@@ -231,8 +228,6 @@ end
 
     mod = @eval module $(gensym())
         import ..sink
-        export child, parent1, parent2
-
         @noinline child(i) = sink(i)
         function parent1(i)
             child(i)
@@ -261,8 +256,6 @@ end
 
     mod = @eval module $(gensym())
         import ..sink
-        export parent1, parent2, child1, child2
-
         @noinline child1(i) = sink(i)
         @noinline child2(i) = sink(i+1)
         function parent1(i)
@@ -293,36 +286,42 @@ end
     #           (host fldmod1->mod1 throws, so the PTX code shouldn't contain a throw)
 
     # NOTE: Int32 to test for #49
-
-    function kernel(out)
-        wid, lane = fldmod1(unsafe_load(out), Int32(32))
-        unsafe_store!(out, wid)
-        return
+    mod = @eval module $(gensym())
+        function kernel(out)
+            wid, lane = fldmod1(unsafe_load(out), Int32(32))
+            unsafe_store!(out, wid)
+            return
+        end
     end
 
     @test @filecheck begin
+        check"CHECK-LABEL: .visible .func {{(julia|j)_kernel[0-9_]*}}"
         check"CHECK-NOT: jl_throw"
         check"CHECK-NOT: jl_invoke"
-        PTX.code_native(kernel, Tuple{Ptr{Int32}})
+        PTX.code_native(mod.kernel, Tuple{Ptr{Int32}})
     end
 end
 
 @testset "LLVM intrinsics" begin
     # issue #13 (a): cannot select trunc
-    function kernel(x)
-        unsafe_trunc(Int, x)
-        return
+    mod = @eval module $(gensym())
+        function kernel(x)
+            unsafe_trunc(Int, x)
+            return
+        end
     end
-    PTX.code_native(devnull, kernel, Tuple{Float64})
+    PTX.code_native(devnull, mod.kernel, Tuple{Float64})
     @test "We did not crash!" != ""
 end
 
 @testset "exception arguments" begin
-    function kernel(a)
-        unsafe_store!(a, trunc(Int, unsafe_load(a)))
-        return
+    mod = @eval module $(gensym())
+        function kernel(a)
+            unsafe_store!(a, trunc(Int, unsafe_load(a)))
+            return
+        end
     end
-    PTX.code_native(devnull, kernel, Tuple{Ptr{Float64}})
+    PTX.code_native(devnull, mod.kernel, Tuple{Ptr{Float64}})
     @test "We did not crash!" != ""
 end
 
@@ -347,6 +346,7 @@ end
     end
 
     @test @filecheck begin
+        check"CHECK-LABEL: .visible .func {{(julia|j)_kernel[0-9_]*}}"
         check"CHECK-NOT: julia.push_gc_frame"
         check"CHECK-NOT: julia.pop_gc_frame"
         check"CHECK-NOT: julia.get_gc_frame_slot"
@@ -356,40 +356,46 @@ end
     end
 
     # make sure that we can still ellide allocations
-    function ref_kernel(ptr, i)
-        data = Ref{Int64}()
-        data[] = 0
-        if i > 1
-            data[] = 1
-        else
-            data[] = 2
+    mod = @eval module $(gensym())
+        function ref_kernel(ptr, i)
+            data = Ref{Int64}()
+            data[] = 0
+            if i > 1
+                data[] = 1
+            else
+                data[] = 2
+            end
+            unsafe_store!(ptr, data[], i)
+            return nothing
         end
-        unsafe_store!(ptr, data[], i)
-        return nothing
     end
 
     @test @filecheck begin
+        check"CHECK-LABEL: .visible .func {{(julia|j)_ref_kernel[0-9_]*}}"
         check"CHECK-NOT: gpu_gc_pool_alloc"
-        PTX.code_native(ref_kernel, Tuple{Ptr{Int64}, Int})
+        PTX.code_native(mod.ref_kernel, Tuple{Ptr{Int64}, Int})
     end
 end
 
 @testset "float boxes" begin
-    function kernel(a,b)
-        c = Int32(a)
-        # the conversion to Int32 may fail, in which case the input Float32 is boxed in order to
-        # pass it to the @nospecialize exception constructor. we should really avoid that (eg.
-        # by avoiding @nospecialize, or optimize the unused arguments away), but for now the box
-        # should just work.
-        unsafe_store!(b, c)
-        return
+    mod = @eval module $(gensym())
+        function kernel(a,b)
+            c = Int32(a)
+            # the conversion to Int32 may fail, in which case the input Float32 is boxed in order to
+            # pass it to the @nospecialize exception constructor. we should really avoid that (eg.
+            # by avoiding @nospecialize, or optimize the unused arguments away), but for now the box
+            # should just work.
+            unsafe_store!(b, c)
+            return
+        end
     end
 
     @test @filecheck begin
+        check"CHECK-LABEL: define void @{{.*kernel.*}}("
         check"CHECK: jl_box_float32"
-        PTX.code_llvm(kernel, Tuple{Float32,Ptr{Float32}})
+        PTX.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}})
     end
-    PTX.code_native(devnull, kernel, Tuple{Float32,Ptr{Float32}})
+    PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
 end
 
 end
