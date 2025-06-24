@@ -6,12 +6,15 @@ for backend in (:khronos, :llvm)
 @testset "calling convention" begin
     kernel() = return
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{}; backend, dump_module=true))
-    @test !occursin("spir_kernel", ir)
+    @test @filecheck begin
+        check"CHECK-NOT: spir_kernel"
+        SPIRV.code_llvm(kernel, Tuple{}; backend, dump_module=true)
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{};
-                                    backend, dump_module=true, kernel=true))
-    @test occursin("spir_kernel", ir)
+    @test @filecheck begin
+        check"CHECK: spir_kernel"
+        SPIRV.code_llvm(kernel, Tuple{}; backend, dump_module=true, kernel=true)
+    end
 end
 
 @testset "byval workaround" begin
@@ -20,14 +23,17 @@ end
         kernel(x) = return
     end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Tuple{Int}}; backend))
-    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\*", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr", ir)
+    @test @filecheck begin
+        check"TYPED: @{{.*kernel.*}}([1 x i64]*"
+        check"OPAQUE: @{{.*kernel.*}}(ptr"
+        SPIRV.code_llvm(mod.kernel, Tuple{Tuple{Int}}; backend)
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Tuple{Int}};
-                                    backend, kernel=true))
-    @test occursin(r"@\w*kernel\w*\(.*{ ({ i64 }|\[1 x i64\]) }\*.+byval", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr byval", ir)
+    @test @filecheck begin
+        check"TYPED: @{{.*kernel.*}}({ [1 x i64] }* byval"
+        check"OPAQUE: @{{.*kernel.*}}(ptr byval"
+        SPIRV.code_llvm(mod.kernel, Tuple{Tuple{Int}}; backend, kernel=true)
+    end
 end
 
 @testset "byval bug" begin
@@ -47,17 +53,20 @@ end
         end
     end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float16}, Float16};
-                                    backend))
-    @test occursin("store half", ir)
+    @test @filecheck begin
+        check"CHECK: store half"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float16}, Float16}; backend)
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float32}, Float32};
-                                    backend))
-    @test occursin("store float", ir)
+    @test @filecheck begin
+        check"CHECK: store float"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float32}, Float32}; backend)
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float64}, Float64};
-                                    backend))
-    @test occursin("store double", ir)
+    @test @filecheck begin
+        check"CHECK: store double"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float64}, Float64}; backend)
+    end
 
     @test_throws_message(InvalidIRError,
                          SPIRV.code_execution(mod.kernel, Tuple{Ptr{Float16}, Float16};
@@ -88,8 +97,10 @@ end
         return
     end
 
-    asm = sprint(io->SPIRV.code_native(io, kernel, Tuple{Bool}; backend, kernel=true))
-    @test occursin(r"OpFunctionCall %void %(julia|j)_error", asm)
+    @test @filecheck begin
+        check"CHECK: OpFunctionCall %void %{{(julia|j)_error}}"
+        SPIRV.code_native(kernel, Tuple{Bool}; backend, kernel=true)
+    end
 end
 
 end

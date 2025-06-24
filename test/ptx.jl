@@ -2,12 +2,15 @@
 
 @testset "exceptions" begin
     foobar() = throw(DivideError())
-    ir = sprint(io->PTX.code_llvm(io, foobar, Tuple{}))
+    @test @filecheck begin
+        check"CHECK-LABEL: foobar"
+        # plain exceptions should get lowered to a call to the GPU run-time
+        # not a jl_throw referencing a jl_value_t representing the exception
+        check"CHECK-NOT: jl_throw"
+        check"CHECK: gpu_report_exception"
 
-    # plain exceptions should get lowered to a call to the GPU run-time
-    @test occursin("gpu_report_exception", ir)
-    # not a jl_throw referencing a jl_value_t representing the exception
-    @test !occursin("jl_throw", ir)
+        PTX.code_llvm(foobar, Tuple{}; dump_module=true)
+    end
 end
 
 @testset "kernel functions" begin
@@ -20,58 +23,73 @@ end
         end
     end
 
-    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{mod.Aggregate}))
-    @test occursin(r"@(julia|j)_kernel\w*\(({ i64 }|\[1 x i64\])\* ", ir) ||
-          occursin(r"@(julia|j)_kernel\w*\(ptr ", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: @{{(julia|j)_kernel_[0-9]+}}"
+        check"TYPED-SAME: ({{(\{ i64 \}|\[1 x i64\])}}*"
+        check"OPAQUE-SAME: (ptr"
+        PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate})
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{mod.Aggregate}; kernel=true))
-    @test occursin(r"@_Z6kernel9Aggregate\(.*({ i64 }|\[1 x i64\]) ", ir)
+    @test @filecheck begin
+        check"CHECK: @_Z6kernel9Aggregate({{.*({ i64 }|\[1 x i64\])}} "
+        PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; kernel=true)
+    end
 end
 
 @testset "property_annotations" begin
     kernel() = return
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{}; dump_module=true))
-    @test !occursin("nvvm.annotations", ir)
+    @test @filecheck begin
+        check"CHECK-NOT: nvvm.annotations"
+        PTX.code_llvm(kernel, Tuple{}; dump_module=true)
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
-                                  dump_module=true, kernel=true))
-    @test occursin("nvvm.annotations", ir)
-    @test !occursin("maxntid", ir)
-    @test !occursin("reqntid", ir)
-    @test !occursin("minctasm", ir)
-    @test !occursin("maxnreg", ir)
+    @test @filecheck begin
+        check"CHECK-NOT: maxntid"
+        check"CHECK-NOT: reqntid"
+        check"CHECK-NOT: minctasm"
+        check"CHECK-NOT: maxnreg"
+        check"CHECK: nvvm.annotations"
+        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true)
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
-                                  dump_module=true, kernel=true, maxthreads=42))
-    @test occursin("maxntidx\", i32 42", ir)
-    @test occursin("maxntidy\", i32 1", ir)
-    @test occursin("maxntidz\", i32 1", ir)
+    @test @filecheck begin
+        check"CHECK: maxntidx\", i32 42"
+        check"CHECK: maxntidy\", i32 1"
+        check"CHECK: maxntidz\", i32 1"
+        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true, maxthreads=42)
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
-                                  dump_module=true, kernel=true, minthreads=42))
-    @test occursin("reqntidx\", i32 42", ir)
-    @test occursin("reqntidy\", i32 1", ir)
-    @test occursin("reqntidz\", i32 1", ir)
+    @test @filecheck begin
+        check"CHECK: reqntidx\", i32 42"
+        check"CHECK: reqntidy\", i32 1"
+        check"CHECK: reqntidz\", i32 1"
+        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true, minthreads=42)
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
-                                  dump_module=true, kernel=true, blocks_per_sm=42))
-    @test occursin("minctasm\", i32 42", ir)
+    @test @filecheck begin
+        check"CHECK: minctasm\", i32 42"
+        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true, blocks_per_sm=42)
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
-                                  dump_module=true, kernel=true, maxregs=42))
-    @test occursin("maxnreg\", i32 42", ir)
+    @test @filecheck begin
+        check"CHECK: maxnreg\", i32 42"
+        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true, maxregs=42)
+    end
 end
 
 LLVM.version() >= v"8" && @testset "calling convention" begin
     kernel() = return
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{}; dump_module=true))
-    @test !occursin("ptx_kernel", ir)
+    @test @filecheck begin
+        check"CHECK-NOT: ptx_kernel"
+        PTX.code_llvm(kernel, Tuple{}; dump_module=true)
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{};
-                                  dump_module=true, kernel=true))
-    @test occursin("ptx_kernel", ir)
+    @test @filecheck begin
+        check"CHECK: ptx_kernel"
+        PTX.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true)
+    end
 end
 
 @testset "kernel state" begin
@@ -82,11 +100,15 @@ end
         kernel() = return
     end
 
-    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{}))
-    @test occursin(r"@(julia|j)_kernel\w*\(\)", ir)
+    @test @filecheck begin
+        check"CHECK: @{{(julia|j)_kernel[0-9_]*}}()"
+        PTX.code_llvm(mod.kernel, Tuple{})
+    end
 
-    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{}; kernel=true))
-    @test occursin("@_Z6kernel([1 x i64] %state)", ir)
+    @test @filecheck begin
+        check"CHECK: @_Z6kernel([1 x i64] %state)"
+        PTX.code_llvm(mod.kernel, Tuple{}; kernel=true)
+    end
 
     # state should only passed to device functions that use it
 
@@ -104,20 +126,25 @@ end
         end
     end
 
-    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{Ptr{Int64}};
-                                  kernel=true, dump_module=true))
-
     # kernel should take state argument before all else
-    @test occursin(r"@_Z6kernelP5Int64\(\[1 x i64\] %state", ir)
-
+    @test @filecheck begin
+        check"CHECK-LABEL: define ptx_kernel void @_Z6kernelP5Int64([1 x i64] %state"
+        check"CHECK-NOT: julia.gpu.state_getter"
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
+    end
     # child1 doesn't use the state
-    @test occursin(r"@(julia|j)_child1\w*\((i64|i8\*|ptr)", ir)
-
+    @test @filecheck begin
+        check"CHECK-LABEL: define internal fastcc i64 @{{(julia|j)_child1[0-9_]*}}"
+        check"INTPTR_ABI-SAME: (i64"
+        check"PTR_ABI-SAME: ({{(ptr|i8\*)}}"
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
+    end
     # child2 does
-    @test occursin(r"@(julia|j)_child2\w*\(\[1 x i64\] %state", ir)
-
-    # can't have the unlowered intrinsic
-    @test !occursin("julia.gpu.state_getter", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: define internal fastcc i64 @{{(julia|j)_child2[0-9_]*}}"
+        check"CHECK-SAME: ([1 x i64] %state"
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
+    end
 end
 end
 
@@ -142,8 +169,11 @@ if :NVPTX in LLVM.backends()
         end
     end
 
-    asm = sprint(io->PTX.code_native(io, mod.parent, Tuple{Int64}))
-    @test occursin(r"call.uni\s+(julia|j)_child_"m, asm)
+    @test @filecheck begin
+        check"CHECK: call.uni"
+        check"CHECK-NEXT: {{(julia|j)_child_}}"
+        PTX.code_native(mod.parent, Tuple{Int64})
+    end
 end
 
 @testset "kernel functions" begin
@@ -158,32 +188,39 @@ end
         end
     end
 
-    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
-                                     kernel=true, dump_module=true))
-    @test occursin(".visible .entry _Z5entry5Int64", asm)
-    @test !occursin(r"\.visible \.func (julia|j)_nonentry", asm)
-    @test occursin(r"\.func (julia|j)_nonentry", asm)
+    @test @filecheck begin
+        check"CHECK-NOT: .visible .func {{(julia|j)_nonentry}}"
+        check"CHECK-LABEL: .visible .entry _Z5entry5Int64"
+        check"CHECK: {{(julia|j)_nonentry}}"
+        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, dump_module=true)
+    end
 
 @testset "property_annotations" begin
-    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64}; kernel=true))
-    @test !occursin("maxntid", asm)
+    @test @filecheck begin
+        check"CHECK-NOT: maxntid"
+        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true)
+    end
 
-    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
-                                         kernel=true, maxthreads=42))
-    @test occursin(".maxntid 42, 1, 1", asm)
+    @test @filecheck begin
+        check"CHECK: .maxntid 42, 1, 1"
+        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, maxthreads=42)
+    end
 
-    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
-                                         kernel=true, minthreads=42))
-    @test occursin(".reqntid 42, 1, 1", asm)
+    @test @filecheck begin
+        check"CHECK: .reqntid 42, 1, 1"
+        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, minthreads=42)
+    end
 
-    asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
-                                         kernel=true, blocks_per_sm=42))
-    @test occursin(".minnctapersm 42", asm)
+    @test @filecheck begin
+        check"CHECK: .minnctapersm 42"
+        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, blocks_per_sm=42)
+    end
 
     if LLVM.version() >= v"4.0"
-        asm = sprint(io->PTX.code_native(io, mod.entry, Tuple{Int64};
-                                             kernel=true, maxregs=42))
-        @test occursin(".maxnreg 42", asm)
+        @test @filecheck begin
+            check"CHECK: .maxnreg 42"
+            PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, maxregs=42)
+        end
     end
 end
 end
@@ -207,11 +244,15 @@ end
         end
     end
 
-    asm = sprint(io->PTX.code_native(io, mod.parent1, Tuple{Int}))
-    @test occursin(r"\.func (julia|j)_child_", asm)
+    @test @filecheck begin
+        check"CHECK: .func {{(julia|j)_child}}"
+        PTX.code_native(mod.parent1, Tuple{Int})
+    end
 
-    asm = sprint(io->PTX.code_native(io, mod.parent2, Tuple{Int}))
-    @test occursin(r"\.func (julia|j)_child_", asm)
+    @test @filecheck begin
+        check"CHECK: .func {{(julia|j)_child}}"
+        PTX.code_native(mod.parent2, Tuple{Int})
+    end
 end
 
 @testset "child function reuse bis" begin
@@ -234,13 +275,17 @@ end
         end
     end
 
-    asm = sprint(io->PTX.code_native(io, mod.parent1, Tuple{Int}))
-    @test occursin(r"\.func (julia|j)_child1_", asm)
-    @test occursin(r"\.func (julia|j)_child2_", asm)
+    @test @filecheck begin
+        check"CHECK-DAG: .func {{(julia|j)_child1}}"
+        check"CHECK-DAG: .func {{(julia|j)_child2}}"
+        PTX.code_native(mod.parent1, Tuple{Int})
+    end
 
-    asm = sprint(io->PTX.code_native(io, mod.parent2, Tuple{Int}))
-    @test occursin(r"\.func (julia|j)_child1_", asm)
-    @test occursin(r"\.func (julia|j)_child2_", asm)
+    @test @filecheck begin
+        check"CHECK-DAG: .func {{(julia|j)_child1}}"
+        check"CHECK-DAG: .func {{(julia|j)_child2}}"
+        PTX.code_native(mod.parent2, Tuple{Int})
+    end
 end
 
 @testset "indirect sysimg function use" begin
@@ -255,9 +300,11 @@ end
         return
     end
 
-    asm = sprint(io->PTX.code_native(io, kernel, Tuple{Ptr{Int32}}))
-    @test !occursin("jl_throw", asm)
-    @test !occursin("jl_invoke", asm)   # forced recompilation should still not invoke
+    @test @filecheck begin
+        check"CHECK-NOT: jl_throw"
+        check"CHECK-NOT: jl_invoke"
+        PTX.code_native(kernel, Tuple{Ptr{Int32}})
+    end
 end
 
 @testset "LLVM intrinsics" begin
@@ -299,13 +346,14 @@ end
         end
     end
 
-    asm = sprint(io->PTX.code_native(io, mod.kernel, Tuple{Int}))
-    @test occursin("gpu_gc_pool_alloc", asm)
-    @test !occursin("julia.push_gc_frame", asm)
-    @test !occursin("julia.pop_gc_frame", asm)
-    @test !occursin("julia.get_gc_frame_slot", asm)
-    @test !occursin("julia.new_gc_frame", asm)
-
+    @test @filecheck begin
+        check"CHECK-NOT: julia.push_gc_frame"
+        check"CHECK-NOT: julia.pop_gc_frame"
+        check"CHECK-NOT: julia.get_gc_frame_slot"
+        check"CHECK-NOT: julia.new_gc_frame"
+        check"CHECK: gpu_gc_pool_alloc"
+        PTX.code_native(mod.kernel, Tuple{Int})
+    end
 
     # make sure that we can still ellide allocations
     function ref_kernel(ptr, i)
@@ -320,10 +368,10 @@ end
         return nothing
     end
 
-    asm = sprint(io->PTX.code_native(io, ref_kernel, Tuple{Ptr{Int64}, Int}))
-
-
-    @test !occursin("gpu_gc_pool_alloc", asm)
+    @test @filecheck begin
+        check"CHECK-NOT: gpu_gc_pool_alloc"
+        PTX.code_native(ref_kernel, Tuple{Ptr{Int64}, Int})
+    end
 end
 
 @testset "float boxes" begin
@@ -337,8 +385,10 @@ end
         return
     end
 
-    ir = sprint(io->PTX.code_llvm(io, kernel, Tuple{Float32,Ptr{Float32}}))
-    @test occursin("jl_box_float32", ir)
+    @test @filecheck begin
+        check"CHECK: jl_box_float32"
+        PTX.code_llvm(kernel, Tuple{Float32,Ptr{Float32}})
+    end
     PTX.code_native(devnull, kernel, Tuple{Float32,Ptr{Float32}})
 end
 

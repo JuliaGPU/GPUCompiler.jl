@@ -4,12 +4,15 @@ if :AMDGPU in LLVM.backends()
 @testset "kernel calling convention" begin
     kernel() = return
 
-    ir = sprint(io->GCN.code_llvm(io, kernel, Tuple{}; dump_module=true))
-    @test !occursin("amdgpu_kernel", ir)
+    @test @filecheck begin
+        check"CHECK-NOT: amdgpu_kernel"
+        GCN.code_llvm(kernel, Tuple{}; dump_module=true)
+    end
 
-    ir = sprint(io->GCN.code_llvm(io, kernel, Tuple{};
-                                         dump_module=true, kernel=true))
-    @test occursin("amdgpu_kernel", ir)
+    @test @filecheck begin
+        check"CHECK: amdgpu_kernel"
+        GCN.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true)
+    end
 end
 
 end
@@ -27,8 +30,10 @@ end
         return
     end
 
-    asm = sprint(io->GCN.code_native(io, kernel, Tuple{}))
-    @test occursin("s_trap 2", asm)
+    @test @filecheck begin
+        check"CHECK: s_trap 2"
+        GCN.code_native(kernel, Tuple{})
+    end
     @test_skip occursin("s_cbranch_execz", asm)
     if Base.libllvm_version < v"9"
         @test_broken occursin("v_readfirstlane", asm)
@@ -44,9 +49,11 @@ end
         return
     end
 
-    asm = sprint(io->GCN.code_native(io, parent, Tuple{Int64}; dump_module=true))
-    @test occursin(r"s_add_u32.*(julia|j)_child_.*@rel32@", asm)
-    @test occursin(r"s_addc_u32.*(julia|j)_child_.*@rel32@", asm)
+    @test @filecheck begin
+        check"CHECK: s_add_u32{{.*(julia|j)_child_.*}}@rel32@"
+        check"CHECK: s_addc_u32{{.*(julia|j)_child_.*}}@rel32@"
+        GCN.code_native(parent, Tuple{Int64}; dump_module=true)
+    end
 end
 
 @testset "kernel functions" begin
@@ -56,10 +63,12 @@ end
         return
     end
 
-    asm = sprint(io->GCN.code_native(io, entry, Tuple{Int64}; dump_module=true, kernel=true))
-    @test occursin(r"\.amdhsa_kernel \w*entry", asm)
-    @test !occursin(r"\.amdhsa_kernel \w*nonentry", asm)
-    @test occursin(r"\.type.*\w*nonentry\w*,@function", asm)
+    @test @filecheck begin
+        check"CHECK-NOT: .amdhsa_kernel {{.*}}nonentry"
+        check"CHECK: .type {{.*nonentry.*}},@function"
+        check"CHECK: .amdhsa_kernel {{.*entry.*}}"
+        GCN.code_native(entry, Tuple{Int64}; dump_module=true, kernel=true)
+    end
 end
 
 @testset "child function reuse" begin
@@ -80,11 +89,15 @@ end
         end
     end
 
-    asm = sprint(io->GCN.code_native(io, mod.parent1, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child_\d*,@function", asm)
+    @test @filecheck begin
+        check"CHECK: .type {{.*child.*}},@function"
+        GCN.code_native(mod.parent1, Tuple{Int}; dump_module=true)
+    end
 
-    asm = sprint(io->GCN.code_native(io, mod.parent2, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child_\d*,@function", asm)
+    @test @filecheck begin
+        check"CHECK: .type {{.*child.*}},@function"
+        GCN.code_native(mod.parent2, Tuple{Int}; dump_module=true)
+    end
 end
 
 @testset "child function reuse bis" begin
@@ -106,13 +119,17 @@ end
         end
     end
 
-    asm = sprint(io->GCN.code_native(io, mod.parent1, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child1_\d*,@function", asm)
-    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child2_\d*,@function", asm)
+    @test @filecheck begin
+        check"CHECK-DAG: .type {{.*child1.*}},@function"
+        check"CHECK-DAG: .type {{.*child2.*}},@function"
+        GCN.code_native(mod.parent1, Tuple{Int}; dump_module=true)
+    end
 
-    asm = sprint(io->GCN.code_native(io, mod.parent2, Tuple{Int}; dump_module=true))
-    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child1_\d*,@function", asm)
-    @test occursin(r"\.type.*(julia|j)_[[:alnum:]_.]*child2_\d*,@function", asm)
+    @test @filecheck begin
+        check"CHECK-DAG: .type {{.*child1.*}},@function"
+        check"CHECK-DAG: .type {{.*child2.*}},@function"
+        GCN.code_native(mod.parent2, Tuple{Int}; dump_module=true)
+    end
 end
 
 @testset "indirect sysimg function use" begin
@@ -127,9 +144,11 @@ end
         return
     end
 
-    asm = sprint(io->GCN.code_native(io, kernel, Tuple{Ptr{Int32}}))
-    @test !occursin("jl_throw", asm)
-    @test !occursin("jl_invoke", asm)   # forced recompilation should still not invoke
+    @test @filecheck begin
+        check"CHECK-NOT: jl_throw"
+        check"CHECK-NOT: jl_invoke"
+        GCN.code_native(kernel, Tuple{Ptr{Int32}})
+    end
 end
 
 @testset "LLVM intrinsics" begin
@@ -171,12 +190,14 @@ false && @testset "GC and TLS lowering" begin
         end
     end
 
-    asm = sprint(io->GCN.code_native(io, mod.kernel, Tuple{Int}))
-    @test occursin("gpu_gc_pool_alloc", asm)
-    @test !occursin("julia.push_gc_frame", asm)
-    @test !occursin("julia.pop_gc_frame", asm)
-    @test !occursin("julia.get_gc_frame_slot", asm)
-    @test !occursin("julia.new_gc_frame", asm)
+    @test @filecheck begin
+        check"CHECK-NOT: jl_push_gc_frame"
+        check"CHECK-NOT: jl_pop_gc_frame"
+        check"CHECK-NOT: jl_get_gc_frame_slot"
+        check"CHECK-NOT: jl_new_gc_frame"
+        check"CHECK: gpu_gc_pool_alloc"
+        GCN.code_native(mod.kernel, Tuple{Int})
+    end
 
     # make sure that we can still ellide allocations
     function ref_kernel(ptr, i)
@@ -191,10 +212,10 @@ false && @testset "GC and TLS lowering" begin
         return nothing
     end
 
-    asm = sprint(io->GCN.code_native(io, ref_kernel, Tuple{Ptr{Int64}, Int}))
-
-
-    @test !occursin("gpu_gc_pool_alloc", asm)
+    @test @filecheck begin
+        check"CHECK-NOT: gpu_gc_pool_alloc"
+        GCN.code_native(ref_kernel, Tuple{Ptr{Int64}, Int})
+    end
 end
 
 @testset "float boxes" begin
@@ -208,8 +229,10 @@ end
         return
     end
 
-    ir = sprint(io->GCN.code_llvm(io, kernel, Tuple{Float32,Ptr{Float32}}))
-    @test occursin("jl_box_float32", ir)
+    @test @filecheck begin
+        check"CHECK: jl_box_float32"
+        GCN.code_llvm(kernel, Tuple{Float32,Ptr{Float32}})
+    end
     GCN.code_native(devnull, kernel, Tuple{Float32,Ptr{Float32}})
 end
 

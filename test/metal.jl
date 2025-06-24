@@ -4,44 +4,54 @@
 @testset "byref aggregates" begin
     kernel(x) = return
 
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Tuple{Int}}))
-    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\*", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr", ir)
+    @test @filecheck begin
+        check"TYPED: @{{.*kernel.*}}({{(\{ i64 \}|\[1 x i64\])}}*"
+        check"OPAQUE: @{{.*kernel.*}}(ptr"
+        Metal.code_llvm(kernel, Tuple{Tuple{Int}})
+    end
 
     # for kernels, every pointer argument needs to take an address space
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Tuple{Int}}; kernel=true))
-    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\]) addrspace\(1\)\*", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr addrspace\(1\)", ir)
+    @test @filecheck begin
+        check"TYPED: @{{.*kernel.*}}({{(\{ i64 \}|\[1 x i64\])}} addrspace(1)*"
+        check"OPAQUE: @{{.*kernel.*}}(ptr addrspace(1)"
+        Metal.code_llvm(kernel, Tuple{Tuple{Int}}; kernel=true)
+    end
 end
 
 @testset "byref primitives" begin
     kernel(x) = return
 
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Int}))
-    @test occursin(r"@\w*kernel\w*\(i64 ", ir)
+    @test @filecheck begin
+        check"CHECK: @{{.*kernel.*}}(i64 "
+        Metal.code_llvm(kernel, Tuple{Int})
+    end
 
     # for kernels, every pointer argument needs to take an address space
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Int}; kernel=true))
-    @test occursin(r"@\w*kernel\w*\(i64 addrspace\(1\)\*", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr addrspace\(1\)", ir)
+    @test @filecheck begin
+        check"TYPED: @{{.*kernel.*}}(i64 addrspace(1)*"
+        check"OPAQUE: @{{.*kernel.*}}(ptr addrspace(1)"
+        Metal.code_llvm(kernel, Tuple{Int}; kernel=true)
+    end
 end
 
 @testset "module metadata" begin
     kernel() = return
 
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{};
-                                    dump_module=true, kernel=true))
-    @test occursin("air.version", ir)
-    @test occursin("air.language_version", ir)
-    @test occursin("air.max_device_buffers", ir)
+    @test @filecheck begin
+        check"CHECK: air.version"
+        check"CHECK: air.language_version"
+        check"CHECK: air.max_device_buffers"
+        Metal.code_llvm(kernel, Tuple{}; dump_module=true, kernel=true)
+    end
 end
 
 @testset "argument metadata" begin
     kernel(x) = return
 
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Int};
-                                    dump_module=true, kernel=true))
-    @test occursin("air.buffer", ir)
+    @test @filecheck begin
+        check"CHECK: air.buffer"
+        Metal.code_llvm(kernel, Tuple{Int}; dump_module=true, kernel=true)
+    end
 
     # XXX: perform more exhaustive testing of argument passing metadata here,
     #      or just defer to execution testing in Metal.jl?
@@ -54,23 +64,29 @@ end
         return
     end
 
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}))
-    @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %.+\)", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr addrspace\(1\) %.+\)", ir)
-    @test occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
+    @test @filecheck begin
+        check"TYPED: @{{.*kernel.*}}({{.*}} addrspace(1)* %{{.+}})"
+        check"OPAQUE: @{{.*kernel.*}}(ptr addrspace(1) %{{.+}})"
+        check"CHECK: call i32 @julia.air.thread_position_in_threadgroup.i32"
+        Metal.code_llvm(kernel, Tuple{Core.LLVMPtr{Int,1}})
+    end
 
-    ir = sprint(io->Metal.code_llvm(io, kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true))
-    @test occursin(r"@\w*kernel\w*\(.* addrspace\(1\)\* %.+, i32 %thread_position_in_threadgroup\)", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr addrspace\(1\) %.+, i32 %thread_position_in_threadgroup\)", ir)
-    @test !occursin(r"call i32 @julia.air.thread_position_in_threadgroup.i32", ir)
+    @test @filecheck begin
+        check"TYPED: @{{.*kernel.*}}({{.*}} addrspace(1)* %{{.+}}, i32 %thread_position_in_threadgroup)"
+        check"OPAQUE: @{{.*kernel.*}}(ptr addrspace(1) %{{.+}}, i32 %thread_position_in_threadgroup)"
+        check"CHECK-NOT: call i32 @julia.air.thread_position_in_threadgroup.i32"
+        Metal.code_llvm(kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true)
+    end
 end
 
 @testset "vector intrinsics" begin
     foo(x, y) = ccall("llvm.smax.v2i64", llvmcall, NTuple{2, VecElement{Int64}},
                       (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}), x, y)
 
-    ir = sprint(io->Metal.code_llvm(io, foo, (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}})))
-    @test occursin("air.max.s.v2i64", ir)
+    @test @filecheck begin
+        check"CHECK: air.max.s.v2i64"
+        Metal.code_llvm(foo, (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}))
+    end
 end
 
 @testset "unsupported type detection" begin
@@ -104,8 +120,10 @@ end
         return
     end
 
-    ir = sprint(io->Metal.code_llvm(io, kernel1, Tuple{Core.LLVMPtr{Float32,1}}; validate=true))
-    @test occursin("@metal_os_log", ir)
+    @test @filecheck begin
+        check"CHECK: @metal_os_log"
+        Metal.code_llvm(kernel1, Tuple{Core.LLVMPtr{Float32,1}}; validate=true)
+    end
 
     function kernel2(ptr)
         val = unsafe_load(ptr)
@@ -130,9 +148,10 @@ end
         end
     end
 
-    ir = sprint(io->Metal.code_llvm(io, mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int};
-                                    dump_module=true, kernel=true))
-    @test occursin("addrspace(2) constant [2 x float]", ir)
+    @test @filecheck begin
+        check"CHECK: addrspace(2) constant [2 x float]"
+        Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int}; dump_module=true, kernel=true)
+    end
 end
 
 end
