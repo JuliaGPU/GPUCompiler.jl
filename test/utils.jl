@@ -92,3 +92,75 @@ end
         @test occursin(ansi_color, highlighted) skip = !can_highlight
     end
 end
+
+
+import GPUCompiler: StackedMethodTable
+import Core.Compiler: findsup, findall, isoverlayed
+
+Base.Experimental.@MethodTable(LayerMT)
+Base.Experimental.@MethodTable(OtherMT)
+
+OverlayMT() = Core.Compiler.OverlayMethodTable(Base.get_world_counter(), LayerMT)
+StackedMT() = StackedMethodTable(Base.get_world_counter(), LayerMT)
+DoubleStackedMT() = StackedMethodTable(Base.get_world_counter(), OtherMT, LayerMT)
+
+@testset "StackedMethodTable -- Unoverlayed" begin
+    if VERSION >= v"1.11.0-DEV.363"
+        @test isoverlayed(OverlayMT()) == true
+        @test isoverlayed(StackedMT()) == true
+        @test isoverlayed(DoubleStackedMT()) == true
+    end
+
+    o_sin  = findsup(Tuple{typeof(sin), Float64}, OverlayMT())
+    s_sin  = findsup(Tuple{typeof(sin), Float64}, StackedMT())
+    ss_sin = findsup(Tuple{typeof(sin), Float64}, DoubleStackedMT())
+    @test s_sin == o_sin
+    @test ss_sin == o_sin
+
+    o_sin  = findall(Tuple{typeof(sin), Float64}, OverlayMT())
+    s_sin  = findall(Tuple{typeof(sin), Float64}, StackedMT())
+    ss_sin = findall(Tuple{typeof(sin), Float64}, DoubleStackedMT())
+    if VERSION >= v"1.11.0-DEV.363"
+        @test o_sin.matches == s_sin.matches
+        @test o_sin.matches == ss_sin.matches
+    else
+        @test o_sin.matches.matches == s_sin.matches.matches
+        @test o_sin.matches.matches == ss_sin.matches.matches
+        @test o_sin.overlayed == s_sin.overlayed
+        @test o_sin.overlayed == ss_sin.overlayed
+        @test o_sin.overlayed == false
+    end
+end
+
+# Note: This must be a top-level otherwise the tests below will not see the new function.
+prev_world = Base.get_world_counter()
+Base.Experimental.@overlay LayerMT function Base.sin(x::Float64) end
+next_world = Base.get_world_counter()
+
+@test next_world > prev_world
+
+@testset "StackedMethodTable -- Overlayed" begin
+    o_sin = findsup(Tuple{typeof(sin), Float64}, OverlayMT())
+    s_sin = findsup(Tuple{typeof(sin), Float64}, StackedMT())
+    ss_sin = findsup(Tuple{typeof(sin), Float64}, DoubleStackedMT())
+    @test s_sin == o_sin
+    @test ss_sin == o_sin
+
+    worlds = o_sin[2]
+    @test worlds.min_world > prev_world
+    @test worlds.max_world == typemax(typeof(next_world))
+
+    o_sin  = findall(Tuple{typeof(sin), Float64}, OverlayMT())
+    s_sin  = findall(Tuple{typeof(sin), Float64}, StackedMT())
+    ss_sin = findall(Tuple{typeof(sin), Float64}, DoubleStackedMT())
+    if VERSION >= v"1.11.0-DEV.363"
+        @test o_sin.matches == s_sin.matches
+        @test o_sin.matches == ss_sin.matches
+    else
+        @test o_sin.matches.matches == s_sin.matches.matches
+        @test o_sin.matches.matches == ss_sin.matches.matches
+        @test o_sin.overlayed == s_sin.overlayed
+        @test o_sin.overlayed == ss_sin.overlayed
+        @test o_sin.overlayed == true
+    end
+end
