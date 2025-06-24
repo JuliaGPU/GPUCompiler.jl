@@ -42,13 +42,11 @@ module FileCheck
     import LLVM_jll
     import IOCapture
     using GPUCompiler, LLVM
-    using Test
 
     export filecheck, @filecheck, @check_str
 
     global filecheck_path::String
     function __init__()
-        # TODO: Windows
         global filecheck_path = joinpath(LLVM_jll.artifact_dir, "tools", "FileCheck")
     end
 
