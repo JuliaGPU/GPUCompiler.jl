@@ -25,12 +25,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{.*kernel.*}}("
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
         SPIRV.code_llvm(mod.kernel, Tuple{Tuple{Int}}; backend)
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define spir_kernel void @{{.*kernel.*}}("
+        check"CHECK-LABEL: define spir_kernel void @_Z6kernel"
         SPIRV.code_llvm(mod.kernel, Tuple{Tuple{Int}}; backend, kernel=true)
     end
 end
@@ -40,8 +40,10 @@ end
     mod = @eval module $(gensym())
         @noinline kernel() = return
     end
-    SPIRV.code_llvm(devnull, mod.kernel, Tuple{}; backend, kernel=true)
-    @test "We did not crash!" != ""
+    @test @filecheck begin
+        check"CHECK-LABEL: define spir_kernel void @_Z6kernel"
+        SPIRV.code_llvm(mod.kernel, Tuple{}; backend, kernel=true)
+    end
 end
 end
 
@@ -54,19 +56,19 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define {{.*}} @{{.*kernel.*}}("
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
         check"CHECK: store half"
         SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float16}, Float16}; backend)
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define {{.*}} @{{.*kernel.*}}("
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
         check"CHECK: store float"
         SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float32}, Float32}; backend)
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define {{.*}} @{{.*kernel.*}}("
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
         check"CHECK: store double"
         SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float64}, Float64}; backend)
     end
@@ -103,7 +105,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: {{.*kernel.*}}"
+        check"CHECK: %_Z6kernel4Bool = OpFunction %void None"
         SPIRV.code_native(mod.kernel, Tuple{Bool}; backend, kernel=true)
     end
 end

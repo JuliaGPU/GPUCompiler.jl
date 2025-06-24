@@ -81,7 +81,7 @@ end
 
     @test @filecheck begin
         check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"TYPED-SAME: ({{.*}} addrspace(1)* %{{.+}})"
+        check"TYPED-SAME: ({{.+}} addrspace(1)* %{{.+}})"
         check"OPAQUE-SAME: (ptr addrspace(1) %{{.+}})"
         check"CHECK: call i32 @julia.air.thread_position_in_threadgroup.i32"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}})
@@ -89,7 +89,7 @@ end
 
     @test @filecheck begin
         check"CHECK-LABEL: define void @_Z6kernel7LLVMPtrI5Int64Li1EE"
-        check"TYPED-SAME: ({{.*}} addrspace(1)* %{{.+}}, i32 %thread_position_in_threadgroup)"
+        check"TYPED-SAME: ({{.+}} addrspace(1)* %{{.+}}, i32 %thread_position_in_threadgroup)"
         check"OPAQUE-SAME: (ptr addrspace(1) %{{.+}}, i32 %thread_position_in_threadgroup)"
         check"CHECK-NOT: call i32 @julia.air.thread_position_in_threadgroup.i32"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true)
@@ -174,7 +174,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: @{{.+}} = {{.*}} addrspace(2) constant [2 x float]"
+        check"CHECK: @{{.+}} ={{.*}} addrspace(2) constant [2 x float]"
         check"CHECK: define void @_Z6kernel7LLVMPtrI7Float32Li1EE5Int64"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int};
                         dump_module=true, kernel=true)

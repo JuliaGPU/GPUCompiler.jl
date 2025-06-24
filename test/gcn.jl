@@ -40,7 +40,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{.*kernel.*}}:"
+        check"CHECK-LABEL: {{(julia|j)_kernel_[0-9]+}}:"
         check"CHECK: s_trap 2"
         GCN.code_native(mod.kernel, Tuple{})
     end
@@ -64,9 +64,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{.*parent.*}}:"
-        check"CHECK: s_add_u32{{.*(julia|j)_child_.*}}@rel32@"
-        check"CHECK: s_addc_u32{{.*(julia|j)_child_.*}}@rel32@"
+        check"CHECK-LABEL: {{(julia|j)_parent_[0-9]+}}:"
+        check"CHECK: s_add_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
+        check"CHECK: s_addc_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
         GCN.code_native(mod.parent, Tuple{Int64}; dump_module=true)
     end
 end
@@ -82,9 +82,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: .amdhsa_kernel {{.*}}nonentry"
-        check"CHECK: .type {{.*nonentry.*}},@function"
-        check"CHECK: .amdhsa_kernel {{.*entry.*}}"
+        check"CHECK-NOT: .amdhsa_kernel {{(julia|j)_nonentry_[0-9]+}}"
+        check"CHECK: .type {{(julia|j)_nonentry_[0-9]+}},@function"
+        check"CHECK: .amdhsa_kernel _Z5entry5Int64"
         GCN.code_native(mod.entry, Tuple{Int64}; dump_module=true, kernel=true)
     end
 end
@@ -107,12 +107,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: .type {{.*child.*}},@function"
+        check"CHECK: .type {{(julia|j)_child_[0-9]+}},@function"
         GCN.code_native(mod.parent1, Tuple{Int}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK: .type {{.*child.*}},@function"
+        check"CHECK: .type {{(julia|j)_child_[0-9]+}},@function"
         GCN.code_native(mod.parent2, Tuple{Int}; dump_module=true)
     end
 end
@@ -136,14 +136,14 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-DAG: .type {{.*child1.*}},@function"
-        check"CHECK-DAG: .type {{.*child2.*}},@function"
+        check"CHECK-DAG: .type {{(julia|j)_child1_[0-9]+}},@function"
+        check"CHECK-DAG: .type {{(julia|j)_child2_[0-9]+}},@function"
         GCN.code_native(mod.parent1, Tuple{Int}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK-DAG: .type {{.*child1.*}},@function"
-        check"CHECK-DAG: .type {{.*child2.*}},@function"
+        check"CHECK-DAG: .type {{(julia|j)_child1_[0-9]+}},@function"
+        check"CHECK-DAG: .type {{(julia|j)_child2_[0-9]+}},@function"
         GCN.code_native(mod.parent2, Tuple{Int}; dump_module=true)
     end
 end
@@ -163,7 +163,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{.*kernel.*}}:"
+        check"CHECK-LABEL: {{(julia|j)_kernel_[0-9]+}}:"
         check"CHECK-NOT: jl_throw"
         check"CHECK-NOT: jl_invoke"
         GCN.code_native(mod.kernel, Tuple{Ptr{Int32}})
@@ -256,7 +256,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{.*kernel.*}}"
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
         check"CHECK: jl_box_float32"
         GCN.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}})
     end

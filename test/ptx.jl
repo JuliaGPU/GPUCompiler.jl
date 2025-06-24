@@ -5,7 +5,7 @@
         foobar() = throw(DivideError())
     end
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{.*foobar.*}}()"
+        check"CHECK-LABEL: define void @{{(julia|j)_foobar_[0-9]+}}"
         # plain exceptions should get lowered to a call to the GPU run-time
         # not a jl_throw referencing a jl_value_t representing the exception
         check"CHECK-NOT: jl_throw"
@@ -26,12 +26,16 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{.*kernel.*}}("
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+        check"TYPED-SAME: ({{({ i64 }|\[1 x i64\])}}*"
+        check"OPAQUE-SAME: (ptr"
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate})
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define ptx_kernel void @_Z6kernel9Aggregate({{.*({ i64 }|\[1 x i64\])}}"
+        check"CHECK-LABEL: define ptx_kernel void @_Z6kernel9Aggregate"
+        check"TYPED-NOT: *"
+        check"OPAQUE-NOT: ptr"
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; kernel=true)
     end
 end
@@ -137,12 +141,12 @@ end
     end
     # child1 doesn't use the state
     @test @filecheck begin
-        check"CHECK-LABEL: define internal fastcc i64 @{{.*child1.*}}("
+        check"CHECK-LABEL: define{{.*}} i64 @{{(julia|j)_child1_[0-9]+}}"
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
     end
     # child2 does
     @test @filecheck begin
-        check"CHECK-LABEL: define internal fastcc i64 @{{.*child2.*}}("
+        check"CHECK-LABEL: define{{.*}} i64 @{{(julia|j)_child2_[0-9]+}}"
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
     end
 end
@@ -381,17 +385,17 @@ end
     mod = @eval module $(gensym())
         function kernel(a,b)
             c = Int32(a)
-            # the conversion to Int32 may fail, in which case the input Float32 is boxed in order to
-            # pass it to the @nospecialize exception constructor. we should really avoid that (eg.
-            # by avoiding @nospecialize, or optimize the unused arguments away), but for now the box
-            # should just work.
+            # the conversion to Int32 may fail, in which case the input Float32 is boxed in
+            # order to pass it to the @nospecialize exception constructor. we should really
+            # avoid that (eg. by avoiding @nospecialize, or optimize the unused arguments
+            # away), but for now the box should just work.
             unsafe_store!(b, c)
             return
         end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{.*kernel.*}}("
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
         check"CHECK: jl_box_float32"
         PTX.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}})
     end
