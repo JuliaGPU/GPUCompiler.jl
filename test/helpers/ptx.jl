@@ -67,6 +67,15 @@ function code_native(io::IO, @nospecialize(func), @nospecialize(types); kwargs..
     GPUCompiler.code_native(io, job; kwargs...)
 end
 
+# aliases without ::IO argument
+for method in (:code_warntype, :code_llvm, :code_native)
+    method = Symbol("$(method)")
+    @eval begin
+        $method(@nospecialize(func), @nospecialize(types); kwargs...) =
+            $method(stdout, func, types; kwargs...)
+    end
+end
+
 # simulates codegen for a kernel function: validates by default
 function code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = create_job(func, types; kernel=true, kwargs...)

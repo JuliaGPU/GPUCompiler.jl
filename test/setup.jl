@@ -9,6 +9,7 @@ for file in readdir(joinpath(@__DIR__, "helpers"))
         include(joinpath(@__DIR__, "helpers", file))
     end
 end
+using .FileCheck
 
 
 ## entry point
