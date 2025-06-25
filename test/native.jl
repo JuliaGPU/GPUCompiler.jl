@@ -6,82 +6,102 @@
     ci, rt = only(GPUCompiler.code_typed(job))
     @test rt === Int
 
-    ir = sprint(io->GPUCompiler.code_warntype(io, job))
-    @test contains(ir, "MethodInstance for identity")
+    @test @filecheck begin
+        check"CHECK: MethodInstance for identity"
+        GPUCompiler.code_warntype(job)
+    end
 
-    ir = sprint(io->GPUCompiler.code_llvm(io, job))
-    @test contains(ir, r"(julia|j)_identity")
+    @test @filecheck begin
+        check"CHECK: @{{(julia|j)_identity_[0-9]+}}"
+        GPUCompiler.code_llvm(job)
+    end
 
-    asm = sprint(io->GPUCompiler.code_native(io, job))
-    @test contains(asm, r"(julia|j)_identity")
+    @test @filecheck begin
+        check"CHECK: @{{(julia|j)_identity_[0-9]+}}"
+        GPUCompiler.code_native(job)
+    end
 end
 
 @testset "compilation" begin
     @testset "callable structs" begin
-        struct MyCallable end
-        (::MyCallable)(a, b) = a+b
+        mod = @eval module $(gensym())
+            struct MyCallable end
+            (::MyCallable)(a, b) = a+b
+        end
 
-        (ci, rt) = Native.code_typed(MyCallable(), (Int, Int), kernel=false)[1]
-        @test ci.slottypes[1] == Core.Compiler.Const(MyCallable())
+        (ci, rt) = Native.code_typed(mod.MyCallable(), (Int, Int), kernel=false)[1]
+        @test ci.slottypes[1] == Core.Compiler.Const(mod.MyCallable())
     end
 
     @testset "compilation database" begin
-        @noinline inner(x) = x+1
-        function outer(x)
-            return inner(x)
+        mod = @eval module $(gensym())
+            @noinline inner(x) = x+1
+            function outer(x)
+                return inner(x)
+            end
         end
 
-        job, _ = Native.create_job(outer, (Int,))
+        job, _ = Native.create_job(mod.outer, (Int,))
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job)
 
-            meth = only(methods(outer, (Int,)))
+            meth = only(methods(mod.outer, (Int,)))
 
             mis = filter(mi->mi.def == meth, keys(meta.compiled))
             @test length(mis) == 1
 
             other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
             @test length(other_mis) == 1
-            @test only(other_mis).def in methods(inner)
+            @test only(other_mis).def in methods(mod.inner)
         end
     end
 
     @testset "advanced database" begin
-        @noinline inner(x) = x+1
-        foo(x) = sum(inner, fill(x, 10, 10))
+        mod = @eval module $(gensym())
+            @noinline inner(x) = x+1
+            foo(x) = sum(inner, fill(x, 10, 10))
+        end
 
-        job, _ = Native.create_job(foo, (Float64,); validate=false)
+        job, _ = Native.create_job(mod.foo, (Float64,); validate=false)
         JuliaContext() do ctx
             # shouldn't segfault
             ir, meta = GPUCompiler.compile(:llvm, job)
 
-            meth = only(methods(foo, (Float64,)))
+            meth = only(methods(mod.foo, (Float64,)))
 
             mis = filter(mi->mi.def == meth, keys(meta.compiled))
             @test length(mis) == 1
 
             inner_methods = filter(keys(meta.compiled)) do mi
-                mi.def in methods(inner) && mi.specTypes == Tuple{typeof(inner), Float64}
+                mi.def in methods(mod.inner) &&
+                mi.specTypes == Tuple{typeof(mod.inner), Float64}
             end
             @test length(inner_methods) == 1
         end
     end
 
     @testset "cached compilation" begin
-        @gensym child kernel unrelated
-        @eval @noinline $child(i) = i
-        @eval $kernel(i) = $child(i)+1
+        mod = @eval module $(gensym())
+            @noinline child(i) = i
+            kernel(i) = child(i)+1
+        end
 
         # smoke test
-        job, _ = Native.create_job(eval(kernel), (Int64,))
-        ir = sprint(io->GPUCompiler.code_llvm(io, job))
-        @test contains(ir, r"add i64 %\d+, 1")
+        job, _ = Native.create_job(mod.kernel, (Int64,))
+        @test @filecheck begin
+            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            check"CHECK: add i64 %{{[0-9]+}}, 1"
+            GPUCompiler.code_llvm(job)
+        end
 
         # basic redefinition
-        @eval $kernel(i) = $child(i)+2
-        job, _ = Native.create_job(eval(kernel), (Int64,))
-        ir = sprint(io->GPUCompiler.code_llvm(io, job))
-        @test contains(ir, r"add i64 %\d+, 2")
+        @eval mod kernel(i) = child(i)+2
+        job, _ = Native.create_job(mod.kernel, (Int64,))
+        @test @filecheck begin
+            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            check"CHECK: add i64 %{{[0-9]+}}, 2"
+            GPUCompiler.code_llvm(job)
+        end
 
         # cached_compilation interface
         invocations = Ref(0)
@@ -94,51 +114,65 @@ end
         end
         linker(job, compiled) = compiled
         cache = Dict()
-        ft = typeof(eval(kernel))
+        ft = typeof(mod.kernel)
         tt = Tuple{Int64}
 
         # initial compilation
         source = methodinstance(ft, tt, Base.get_world_counter())
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, r"add i64 %\d+, 2")
+        @test @filecheck begin
+            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            check"CHECK: add i64 %{{[0-9]+}}, 2"
+            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        end
         @test invocations[] == 1
 
         # cached compilation
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, r"add i64 %\d+, 2")
+        @test @filecheck begin
+            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            check"CHECK: add i64 %{{[0-9]+}}, 2"
+            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        end
         @test invocations[] == 1
 
         # redefinition
-        @eval $kernel(i) = $child(i)+3
+        @eval mod kernel(i) = child(i)+3
         source = methodinstance(ft, tt, Base.get_world_counter())
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, r"add i64 %\d+, 3")
+        @test @filecheck begin
+            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            check"CHECK: add i64 %{{[0-9]+}}, 3"
+            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        end
         @test invocations[] == 2
 
         # cached compilation
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, r"add i64 %\d+, 3")
+        @test @filecheck begin
+            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            check"CHECK: add i64 %{{[0-9]+}}, 3"
+            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        end
         @test invocations[] == 2
 
         # redefinition of an unrelated function
-        @eval $unrelated(i) = 42
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        @eval mod unrelated(i) = 42
+        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test invocations[] == 2
 
         # redefining child functions
-        @eval @noinline $child(i) = i+1
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        @eval mod @noinline child(i) = i+1
+        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test invocations[] == 3
 
         # cached compilation
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test invocations[] == 3
 
         # change in configuration
         config = CompilerConfig(job.config; name="foobar")
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, config, compiler, linker)
+        @test @filecheck begin
+            check"CHECK: define i64 @foobar"
+            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, config, compiler, linker)
+        end
         @test invocations[] == 4
-        @test contains(ir, "foobar")
 
         # tasks running in the background should keep on using the old version
         c1, c2 = Condition(), Condition()
@@ -150,13 +184,16 @@ end
         end
         t = @async Base.invokelatest(background, job)
         wait(c1)        # make sure the task has started
-        @eval $kernel(i) = $child(i)+4
+        @eval mod kernel(i) = child(i)+4
         source = methodinstance(ft, tt, Base.get_world_counter())
         ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         @test contains(ir, r"add i64 %\d+, 4")
         notify(c2)      # wake up the task
-        ir = fetch(t)
-        @test contains(ir, r"add i64 %\d+, 3")
+        @test @filecheck begin
+            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            check"CHECK: add i64 %{{[0-9]+}}, 3"
+            fetch(t)
+        end
     end
 
     @testset "allowed mutable types" begin
@@ -177,59 +214,71 @@ end
 @testset "IR" begin
 
 @testset "basic reflection" begin
-    valid_kernel() = return
-    invalid_kernel() = 1
+    mod = @eval module $(gensym())
+        valid_kernel() = return
+        invalid_kernel() = 1
+    end
 
-    ir = sprint(io->Native.code_llvm(io, valid_kernel, Tuple{}; optimize=false, dump_module=true))
+    @test @filecheck begin
+        # module should contain our function + a generic call wrapper
+        check"CHECK: @{{(julia|j)_valid_kernel_[0-9]+}}"
+        Native.code_llvm(mod.valid_kernel, Tuple{}; optimize=false, dump_module=true)
+    end
 
-    # module should contain our function + a generic call wrapper
-    @test occursin(r"define\ .* void\ @.*(julia|j)_valid_kernel.*\(\)"x, ir)
-    @test !occursin("define %jl_value_t* @jlcall_", ir)
-
-    # there should be no debug metadata
-    @test !occursin("!dbg", ir)
-
-    @test Native.code_llvm(devnull, invalid_kernel, Tuple{}) == nothing
-    @test_throws KernelError Native.code_llvm(devnull, invalid_kernel, Tuple{}; kernel=true) == nothing
+    @test Native.code_llvm(devnull, mod.invalid_kernel, Tuple{}) == nothing
+    @test_throws KernelError Native.code_llvm(devnull, mod.invalid_kernel, Tuple{}; kernel=true) == nothing
 end
 
 @testset "unbound typevars" begin
-    invalid_kernel() where {unbound} = return
-    @test_throws KernelError Native.code_llvm(devnull, invalid_kernel, Tuple{})
+    mod = @eval module $(gensym())
+        invalid_kernel() where {unbound} = return
+    end
+    @test_throws KernelError Native.code_llvm(devnull, mod.invalid_kernel, Tuple{})
 end
 
 @testset "child functions" begin
     # we often test using `@noinline sink` child functions, so test whether these survive
-    @noinline child(i) = sink(i)
-    parent(i) = child(i)
+    mod = @eval module $(gensym())
+        import ..sink
+        @noinline child(i) = sink(i)
+        parent(i) = child(i)
+    end
 
-    ir = sprint(io->Native.code_llvm(io, parent, Tuple{Int}))
-    @test occursin(r"call .+ @(julia|j).+child.+", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: define i64 @{{(julia|j)_parent_[0-9]+}}"
+        check"CHECK: call{{.*}} i64 @{{(julia|j)_child_[0-9]+}}"
+        Native.code_llvm(mod.parent, Tuple{Int})
+    end
 end
 
 @testset "sysimg" begin
     # bug: use a system image function
-
-    function foobar(a,i)
-        Base.pointerset(a, 0, mod1(i,10), 8)
+    mod = @eval module $(gensym())
+        function foobar(a,i)
+            Base.pointerset(a, 0, mod1(i,10), 8)
+        end
     end
 
-    ir = sprint(io->Native.code_llvm(io, foobar, Tuple{Ptr{Int},Int}))
-    @test !occursin("jlsys_", ir)
+    @test @filecheck begin
+        check"CHECK-NOT: jlsys_"
+        Native.code_llvm(mod.foobar, Tuple{Ptr{Int},Int})
+    end
 end
 
 @testset "tracked pointers" begin
-    function kernel(a)
-        a[1] = 1
-        return
+    mod = @eval module $(gensym())
+        function kernel(a)
+            a[1] = 1
+            return
+        end
     end
 
     # this used to throw an LLVM assertion (#223)
-    Native.code_llvm(devnull, kernel, Tuple{Vector{Int}}; kernel=true)
+    Native.code_llvm(devnull, mod.kernel, Tuple{Vector{Int}}; kernel=true)
     @test "We did not crash!" != ""
 end
 
-@testset "CUDAjl#278" begin
+@testset "CUDA.jl#278" begin
     # codegen idempotency
     # NOTE: this isn't fixed, but surfaces here due to bad inference of checked_sub
     # NOTE: with the fix to print_to_string this doesn't error anymore,
@@ -259,71 +308,94 @@ end
 end
 
 @testset "slow abi" begin
-    x = 2
-    f = () -> x+1
-    ir = sprint(io->Native.code_llvm(io, f, Tuple{}, entry_abi=:func, dump_module=true))
-    @test occursin(r"define nonnull {}\* @jfptr", ir) ||
-          occursin(r"define nonnull ptr @jfptr", ir)
-    @test occursin(r"define internal fastcc .+ @julia", ir)
-    @test occursin(r"call fastcc .+ @julia", ir)
+    mod = @eval module $(gensym())
+        x = 2
+        f = () -> x+1
+    end
+    @test @filecheck begin
+        check"CHECK: define {{.+}} @julia"
+        check"TYPED: define nonnull {}* @jfptr"
+        check"OPAQUE: define nonnull ptr @jfptr"
+        check"CHECK: call {{.+}} @julia"
+        Native.code_llvm(mod.f, Tuple{}; entry_abi=:func, dump_module=true)
+    end
 end
 
 @testset "function entry safepoint emission" begin
-    ir = sprint(io->Native.code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true))
-    @test !occursin("%safepoint", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: define void @{{(julia|j)_identity_[0-9]+}}"
+        check"CHECK-NOT: %safepoint"
+        Native.code_llvm(identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true)
+    end
 
-    ir = sprint(io->Native.code_llvm(io, identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true))
-    @test occursin("%safepoint", ir) broken=(VERSION >= v"1.13.0-DEV.533")
     # XXX: broken by JuliaLang/julia#57010,
     #      see https://github.com/JuliaLang/julia/pull/57010/files#r2079576894
+    if VERSION < v"1.13.0-DEV.533"
+        @test @filecheck begin
+            check"CHECK-LABEL: define void @{{(julia|j)_identity_[0-9]+}}"
+            check"CHECK: %safepoint"
+            Native.code_llvm(identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true)
+        end
+    end
 end
 
 @testset "always_inline" begin
     # XXX: broken by JuliaLang/julia#51599, see JuliaGPU/GPUCompiler.jl#527
     mod = @eval module $(gensym())
-        f_expensive(x) = $(foldl((e, _) -> :($sink($e) + $sink(x)), 1:100; init=:x))
+        import ..sink
+        expensive(x) = $(foldl((e, _) -> :($sink($e) + $sink(x)), 1:100; init=:x))
         function g(x)
-            f_expensive(x)
+            expensive(x)
             return
         end
         function h(x)
-            f_expensive(x)
+            expensive(x)
             return
         end
     end
 
-    ir = sprint(io->Native.code_llvm(io, mod.g, Tuple{Int64}; dump_module=true, kernel=true))
-    @test occursin(r"^define.*(julia|j)_f_expensive"m, ir)
+    @test @filecheck begin
+        check"CHECK: @{{(julia|j)_expensive_[0-9]+}}"
+        Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true)
+    end
 
-    ir = sprint(io->Native.code_llvm(io, mod.g, Tuple{Int64}; dump_module=true, kernel=true,
-                                     always_inline=true))
-    @test !occursin(r"^define.*(julia|j)_f_expensive"m, ir)
+    @test @filecheck begin
+        check"CHECK-NOT: @{{(julia|j)_expensive_[0-9]+}}"
+        Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
+    end
 
-    ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true,
-                                     always_inline=true))
-    @test !occursin(r"^define.*(julia|j)_f_expensive"m, ir)
+    @test @filecheck begin
+        check"CHECK: @{{(julia|j)_expensive_[0-9]+}}"
+        Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true)
+    end
 
-    ir = sprint(io->Native.code_llvm(io, mod.h, Tuple{Int64}; dump_module=true, kernel=true))
-    @test occursin(r"^define.*(julia|j)_f_expensive"m, ir)
+    @test @filecheck begin
+        check"CHECK-NOT: @{{(julia|j)_expensive_[0-9]+}}"
+        Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
+    end
 end
 
 @testset "function attributes" begin
-    @inline function convergent_barrier()
-        Base.llvmcall(("""
-            declare void @barrier() #1
+    mod = @eval module $(gensym())
+        @inline function convergent_barrier()
+            Base.llvmcall(("""
+                declare void @barrier() #1
 
-            define void @entry() #0 {
-                call void @barrier()
-                ret void
-            }
+                define void @entry() #0 {
+                    call void @barrier()
+                    ret void
+                }
 
-            attributes #0 = { alwaysinline }
-            attributes #1 = { convergent }""", "entry"),
-        Nothing, Tuple{})
+                attributes #0 = { alwaysinline }
+                attributes #1 = { convergent }""", "entry"),
+            Nothing, Tuple{})
+        end
     end
 
-    ir = sprint(io->Native.code_llvm(io, convergent_barrier, Tuple{}; dump_module=true, raw=true))
-    @test occursin(r"attributes #. = \{ convergent \}", ir)
+    @test @filecheck begin
+        check"CHECK: attributes #{{.}} = { convergent }"
+        Native.code_llvm(mod.convergent_barrier, Tuple{}; dump_module=true, raw=true)
+    end
 end
 
 end
@@ -333,39 +405,45 @@ end
 @testset "assembly" begin
 
 @testset "basic reflection" begin
-    valid_kernel() = return
-    invalid_kernel() = 1
+    mod = @eval module $(gensym())
+        valid_kernel() = return
+        invalid_kernel() = 1
+    end
 
-    @test Native.code_native(devnull, valid_kernel, Tuple{}) == nothing
-    @test Native.code_native(devnull, invalid_kernel, Tuple{}) == nothing
-    @test_throws KernelError Native.code_native(devnull, invalid_kernel, Tuple{}; kernel=true)
+    @test Native.code_native(devnull, mod.valid_kernel, Tuple{}) == nothing
+    @test Native.code_native(devnull, mod.invalid_kernel, Tuple{}) == nothing
+    @test_throws KernelError Native.code_native(devnull, mod.invalid_kernel, Tuple{}; kernel=true)
 end
 
 @testset "idempotency" begin
     # bug: generate code twice for the same kernel (jl_to_ptx wasn't idempotent)
-
-    kernel() = return
-    Native.code_native(devnull, kernel, Tuple{})
-    Native.code_native(devnull, kernel, Tuple{})
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+    Native.code_native(devnull, mod.kernel, Tuple{})
+    Native.code_native(devnull, mod.kernel, Tuple{})
 
     @test "We did not crash!" != ""
 end
 
 @testset "compile for host after gpu" begin
     # issue #11: re-using host functions after GPU compilation
-    @noinline child(i) = sink(i+1)
+    mod = @eval module $(gensym())
+        import ..sink
+        @noinline child(i) = sink(i+1)
 
-    function fromhost()
-        child(10)
+        function fromhost()
+            child(10)
+        end
+
+        function fromptx()
+            child(10)
+            return
+        end
     end
 
-    function fromptx()
-        child(10)
-        return
-    end
-
-    Native.code_native(devnull, fromptx, Tuple{})
-    @test fromhost() == 11
+    Native.code_native(devnull, mod.fromptx, Tuple{})
+    @test mod.fromhost() == 11
 end
 
 end
@@ -374,23 +452,29 @@ end
 
 @testset "errors" begin
 
-struct CleverType{T}
-    x::T
-end
-Base.unsafe_trunc(::Type{Int}, x::CleverType) = unsafe_trunc(Int, x.x)
 
 @testset "non-isbits arguments" begin
-    foobar(i) = (sink(unsafe_trunc(Int,i)); return)
+    mod = @eval module $(gensym())
+        import ..sink
+        foobar(i) = (sink(unsafe_trunc(Int,i)); return)
+    end
 
     @test_throws_message(KernelError,
-                         Native.code_execution(foobar, Tuple{BigInt})) do msg
+                         Native.code_execution(mod.foobar, Tuple{BigInt})) do msg
         occursin("passing non-bitstype argument", msg) &&
         occursin("BigInt", msg)
     end
 
     # test that we get information about fields and reason why something is not isbits
+    mod = @eval module $(gensym())
+        struct CleverType{T}
+            x::T
+        end
+        Base.unsafe_trunc(::Type{Int}, x::CleverType) = unsafe_trunc(Int, x.x)
+        foobar(i) = (sink(unsafe_trunc(Int,i)); return)
+    end
     @test_throws_message(KernelError,
-                         Native.code_execution(foobar, Tuple{CleverType{BigInt}})) do msg
+                         Native.code_execution(mod.foobar, Tuple{mod.CleverType{BigInt}})) do msg
         occursin("passing non-bitstype argument", msg) &&
         occursin("CleverType", msg) &&
         occursin("BigInt", msg)
@@ -399,7 +483,6 @@ end
 
 @testset "invalid LLVM IR" begin
     mod = @eval module $(gensym())
-        export foobar
         foobar(i) = println(i)
     end
 
@@ -416,7 +499,6 @@ end
 
 @testset "invalid LLVM IR (ccall)" begin
     mod = @eval module $(gensym())
-        export foobar
         function foobar(p)
             unsafe_store!(p, ccall(:time, Cint, ()))
             return
@@ -440,7 +522,6 @@ end
 
 @testset "delayed bindings" begin
     mod = @eval module $(gensym())
-        export kernel
         function kernel()
             undefined
             return
@@ -473,7 +554,6 @@ end
 
 @testset "dynamic call (apply)" begin
     mod = @eval module $(gensym())
-        export func
         func() = println(1)
     end
 
@@ -495,11 +575,14 @@ end
 
     mod = @eval module $(gensym())
         kernel() = child()
-        child() = 0
+        @inline child() = 0
     end
 
-    ir = sprint(io->Native.code_llvm(io, mod.kernel, Tuple{}))
-    @test occursin("ret i64 0", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: @julia_kernel"
+        check"CHECK: ret i64 0"
+        Native.code_llvm(mod.kernel, Tuple{})
+    end
 
     mod = @eval module $(gensym())
         using ..GPUCompiler
@@ -507,16 +590,20 @@ end
         Base.Experimental.@MethodTable(method_table)
 
         kernel() = child()
-        child() = 0
+        @inline child() = 0
 
         Base.Experimental.@overlay method_table child() = 1
     end
 
-    ir = sprint(io->Native.code_llvm(io, mod.kernel, Tuple{}; mod.method_table))
-    @test occursin("ret i64 1", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: @julia_kernel"
+        check"CHECK: ret i64 1"
+        Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
+    end
 end
 
-@testset "#366: semi-concrete interpretation + overlay methods = dynamic dispatch" begin
+@testset "semi-concrete interpretation + overlay methods" begin
+    # issue 366, caused dynamic deispatch
     mod = @eval module $(gensym())
         using ..GPUCompiler
         using StaticArrays
@@ -533,14 +620,17 @@ end
             (ccall("extern __nv_isnanf", llvmcall, Int32, (Cfloat,), x)) != 0
     end
 
-    ir = sprint(io->Native.code_llvm(io, mod.kernel, Tuple{Int, Int};
-                                     debuginfo=:none, mod.method_table))
-    @test !occursin("apply_generic", ir)
-    @test occursin("llvm.floor", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: @julia_kernel"
+        check"CHECK-NOT: apply_generic"
+        check"CHECK: llvm.floor"
+        Native.code_llvm(mod.kernel, Tuple{Int, Int}; debuginfo=:none, mod.method_table)
+    end
 end
 
-@testset "JuliaLang/julia#48097: kwcall inference in the presence of overlay method" begin
-    # XXX: broken again by JuliaLang/julia#51092, see JuliaGPU/GPUCompiler.jl#506
+@testset "kwcall inference + overlay method" begin
+    # originally broken by JuliaLang/julia#48097
+    # broken again by JuliaLang/julia#51092, see JuliaGPU/GPUCompiler.jl#506
 
     mod = @eval module $(gensym())
         child(; kwargs...) = return
@@ -553,11 +643,13 @@ end
         Base.Experimental.@overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} = return
     end
 
-    ir = sprint(io->Native.code_llvm(io, mod.parent, Tuple{};
-                                     debuginfo=:none, mod.method_table))
-
-    @test occursin("ret void", ir)
-    @test !any(f->occursin(f, ir),
-               ["jl_invoke", "apply_iterate",
-                "inttoptr", "apply_type"])
+    @test @filecheck begin
+        check"CHECK-LABEL: @julia_parent"
+        check"CHECK-NOT: jl_invoke"
+        check"CHECK-NOT: apply_iterate"
+        check"CHECK-NOT: inttoptr"
+        check"CHECK-NOT: apply_type"
+        check"CHECK: ret void"
+        Native.code_llvm(mod.parent, Tuple{}; debuginfo=:none, mod.method_table)
+    end
 end

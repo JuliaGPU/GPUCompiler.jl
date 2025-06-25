@@ -164,3 +164,26 @@ next_world = Base.get_world_counter()
         @test o_sin.overlayed == true
     end
 end
+
+# Test FileCheck
+@testset "FileCheck" begin
+    @test @filecheck begin
+        check"CHECK: works"
+        println("works")
+    end
+
+    @test_throws "expected string not found in input" @filecheck begin
+        check"CHECK: works"
+        println("doesn't work")
+    end
+
+    @test @filecheck begin
+        check"CHECK: errors"
+        error("errors")
+    end
+
+    @test_throws "expected string not found in input" @filecheck begin
+        check"CHECK: works"
+        error("errors")
+    end
+end

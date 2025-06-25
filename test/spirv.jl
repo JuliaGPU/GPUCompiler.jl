@@ -4,60 +4,74 @@ for backend in (:khronos, :llvm)
 
 @testset "kernel functions" begin
 @testset "calling convention" begin
-    kernel() = return
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{}; backend, dump_module=true))
-    @test !occursin("spir_kernel", ir)
+    @test @filecheck begin
+        check"CHECK-NOT: spir_kernel"
+        SPIRV.code_llvm(mod.kernel, Tuple{}; backend, dump_module=true)
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, kernel, Tuple{};
-                                    backend, dump_module=true, kernel=true))
-    @test occursin("spir_kernel", ir)
+    @test @filecheck begin
+        check"CHECK: spir_kernel"
+        SPIRV.code_llvm(mod.kernel, Tuple{}; backend, dump_module=true, kernel=true)
+    end
 end
 
 @testset "byval workaround" begin
     mod = @eval module $(gensym())
-        export kernel
         kernel(x) = return
     end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Tuple{Int}}; backend))
-    @test occursin(r"@\w*kernel\w*\(({ i64 }|\[1 x i64\])\*", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+        SPIRV.code_llvm(mod.kernel, Tuple{Tuple{Int}}; backend)
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Tuple{Int}};
-                                    backend, kernel=true))
-    @test occursin(r"@\w*kernel\w*\(.*{ ({ i64 }|\[1 x i64\]) }\*.+byval", ir) ||
-          occursin(r"@\w*kernel\w*\(ptr byval", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: define spir_kernel void @_Z6kernel"
+        SPIRV.code_llvm(mod.kernel, Tuple{Tuple{Int}}; backend, kernel=true)
+    end
 end
 
 @testset "byval bug" begin
     # byval added alwaysinline, which could conflict with noinline and fail verification
-    @noinline kernel() = return
-    SPIRV.code_llvm(devnull, kernel, Tuple{}; backend, kernel=true)
-    @test "We did not crash!" != ""
+    mod = @eval module $(gensym())
+        @noinline kernel() = return
+    end
+    @test @filecheck begin
+        check"CHECK-LABEL: define spir_kernel void @_Z6kernel"
+        SPIRV.code_llvm(mod.kernel, Tuple{}; backend, kernel=true)
+    end
 end
 end
 
 @testset "unsupported type detection" begin
     mod = @eval module $(gensym())
-        export kernel
         function kernel(ptr, val)
             unsafe_store!(ptr, val)
             return
         end
     end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float16}, Float16};
-                                    backend))
-    @test occursin("store half", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+        check"CHECK: store half"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float16}, Float16}; backend)
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float32}, Float32};
-                                    backend))
-    @test occursin("store float", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+        check"CHECK: store float"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float32}, Float32}; backend)
+    end
 
-    ir = sprint(io->SPIRV.code_llvm(io, mod.kernel, Tuple{Ptr{Float64}, Float64};
-                                    backend))
-    @test occursin("store double", ir)
+    @test @filecheck begin
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+        check"CHECK: store double"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float64}, Float64}; backend)
+    end
 
     @test_throws_message(InvalidIRError,
                          SPIRV.code_execution(mod.kernel, Tuple{Ptr{Float16}, Float16};
@@ -83,13 +97,17 @@ end
 @testset "asm" begin
 
 @testset "trap removal" begin
-    function kernel(x)
-        x && error()
-        return
+    mod = @eval module $(gensym())
+        function kernel(x)
+            x && error()
+            return
+        end
     end
 
-    asm = sprint(io->SPIRV.code_native(io, kernel, Tuple{Bool}; backend, kernel=true))
-    @test occursin(r"OpFunctionCall %void %(julia|j)_error", asm)
+    @test @filecheck begin
+        check"CHECK: %_Z6kernel4Bool = OpFunction %void None"
+        SPIRV.code_native(mod.kernel, Tuple{Bool}; backend, kernel=true)
+    end
 end
 
 end
