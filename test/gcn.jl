@@ -41,13 +41,9 @@ end
 
     @test @filecheck begin
         check"CHECK-LABEL: {{(julia|j)_kernel_[0-9]+}}:"
+        check"CHECK: s_cbranch_exec"
         check"CHECK: s_trap 2"
         GCN.code_native(mod.kernel, Tuple{})
-    end
-    # XXX
-    @test_skip occursin("s_cbranch_execz", asm)
-    if Base.libllvm_version < v"9"
-        @test_broken occursin("v_readfirstlane", asm)
     end
 end
 
