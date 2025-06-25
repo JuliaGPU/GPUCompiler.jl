@@ -151,14 +151,7 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob); kwargs...)
-    # XXX: remove on next major version
-    if !isempty(kwargs)
-        Base.depwarn("The GPUCompiler `emit_llvm` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :emit_llvm)
-        config = CompilerConfig(job.config; kwargs...)
-        job = CompilerJob(job.source, config)
-    end
-
+function initialize_llvm()
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -167,6 +160,17 @@ const __llvm_initialized = Ref(false)
         InitializeAllTargetMCs()
         __llvm_initialized[] = true
     end
+end
+
+@locked function emit_llvm(@nospecialize(job::CompilerJob); kwargs...)
+    # XXX: remove on next major version
+    if !isempty(kwargs)
+        Base.depwarn("The GPUCompiler `emit_llvm` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :emit_llvm)
+        config = CompilerConfig(job.config; kwargs...)
+        job = CompilerJob(job.source, config)
+    end
+
+    initialize_llvm()
 
     @tracepoint "IR generation" begin
         ir, compiled = irgen(job)
