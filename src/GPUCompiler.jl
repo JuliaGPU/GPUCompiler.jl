@@ -52,7 +52,10 @@ include("precompile.jl")
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
+    create_compile_cache()
+end
 
+function create_compile_cache()
     dir = @get_scratch!("compiled")
     ## add the Julia version
     dir = joinpath(dir, "v$(VERSION.major).$(VERSION.minor)")
@@ -67,5 +70,19 @@ function __init__()
 
     Tracy.@register_tracepoints()
 end
+
+# remove the existing cache
+# NOTE: call this function from global scope, so any change triggers recompilation.
+function reset_compile_cache()
+    dir = @get_scratch!("compiled")
+    lock(runtime_lock) do
+        rm(dir; force=true, recursive=true)
+        create_compile_cache()
+    end
+
+    return
+end
+# backwards compatibility
+const reset_runtime = reset_compile_cache
 
 end # module
