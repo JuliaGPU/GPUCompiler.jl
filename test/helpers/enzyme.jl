@@ -100,7 +100,9 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
     # prepare the slots
     new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
     new_ci.slotflags = UInt8[0x00 for i = 1:3]
-    new_ci.nargs = 3
+    @static if isdefined(Core, :DebugInfo)
+        new_ci.nargs = 3
+    end
 
     # We don't know the caller's target so EnzymeTarget uses the default NativeCompilerTarget.
     target = EnzymeTarget()
