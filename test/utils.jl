@@ -187,3 +187,7 @@ end
         error("errors")
     end
 end
+
+@testset "Mock Enzyme" begin
+    Enzyme.deferred_codegen_id(typeof(identity), Tuple{Vector{Float64}})
+end

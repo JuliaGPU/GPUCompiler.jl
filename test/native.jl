@@ -653,3 +653,20 @@ end
         Native.code_llvm(mod.parent, Tuple{}; debuginfo=:none, mod.method_table)
     end
 end
+
+@testset "Mock Enzyme" begin
+    function kernel(a)
+        a[1] = a[1]^2
+        return
+    end
+    
+    function dkernel(a)
+        ptr = Enzyme.deferred_codegen(typeof(kernel), Tuple{Vector{Float64}})
+        ccall(ptr, Cvoid, (Vector{Float64},), a)
+        return
+    end
+
+    ir = sprint(io->Native.code_llvm(io, dkernel, Tuple{Vector{Float64}}; debuginfo=:none))
+    @test !occursin("deferred_codegen", ir)
+    @test occursin("call void @julia_kernel", ir)
+end
