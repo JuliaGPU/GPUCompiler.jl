@@ -87,7 +87,7 @@ function lower_throw_extra!(mod::LLVM.Module)
                     # remove the call
                     nargs = length(parameters(f))
                     call_args = arguments(call)
-                    erase!(LLVM.parent(call), call)
+                    erase!(call)
 
                     # HACK: kill the exceptions' unused arguments
                     for arg in call_args
