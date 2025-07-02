@@ -21,6 +21,22 @@ sink_gcn(i) = sink(i, Val(5))
     end
 end
 
+@testset "bounds errors" begin
+    mod = @eval module $(gensym())
+        function kernel()
+            Base.throw_boundserror(1, 2)
+            return
+        end
+    end
+
+    @test @filecheck begin
+        check"CHECK-NOT: {{julia_throw_boundserror_[0-9]+}}"
+        check"CHECK: @gpu_report_exception"
+        check"CHECK: @gpu_signal_exception"
+        GCN.code_llvm(mod.kernel, Tuple{})
+    end
+end
+
 end
 
 ############################################################################################
