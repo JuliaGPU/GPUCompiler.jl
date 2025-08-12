@@ -28,7 +28,7 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     supports_fp16::Bool = true
     supports_fp64::Bool = true
 
-    backend::Symbol = isavailable(SPIRV_LLVM_Backend_jll) ? :llvm : :khronos
+    backend::Symbol = isavailable(SPIRV_LLVM_Translator_jll) ? :khronos : :llvm
     # XXX: these don't really belong in the _target_ struct
     validate::Bool = false
     optimize::Bool = false
