@@ -129,7 +129,8 @@ const deferred_codegen_jobs = Dict{Int, Any}()
 
 # We make this function explicitly callable so that we can drive OrcJIT's
 # lazy compilation from, while also enabling recursive compilation.
-Base.@ccallable Ptr{Cvoid} function deferred_codegen(ptr::Ptr{Cvoid})
+# Julia 1.11 and co broke @ccallable so we have to do this manually in __init__
+function deferred_codegen(ptr::Ptr{Cvoid})::Ptr{Cvoid}
     ptr
 end
 

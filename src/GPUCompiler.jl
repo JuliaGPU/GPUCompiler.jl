@@ -66,6 +66,28 @@ function __init__()
     global compile_cache = dir
 
     Tracy.@register_tracepoints()
+
+    # Register deferred_codegen as a global function so that it can be called with `ccall("extern deferred_codegen"`
+    @dispose jljit=JuliaOJIT() begin
+        jd = JITDylib(jljit)
+
+        address = LLVM.API.LLVMOrcJITTargetAddress(
+            reinterpret(UInt, @cfunction(deferred_codegen, Ptr{Cvoid}, (Ptr{Cvoid},))))
+        flags = LLVM.API.LLVMJITSymbolFlags(
+            LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
+        name = mangle(jljit, "deferred_codegen")
+        symbol = LLVM.API.LLVMJITEvaluatedSymbol(address, flags)
+        map = if LLVM.version() >= v"15"
+            LLVM.API.LLVMOrcCSymbolMapPair(name, symbol)
+        else
+            LLVM.API.LLVMJITCSymbolMapPair(name, symbol)
+        end
+
+        mu = LLVM.absolute_symbols(Ref(map))
+        LLVM.define(jd, mu)
+        addr = lookup(jljit, "deferred_codegen")
+        @assert addr != C_NULL "Failed to register deferred_codegen"
+    end
 end
 
 end # module
