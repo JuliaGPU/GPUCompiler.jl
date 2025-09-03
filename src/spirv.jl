@@ -62,7 +62,8 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) =
     "spirv-" * String(job.config.target.backend)
 
-function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
+function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
+                        entry::LLVM.Function)
     # update calling convention
     for f in functions(mod)
         # JuliaGPU/GPUCompiler.jl#97
@@ -70,6 +71,37 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     end
     if job.config.kernel
         callconv!(entry, LLVM.API.LLVMSPIRKERNELCallConv)
+    end
+
+    return entry
+end
+
+function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
+    errors = IRError[]
+
+    # support for half and double depends on the target
+    if !job.config.target.supports_fp16
+        append!(errors, check_ir_values(mod, LLVM.HalfType()))
+    end
+    if !job.config.target.supports_fp64
+        append!(errors, check_ir_values(mod, LLVM.DoubleType()))
+    end
+
+    return errors
+end
+
+function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
+                    entry::LLVM.Function)
+    # convert the kernel state argument to a byval reference
+    if job.config.kernel
+        state = kernel_state_type(job)
+        if state !== Nothing
+            entry = kernel_state_to_reference!(job, mod, entry)
+
+            T_state = convert(LLVMType, state)
+            attr = TypeAttribute("byval", T_state)
+            push!(parameter_attributes(entry, 1), attr)
+        end
     end
 
     # HACK: Intel's compute runtime doesn't properly support SPIR-V's byval attribute.
@@ -89,20 +121,6 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                   ConstantInt(Int32(5))]))
 
     return entry
-end
-
-function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
-    errors = IRError[]
-
-    # support for half and double depends on the target
-    if !job.config.target.supports_fp16
-        append!(errors, check_ir_values(mod, LLVM.HalfType()))
-    end
-    if !job.config.target.supports_fp64
-        append!(errors, check_ir_values(mod, LLVM.DoubleType()))
-    end
-
-    return errors
 end
 
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
@@ -351,6 +369,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     # remove the old function
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
+    prune_constexpr_uses!(f)
     @assert isempty(uses(f))
     replace_metadata_uses!(f, new_f)
     erase!(f)

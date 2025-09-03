@@ -82,7 +82,7 @@ function irgen(@nospecialize(job::CompilerJob))
 
     # minimal required optimization
     @tracepoint "rewrite" begin
-        if job.config.kernel && needs_byval(job)
+        if job.config.kernel && pass_by_value(job)
             # pass all bitstypes by value; by default Julia passes aggregates by reference
             # (this improves performance, and is mandated by certain back-ends like SPIR-V).
             args = classify_arguments(job, function_type(entry))
@@ -256,10 +256,11 @@ end
 ## kernel promotion
 
 @enum ArgumentCC begin
-    BITS_VALUE  # bitstype, passed as value
-    BITS_REF    # bitstype, passed as pointer
-    MUT_REF     # jl_value_t*, or the anonymous equivalent
-    GHOST       # not passed
+    BITS_VALUE      # bitstype, passed as value
+    BITS_REF        # bitstype, passed as pointer
+    MUT_REF         # jl_value_t*, or the anonymous equivalent
+    GHOST           # not passed
+    KERNEL_STATE    # the kernel state argument
 end
 
 # Determine the calling convention of a the arguments of a Julia function, given the
@@ -270,7 +271,8 @@ end
 # - `name`: the name of the argument
 # - `idx`: the index of the argument in the LLVM function type, or `nothing` if the argument
 #          is not passed at the LLVM level.
-function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType)
+function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType;
+                            post_optimization::Bool=false)
     source_sig = job.source.specTypes
     source_types = [source_sig.parameters...]
 
@@ -282,9 +284,15 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
 
     codegen_types = parameters(codegen_ft)
 
-    args = []
-    codegen_i = 1
-    for (source_i, (source_typ, source_name)) in enumerate(zip(source_types, source_argnames))
+    if post_optimization && kernel_state_type(job) !== Nothing
+        args = []
+        push!(args, (cc=KERNEL_STATE, typ=kernel_state_type(job), name=:kernel_state, idx=1))
+        codegen_i = 2
+    else
+        args = []
+        codegen_i = 1
+    end
+    for (source_typ, source_name) in zip(source_types, source_argnames)
         if isghosttype(source_typ) || Core.Compiler.isconstType(source_typ)
             push!(args, (cc=GHOST, typ=source_typ, name=source_name, idx=nothing))
             continue
@@ -817,5 +825,101 @@ function kernel_state_value(state)
         end
 
         call_function(llvm_f, state)
+    end
+end
+
+# convert kernel state argument from pass-by-value to pass-by-reference
+#
+# the kernel state argument is always passed by value to avoid codegen issues with byval.
+# some back-ends however do not support passing kernel arguments by value, so this pass
+# serves to convert that argument (and is conceptually the inverse of `lower_byval`).
+function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                                    f::LLVM.Function)
+    ft = function_type(f)
+
+    # check if we even need a kernel state argument
+    state = kernel_state_type(job)
+    if state === Nothing
+        return f
+    end
+
+    T_state = convert(LLVMType, state)
+
+    # find the kernel state parameter (should be the first argument)
+    if isempty(parameters(ft)) || value_type(parameters(f)[1]) != T_state
+        return f
+    end
+
+    @tracepoint "kernel state to reference" begin
+        # generate the new function type & definition
+        new_types = LLVM.LLVMType[]
+        # convert the first parameter (kernel state) to a pointer
+        push!(new_types, LLVM.PointerType(T_state))
+        # keep all other parameters as-is
+        for i in 2:length(parameters(ft))
+            push!(new_types, parameters(ft)[i])
+        end
+
+        new_ft = LLVM.FunctionType(return_type(ft), new_types)
+        new_f = LLVM.Function(mod, "", new_ft)
+        linkage!(new_f, linkage(f))
+
+        # name the parameters
+        LLVM.name!(parameters(new_f)[1], "state_ptr")
+        for (i, (arg, new_arg)) in enumerate(zip(parameters(f)[2:end], parameters(new_f)[2:end]))
+            LLVM.name!(new_arg, LLVM.name(arg))
+        end
+
+        # emit IR performing the "conversions"
+        new_args = LLVM.Value[]
+        @dispose builder=IRBuilder() begin
+            entry = BasicBlock(new_f, "conversion")
+            position!(builder, entry)
+
+            # load the kernel state value from the pointer
+            state_val = load!(builder, T_state, parameters(new_f)[1], "state")
+            push!(new_args, state_val)
+
+            # all other arguments are passed through directly
+            for i in 2:length(parameters(new_f))
+                push!(new_args, parameters(new_f)[i])
+            end
+
+            # map the arguments
+            value_map = Dict{LLVM.Value, LLVM.Value}(
+                param => new_args[i] for (i,param) in enumerate(parameters(f))
+            )
+            value_map[f] = new_f
+
+            clone_into!(new_f, f; value_map,
+                        changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+
+            # fall through
+            br!(builder, blocks(new_f)[2])
+        end
+
+        # set the attributes for the state pointer parameter
+        attrs = parameter_attributes(new_f, 1)
+        # the pointer itself cannot be captured since we immediately load from it
+        push!(attrs, EnumAttribute("nocapture", 0))
+        # each kernel state is separate
+        push!(attrs, EnumAttribute("noalias", 0))
+        # the state is read-only
+        push!(attrs, EnumAttribute("readonly", 0))
+
+        # remove the old function
+        fn = LLVM.name(f)
+        @assert isempty(uses(f))
+        replace_metadata_uses!(f, new_f)
+        erase!(f)
+        LLVM.name!(new_f, fn)
+
+        # minimal optimization
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, SimplifyCFGPass())
+            run!(pb, new_f, llvm_machine(job.config.target))
+        end
+
+        return new_f
     end
 end
