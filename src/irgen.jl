@@ -372,18 +372,16 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     ft = function_type(f)
     @tracepoint "lower byval" begin
 
-    # classify the arguments
-    args = classify_arguments(job, ft)
-    filter!(args) do arg
-        arg.cc != GHOST
-    end
-
     # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
+    types = Vector{LLVMType}(undef, length(parameters(ft)))
     for i in 1:length(byval)
-        attrs = collect(parameter_attributes(f, i))
-        byval[i] = any(attrs) do attr
-            kind(attr) == kind(TypeAttribute("byval", LLVM.VoidType()))
+        byval[i] = false
+        for attr in collect(parameter_attributes(f, i))
+            if kind(attr) == kind(TypeAttribute("byval", LLVM.VoidType()))
+                byval[i] = true
+                types[i] = value(attr)
+            end
         end
     end
 
@@ -421,7 +419,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     new_types = LLVM.LLVMType[]
     for (i, param) in enumerate(parameters(ft))
         if byval[i]
-            llvm_typ = convert(LLVMType, args[i].typ)
+            llvm_typ = convert(LLVMType, types[i])
             push!(new_types, llvm_typ)
         else
             push!(new_types, param)
@@ -444,7 +442,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
         for (i, param) in enumerate(parameters(ft))
             if byval[i]
                 # copy the argument value to a stack slot, and reference it.
-                llvm_typ = convert(LLVMType, args[i].typ)
+                llvm_typ = convert(LLVMType, types[i])
                 ptr = alloca!(builder, llvm_typ)
                 if LLVM.addrspace(param) != 0
                     ptr = addrspacecast!(builder, ptr, param)
