@@ -35,7 +35,7 @@ llvm_datalayout(target::MetalCompilerTarget) =
     "-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024"*
     "-n8:16:32"
 
-needs_byval(job::CompilerJob{MetalCompilerTarget}) = false
+pass_by_value(job::CompilerJob{MetalCompilerTarget}) = false
 
 
 ## job
@@ -160,6 +160,11 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
 
+    # convert the kernel state argument to a reference
+    if job.config.kernel && kernel_state_type(job) !== Nothing
+        entry = kernel_state_to_reference!(job, mod, entry)
+    end
+
     # add kernel metadata
     if job.config.kernel
         entry = add_parameter_address_spaces!(job, mod, entry)
@@ -235,7 +240,7 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
 
     # find the byref parameters
     byref = BitVector(undef, length(parameters(ft)))
-    args = classify_arguments(job, ft)
+    args = classify_arguments(job, ft; post_optimization=true)
     filter!(args) do arg
         arg.cc != GHOST
     end
@@ -318,6 +323,7 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
 
     # remove the old function
     fn = LLVM.name(f)
+    prune_constexpr_uses!(f)
     @assert isempty(uses(f))
     replace_metadata_uses!(f, new_f)
     erase!(f)
@@ -418,7 +424,7 @@ end
 
 # value-to-reference conversion
 #
-# Metal doesn't support passing valuse, so we need to convert those to references instead
+# Metal doesn't support passing values, so we need to convert those to references instead
 function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)
 
@@ -717,7 +723,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     arg_infos = Metadata[]
 
     # Iterate through arguments and create metadata for them
-    args = classify_arguments(job, entry_ft)
+    args = classify_arguments(job, entry_ft; post_optimization=true)
     i = 1
     for arg in args
         arg.idx ===  nothing && continue

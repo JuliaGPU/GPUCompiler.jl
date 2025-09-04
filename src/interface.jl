@@ -267,7 +267,7 @@ runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
 kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
 
 # Does the target need to pass kernel arguments by value?
-needs_byval(@nospecialize(job::CompilerJob)) = true
+pass_by_value(@nospecialize(job::CompilerJob)) = true
 
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
