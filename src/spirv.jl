@@ -287,7 +287,7 @@ end
 function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)::LLVM.FunctionType
 
-    args = classify_arguments(job, ft)
+    args = classify_arguments(job, ft; post_optimization=true)
     filter!(args) do arg
         arg.cc != GHOST
     end
