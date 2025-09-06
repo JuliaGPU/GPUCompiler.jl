@@ -528,8 +528,8 @@ function add_kernel_state!(mod::LLVM.Module)
     state_intr = kernel_state_intr(mod, T_state)
     state_intr_ft = LLVM.FunctionType(T_state)
 
-    # additional arguments to pass to every function
-    additional_args = additional_arg_types(job)
+    # additional arguments to pass to every function, but only if they are required
+    additional_args = haskey(functions(mod), "julia.gpu.additional_arg_getter") ? additional_arg_types(job) : (;)
     T_additional_args = convert.(LLVMType, values(additional_args))
     names_additional_args = String.(keys(additional_args))
 
