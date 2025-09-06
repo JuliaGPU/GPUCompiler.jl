@@ -530,8 +530,8 @@ function add_kernel_state!(mod::LLVM.Module)
 
     # additional arguments to pass to every function, but only if they are required
     additional_args = haskey(functions(mod), "julia.gpu.additional_arg_getter") ? additional_arg_types(job) : (;)
-    T_additional_args = convert.(LLVMType, values(additional_args))
-    names_additional_args = String.(keys(additional_args))
+    T_additional_args = LLVMType[convert(LLVMType, T) for T in values(additional_args)]
+    names_additional_args = String[String(name) for name in keys(additional_args)]
 
     additional_arg_intrs = additional_arg_intr.(Ref(mod), T_additional_args)
     additional_arg_intr_fts = LLVM.FunctionType.(T_additional_args)
@@ -804,13 +804,12 @@ function lower_kernel_state!(fun::LLVM.Function)
 
                 i = Int(convert(Int, operands(inst)[1]::ConstantInt))
                 if additional_args[i] === nothing
-                    state_arg = parameters(fun)[end - length(additional_arg_tys) + i]
-                    T_state = convert(LLVMType, additional_arg_tys[i])
-                    @assert value_type(state_arg) == T_state
-                    additional_args[i] = state_arg
+                    additional_args[i] = parameters(fun)[end - length(additional_arg_tys) + i]
+                    T_arg = convert(LLVMType, additional_arg_tys[i])
+                    @assert value_type(additional_args[i]) == T_arg
                 end
 
-                replace_uses!(inst, state_arg)
+                replace_uses!(inst, additional_args[i])
 
                 @assert isempty(uses(inst))
                 erase!(inst)
@@ -841,7 +840,6 @@ function cleanup_kernel_state!(mod::LLVM.Module)
     if haskey(functions(mod), "julia.gpu.additional_arg_getter")
         intr = functions(mod)["julia.gpu.additional_arg_getter"]
         if isempty(uses(intr))
-            # if we're not emitting a kernel, we can't resolve the intrinsic to an argument.
             erase!(intr)
             changed = true
         end
@@ -985,40 +983,40 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
     end
 end
 
-function additional_arg_intr(mod::LLVM.Module, T_state)
-    state_intr = if haskey(functions(mod), "julia.gpu.additional_arg_getter")
+function additional_arg_intr(mod::LLVM.Module, T_arg)
+    additional_arg_intr = if haskey(functions(mod), "julia.gpu.additional_arg_getter")
         functions(mod)["julia.gpu.additional_arg_getter"]
     else
-        LLVM.Function(mod, "julia.gpu.additional_arg_getter", LLVM.FunctionType(T_state))
+        LLVM.Function(mod, "julia.gpu.additional_arg_getter", LLVM.FunctionType(T_arg))
     end
-    push!(function_attributes(state_intr), EnumAttribute("readnone", 0))
+    push!(function_attributes(additional_arg_intr), EnumAttribute("readnone", 0))
 
-    return state_intr
+    return additional_arg_intr
 end
 
 # run-time equivalent
-function additional_arg_value(state, index)
+function additional_arg_value(arg, index)
     @dispose ctx=Context() begin
-        T_state = convert(LLVMType, state)
+        T_arg = convert(LLVMType, arg)
 
         # create function
-        llvm_f, _ = create_function(T_state)
+        llvm_f, _ = create_function(T_arg)
         mod = LLVM.parent(llvm_f)
 
         # get intrinsic
-        state_intr = additional_arg_intr(mod, T_state)
-        state_intr_ft = function_type(state_intr)
+        _additional_arg_intr = additional_arg_intr(mod, T_arg)
+        additional_arg_intr_ft = function_type(_additional_arg_intr)
 
         # generate IR
         @dispose builder=IRBuilder() begin
             entry = BasicBlock(llvm_f, "entry")
             position!(builder, entry)
 
-            val = call!(builder, state_intr_ft, state_intr, Value[ConstantInt(index)], "additional_arg")
+            val = call!(builder, additional_arg_intr_ft, _additional_arg_intr, Value[ConstantInt(index)], "additional_arg")
 
             ret!(builder, val)
         end
 
-        call_function(llvm_f, state)
+        call_function(llvm_f, arg)
     end
 end
