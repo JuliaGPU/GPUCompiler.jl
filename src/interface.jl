@@ -265,6 +265,7 @@ runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
 # argument to each kernel, and pass that object to every function that accesses the kernel
 # state (possibly indirectly) via the `kernel_state_pointer` function.
 kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
+additional_arg_types(@nospecialize(job::CompilerJob)) = (;)
 
 # Does the target need to pass kernel arguments by value?
 pass_by_value(@nospecialize(job::CompilerJob)) = true
