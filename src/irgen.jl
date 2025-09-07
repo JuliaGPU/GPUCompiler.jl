@@ -533,8 +533,8 @@ function add_kernel_state!(mod::LLVM.Module)
     T_additional_args = LLVMType[convert(LLVMType, T) for T in values(additional_args)]
     names_additional_args = String[String(name) for name in keys(additional_args)]
 
-    additional_arg_intrs = additional_arg_intr.(Ref(mod), T_additional_args)
-    additional_arg_intr_fts = LLVM.FunctionType.(T_additional_args)
+    additional_arg_intrs = [additional_arg_intr(mod, T) for T in T_additional_args]
+    additional_arg_intr_fts = [LLVM.FunctionType(T, [convert(LLVMType, Int)]) for T in T_additional_args]
 
     kernels = []
     kernels_md = metadata(mod)["julia.kernel"]
@@ -987,7 +987,7 @@ function additional_arg_intr(mod::LLVM.Module, T_arg)
     additional_arg_intr = if haskey(functions(mod), "julia.gpu.additional_arg_getter")
         functions(mod)["julia.gpu.additional_arg_getter"]
     else
-        LLVM.Function(mod, "julia.gpu.additional_arg_getter", LLVM.FunctionType(T_arg))
+        LLVM.Function(mod, "julia.gpu.additional_arg_getter", LLVM.FunctionType(T_arg, [convert(LLVMType, Int)]))
     end
     push!(function_attributes(additional_arg_intr), EnumAttribute("readnone", 0))
 
@@ -995,7 +995,7 @@ function additional_arg_intr(mod::LLVM.Module, T_arg)
 end
 
 # run-time equivalent
-function additional_arg_value(arg, index)
+function additional_arg_value(arg, index::Int)
     @dispose ctx=Context() begin
         T_arg = convert(LLVMType, arg)
 
