@@ -31,10 +31,7 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     add!(mpm, NewPMFunctionPassManager()) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
-        if (uses_julia_runtime(job) || can_vectorize(job)) && opt_level >= 2
-            # XXX: we disable vectorization, as this generally isn't useful for GPU targets
-            #      and actually causes issues with some back-end compilers (like Metal).
-            # TODO: Make this not dependent on `uses_julia_runtime` (likely CPU), but it's own control
+        if (can_vectorize(job)) && opt_level >= 2
             buildVectorPipeline(fpm, job, opt_level)
         end
         if isdebug(:optim)

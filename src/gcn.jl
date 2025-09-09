@@ -124,3 +124,5 @@ function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
     end
     call!(builder, trap_ft, trap)
 end
+
+can_vectorize(job::CompilerJob{GCNCompilerTarget}) = true
