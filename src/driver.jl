@@ -129,7 +129,8 @@ const deferred_codegen_jobs = Dict{Int, Any}()
 
 # We make this function explicitly callable so that we can drive OrcJIT's
 # lazy compilation from, while also enabling recursive compilation.
-Base.@ccallable Ptr{Cvoid} function deferred_codegen(ptr::Ptr{Cvoid})
+# see `register_deferred_codegen`
+function deferred_codegen(ptr::Ptr{Cvoid})::Ptr{Cvoid}
     ptr
 end
 
@@ -147,6 +148,33 @@ end
         # TODO: add an edge to this method instance to support method redefinitions
         ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
     end
+end
+
+# Register deferred_codegen as a global function so that it can be called with `ccall("extern deferred_codegen"`
+# Called from __init__
+# On 1.11+ this is needed due to a Julia bug that drops the pointer when code-coverage is enabled.
+function register_deferred_codegen()
+    @dispose jljit=JuliaOJIT() begin
+        jd = JITDylib(jljit)
+
+        address = LLVM.API.LLVMOrcJITTargetAddress(
+            reinterpret(UInt, @cfunction(deferred_codegen, Ptr{Cvoid}, (Ptr{Cvoid},))))
+        flags = LLVM.API.LLVMJITSymbolFlags(
+            LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
+        name = mangle(jljit, "deferred_codegen")
+        symbol = LLVM.API.LLVMJITEvaluatedSymbol(address, flags)
+        map = if LLVM.version() >= v"15"
+            LLVM.API.LLVMOrcCSymbolMapPair(name, symbol)
+        else
+            LLVM.API.LLVMJITCSymbolMapPair(name, symbol)
+        end
+
+        mu = LLVM.absolute_symbols(Ref(map))
+        LLVM.define(jd, mu)
+        addr = lookup(jljit, "deferred_codegen")
+        @assert addr != C_NULL "Failed to register deferred_codegen"
+    end
+    return nothing
 end
 
 const __llvm_initialized = Ref(false)
