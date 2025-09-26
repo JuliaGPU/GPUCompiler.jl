@@ -567,7 +567,11 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     i = 1
     for arg in args
         arg.idx ===  nothing && continue
-        @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
+        if job.config.optimize
+            @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
+        else
+            parameters(entry_ft)[arg.idx] isa LLVM.PointerType || continue
+        end
 
         # NOTE: we emit the bare minimum of argument metadata to support
         #       bindless argument encoding. Actually using the argument encoder
