@@ -238,7 +238,7 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
 
     # find the byref parameters
     byref = BitVector(undef, length(parameters(ft)))
-    args = classify_arguments(job, ft; post_optimization=true)
+    args = classify_arguments(job, ft; post_optimization=job.config.optimize)
     filter!(args) do arg
         arg.cc != GHOST
     end
@@ -563,11 +563,15 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     arg_infos = Metadata[]
 
     # Iterate through arguments and create metadata for them
-    args = classify_arguments(job, entry_ft; post_optimization=true)
+    args = classify_arguments(job, entry_ft; post_optimization=job.config.optimize)
     i = 1
     for arg in args
         arg.idx ===  nothing && continue
-        @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
+        if job.config.optimize
+            @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
+        else
+            parameters(entry_ft)[arg.idx] isa LLVM.PointerType || continue
+        end
 
         # NOTE: we emit the bare minimum of argument metadata to support
         #       bindless argument encoding. Actually using the argument encoder
