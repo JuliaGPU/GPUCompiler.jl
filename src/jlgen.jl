@@ -589,7 +589,11 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
             # now make sure everything has source code, if desired
             mi = CC.get_ci_mi(callee)
             if CC.use_const_api(callee)
-                src = CC.codeinfo_for_const(interp, mi, ci.rettype_const)
+                if VERSION >= v"1.13.0-DEV.1121"
+                    src = CC.codeinfo_for_const(interp, mi, CC.WorldRange(callee.min_world, callee.max_world), callee.edges, callee.rettype_const)
+                else
+                    src = CC.codeinfo_for_const(interp, mi, callee.rettype_const)
+                end
             else
                 # TODO: typeinf_code could return something with different edges/ages/owner/abi (needing an update to callee), which we don't handle here
                 src = CC.typeinf_code(interp, mi, true)
