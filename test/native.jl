@@ -340,7 +340,10 @@ end
 end
 
 @testset "always_inline" begin
-    # XXX: broken by JuliaLang/julia#51599, see JuliaGPU/GPUCompiler.jl#527
+    # XXX: broken by JuliaLang/julia#51599, see JuliaGPU/GPUCompiler.jl#527.
+    #      yet somehow this works on 1.12?
+    broken = VERSION >= v"1.13-"
+
     mod = @eval module $(gensym())
         import ..sink
         expensive(x) = $(foldl((e, _) -> :($sink($e) + $sink(x)), 1:100; init=:x))
@@ -359,20 +362,20 @@ end
         Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
-    @test @filecheck begin
+    @test @filecheck(begin
         check"CHECK-NOT: @{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
-    end
+    end) broken=broken
 
     @test @filecheck begin
         check"CHECK: @{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
-    @test @filecheck begin
+    @test @filecheck(begin
         check"CHECK-NOT: @{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
-    end
+    end) broken=broken
 end
 
 @testset "function attributes" begin
@@ -659,7 +662,7 @@ end
         a[1] = a[1]^2
         return
     end
-    
+
     function dkernel(a)
         ptr = Enzyme.deferred_codegen(typeof(kernel), Tuple{Vector{Float64}})
         ccall(ptr, Cvoid, (Vector{Float64},), a)

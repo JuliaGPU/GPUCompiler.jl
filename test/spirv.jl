@@ -78,7 +78,7 @@ end
                                               backend, supports_fp16=false)) do msg
         occursin("unsupported use of half value", msg) &&
         occursin("[1] unsafe_store!", msg) &&
-        occursin("[2] kernel", msg)
+        occursin(r"\[\d+\] kernel", msg)
     end
 
     @test_throws_message(InvalidIRError,
@@ -86,7 +86,7 @@ end
                                               backend, supports_fp64=false)) do msg
         occursin("unsupported use of double value", msg) &&
         occursin("[1] unsafe_store!", msg) &&
-        occursin("[2] kernel", msg)
+        occursin(r"\[\d+\] kernel", msg)
     end
 end
 
