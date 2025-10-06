@@ -64,7 +64,6 @@ function runtests(f, name)
         res
     end
 
-    old_print_setting = Test.TESTSET_PRINT_ENABLE[]
     @static if VERSION >= v"1.13.0-DEV.1044"
         @with Test.TESTSET_PRINT_ENABLE=>false begin
             inner()
