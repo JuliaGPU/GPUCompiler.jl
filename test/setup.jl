@@ -11,14 +11,15 @@ for file in readdir(joinpath(@__DIR__, "helpers"))
 end
 using .FileCheck
 
+if VERSION >= v"1.13.0-DEV.1044"
+using Base.ScopedValues
+end
+
 
 ## entry point
 
 function runtests(f, name)
-    old_print_setting = Test.TESTSET_PRINT_ENABLE[]
-    Test.TESTSET_PRINT_ENABLE[] = false
-
-    try
+    function inner()
         # generate a temporary module to execute the tests in
         mod_name = Symbol("Test", rand(1:100), "Main_", replace(name, '/' => '_'))
         mod = @eval(Main, module $mod_name end)
@@ -61,8 +62,21 @@ function runtests(f, name)
 
         GC.gc(true)
         res
-    finally
-        Test.TESTSET_PRINT_ENABLE[] = old_print_setting
+    end
+
+    old_print_setting = Test.TESTSET_PRINT_ENABLE[]
+    @static if VERSION >= v"1.13.0-DEV.1044"
+        @with Test.TESTSET_PRINT_ENABLE=>false begin
+            inner()
+        end
+    else
+        old_print_setting = Test.TESTSET_PRINT_ENABLE[]
+        Test.TESTSET_PRINT_ENABLE[] = false
+        try
+            inner()
+        finally
+            Test.TESTSET_PRINT_ENABLE[] = old_print_setting
+        end
     end
 end
 
