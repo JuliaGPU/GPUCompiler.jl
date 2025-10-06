@@ -321,10 +321,10 @@ CC.isoverlayed(::StackedMethodTable) = true
             # no need to fall back to the parent method view
             return result
         end
-    
+
         parent_result = CC.findall(sig, table.parent; limit)::Union{Nothing, CC.MethodLookupResult}
         parent_result === nothing && return nothing #too many matches
-    
+
         # merge the parent match results with the internal method table
         return CC.MethodLookupResult(
             CC.vcat(result.matches, parent_result.matches),
@@ -354,13 +354,13 @@ else
             # no need to fall back to the parent method view
             return CC.MethodMatchResult(result, true)
         end
-    
+
         parent_result = CC.findall(sig, table.parent; limit)::Union{Nothing, CC.MethodMatchResult}
         parent_result === nothing && return nothing #too many matches
-    
+
         overlayed = parent_result.overlayed | !CC.isempty(result)
         parent_result = parent_result.matches::CC.MethodLookupResult
-        
+
         # merge the parent match results with the internal method table
         return CC.MethodMatchResult(
         CC.MethodLookupResult(
@@ -805,10 +805,24 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
     end
 
-    if VERSION >= v"1.12.0-DEV.1703"
-        # on sufficiently recent versions of Julia, we can query the MIs compiled.
-        # this is required after the move to `invokce(::CodeInstance)`, because our
+    if VERSION >= v"1.13.0-DEV.1120"
+        # on sufficiently recent versions of Julia, we can query the CIs compiled.
+        # this is required after the move to `invoke(::CodeInstance)`, because our
         # lookup function (used to populate method_instances) isn't always called then.
+
+        num_cis = Ref{Csize_t}(0)
+        @ccall jl_get_llvm_cis(native_code::Ptr{Cvoid}, num_cis::Ptr{Csize_t},
+                               C_NULL::Ptr{Cvoid})::Nothing
+        resize!(method_instances, num_cis[])
+        @ccall jl_get_llvm_cis(native_code::Ptr{Cvoid}, num_cis::Ptr{Csize_t},
+                               method_instances::Ptr{Cvoid})::Nothing
+
+        for (i, ci) in enumerate(method_instances)
+            method_instances[i] = ci.def::MethodInstance
+        end
+
+    elseif VERSION >= v"1.12.0-DEV.1703"
+        # slightly older versions of Julia used MIs directly
 
         num_mis = Ref{Csize_t}(0)
         @ccall jl_get_llvm_mis(native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
