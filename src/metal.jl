@@ -243,7 +243,7 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
         arg.cc != GHOST
     end
     for arg in args
-        byref[arg.idx] = (arg.cc == BITS_REF)
+        byref[arg.idx] = (arg.cc == BITS_REF || arg.cc == KERNEL_STATE)
     end
 
     function remapType(src)
