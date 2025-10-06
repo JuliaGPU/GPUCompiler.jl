@@ -16,7 +16,11 @@ using .FileCheck
 
 function runtests(f, name)
     old_print_setting = Test.TESTSET_PRINT_ENABLE[]
-    Test.TESTSET_PRINT_ENABLE[] = false
+    @static if VERSION < v"1.13.0-DEV.1044"
+        Test.TESTSET_PRINT_ENABLE[] = false
+    else
+        Test.TESTSET_PRINT_ENABLE[] => false
+    end
 
     try
         # generate a temporary module to execute the tests in
@@ -62,7 +66,11 @@ function runtests(f, name)
         GC.gc(true)
         res
     finally
-        Test.TESTSET_PRINT_ENABLE[] = old_print_setting
+        @static if VERSION < v"1.13.0-DEV.1044"
+            Test.TESTSET_PRINT_ENABLE[] = old_print_setting
+        else
+            Test.TESTSET_PRINT_ENABLE[] => old_print_setting
+        end
     end
 end
 
