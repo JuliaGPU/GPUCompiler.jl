@@ -282,6 +282,19 @@ const __llvm_initialized = Ref(false)
                     erase!(call)
                 end
             end
+
+            # minimal optimization to convert the inttoptr/call into a direct call
+            @dispose pb=NewPMPassBuilder() begin
+                add!(pb, NewPMFunctionPassManager()) do fpm
+                    add!(fpm, InstCombinePass())
+                end
+                run!(pb, ir, llvm_machine(job.config.target))
+            end
+            ## XXX: LLVM often leaves behind unused constant expressions containing function
+            ##      pointer bitcasts we just optimized away, so prune those manually.
+            for f in functions(ir)
+                prune_constexpr_uses!(f)
+            end
         end
 
         # all deferred compilations should have been resolved
