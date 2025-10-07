@@ -47,13 +47,16 @@ runtime_slug(job::CompilerJob{MetalCompilerTarget}) = "metal-macos$(job.config.t
 isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
 
-function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module, entry::LLVM.Function)
-    entry_fn = LLVM.name(entry)
+function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
+    if haskey(metadata(mod), "julia.kernel")
+        kernels_md = metadata(mod)["julia.kernel"]
+        for kernel_md in operands(kernels_md)
+            f = LLVM.Value(operands(kernel_md)[1])::LLVM.Function
 
-    # update calling conventions
-    if job.config.kernel
-        entry = pass_by_reference!(job, mod, entry)
-        entry = add_input_arguments!(job, mod, entry, kernel_intrinsics)
+            # update calling conventions
+            f = pass_by_reference!(job, mod, f)
+            f = add_input_arguments!(job, mod, f, kernel_intrinsics)
+        end
     end
 
     # emit the AIR and Metal version numbers as constants in the module. this makes it
@@ -83,7 +86,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
         run!(pb, mod)
     end
 
-    return functions(mod)[entry_fn]
+    return
 end
 
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
