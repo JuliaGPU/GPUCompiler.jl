@@ -325,10 +325,18 @@ const __llvm_initialized = Ref(false)
     end
 
     @tracepoint "IR post-processing" begin
-        # mark everything internal except for entrypoints and any exported
-        # global variables. this makes sure that the optimizer can, e.g.,
-        # rewrite function signatures.
+        # mark the kernel entry-point functions (optimization may need it)
+        if job.config.kernel
+            push!(metadata(ir)["julia.kernel"], MDNode([entry]))
+
+            # IDEA: save all jobs, not only kernels, and save other attributes
+            #       so that we can reconstruct the CompileJob instead of setting it globally
+        end
+
         if job.config.toplevel
+            # mark everything internal except for entrypoints and any exported
+            # global variables. this makes sure that the optimizer can, e.g.,
+            # rewrite function signatures.
             preserved_gvs = collect(values(jobs))
             for gvar in globals(ir)
                 if linkage(gvar) == LLVM.API.LLVMExternalLinkage
@@ -344,34 +352,41 @@ const __llvm_initialized = Ref(false)
                     run!(pm, ir)
                 end
             end
-        end
 
-        # mark the kernel entry-point functions (optimization may need it)
-        if job.config.kernel
-            push!(metadata(ir)["julia.kernel"], MDNode([entry]))
+            finish_linked_module!(job, ir)
 
-            # IDEA: save all jobs, not only kernels, and save other attributes
-            #       so that we can reconstruct the CompileJob instead of setting it globally
-        end
+            if job.config.optimize
+                @tracepoint "optimization" begin
+                    optimize!(job, ir; job.config.opt_level)
 
-        if job.config.toplevel && job.config.optimize
-            @tracepoint "optimization" begin
-                optimize!(job, ir; job.config.opt_level)
+                    # deferred codegen has some special optimization requirements,
+                    # which also need to happen _after_ regular optimization.
+                    # XXX: make these part of the optimizer pipeline?
+                    if has_deferred_jobs
+                        @dispose pb=NewPMPassBuilder() begin
+                            add!(pb, NewPMFunctionPassManager()) do fpm
+                                add!(fpm, InstCombinePass())
+                            end
+                            add!(pb, AlwaysInlinerPass())
+                            add!(pb, NewPMFunctionPassManager()) do fpm
+                                add!(fpm, SROAPass())
+                                add!(fpm, GVNPass())
+                            end
+                            add!(pb, MergeFunctionsPass())
+                            run!(pb, ir, llvm_machine(job.config.target))
+                        end
+                    end
+                end
+            end
 
-                # deferred codegen has some special optimization requirements,
-                # which also need to happen _after_ regular optimization.
-                # XXX: make these part of the optimizer pipeline?
-                if has_deferred_jobs
+            if job.config.cleanup
+                @tracepoint "clean-up" begin
                     @dispose pb=NewPMPassBuilder() begin
-                        add!(pb, NewPMFunctionPassManager()) do fpm
-                            add!(fpm, InstCombinePass())
-                        end
-                        add!(pb, AlwaysInlinerPass())
-                        add!(pb, NewPMFunctionPassManager()) do fpm
-                            add!(fpm, SROAPass())
-                            add!(fpm, GVNPass())
-                        end
-                        add!(pb, MergeFunctionsPass())
+                        add!(pb, RecomputeGlobalsAAPass())
+                        add!(pb, GlobalOptPass())
+                        add!(pb, GlobalDCEPass())
+                        add!(pb, StripDeadPrototypesPass())
+                        add!(pb, ConstantMergePass())
                         run!(pb, ir, llvm_machine(job.config.target))
                     end
                 end
@@ -379,29 +394,13 @@ const __llvm_initialized = Ref(false)
 
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
-        end
 
-        if job.config.toplevel && job.config.cleanup
-            @tracepoint "clean-up" begin
-                @dispose pb=NewPMPassBuilder() begin
-                    add!(pb, RecomputeGlobalsAAPass())
-                    add!(pb, GlobalOptPass())
-                    add!(pb, GlobalDCEPass())
-                    add!(pb, StripDeadPrototypesPass())
-                    add!(pb, ConstantMergePass())
-                    run!(pb, ir, llvm_machine(job.config.target))
-                end
-            end
-        end
-
-        # finish the module
-        #
-        # we want to finish the module after optimization, so we cannot do so
-        # during deferred code generation. instead, process the deferred jobs
-        # here.
-        if job.config.toplevel
+            # finish the module
+            #
+            # we want to finish the module after optimization, so we cannot do so
+            # during deferred code generation. instead, process the deferred jobs
+            # here.
             entry = finish_ir!(job, ir, entry)
-
             for (job′, fn′) in jobs
                 job′ == job && continue
                 finish_ir!(job′, ir, functions(ir)[fn′])
@@ -422,7 +421,7 @@ const __llvm_initialized = Ref(false)
     end
 
     if job.config.toplevel && job.config.validate
-        @tracepoint "Validation" begin
+        @tracepoint "validation" begin
             check_ir(job, ir)
         end
     end
