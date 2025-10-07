@@ -1054,6 +1054,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     for (f, new_f) in workmap
         rewrite_uses!(f, new_f)
         @assert isempty(uses(f))
+        replace_metadata_uses!(f, new_f)
         erase!(f)
     end
 

@@ -497,6 +497,7 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
     erase!(f)
     LLVM.name!(new_f, fn)
 
