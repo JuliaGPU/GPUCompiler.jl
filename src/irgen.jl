@@ -935,12 +935,24 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     while worklist_length != length(worklist)
         # iteratively discover functions that use an intrinsic or any function calling it
         worklist_length = length(worklist)
-        additions = LLVM.Function[]
-        for f in worklist, use in uses(f)
-            inst = user(use)::Instruction
-            bb = LLVM.parent(inst)
-            new_f = LLVM.parent(bb)
-            in(new_f, worklist) || push!(additions, new_f)
+        additions = Set{LLVM.Function}()
+        function scan_uses(val)
+            for use in uses(val)
+                candidate = user(use)
+                if isa(candidate, Instruction)
+                    bb = LLVM.parent(candidate)
+                    new_f = LLVM.parent(bb)
+                    in(new_f, worklist) || push!(additions, new_f)
+                elseif isa(candidate, ConstantExpr)
+                    @safe_info candidate
+                    scan_uses(candidate)
+                else
+                    error("Don't know how to check uses of $candidate. Please file an issue.")
+                end
+            end
+        end
+        for f in worklist
+            scan_uses(f)
         end
         for f in additions
             push!(worklist, f)
