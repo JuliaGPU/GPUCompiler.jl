@@ -327,10 +327,7 @@ const __llvm_initialized = Ref(false)
     @tracepoint "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
-            push!(metadata(ir)["julia.kernel"], MDNode([entry]))
-
-            # IDEA: save all jobs, not only kernels, and save other attributes
-            #       so that we can reconstruct the CompileJob instead of setting it globally
+            mark_kernel!(entry)
         end
 
         if job.config.toplevel

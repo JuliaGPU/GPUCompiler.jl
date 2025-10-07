@@ -155,3 +155,30 @@ function prune_constexpr_uses!(root::LLVM.Value)
         end
     end
 end
+
+
+## kernel metadata handling
+
+# kernels are encoded in the IR using the julia.kernel metadata.
+
+# IDEA: don't only mark kernels, but all jobs, and save all attributes of the CompileJob
+#       so that we can reconstruct the CompileJob instead of setting it globally
+
+# mark a function as kernel
+function mark_kernel!(f::LLVM.Function)
+    mod = LLVM.parent(f)
+    push!(metadata(mod)["julia.kernel"], MDNode([f]))
+    return f
+end
+
+# iterate over all kernels in the module
+function kernels(mod::LLVM.Module)
+    vals = LLVM.Function[]
+    if haskey(metadata(mod), "julia.kernel")
+        kernels_md = metadata(mod)["julia.kernel"]
+        for kernel_md in operands(kernels_md)
+            push!(vals, LLVM.Value(operands(kernel_md)[1]))
+        end
+    end
+    return vals
+end

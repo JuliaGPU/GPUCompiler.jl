@@ -48,15 +48,10 @@ isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
 
 function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
-    if haskey(metadata(mod), "julia.kernel")
-        kernels_md = metadata(mod)["julia.kernel"]
-        for kernel_md in operands(kernels_md)
-            f = LLVM.Value(operands(kernel_md)[1])::LLVM.Function
-
-            # update calling conventions
-            f = pass_by_reference!(job, mod, f)
-            f = add_input_arguments!(job, mod, f, kernel_intrinsics)
-        end
+    for f in kernels(mod)
+        # update calling conventions
+        f = pass_by_reference!(job, mod, f)
+        f = add_input_arguments!(job, mod, f, kernel_intrinsics)
     end
 
     # emit the AIR and Metal version numbers as constants in the module. this makes it
