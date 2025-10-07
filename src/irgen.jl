@@ -526,18 +526,12 @@ function add_kernel_state!(mod::LLVM.Module)
     state_intr = kernel_state_intr(mod, T_state)
     state_intr_ft = LLVM.FunctionType(T_state)
 
-    kernels = []
-    kernels_md = metadata(mod)["julia.kernel"]
-    for kernel_md in operands(kernels_md)
-        push!(kernels, Value(operands(kernel_md)[1]))
-    end
-
     # determine which functions need a kernel state argument
     #
     # previously, we add the argument to every function and relied on unused arg elim to
     # clean-up the IR. however, some libraries do Funny Stuff, e.g., libdevice bitcasting
     # function pointers. such IR is hard to rewrite, so instead be more conservative.
-    worklist = Set{LLVM.Function}([state_intr, kernels...])
+    worklist = Set{LLVM.Function}([state_intr, kernels(mod)...])
     worklist_length = 0
     while worklist_length != length(worklist)
         # iteratively discover functions that use the intrinsic or any function calling it
@@ -941,12 +935,24 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     while worklist_length != length(worklist)
         # iteratively discover functions that use an intrinsic or any function calling it
         worklist_length = length(worklist)
-        additions = LLVM.Function[]
-        for f in worklist, use in uses(f)
-            inst = user(use)::Instruction
-            bb = LLVM.parent(inst)
-            new_f = LLVM.parent(bb)
-            in(new_f, worklist) || push!(additions, new_f)
+        additions = Set{LLVM.Function}()
+        function scan_uses(val)
+            for use in uses(val)
+                candidate = user(use)
+                if isa(candidate, Instruction)
+                    bb = LLVM.parent(candidate)
+                    new_f = LLVM.parent(bb)
+                    in(new_f, worklist) || push!(additions, new_f)
+                elseif isa(candidate, ConstantExpr)
+                    @safe_info candidate
+                    scan_uses(candidate)
+                else
+                    error("Don't know how to check uses of $candidate. Please file an issue.")
+                end
+            end
+        end
+        for f in worklist
+            scan_uses(f)
         end
         for f in additions
             push!(worklist, f)
@@ -1054,6 +1060,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     for (f, new_f) in workmap
         rewrite_uses!(f, new_f)
         @assert isempty(uses(f))
+        replace_metadata_uses!(f, new_f)
         erase!(f)
     end
 

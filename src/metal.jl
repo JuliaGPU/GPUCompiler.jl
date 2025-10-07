@@ -47,13 +47,11 @@ runtime_slug(job::CompilerJob{MetalCompilerTarget}) = "metal-macos$(job.config.t
 isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
 
-function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module, entry::LLVM.Function)
-    entry_fn = LLVM.name(entry)
-
-    # update calling conventions
-    if job.config.kernel
-        entry = pass_by_reference!(job, mod, entry)
-        entry = add_input_arguments!(job, mod, entry, kernel_intrinsics)
+function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
+    for f in kernels(mod)
+        # update calling conventions
+        f = pass_by_reference!(job, mod, f)
+        f = add_input_arguments!(job, mod, f, kernel_intrinsics)
     end
 
     # emit the AIR and Metal version numbers as constants in the module. this makes it
@@ -83,7 +81,7 @@ function finish_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mo
         run!(pb, mod)
     end
 
-    return functions(mod)[entry_fn]
+    return
 end
 
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
@@ -497,6 +495,7 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     fn = LLVM.name(f)
     @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
     erase!(f)
     LLVM.name!(new_f, fn)
 

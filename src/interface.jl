@@ -354,6 +354,9 @@ link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
     entry
 
+# finalization of linked modules, after deferred codegen but before optimization
+finish_linked_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
+
 # post-Julia optimization processing of the module
 optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
