@@ -944,7 +944,6 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     new_f = LLVM.parent(bb)
                     in(new_f, worklist) || push!(additions, new_f)
                 elseif isa(candidate, ConstantExpr)
-                    @safe_info candidate
                     scan_uses(candidate)
                 else
                     error("Don't know how to check uses of $candidate. Please file an issue.")
