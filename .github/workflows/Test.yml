@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.10', '1.11', '1.12-nightly', 'nightly']
+        version: ['1.10', '1.11', '1.12', 'nightly']
         os: [ubuntu-24.04, ubuntu-24.04-arm, macOS-15, macOS-15-intel, windows-2025]
         arch: [x64, arm64]
         llvm_args: ['']
@@ -115,12 +115,12 @@ jobs:
       matrix:
         os: [ubuntu-24.04]
         arch: [x64]
-        llvm_args: ['', '--opaque-pointers']
+        llvm_args: ['']
         include:
-          - version: '1.11'
-            pipeline: 'julia-release-1-dot-11'
+          - version: '1.12'
+            pipeline: 'julia-release-1-dot-12'
             build: 'x86_64-linux-gnuassert'
-            branch: 'release-1.11'
+            branch: 'release-1.12'
           #- version: 'master'
           #  pipeline: 'julia-master'
           #  build: 'x86_64-linux-gnuassert'
