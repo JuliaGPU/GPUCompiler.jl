@@ -110,12 +110,6 @@ if LLVM.is_asserts()
     # XXX: GCN's non-0 stack address space triggers LLVM assertions due to Julia bugs
     push!(skip_tests, "gcn")
 end
-@dispose ctx=Context() begin
-    # XXX: some back-ends do not support opaque pointers
-    if !supports_typed_pointers(ctx)
-        push!(skip_tests, "metal")
-    end
-end
 if VERSION < v"1.11"
     append!(skip_tests, ["ptx/precompile", "native/precompile"])
 end
