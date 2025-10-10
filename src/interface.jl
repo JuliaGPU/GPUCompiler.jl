@@ -338,6 +338,8 @@ function llvm_debug_info(@nospecialize(job::CompilerJob))
     end
 end
 
+# Whether to emit gnu_pubnames
+llvm_gnu_pubnames(@nospecialize(job::CompilerJob)) = false
 
 ## extension points at important stages of compilation
 
