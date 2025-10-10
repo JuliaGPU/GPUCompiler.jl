@@ -222,6 +222,9 @@ end
 # Has the runtime available and does not require special handling
 uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 
+# Is it legal to run vectorization passes on this target
+can_vectorize(@nospecialize(job::CompilerJob)) = false
+
 # Should emit PTLS lookup that can be relocated
 dump_native(@nospecialize(job::CompilerJob)) = false
 
