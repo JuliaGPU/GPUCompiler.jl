@@ -1,4 +1,5 @@
 using ParallelTestRunner 
+import LLVM
 
 const init_code = quote
     using Test, GPUCompiler, LLVM
