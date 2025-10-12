@@ -716,11 +716,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # set-up the compiler interface
     debug_info_kind = llvm_debug_info(job)
+    gnu_pubnames = llvm_gnu_pubnames(job)
     cgparams = (;
         track_allocations  = false,
         code_coverage      = false,
         prefer_specsig     = true,
-        gnu_pubnames       = false,
+        gnu_pubnames       = Bool(gnu_pubnames),
         debug_info_kind    = Cint(debug_info_kind),
         safepoint_on_entry = can_safepoint(job),
         gcstack_arg        = false)
