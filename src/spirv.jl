@@ -28,7 +28,7 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     supports_fp16::Bool = true
     supports_fp64::Bool = true
 
-    backend::Symbol = isavailable(SPIRV_LLVM_Backend_jll) ? :llvm : :khronos
+    backend::Symbol = :khronos #isavailable(SPIRV_LLVM_Backend_jll) ? :llvm : :khronos
     # XXX: these don't really belong in the _target_ struct
     validate::Bool = false
     optimize::Bool = false
@@ -366,6 +366,14 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     replace_metadata_uses!(f, new_f)
     erase!(f)
     LLVM.name!(new_f, fn)
+
+    # Run SimplifyCFG to clean up control flow
+    @dispose pb=NewPMPassBuilder() begin
+        add!(pb, NewPMFunctionPassManager()) do fpm
+            add!(fpm, SimplifyCFGPass())
+        end
+        run!(pb, mod)
+    end
 
     return new_f
 end
