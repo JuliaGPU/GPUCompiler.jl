@@ -330,7 +330,7 @@ function convert_i128_allocas!(mod::LLVM.Module)
                         bitcast_ptr = bitcast!(builder, new_alloca, old_ptr_type)
 
                         replace_uses!(inst, bitcast_ptr)
-                        unsafe_delete!(bb, inst)
+                        erase!(inst)
                         changed = true
                     end
                 end
