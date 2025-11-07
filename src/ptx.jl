@@ -195,7 +195,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                     mod::LLVM.Module, entry::LLVM.Function)
     if LLVM.version() < v"17"
         for f in functions(mod)
-            lower_unreachable!(f)
+            lower_unreachable_to_exit!(f)
         end
     end
 
@@ -310,7 +310,7 @@ end
 # CFG, and consequently correctly determine the divergence regions as intended.
 # Note that we first emit a call to `trap`, so that the behaviour is the same
 # as before.
-function lower_unreachable!(f::LLVM.Function)
+function lower_unreachable_to_exit!(f::LLVM.Function)
     mod = LLVM.parent(f)
 
     # TODO:
