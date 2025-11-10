@@ -153,7 +153,8 @@ function Base.showerror(io::IO, err::InvalidIRError)
     printstyled(io, "Hint"; bold = true, color = :cyan)
     printstyled(
         io,
-        ": catch this exception as `err` and call `code_typed(err; interactive = true)` to",
+        ": catch this exception as `err` and call",
+        " `code_typed(GPUCompiler.unwrap_error(err); interactive = true)` to",
         " introspect the erroneous code with Cthulhu.jl";
         color = :cyan,
     )

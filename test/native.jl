@@ -1,3 +1,5 @@
+using InteractiveUtils
+
 @testset "reflection" begin
     job, _ = Native.create_job(identity, (Int,))
 
@@ -620,6 +622,25 @@ end
         occursin("[1] println", msg) &&
         occursin("[2] foobar", msg)
     end
+end
+
+@testset "unwrap_error" begin
+    mod = @eval module $(gensym())
+        foobar(i) = println(i)
+    end
+
+    stack = try
+        Native.code_execution(mod.foobar, Tuple{Int})
+        nothing
+    catch
+        current_exceptions()
+    end
+    @test stack isa Base.ExceptionStack
+    err = GPUCompiler.unwrap_error(stack)
+    @test err isa GPUCompiler.InvalidIRError
+    @test GPUCompiler.unwrap_error(err) === err
+    @test GPUCompiler.unwrap_error(LoadError("foo.jl", 1, err)) === err
+    @test only(code_typed(GPUCompiler.unwrap_error(stack))) isa Pair
 end
 
 @testset "invalid LLVM IR (ccall)" begin
