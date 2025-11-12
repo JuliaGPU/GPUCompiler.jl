@@ -110,6 +110,9 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
         entry = wrap_byval(job, mod, entry)
     end
 
+    # SPIR-V does not support i128, convert alloca arrays to vector types
+    convert_i128_allocas!(mod)
+
     # add module metadata
     ## OpenCL 2.0
     push!(metadata(mod)["opencl.ocl.version"],
@@ -276,6 +279,62 @@ function rm_freeze!(mod::LLVM.Module)
             @compiler_assert isempty(uses(inst)) job
             erase!(inst)
             changed = true
+        end
+    end
+
+    end
+    return changed
+end
+
+# convert alloca [N x i128] to alloca [N x <2 x i64>]
+# SPIR-V doesn't support i128 types, but we can represent them as vectors
+function convert_i128_allocas!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    changed = false
+    @tracepoint "convert i128 allocas" begin
+
+    for f in functions(mod), bb in blocks(f)
+        for inst in instructions(bb)
+            if inst isa LLVM.AllocaInst
+                alloca_type = LLVMType(LLVM.API.LLVMGetAllocatedType(inst))
+
+                # Check if this is an i128 or an array of i128
+                if alloca_type isa LLVM.ArrayType
+                    T = eltype(alloca_type)
+                else
+                    T = alloca_type
+                end
+                if T isa LLVM.IntegerType && width(T) == 128
+                    # replace i128 with <2 x i64>
+                    vec_type = LLVM.VectorType(LLVM.Int64Type(), 2)
+
+                    if alloca_type isa LLVM.ArrayType
+                        array_size = length(alloca_type)
+                        new_alloca_type = LLVM.ArrayType(vec_type, array_size)
+                    else
+                        new_alloca_type = vec_type
+                    end
+                    align_val = alignment(inst)
+
+                    # Create new alloca with vector type
+                    @dispose builder=IRBuilder() begin
+                        position!(builder, inst)
+                        new_alloca = alloca!(builder, new_alloca_type)
+                        alignment!(new_alloca, align_val)
+
+                        # Bitcast the new alloca back to the original pointer type
+                        # XXX: The issue only seems to manifest itself on LLVM >= 18
+                        #      where we use opaque pointers anyways, so not sure this
+                        #      is needed
+                        old_ptr_type = LLVMType(LLVM.API.LLVMTypeOf(inst.ref))
+                        bitcast_ptr = bitcast!(builder, new_alloca, old_ptr_type)
+
+                        replace_uses!(inst, bitcast_ptr)
+                        erase!(inst)
+                        changed = true
+                    end
+                end
+            end
         end
     end
 

@@ -112,4 +112,37 @@ end
 
 end
 
+@testset "replace i128 allocas" begin
+    mod = @eval module $(gensym())
+        # reimplement some of SIMD.jl
+        struct Vec{N, T}
+            data::NTuple{N, Core.VecElement{T}}
+        end
+        @generated function fadd(x::Vec{N, Float32}, y::Vec{N, Float32}) where {N}
+            quote
+                Vec(Base.llvmcall($"""
+                    %ret = fadd <$N x float> %0, %1
+                    ret <$N x float> %ret
+                """, NTuple{N, Core.VecElement{Float32}}, NTuple{2, NTuple{N, Core.VecElement{Float32}}}, x.data, y.data))
+            end
+        end
+        kernel(x...) = @noinline fadd(x...)
+    end
+
+    @test @filecheck begin
+        # TODO: should structs of `NTuple{VecElement{T}}` be passed by value instead of sret?
+        check"CHECK-NOT: i128"
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+        @static VERSION >= v"1.12" && check"CHECK: alloca <2 x i64>, align 16"
+        SPIRV.code_llvm(mod.kernel, NTuple{2, mod.Vec{4, Float32}}; backend, dump_module=true)
+    end
+
+    @test @filecheck begin
+        check"CHECK-NOT: i128"
+        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+        @static VERSION >= v"1.12" && check"CHECK: alloca [2 x <2 x i64>], align 16"
+        SPIRV.code_llvm(mod.kernel, NTuple{2, mod.Vec{8, Float32}}; backend, dump_module=true)
+    end
+end
+
 end
