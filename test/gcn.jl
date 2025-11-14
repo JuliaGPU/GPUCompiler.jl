@@ -37,6 +37,13 @@ end
     end
 end
 
+@testset "https://github.com/JuliaGPU/AMDGPU.jl/issues/846" begin
+    ir, rt = GCN.code_typed((Tuple{Tuple{Val{4}}, Tuple{Float32}},); always_inline=true) do t
+        t[1]
+    end |> only
+    @test rt == Tuple{Val{4}}
+end
+
 end
 
 ############################################################################################
