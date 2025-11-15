@@ -324,7 +324,7 @@ function optimization_params(@nospecialize(job::CompilerJob))
     kwargs = NamedTuple()
 
     if job.config.always_inline
-        kwargs = (kwargs..., inline_cost_threshold=typemax(Int))
+        kwargs = (kwargs..., inline_cost_threshold=Int(CC.MAX_INLINE_COST))
     end
 
     return CC.OptimizationParams(;kwargs...)
