@@ -219,7 +219,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     add!(mpm, NewPMFunctionPassManager()) do fpm
         # lower exception handling
-        if uses_julia_runtime(job)
+        if uses_julia_runtime(job) && VERSION < v"1.13.0-DEV.36"
             add!(fpm, LowerExcHandlersPass())
         end
         add!(fpm, GCInvariantVerifierPass())
