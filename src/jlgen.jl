@@ -614,9 +614,7 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
 
         # inference should have populated our cache
         wvc = WorldView(cache, min_world, max_world)
-        if !CC.haskey(wvc, mi)
-            throw(AssertionError("GPUCompiler: Failed to compile method for $mi, between worlds $min_world and $max_world"))
-        end
+        @assert CC.haskey(wvc, mi) "GPUCompiler: Failed to compile method for $mi, between worlds $min_world and $max_world"
         ci = CC.getindex(wvc, mi)
 
         # if ci is rettype_const, the inference result won't have been cached
