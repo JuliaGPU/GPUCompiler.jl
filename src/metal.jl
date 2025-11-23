@@ -1018,7 +1018,7 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
 
         # synchronization
         if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
-            add_attributes("nounwind", "convergent")
+            add_attributes("nounwind", "mustprogress", "convergent", "willreturn")
 
         # atomics
         elseif match(r"air.atomic.(local|global).load", fn) !== nothing
@@ -1033,6 +1033,14 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
         elseif match(r"^air.atomic.(local|global).(add|sub|min|max|and|or|xor)", fn) !== nothing
             # TODO: "memory(argmem: readwrite)" on LLVM 16+
             add_attributes("argmemonly", "nounwind")
+
+        # simdgroup
+        elseif match(r"air.simdgroup_matrix_8x8_multiply_accumulate", fn) !== nothing
+            add_attributes("convergent", "mustprogress", "nounwind", "willreturn")
+        elseif match(r"air.simdgroup_matrix_8x8_load", fn) !== nothing
+            add_attributes("convergent", "mustprogress", "nofree", "nounwind", "readonly", "willreturn")
+        elseif match(r"air.simdgroup_matrix_8x8_store", fn) !== nothing
+            add_attributes("convergent", "mustprogress", "nounwind", "willreturn", "writeonly")
         end
     end
 
