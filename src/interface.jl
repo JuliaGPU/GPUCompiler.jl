@@ -222,6 +222,10 @@ end
 # Has the runtime available and does not require special handling
 uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 
+# Should we emit code in imaging mode (i.e. without embedding concrete runtime addresses)?
+imaging_mode(@nospecialize(job::CompilerJob)) = imaging_mode(job.config.target)
+imaging_mode(@nospecialize(target::AbstractCompilerTarget)) = false
+
 # Is it legal to run vectorization passes on this target
 can_vectorize(@nospecialize(job::CompilerJob)) = false
 

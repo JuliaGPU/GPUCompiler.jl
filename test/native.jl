@@ -512,7 +512,8 @@ end
                          Native.code_execution(mod.foobar, Tuple{Ptr{Int}})) do msg
         if VERSION >= v"1.11-"
             occursin("invalid LLVM IR", msg) &&
-            occursin(GPUCompiler.LAZY_FUNCTION, msg) &&
+            (occursin(GPUCompiler.LAZY_FUNCTION, msg) ||
+             occursin(GPUCompiler.RUNTIME_FUNCTION, msg)) &&
             occursin("call to time", msg) &&
             occursin("[1] foobar", msg)
         else

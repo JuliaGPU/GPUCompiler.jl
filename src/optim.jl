@@ -19,6 +19,14 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
         end
         run!(pb, mod, tm)
     end
+
+    # Make sure any lingering TLS getters are rewritten even if upstream LLVM passes
+    # transformed them before the GPULowerPTLSPass had a chance to run.
+    if occursin("StaticCompilerTarget", string(typeof(job.config.target))) &&
+       uses_julia_runtime(job)
+        lower_ptls!(mod)
+    end
+
     optimize_module!(job, mod)
     run!(DeadArgumentEliminationPass(), mod, tm)
     return
@@ -405,7 +413,31 @@ function lower_ptls!(mod::LLVM.Module)
 
     intrinsic = "julia.get_pgcstack"
 
-    if haskey(functions(mod), intrinsic)
+    # On host-style static targets we want a relocatable call into libjulia instead of
+    # embedding the pointer to the TLS getter. Replace the intrinsic with a declared
+    # libjulia call to avoid baking absolute addresses that crash in standalone binaries.
+    if haskey(functions(mod), intrinsic) &&
+       occursin("StaticCompilerTarget", string(typeof(job.config.target))) &&
+       uses_julia_runtime(job)
+
+        pgc_fn = functions(mod)[intrinsic]
+        jl_decl = if haskey(functions(mod), "jl_get_pgcstack")
+            functions(mod)["jl_get_pgcstack"]
+        else
+            LLVM.Function(mod, "jl_get_pgcstack", LLVM.FunctionType(LLVM.PointerType()))
+        end
+
+        for use in uses(pgc_fn)
+            call = user(use)::LLVM.CallInst
+            @dispose builder=IRBuilder() begin
+                position!(builder, call)
+                repl = call!(builder, function_type(jl_decl), jl_decl, LLVM.Value[])
+                replace_uses!(call, repl)
+            end
+            erase!(call)
+            changed = true
+        end
+    elseif haskey(functions(mod), intrinsic)
         ptls_getter = functions(mod)[intrinsic]
 
         for use in uses(ptls_getter)
@@ -418,6 +450,34 @@ function lower_ptls!(mod::LLVM.Module)
             end
         end
      end
+
+    # Newer Julia versions sometimes lower the TLS getter to an inttoptr call that bakes
+    # the address of `jl_get_pgcstack_static` into the IR. Rewrite those calls as well to
+    # make sure we always end up with a relocatable reference into libjulia when the
+    # runtime is linked.
+    if uses_julia_runtime(job) && occursin("StaticCompilerTarget", string(typeof(job.config.target)))
+        jl_decl = if haskey(functions(mod), "jl_get_pgcstack")
+            functions(mod)["jl_get_pgcstack"]
+        else
+            LLVM.Function(mod, "jl_get_pgcstack", LLVM.FunctionType(LLVM.PointerType()))
+        end
+
+        for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+            inst isa LLVM.CallInst || continue
+
+            callee = LLVM.called_operand(inst)
+            if callee isa LLVM.ConstantExpr && occursin("inttoptr", string(callee)) &&
+               occursin("pgcstack", string(inst))
+                @dispose builder=IRBuilder() begin
+                    position!(builder, inst)
+                    repl = call!(builder, function_type(jl_decl), jl_decl, LLVM.Value[])
+                    replace_uses!(inst, repl)
+                end
+                erase!(inst)
+                changed = true
+            end
+        end
+    end
 
     return changed
 end

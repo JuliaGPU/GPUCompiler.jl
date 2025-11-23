@@ -717,6 +717,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # set-up the compiler interface
     debug_info_kind = llvm_debug_info(job)
+    imaging = imaging_mode(job)
+
     cgparams = (;
         track_allocations  = false,
         code_coverage      = false,
@@ -725,6 +727,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         debug_info_kind    = Cint(debug_info_kind),
         safepoint_on_entry = can_safepoint(job),
         gcstack_arg        = false)
+    if :use_jlplt in fieldnames(Base.CodegenParams)
+        cgparams = (; cgparams..., use_jlplt = imaging)
+    end
     if VERSION < v"1.12.0-DEV.1667"
         cgparams = (; lookup = Base.unsafe_convert(Ptr{Nothing}, lookup_cb), cgparams... )
     end
@@ -748,6 +753,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
         end
 
+        imaging_flag = imaging ? 1 : 0
+
         native_code = if VERSION >= v"1.12.0-DEV.1823"
             codeinfos = Any[]
             for (ci, src) in populated
@@ -760,11 +767,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         elseif VERSION >= v"1.12.0-DEV.1667"
             ccall(:jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t, Ptr{Cvoid}),
-                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.world, Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
+                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, imaging_flag, #=external linkage=# 0, job.world, Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
         else
             ccall(:jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t),
-                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, #=imaging mode=# 0, #=external linkage=# 0, job.world)
+                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, imaging_flag, #=external linkage=# 0, job.world)
         end
         @assert native_code != C_NULL
 
