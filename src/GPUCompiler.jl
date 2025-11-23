@@ -66,7 +66,7 @@ function __init__()
     global compile_cache = dir
 
     Tracy.@register_tracepoints()
-    register_deferred_codegen()
+    return register_deferred_codegen()
 end
 
 end # module

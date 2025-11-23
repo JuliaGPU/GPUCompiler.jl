@@ -19,7 +19,7 @@ function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
             while loc !== nothing
                 scope = LLVM.scope(loc)
                 if scope !== nothing
-                    name = replace(LLVM.name(scope), r";$"=>"")
+                    name = replace(LLVM.name(scope), r";$" => "")
                     file = LLVM.file(scope)
                     path = joinpath(LLVM.directory(file), LLVM.filename(file))
                     line = LLVM.line(loc)

@@ -11,7 +11,7 @@ module TestRuntime
 end
 
 struct TestCompilerParams <: AbstractCompilerParams end
-GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
+GPUCompiler.runtime_module(::CompilerJob{<:Any, TestCompilerParams}) = TestRuntime
 
 kernel() = nothing
 
@@ -26,7 +26,7 @@ function main()
         GPUCompiler.compile(:asm, job)
     end
 
-    println(output[1])
+    return println(output[1])
 end
 
 isinteractive() || main()

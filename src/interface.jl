@@ -27,7 +27,7 @@ llvm_triple(@nospecialize(target::AbstractCompilerTarget)) = error("Not implemen
 function llvm_machine(@nospecialize(target::AbstractCompilerTarget))
     triple = llvm_triple(target)
 
-    t = Target(triple=triple)
+    t = Target(triple = triple)
 
     tm = TargetMachine(t, triple)
     asm_verbosity!(tm, true)
@@ -41,7 +41,7 @@ llvm_datalayout(target::AbstractCompilerTarget) = DataLayout(llvm_machine(target
 function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     dl = llvm_datalayout(target)
     dl === nothing && return nothing
-    DataLayout(string(dl) * "-ni:10:11:12:13")
+    return DataLayout(string(dl) * "-ni:10:11:12:13")
 end
 
 have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
@@ -68,8 +68,10 @@ export CompilerConfig
 
 # the configuration of the compiler
 
-const CONFIG_KWARGS = [:kernel, :name, :entry_abi, :always_inline, :opt_level,
-                       :libraries, :optimize, :cleanup, :validate, :strip]
+const CONFIG_KWARGS = [
+    :kernel, :name, :entry_abi, :always_inline, :opt_level,
+    :libraries, :optimize, :cleanup, :validate, :strip,
+]
 
 """
     CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, name=nothing,
@@ -102,12 +104,12 @@ Several keyword arguments can be used to customize the compilation process:
 - `validate`: enable optional validation of input and outputs (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
 """
-struct CompilerConfig{T,P}
+struct CompilerConfig{T, P}
     target::T
     params::P
 
     kernel::Bool
-    name::Union{Nothing,String}
+    name::Union{Nothing, String}
     entry_abi::Symbol
     always_inline::Bool
     opt_level::Int
@@ -121,27 +123,33 @@ struct CompilerConfig{T,P}
     toplevel::Bool
     only_entry::Bool
 
-    function CompilerConfig(target::AbstractCompilerTarget, params::AbstractCompilerParams;
-                            kernel=true, name=nothing, entry_abi=:specfunc, toplevel=true,
-                            always_inline=false, opt_level=2, optimize=toplevel,
-                            libraries=toplevel, cleanup=toplevel, validate=toplevel,
-                            strip=false, only_entry=false)
+    function CompilerConfig(
+            target::AbstractCompilerTarget, params::AbstractCompilerParams;
+            kernel = true, name = nothing, entry_abi = :specfunc, toplevel = true,
+            always_inline = false, opt_level = 2, optimize = toplevel,
+            libraries = toplevel, cleanup = toplevel, validate = toplevel,
+            strip = false, only_entry = false
+        )
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
-        new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
-                                            always_inline, opt_level, libraries, optimize,
-                                            cleanup, validate, strip, toplevel, only_entry)
+        return new{typeof(target), typeof(params)}(
+            target, params, kernel, name, entry_abi,
+            always_inline, opt_level, libraries, optimize,
+            cleanup, validate, strip, toplevel, only_entry
+        )
     end
 end
 
 # copy constructor
-function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
-                        kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
-                        always_inline=cfg.always_inline, opt_level=cfg.opt_level,
-                        libraries=cfg.libraries, optimize=cfg.optimize, cleanup=cfg.cleanup,
-                        validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
-                        only_entry=cfg.only_entry)
+function CompilerConfig(
+        cfg::CompilerConfig; target = cfg.target, params = cfg.params,
+        kernel = cfg.kernel, name = cfg.name, entry_abi = cfg.entry_abi,
+        always_inline = cfg.always_inline, opt_level = cfg.opt_level,
+        libraries = cfg.libraries, optimize = cfg.optimize, cleanup = cfg.cleanup,
+        validate = cfg.validate, strip = cfg.strip, toplevel = cfg.toplevel,
+        only_entry = cfg.only_entry
+    )
     # deriving a non-toplevel job disables certain features
     # XXX: should we keep track if any of these were set explicitly in the first place?
     #      see how PkgEval does that.
@@ -151,12 +159,14 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
         cleanup = false
         validate = false
     end
-    CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
-                   libraries, optimize, cleanup, validate, strip, toplevel, only_entry)
+    return CompilerConfig(
+        target, params; kernel, entry_abi, name, always_inline, opt_level,
+        libraries, optimize, cleanup, validate, strip, toplevel, only_entry
+    )
 end
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
-    print(io, "CompilerConfig for ", T)
+    return print(io, "CompilerConfig for ", T)
 end
 
 function Base.hash(cfg::CompilerConfig, h::UInt)
@@ -194,18 +204,20 @@ using Core: MethodInstance
 Construct a `CompilerJob` that will be used to drive compilation for the given `source` and
 `config` in a given `world`.
 """
-struct CompilerJob{T,P}
+struct CompilerJob{T, P}
     source::MethodInstance
-    config::CompilerConfig{T,P}
+    config::CompilerConfig{T, P}
     world::UInt
 
-    CompilerJob(source::MethodInstance, config::CompilerConfig{T,P},
-                world=tls_world_age()) where {T,P} =
-        new{T,P}(source, config, world)
+    CompilerJob(
+        source::MethodInstance, config::CompilerConfig{T, P},
+        world = tls_world_age()
+    ) where {T, P} =
+        new{T, P}(source, config, world)
 end
 
 # copy constructor
-CompilerJob(job::CompilerJob; source=job.source, config=job.config, world=job.world) =
+CompilerJob(job::CompilerJob; source = job.source, config = job.config, world = job.world) =
     CompilerJob(source, config, world)
 
 function Base.hash(job::CompilerJob, h::UInt)
@@ -221,6 +233,10 @@ end
 
 # Has the runtime available and does not require special handling
 uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
+
+# Should we emit code in imaging mode (i.e. without embedding concrete runtime addresses)?
+imaging_mode(@nospecialize(job::CompilerJob)) = imaging_mode(job.config.target)
+imaging_mode(@nospecialize(target::AbstractCompilerTarget)) = false
 
 # Is it legal to run vectorization passes on this target
 can_vectorize(@nospecialize(job::CompilerJob)) = false
@@ -238,15 +254,19 @@ isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
 if VERSION >= v"1.11.0-DEV.1552"
-get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
-                   token=ci_cache_token(job), inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
+    get_interpreter(@nospecialize(job::CompilerJob)) =
+        GPUInterpreter(
+        job.world; method_table_view = maybe_cached(method_table_view(job)),
+        token = ci_cache_token(job), inf_params = inference_params(job),
+        opt_params = optimization_params(job)
+    )
 else
-get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
-                   code_cache=ci_cache(job), inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
+    get_interpreter(@nospecialize(job::CompilerJob)) =
+        GPUInterpreter(
+        job.world; method_table_view = maybe_cached(method_table_view(job)),
+        code_cache = ci_cache(job), inf_params = inference_params(job),
+        opt_params = optimization_params(job)
+    )
 end
 
 # does this target support throwing Julia exceptions with jl_throw?
@@ -295,14 +315,14 @@ if VERSION >= v"1.11.0-DEV.1552"
     # Soft deprecated user should use `CC.code_cache(get_interpreter(job))`
     ci_cache(@nospecialize(job::CompilerJob)) = CC.code_cache(get_interpreter(job))
 else
-function ci_cache(@nospecialize(job::CompilerJob))
-    lock(GLOBAL_CI_CACHES_LOCK) do
-        cache = get!(GLOBAL_CI_CACHES, job.config) do
-            CodeCache()
+    function ci_cache(@nospecialize(job::CompilerJob))
+        return lock(GLOBAL_CI_CACHES_LOCK) do
+            cache = get!(GLOBAL_CI_CACHES, job.config) do
+                CodeCache()
+            end
+            return cache
         end
-        return cache
     end
-end
 end
 
 # the method table to use
@@ -312,10 +332,10 @@ method_table_view(@nospecialize(job::CompilerJob)) = get_method_table_view(job.w
 
 # the inference parameters to use when constructing the GPUInterpreter
 function inference_params(@nospecialize(job::CompilerJob))
-    if VERSION >= v"1.12.0-DEV.1017"
+    return if VERSION >= v"1.12.0-DEV.1017"
         CC.InferenceParams()
     else
-        CC.InferenceParams(; unoptimize_throw_blocks=false)
+        CC.InferenceParams(; unoptimize_throw_blocks = false)
     end
 end
 
@@ -324,15 +344,15 @@ function optimization_params(@nospecialize(job::CompilerJob))
     kwargs = NamedTuple()
 
     if job.config.always_inline
-        kwargs = (kwargs..., inline_cost_threshold=Int(CC.MAX_INLINE_COST))
+        kwargs = (kwargs..., inline_cost_threshold = Int(CC.MAX_INLINE_COST))
     end
 
-    return CC.OptimizationParams(;kwargs...)
+    return CC.OptimizationParams(; kwargs...)
 end
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))
-    if Base.JLOptions().debug_level == 0
+    return if Base.JLOptions().debug_level == 0
         LLVM.API.LLVMDebugEmissionKindNoDebug
     elseif Base.JLOptions().debug_level == 1
         LLVM.API.LLVMDebugEmissionKindLineTablesOnly
@@ -350,8 +370,10 @@ prepare_job!(@nospecialize(job::CompilerJob)) = return
 
 # early extension point used to link-in external bitcode files.
 # this is typically used by downstream packages to link vendor libraries.
-link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                undefined_fns::Vector{String}) = return
+link_libraries!(
+    @nospecialize(job::CompilerJob), mod::LLVM.Module,
+    undefined_fns::Vector{String}
+) = return
 
 # finalization of the module, before deferred codegen and optimization
 finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =

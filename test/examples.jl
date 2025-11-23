@@ -1,4 +1,4 @@
-function find_sources(path::String, sources=String[])
+function find_sources(path::String, sources = String[])
     if isdir(path)
         for entry in readdir(path)
             find_sources(joinpath(path, entry), sources)
@@ -6,7 +6,7 @@ function find_sources(path::String, sources=String[])
     elseif endswith(path, ".jl")
         push!(sources, path)
     end
-    sources
+    return sources
 end
 
 dir = joinpath(@__DIR__, "..", "examples")
@@ -18,6 +18,6 @@ cd(dir) do
     examples = relpath.(files, Ref(dir))
     @testset for example in examples
         cmd = `$(Base.julia_cmd()) --project=$(Base.active_project())`
-        @test success(pipeline(`$cmd $example`, stderr=stderr))
+        @test success(pipeline(`$cmd $example`, stderr = stderr))
     end
 end

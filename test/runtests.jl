@@ -22,10 +22,10 @@ function test_filter(test)
     if LLVM.is_asserts() && test == "gcn"
         # XXX: GCN's non-0 stack address space triggers LLVM assertions due to Julia bugs
         return false
-     end
-     if VERSION < v"1.11" && test in ("ptx/precompile", "native/precompile")
-         return false
-     end
+    end
+    if VERSION < v"1.11" && test in ("ptx/precompile", "native/precompile")
+        return false
+    end
     return true
 end
 

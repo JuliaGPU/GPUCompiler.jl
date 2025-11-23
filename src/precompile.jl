@@ -2,22 +2,22 @@ using PrecompileTools: @setup_workload, @compile_workload
 
 @setup_workload begin
     precompile_module = @eval module $(gensym())
-        using ..GPUCompiler
+    using ..GPUCompiler
 
-        module DummyRuntime
-            # dummy methods
-            signal_exception() = return
-            malloc(sz) = C_NULL
-            report_oom(sz) = return
-            report_exception(ex) = return
-            report_exception_name(ex) = return
-            report_exception_frame(idx, func, file, line) = return
-        end
+    module DummyRuntime
+        # dummy methods
+        signal_exception() = return
+        malloc(sz) = C_NULL
+        report_oom(sz) = return
+        report_exception(ex) = return
+        report_exception_name(ex) = return
+        report_exception_frame(idx, func, file, line) = return
+    end
 
-        struct DummyCompilerParams <: AbstractCompilerParams end
-        const DummyCompilerJob = CompilerJob{NativeCompilerTarget, DummyCompilerParams}
+    struct DummyCompilerParams <: AbstractCompilerParams end
+    const DummyCompilerJob = CompilerJob{NativeCompilerTarget, DummyCompilerParams}
 
-        GPUCompiler.runtime_module(::DummyCompilerJob) = DummyRuntime
+    GPUCompiler.runtime_module(::DummyCompilerJob) = DummyRuntime
     end
 
     kernel() = nothing
@@ -28,7 +28,7 @@ using PrecompileTools: @setup_workload, @compile_workload
         params = precompile_module.DummyCompilerParams()
         # XXX: on Windows, compiling the GPU runtime leaks GPU code in the native cache,
         #      so prevent building the runtime library (see JuliaGPU/GPUCompiler.jl#601)
-        config = CompilerConfig(target, params; libraries=false)
+        config = CompilerConfig(target, params; libraries = false)
         job = CompilerJob(source, config)
 
         JuliaContext() do ctx

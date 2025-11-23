@@ -8,6 +8,7 @@ function link_library!(mod::LLVM.Module, libs::Vector{LLVM.Module})
     for lib in libs
         link!(mod, lib)
     end
+    return
 end
 
 
@@ -18,7 +19,7 @@ end
 
 ## higher-level functionality to work with runtime functions
 
-function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[])
+function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args = LLVM.Value[])
     bb = position(builder)
     f = LLVM.parent(bb)
     mod = LLVM.parent(f)
@@ -36,26 +37,30 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         #      is linked, as part of the lower_gc_frame! optimization pass.
         # XXX: report_exception can also be used after the runtime is linked during
         #      CUDA/Enzyme nested compilation
-        error("Calling an intrinsic function that clashes with an existing definition: ",
-               string(ft), " ", rt.name)
+        error(
+            "Calling an intrinsic function that clashes with an existing definition: ",
+            string(ft), " ", rt.name
+        )
     end
 
     # runtime functions are written in Julia, while we're calling from LLVM,
     # this often results in argument type mismatches. try to fix some here.
     args = LLVM.Value[args...]
     if length(args) != length(parameters(ft))
-        error("Incorrect number of arguments for runtime function: ",
-              "passing ", length(args), " argument(s) to '", string(ft), " ", rt.name, "'")
+        error(
+            "Incorrect number of arguments for runtime function: ",
+            "passing ", length(args), " argument(s) to '", string(ft), " ", rt.name, "'"
+        )
     end
-    for (i,arg) in enumerate(args)
+    for (i, arg) in enumerate(args)
         if value_type(arg) != parameters(ft)[i]
             args[i] = if (value_type(arg) isa LLVM.PointerType) &&
-               (parameters(ft)[i] isa LLVM.IntegerType)
+                    (parameters(ft)[i] isa LLVM.IntegerType)
                 # pointers are passed as integers on Julia 1.11 and earlier
                 ptrtoint!(builder, args[i], parameters(ft)[i])
             elseif value_type(arg) isa LLVM.PointerType &&
-                   parameters(ft)[i] isa LLVM.PointerType &&
-                   addrspace(value_type(arg)) != addrspace(parameters(ft)[i])
+                    parameters(ft)[i] isa LLVM.PointerType &&
+                    addrspace(value_type(arg)) != addrspace(parameters(ft)[i])
                 # runtime functions are always in the default address space,
                 # while arguments may come from globals in other address spaces.
                 addrspacecast!(builder, args[i], parameters(ft)[i])
@@ -65,7 +70,7 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         end
     end
 
-    call!(builder, ft, f, args)
+    return call!(builder, ft, f, args)
 end
 
 
@@ -97,7 +102,7 @@ function emit_function!(mod, config::CompilerConfig, f, method)
         replace_uses!(decl, entry)
         erase!(decl)
     end
-    LLVM.name!(entry, name)
+    return LLVM.name!(entry, name)
 end
 
 function build_runtime(@nospecialize(job::CompilerJob))
@@ -105,7 +110,7 @@ function build_runtime(@nospecialize(job::CompilerJob))
 
     # the compiler job passed into here is identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
-    config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false, strip=false)
+    config = CompilerConfig(job.config; kernel = false, toplevel = false, only_entry = false, strip = false)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
@@ -122,7 +127,7 @@ function build_runtime(@nospecialize(job::CompilerJob))
     # removes Julia address spaces, which would then lead to type mismatches when using
     # functions from the runtime library from IR that has not been stripped of AS info.
 
-    mod
+    return mod
 end
 
 const runtime_lock = ReentrantLock()
@@ -159,13 +164,13 @@ const runtime_cache = Dict{String, Vector{UInt8}}()
             lib = build_runtime(job)
 
             # atomic write to disk
-            temp_path, io = mktemp(dirname(path); cleanup=false)
+            temp_path, io = mktemp(dirname(path); cleanup = false)
             write(io, lib)
             close(io)
             @static if VERSION >= v"1.12.0-DEV.1023"
-                mv(temp_path, path; force=true)
+                mv(temp_path, path; force = true)
             else
-                Base.rename(temp_path, path, force=true)
+                Base.rename(temp_path, path, force = true)
             end
         end
 
@@ -177,7 +182,7 @@ end
 # NOTE: call this function from global scope, so any change triggers recompilation.
 function reset_runtime()
     lock(runtime_lock) do
-        rm(compile_cache; recursive=true, force=true)
+        rm(compile_cache; recursive = true, force = true)
     end
 
     return

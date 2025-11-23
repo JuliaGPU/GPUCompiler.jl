@@ -5,17 +5,17 @@
 export NativeCompilerTarget
 
 Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
-    cpu::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
-    features::String=(LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
-    llvm_always_inline::Bool=false # will mark the job function as always inline
-    jlruntime::Bool=false # Use Julia runtime for throwing errors, instead of the GPUCompiler support
+    cpu::String = (LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUName())
+    features::String = (LLVM.version() < v"8") ? "" : unsafe_string(LLVM.API.LLVMGetHostCPUFeatures())
+    llvm_always_inline::Bool = false # will mark the job function as always inline
+    jlruntime::Bool = false # Use Julia runtime for throwing errors, instead of the GPUCompiler support
 end
 llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
 
 function llvm_machine(target::NativeCompilerTarget)
     triple = llvm_triple(target)
 
-    t = Target(triple=triple)
+    t = Target(triple = triple)
 
     tm = TargetMachine(t, triple, target.cpu, target.features)
     asm_verbosity!(tm, true)

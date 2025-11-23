@@ -18,9 +18,9 @@ export JuliaContext
 # JuliaContext helper below, which returns a local context on Julia 1.9, and the global
 # unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
 # this helper to a regular `Context()` call.
-function JuliaContext(; opaque_pointers=nothing)
+function JuliaContext(; opaque_pointers = nothing)
     # XXX: remove
-    ThreadSafeContext(; opaque_pointers)
+    return ThreadSafeContext(; opaque_pointers)
 end
 function JuliaContext(f; kwargs...)
     ts_ctx = JuliaContext(; kwargs...)
@@ -30,7 +30,7 @@ function JuliaContext(f; kwargs...)
     #      rework this once we depend on Julia 1.9 or later.
     ctx = context(ts_ctx)
     activate(ctx)
-    try
+    return try
         f(ctx)
     finally
         deactivate(ctx)
@@ -44,7 +44,7 @@ end
 export compile
 
 # (::CompilerJob)
-const compile_hook = Ref{Union{Nothing,Function}}(nothing)
+const compile_hook = Ref{Union{Nothing, Function}}(nothing)
 
 """
     compile(target::Symbol, job::CompilerJob)
@@ -74,11 +74,11 @@ function codegen(output::Symbol, @nospecialize(job::CompilerJob); kwargs...)
         config = CompilerConfig(job.config; kwargs...)
         job = CompilerJob(job.source, config)
     end
-    compile_unhooked(output, job)
+    return compile_unhooked(output, job)
 end
 
 function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob); kwargs...)
-    if context(; throw_error=false) === nothing
+    if context(; throw_error = false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
 
@@ -131,10 +131,10 @@ const deferred_codegen_jobs = Dict{Int, Any}()
 # lazy compilation from, while also enabling recursive compilation.
 # see `register_deferred_codegen`
 function deferred_codegen(ptr::Ptr{Cvoid})::Ptr{Cvoid}
-    ptr
+    return ptr
 end
 
-@generated function deferred_codegen(::Val{ft}, ::Val{tt}) where {ft,tt}
+@generated function deferred_codegen(::Val{ft}, ::Val{tt}) where {ft, tt}
     id = length(deferred_codegen_jobs) + 1
     deferred_codegen_jobs[id] = (; ft, tt)
     # don't bother looking up the method instance, as we'll do so again during codegen
@@ -144,7 +144,7 @@ end
     # generated functions so use the current world counter, which may be too new
     # for the world we're compiling for.
 
-    quote
+    return quote
         # TODO: add an edge to this method instance to support method redefinitions
         ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
     end
@@ -154,13 +154,15 @@ end
 # Called from __init__
 # On 1.11+ this is needed due to a Julia bug that drops the pointer when code-coverage is enabled.
 function register_deferred_codegen()
-    @dispose jljit=JuliaOJIT() begin
+    @dispose jljit = JuliaOJIT() begin
         jd = JITDylib(jljit)
 
         address = LLVM.API.LLVMOrcJITTargetAddress(
-            reinterpret(UInt, @cfunction(deferred_codegen, Ptr{Cvoid}, (Ptr{Cvoid},))))
+            reinterpret(UInt, @cfunction(deferred_codegen, Ptr{Cvoid}, (Ptr{Cvoid},)))
+        )
         flags = LLVM.API.LLVMJITSymbolFlags(
-            LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
+            LLVM.API.LLVMJITSymbolGenericFlagsExported, 0
+        )
         name = mangle(jljit, "deferred_codegen")
         symbol = LLVM.API.LLVMJITEvaluatedSymbol(address, flags)
         map = if LLVM.version() >= v"15"
@@ -212,7 +214,7 @@ const __llvm_initialized = Ref(false)
 
     # deferred code generation
     has_deferred_jobs = job.config.toplevel && !job.config.only_entry &&
-                        haskey(functions(ir), "deferred_codegen")
+        haskey(functions(ir), "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
         dyn_marker = functions(ir)["deferred_codegen"]
@@ -252,7 +254,7 @@ const __llvm_initialized = Ref(false)
                 dyn_entry_fn = get!(jobs, dyn_job) do
                     target = nest_target(dyn_job.config.target, job.config.target)
                     params = nest_params(dyn_job.config.params, job.config.params)
-                    config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
+                    config = CompilerConfig(dyn_job.config; toplevel = false, target, params)
                     dyn_ir, dyn_meta = codegen(:llvm, CompilerJob(dyn_job; config))
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
@@ -266,7 +268,7 @@ const __llvm_initialized = Ref(false)
                 # insert a pointer to the function everywhere the entry is used
                 T_ptr = convert(LLVMType, Ptr{Cvoid})
                 for call in worklist[dyn_job]
-                    @dispose builder=IRBuilder() begin
+                    @dispose builder = IRBuilder() begin
                         position!(builder, call)
                         fptr = if LLVM.version() >= v"17"
                             T_ptr = LLVM.PointerType()
@@ -284,7 +286,7 @@ const __llvm_initialized = Ref(false)
             end
 
             # minimal optimization to convert the inttoptr/call into a direct call
-            @dispose pb=NewPMPassBuilder() begin
+            @dispose pb = NewPMPassBuilder() begin
                 add!(pb, NewPMFunctionPassManager()) do fpm
                     add!(fpm, InstCombinePass())
                 end
@@ -311,9 +313,11 @@ const __llvm_initialized = Ref(false)
             @tracepoint "target libraries" link_libraries!(job, ir, undefined_fns)
 
             # GPU run-time library
-            if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
-                                                        fn in runtime_intrinsics,
-                                                undefined_fns)
+            if !uses_julia_runtime(job) && any(
+                    fn -> fn in runtime_fns ||
+                        fn in runtime_intrinsics,
+                    undefined_fns
+                )
                 @tracepoint "runtime library" link_library!(ir, runtime)
             end
         end
@@ -336,10 +340,12 @@ const __llvm_initialized = Ref(false)
                 end
             end
             if LLVM.version() >= v"17"
-                run!(InternalizePass(; preserved_gvs), ir,
-                     llvm_machine(job.config.target))
+                run!(
+                    InternalizePass(; preserved_gvs), ir,
+                    llvm_machine(job.config.target)
+                )
             else
-                @dispose pm=ModulePassManager() begin
+                @dispose pm = ModulePassManager() begin
                     internalize!(pm, preserved_gvs)
                     run!(pm, ir)
                 end
@@ -355,7 +361,7 @@ const __llvm_initialized = Ref(false)
                     # which also need to happen _after_ regular optimization.
                     # XXX: make these part of the optimizer pipeline?
                     if has_deferred_jobs
-                        @dispose pb=NewPMPassBuilder() begin
+                        @dispose pb = NewPMPassBuilder() begin
                             add!(pb, NewPMFunctionPassManager()) do fpm
                                 add!(fpm, InstCombinePass())
                             end
@@ -373,7 +379,7 @@ const __llvm_initialized = Ref(false)
 
             if job.config.cleanup
                 @tracepoint "clean-up" begin
-                    @dispose pb=NewPMPassBuilder() begin
+                    @dispose pb = NewPMPassBuilder() begin
                         add!(pb, RecomputeGlobalsAAPass())
                         add!(pb, GlobalOptPass())
                         add!(pb, GlobalDCEPass())
@@ -425,8 +431,10 @@ const __llvm_initialized = Ref(false)
     return ir, (; entry, compiled)
 end
 
-@locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
-                          format::LLVM.API.LLVMCodeGenFileType)
+@locked function emit_asm(
+        @nospecialize(job::CompilerJob), ir::LLVM.Module,
+        format::LLVM.API.LLVMCodeGenFileType
+    )
     # NOTE: strip after validation to get better errors
     if job.config.strip
         @tracepoint "Debug info removal" strip_debuginfo!(ir)

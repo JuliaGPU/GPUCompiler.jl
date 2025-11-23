@@ -8,7 +8,7 @@ const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulh
 # syntax highlighting
 #
 
-const _pygmentize = Ref{Union{String,Nothing}}()
+const _pygmentize = Ref{Union{String, Nothing}}()
 function pygmentize()
     if !isassigned(_pygmentize)
         _pygmentize[] = Sys.which("pygmentize")
@@ -120,15 +120,15 @@ include("reflection_compat.jl")
 
 function code_lowered(@nospecialize(job::CompilerJob); kwargs...)
     sig = job.source.specTypes  # XXX: can we just use the method instance?
-    code_lowered_by_type(sig; kwargs...)
+    return code_lowered_by_type(sig; kwargs...)
 end
 
-function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
+function code_typed(@nospecialize(job::CompilerJob); interactive::Bool = false, kwargs...)
     sig = job.source.specTypes  # XXX: can we just use the method instance?
-    if interactive
+    return if interactive
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
-        mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
+        mod === nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         interp = get_interpreter(job)
         descend_code_typed = getfield(mod, :descend_code_typed)
         descend_code_typed(sig; interp, kwargs...)
@@ -138,13 +138,13 @@ function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kw
     end
 end
 
-function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
+function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Bool = false, kwargs...)
     sig = job.source.specTypes  # XXX: can we just use the method instance?
-    if interactive
+    return if interactive
         @assert io == stdout
         # call Cthulhu without introducing a dependency on Cthulhu
         mod = get(Base.loaded_modules, Cthulhu, nothing)
-        mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
+        mod === nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
 
         interp = get_interpreter(job)
         descend_code_warntype = getfield(mod, :descend_code_warntype)
@@ -183,22 +183,26 @@ The following keyword arguments are supported:
 
 See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
-                   debuginfo::Symbol=:default, dump_module::Bool=false, kwargs...)
+function code_llvm(
+        io::IO, @nospecialize(job::CompilerJob); optimize::Bool = true, raw::Bool = false,
+        debuginfo::Symbol = :default, dump_module::Bool = false, kwargs...
+    )
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
-    config = CompilerConfig(job.config; validate=false, strip=false, optimize)
+    config = CompilerConfig(job.config; validate = false, strip = false, optimize)
     str = JuliaContext() do ctx
         ir, meta = compile(:llvm, CompilerJob(job; config))
         ts_mod = ThreadSafeModule(ir)
         entry_fn = meta.entry
         GC.@preserve ts_mod entry_fn begin
             value = Ref(jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
-            ccall(:jl_dump_function_ir, Ref{String},
-                    (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
-                    value, !raw, dump_module, debuginfo)
+            ccall(
+                :jl_dump_function_ir, Ref{String},
+                (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
+                value, !raw, dump_module, debuginfo
+            )
         end
     end
-    highlight(io, str, "llvm")
+    return highlight(io, str, "llvm")
 end
 code_llvm(@nospecialize(job::CompilerJob); kwargs...) = code_llvm(stdout, job; kwargs...)
 
@@ -215,13 +219,15 @@ The following keyword arguments are supported:
 
 See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_native(io::IO, @nospecialize(job::CompilerJob);
-                     raw::Bool=false, dump_module::Bool=false)
-    config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
+function code_native(
+        io::IO, @nospecialize(job::CompilerJob);
+        raw::Bool = false, dump_module::Bool = false
+    )
+    config = CompilerConfig(job.config; strip = !raw, only_entry = !dump_module, validate = false)
     asm, meta = JuliaContext() do ctx
         compile(:asm, CompilerJob(job; config))
     end
-    highlight(io, asm, source_code(job.config.target))
+    return highlight(io, asm, source_code(job.config.target))
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =
     code_native(stdout, job; kwargs...)
@@ -233,12 +239,12 @@ code_native(@nospecialize(job::CompilerJob); kwargs...) =
 
 function emit_hooked_compilation(inner_hook, ex...)
     user_code = ex[end]
-    user_kwargs = ex[1:end-1]
-    quote
+    user_kwargs = ex[1:(end - 1)]
+    return quote
         # we only want to invoke the hook once for every compilation job
         jobs = Set()
         function outer_hook(job)
-            if !in(job, jobs)
+            return if !in(job, jobs)
                 # the user hook might invoke the compiler again, so disable the hook
                 old_hook = $compile_hook[]
                 try
@@ -276,10 +282,10 @@ Evaluates the expression `ex` and returns the result of
 See also: `InteractiveUtils.@code_lowered`
 """
 macro device_code_lowered(ex...)
-    quote
+    return quote
         buf = Any[]
         function hook(job::CompilerJob)
-            append!(buf, code_lowered(job))
+            return append!(buf, code_lowered(job))
         end
         $(emit_hooked_compilation(:hook, ex...))
         buf
@@ -295,10 +301,10 @@ Evaluates the expression `ex` and returns the result of
 See also: `InteractiveUtils.@code_typed`
 """
 macro device_code_typed(ex...)
-    quote
-        output = Dict{CompilerJob,Any}()
+    return quote
+        output = Dict{CompilerJob, Any}()
         function hook(job::CompilerJob; kwargs...)
-            output[job] = code_typed(job; kwargs...)
+            return output[job] = code_typed(job; kwargs...)
         end
         $(emit_hooked_compilation(:hook, ex...))
         output
@@ -314,12 +320,12 @@ Evaluates the expression `ex` and prints the result of
 See also: `InteractiveUtils.@code_warntype`
 """
 macro device_code_warntype(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(job::CompilerJob; io::IO = stdout, kwargs...)
         println(io, "$job")
         println(io)
-        code_warntype(io, job; kwargs...)
+        return code_warntype(io, job; kwargs...)
     end
-    emit_hooked_compilation(hook, ex...)
+    return emit_hooked_compilation(hook, ex...)
 end
 
 """
@@ -332,11 +338,11 @@ to `io` for every compiled GPU kernel. For other supported keywords, see
 See also: InteractiveUtils.@code_llvm
 """
 macro device_code_llvm(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(job::CompilerJob; io::IO = stdout, kwargs...)
         println(io, "; $job")
-        code_llvm(io, job; kwargs...)
+        return code_llvm(io, job; kwargs...)
     end
-    emit_hooked_compilation(hook, ex...)
+    return emit_hooked_compilation(hook, ex...)
 end
 
 """
@@ -347,12 +353,12 @@ for every compiled GPU kernel. For other supported keywords, see
 [`GPUCompiler.code_native`](@ref).
 """
 macro device_code_native(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(job::CompilerJob; io::IO = stdout, kwargs...)
         println(io, "// $job")
         println(io)
-        code_native(io, job; kwargs...)
+        return code_native(io, job; kwargs...)
     end
-    emit_hooked_compilation(hook, ex...)
+    return emit_hooked_compilation(hook, ex...)
 end
 
 """
@@ -374,23 +380,23 @@ macro device_code(ex...)
         end
 
         open(joinpath(dir, "$fn.typed.jl"), "w") do io
-            code = only(code_typed(job; debuginfo=:source))
+            code = only(code_typed(job; debuginfo = :source))
             println(io, code)
         end
 
         open(joinpath(dir, "$fn.unopt.ll"), "w") do io
-            code_llvm(io, job; dump_module=true, raw=true, optimize=false)
+            code_llvm(io, job; dump_module = true, raw = true, optimize = false)
         end
 
         open(joinpath(dir, "$fn.opt.ll"), "w") do io
-            code_llvm(io, job; dump_module=true, raw=true)
+            code_llvm(io, job; dump_module = true, raw = true)
         end
 
         open(joinpath(dir, "$fn.asm"), "w") do io
-            code_native(io, job; dump_module=true, raw=true)
+            code_native(io, job; dump_module = true, raw = true)
         end
 
-        localUnique += 1
+        return localUnique += 1
     end
-    emit_hooked_compilation(hook, ex...)
+    return emit_hooked_compilation(hook, ex...)
 end

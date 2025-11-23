@@ -14,7 +14,7 @@ function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
 end
 
 function typeinf_type(mi::MethodInstance; interp::CC.AbstractInterpreter)
-    @static if VERSION < v"1.11.0"
+    return @static if VERSION < v"1.11.0"
         code = Core.Compiler.get(Core.Compiler.code_cache(interp), mi, nothing)
         if code isa Core.Compiler.CodeInstance
             return code.rettype
@@ -40,11 +40,15 @@ function check_method(@nospecialize(job::CompilerJob))
 
     # kernels can't return values
     if job.config.kernel
-        rt = typeinf_type(job.source; interp=get_interpreter(job))
+        rt = typeinf_type(job.source; interp = get_interpreter(job))
 
         if rt != Nothing && rt != Union{}
-            throw(KernelError(job, "kernel returns a value of type `$rt`",
-                """Make sure your kernel function ends in `return`, `return nothing` or `nothing`."""))
+            throw(
+                KernelError(
+                    job, "kernel returns a value of type `$rt`",
+                    """Make sure your kernel function ends in `return`, `return nothing` or `nothing`."""
+                )
+            )
         end
     end
 
@@ -62,15 +66,15 @@ function hasfieldcount(@nospecialize(dt))
     return true
 end
 
-function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
-    dt===Module && return ""    # work around JuliaLang/julia#33347
+function explain_nonisbits(@nospecialize(dt), depth = 1; maxdepth = 10)
+    dt === Module && return ""    # work around JuliaLang/julia#33347
     depth > maxdepth && return ""
     hasfieldcount(dt) || return ""
     msg = ""
     for (ft, fn) in zip(fieldtypes(dt), fieldnames(dt))
         if !isbitstype(ft)
             msg *= "  "^depth * ".$fn is of type $ft which is not isbits.\n"
-            msg *= explain_nonisbits(ft, depth+1)
+            msg *= explain_nonisbits(ft, depth + 1)
         end
     end
     return msg
@@ -86,16 +90,20 @@ function check_invocation(@nospecialize(job::CompilerJob))
     # make sure any non-isbits arguments are unused
     real_arg_i = 0
 
-    for (arg_i,dt) in enumerate(sig.parameters)
+    for (arg_i, dt) in enumerate(sig.parameters)
         isghosttype(dt) && continue
         Core.Compiler.isconstType(dt) && continue
         real_arg_i += 1
 
         # XXX: can we support these for CPU targets?
         if dt <: Core.OpaqueClosure
-            throw(KernelError(job, "passing an opaque closure",
-                """Argument $arg_i to your kernel function is an opaque closure.
-                   This is a CPU-only object not supported by GPUCompiler."""))
+            throw(
+                KernelError(
+                    job, "passing an opaque closure",
+                    """Argument $arg_i to your kernel function is an opaque closure.
+                    This is a CPU-only object not supported by GPUCompiler."""
+                )
+            )
         end
 
         # If an object doesn't have fields, it can only be used by identity, so we can allow
@@ -105,13 +113,17 @@ function check_invocation(@nospecialize(job::CompilerJob))
         end
 
         if !isbitstype(dt)
-            throw(KernelError(job, "passing non-bitstype argument",
-                """Argument $arg_i to your kernel function is of type $dt, which is not a bitstype:
-                   $(explain_nonisbits(dt))
+            throw(
+                KernelError(
+                    job, "passing non-bitstype argument",
+                    """Argument $arg_i to your kernel function is of type $dt, which is not a bitstype:
+                    $(explain_nonisbits(dt))
 
-                   Only bitstypes, which are "plain data" types that are immutable
-                   and contain no references to other values, can be used in GPU kernels.
-                   For more information, see the `Base.isbitstype` function."""))
+                    Only bitstypes, which are "plain data" types that are immutable
+                    and contain no references to other values, can be used in GPU kernels.
+                    For more information, see the `Base.isbitstype` function."""
+                )
+            )
         end
     end
 
@@ -131,20 +143,20 @@ end
 const RUNTIME_FUNCTION = "call to the Julia runtime"
 const UNKNOWN_FUNCTION = "call to an unknown function"
 const POINTER_FUNCTION = "call through a literal pointer"
-const CCALL_FUNCTION   = "call to an external C function"
-const LAZY_FUNCTION    = "call to a lazy-initialized function"
-const DELAYED_BINDING  = "use of an undefined name"
-const DYNAMIC_CALL     = "dynamic function invocation"
+const CCALL_FUNCTION = "call to an external C function"
+const LAZY_FUNCTION = "call to a lazy-initialized function"
+const DELAYED_BINDING = "use of an undefined name"
+const DYNAMIC_CALL = "dynamic function invocation"
 
 function Base.showerror(io::IO, err::InvalidIRError)
     print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
     for (kind, bt, meta) in err.errors
-        printstyled(io, "\nReason: unsupported $kind"; color=:red)
+        printstyled(io, "\nReason: unsupported $kind"; color = :red)
         if meta !== nothing
             if kind == RUNTIME_FUNCTION || kind == UNKNOWN_FUNCTION || kind == POINTER_FUNCTION || kind == DYNAMIC_CALL || kind == CCALL_FUNCTION || kind == LAZY_FUNCTION
-                printstyled(io, " (call to ", meta, ")"; color=:red)
+                printstyled(io, " (call to ", meta, ")"; color = :red)
             elseif kind == DELAYED_BINDING
-                printstyled(io, " (use of '", meta, "')"; color=:red)
+                printstyled(io, " (use of '", meta, "')"; color = :red)
             end
         end
         Base.show_backtrace(io, bt)
@@ -211,7 +223,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
                 name = match(rx, name).captures[1]
                 push!(errors, (LAZY_FUNCTION, bt, name))
             catch e
-                @safe_debug "Decoding name of PLT entry failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding name of PLT entry failed" inst bb = LLVM.parent(inst)
                 push!(errors, (LAZY_FUNCTION, bt, nothing))
             end
         end
@@ -235,11 +247,11 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 sym = Base.unsafe_pointer_to_objref(sym)
                 push!(errors, (DELAYED_BINDING, bt, sym))
             catch e
-                @safe_debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_get_binding_or_error failed" inst bb = LLVM.parent(inst)
                 push!(errors, (DELAYED_BINDING, bt, nothing))
             end
         elseif fn == "jl_reresolve_binding_value_seqcst" || fn == "ijl_reresolve_binding_value_seqcst" ||
-               fn == "jl_get_binding_value_seqcst" || fn == "ijl_get_binding_value_seqcst"
+                fn == "jl_get_binding_value_seqcst" || fn == "ijl_get_binding_value_seqcst"
             try
                 # pry the binding from the IR
                 expr = arguments(inst)[1]::ConstantExpr
@@ -248,7 +260,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 obj = Base.unsafe_pointer_to_objref(ptr)
                 push!(errors, (DELAYED_BINDING, bt, obj.globalref))
             catch e
-                @safe_debug "Decoding arguments to jl_reresolve_binding_value_seqcst failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_reresolve_binding_value_seqcst failed" inst bb = LLVM.parent(inst)
                 push!(errors, (DELAYED_BINDING, bt, nothing))
             end
         elseif startswith(fn, "tojlinvoke")
@@ -281,7 +293,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 meth = Base.unsafe_pointer_to_objref(meth)::Core.MethodInstance
                 push!(errors, (DYNAMIC_CALL, bt, meth.def))
             catch e
-                @safe_debug "Decoding arguments to jl_invoke failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_invoke failed" inst bb = LLVM.parent(inst)
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
         elseif fn == "jl_apply_generic" || fn == "ijl_apply_generic"
@@ -293,7 +305,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 f = Base.unsafe_pointer_to_objref(f)
                 push!(errors, (DYNAMIC_CALL, bt, f))
             catch e
-                @safe_debug "Decoding arguments to jl_apply_generic failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_apply_generic failed" inst bb = LLVM.parent(inst)
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
 
@@ -305,14 +317,14 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                 name_value = map(collect(name_init)) do char
                     convert(UInt8, char)
                 end |> String
-                name_value = name_value[1:end-1] # remove trailing \0
+                name_value = name_value[1:(end - 1)] # remove trailing \0
                 push!(errors, (CCALL_FUNCTION, bt, name_value))
             catch e
-                @safe_debug "Decoding arguments to jl_load_and_lookup failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_load_and_lookup failed" inst bb = LLVM.parent(inst)
                 push!(errors, (CCALL_FUNCTION, bt, nothing))
             end
 
-        # detect calls to undefined functions
+            # detect calls to undefined functions
         elseif isdeclaration(dest) && !LLVM.isintrinsic(dest) && !isintrinsic(job, fn)
             # figure out if the function lives in the Julia runtime library
             if libjulia[] == C_NULL
@@ -344,7 +356,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
 
             if !valid_function_pointer(job, ptr)
                 # look it up in the Julia JIT cache
-                frames = ccall(:jl_lookup_code_address, Any, (Ptr{Cvoid}, Cint,), ptr, 0)
+                frames = ccall(:jl_lookup_code_address, Any, (Ptr{Cvoid}, Cint), ptr, 0)
                 # XXX: what if multiple frames are returned? rare, but happens
                 if length(frames) == 1
                     fn, file, line, linfo, fromC, inlined = last(frames)
@@ -360,7 +372,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
 end
 
 # helper function to check for illegal values in an LLVM module
-function check_ir_values(mod::LLVM.Module, predicate, msg="value")
+function check_ir_values(mod::LLVM.Module, predicate, msg = "value")
     errors = IRError[]
     for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
         if predicate(inst) || any(predicate, operands(inst))
@@ -372,5 +384,5 @@ function check_ir_values(mod::LLVM.Module, predicate, msg="value")
 end
 ## shorthand to check for illegal value types
 function check_ir_values(mod::LLVM.Module, T_bad::LLVMType)
-    check_ir_values(mod, val -> value_type(val) == T_bad, "use of $(string(T_bad)) value")
+    return check_ir_values(mod, val -> value_type(val) == T_bad, "use of $(string(T_bad)) value")
 end
