@@ -1,14 +1,16 @@
-defs(mod::LLVM.Module)  = filter(f -> !isdeclaration(f), collect(functions(mod)))
-decls(mod::LLVM.Module) = filter(f ->  isdeclaration(f) && !LLVM.isintrinsic(f),
-                                 collect(functions(mod)))
+defs(mod::LLVM.Module) = filter(f -> !isdeclaration(f), collect(functions(mod)))
+decls(mod::LLVM.Module) = filter(
+    f -> isdeclaration(f) && !LLVM.isintrinsic(f),
+    collect(functions(mod))
+)
 
 ## debug verification
 
 should_verify() = ccall(:jl_is_debugbuild, Cint, ()) == 1 ||
-                  Base.JLOptions().debug_level >= 2 ||
-                  something(tryparse(Bool, get(ENV, "CI", "false")), true)
+    Base.JLOptions().debug_level >= 2 ||
+    something(tryparse(Bool, get(ENV, "CI", "false")), true)
 
-isdebug(group, mod=GPUCompiler) =
+isdebug(group, mod = GPUCompiler) =
     Base.CoreLogging.current_logger_for_env(Base.CoreLogging.Debug, group, mod) !== nothing
 
 
@@ -29,7 +31,7 @@ function Base.getproperty(lazy_mod::LazyModule, sym::Symbol)
     if mod === nothing
         error("This functionality requires the $(pkg.name) package, which should be installed and loaded first.")
     end
-    getfield(mod, sym)
+    return getfield(mod, sym)
 end
 
 
@@ -49,11 +51,11 @@ end
 for level in [:debug, :info, :warn, :error]
     @eval begin
         macro $(Symbol("safe_$level"))(ex...)
-            macrocall = :(@placeholder $(ex...) _file=$(String(__source__.file)) _line=$(__source__.line))
+            macrocall = :(@placeholder $(ex...) _file = $(String(__source__.file)) _line = $(__source__.line))
             # NOTE: `@placeholder` in order to avoid hard-coding @__LINE__ etc
             macrocall.args[1] = Symbol($"@$level")
-            quote
-                io = IOContext(Core.stderr, :color=>STDERR_HAS_COLOR[])
+            return quote
+                io = IOContext(Core.stderr, :color => STDERR_HAS_COLOR[])
                 # ideally we call Logging.shouldlog() here, but that is likely to yield,
                 # so instead we rely on the min_enabled_level of the logger.
                 # in the case of custom loggers that may be an issue, because,
@@ -86,14 +88,23 @@ end
 macro safe_show(exs...)
     blk = Expr(:block)
     for ex in exs
-        push!(blk.args,
-              :(println(Core.stdout, $(sprint(Base.show_unquoted,ex)*" = "),
-                                     repr(begin local value = $(esc(ex)) end))))
+        push!(
+            blk.args,
+            :(
+                println(
+                    Core.stdout, $(sprint(Base.show_unquoted, ex) * " = "),
+                    repr(
+                        begin
+                            local value = $(esc(ex))
+                        end
+                    )
+                )
+            )
+        )
     end
     isempty(exs) || push!(blk.args, :value)
     return blk
 end
-
 
 
 ## codegen locking
@@ -118,7 +129,7 @@ macro locked(ex)
             ccall(:jl_typeinf_lock_end, Cvoid, ())
         end
     end
-    esc(combinedef(def))
+    return esc(combinedef(def))
 end
 
 # HACK: temporarily unlock again to perform a task switch
@@ -136,7 +147,7 @@ macro unlocked(ex)
             ccall(:jl_typeinf_lock_begin, Cvoid, ())
         end
     end
-    esc(combinedef(def))
+    return esc(combinedef(def))
 end
 
 
@@ -154,6 +165,7 @@ function prune_constexpr_uses!(root::LLVM.Value)
             isempty(uses(val)) && LLVM.unsafe_destroy!(val)
         end
     end
+    return
 end
 
 

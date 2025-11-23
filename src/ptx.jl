@@ -13,16 +13,16 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     debuginfo::Bool = false
 
     # optional properties
-    minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
-    maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
-    blocks_per_sm::Union{Nothing,Int} = nothing
-    maxregs::Union{Nothing,Int} = nothing
+    minthreads::Union{Nothing, Int, NTuple{<:Any, Int}} = nothing
+    maxthreads::Union{Nothing, Int, NTuple{<:Any, Int}} = nothing
+    blocks_per_sm::Union{Nothing, Int} = nothing
+    maxregs::Union{Nothing, Int} = nothing
 
     fastmath::Bool = Base.JLOptions().fast_math == 1
 
     # deprecated; remove with next major version
-    exitable::Union{Nothing,Bool} = nothing
-    unreachable::Union{Nothing,Bool} = nothing
+    exitable::Union{Nothing, Bool} = nothing
+    unreachable::Union{Nothing, Bool} = nothing
 end
 
 function Base.hash(target::PTXCompilerTarget, h::UInt)
@@ -37,22 +37,24 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.maxregs, h)
     h = hash(target.fastmath, h)
 
-    h
+    return h
 end
 
 source_code(target::PTXCompilerTarget) = "ptx"
 
-llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
+llvm_triple(target::PTXCompilerTarget) = Int === Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
 function llvm_machine(target::PTXCompilerTarget)
     @static if :NVPTX ∉ LLVM.backends()
         return nothing
     end
     triple = llvm_triple(target)
-    t = Target(triple=triple)
+    t = Target(triple = triple)
 
-    tm = TargetMachine(t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
-                       "+ptx$(target.ptx.major)$(target.ptx.minor)")
+    tm = TargetMachine(
+        t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
+        "+ptx$(target.ptx.major)$(target.ptx.minor)"
+    )
     asm_verbosity!(tm, true)
 
     return tm
@@ -64,7 +66,7 @@ llvm_datalayout(target::PTXCompilerTarget) =
     "e-" *
     # on 32-bit systems, use 32-bit pointers.
     # on 64-bit systems, use 64-bit pointers.
-    (Int === Int64 ? "p:64:64:64-" :  "p:32:32:32-") *
+    (Int === Int64 ? "p:64:64:64-" : "p:32:32:32-") *
     # alignment of integer types
     "i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-" *
     # alignment of floating point types
@@ -90,7 +92,7 @@ function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
     job.config.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.config.target.maxthreads)")
     job.config.target.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.config.target.blocks_per_sm)")
     job.config.target.maxregs !== nothing && print(io, ", maxregs=$(job.config.target.maxregs)")
-    job.config.target.fastmath && print(io, ", fast math enabled")
+    return job.config.target.fastmath && print(io, ", fast math enabled")
 end
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
@@ -103,16 +105,20 @@ runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
     "-sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)" *
     "-debuginfo=$(Int(llvm_debug_info(job)))"
 
-function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                        mod::LLVM.Module, entry::LLVM.Function)
+function finish_module!(
+        @nospecialize(job::CompilerJob{PTXCompilerTarget}),
+        mod::LLVM.Module, entry::LLVM.Function
+    )
     # emit the device capability and ptx isa version as constants in the module. this makes
     # it possible to 'query' these in device code, relying on LLVM to optimize the checks
     # away and generate static code. note that we only do so if there's actual uses of these
     # variables; unconditionally creating a gvar would result in duplicate declarations.
-    for (name, value) in ["sm_major"  => job.config.target.cap.major,
-                          "sm_minor"  => job.config.target.cap.minor,
-                          "ptx_major" => job.config.target.ptx.major,
-                          "ptx_minor" => job.config.target.ptx.minor]
+    for (name, value) in [
+            "sm_major" => job.config.target.cap.major,
+            "sm_minor" => job.config.target.cap.minor,
+            "ptx_major" => job.config.target.ptx.major,
+            "ptx_minor" => job.config.target.ptx.minor,
+        ]
         if haskey(globals(mod), name)
             gv = globals(mod)[name]
             initializer!(gv, ConstantInt(LLVM.Int32Type(), value))
@@ -139,7 +145,7 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
 
     # we emit properties (of the device and ptx isa) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb = NewPMPassBuilder() begin
         add!(pb, RecomputeGlobalsAAPass())
         add!(pb, GlobalOptPass())
         run!(pb, mod, llvm_machine(job.config.target))
@@ -148,11 +154,13 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     return entry
 end
 
-function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                          mod::LLVM.Module)
+function optimize_module!(
+        @nospecialize(job::CompilerJob{PTXCompilerTarget}),
+        mod::LLVM.Module
+    )
     tm = llvm_machine(job.config.target)
     # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
-    @dispose pb=NewPMPassBuilder() begin
+    return @dispose pb = NewPMPassBuilder() begin
         register!(pb, NVVMReflectPass())
 
         add!(pb, NewPMFunctionPassManager()) do fpm
@@ -166,9 +174,9 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             # but Julia's pass sequence only invokes the simple unroller.
             add!(fpm, LoopUnrollPass(; job.config.opt_level))
             add!(fpm, InstCombinePass())        # clean-up redundancy
-            add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
+            add!(fpm, NewPMLoopPassManager(; use_memory_ssa = true)) do lpm
                 add!(lpm, LICMPass())           # the inner runtime check might be
-                                                # outer loop invariant
+                # outer loop invariant
             end
 
             # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
@@ -191,8 +199,10 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 end
 
-function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                    mod::LLVM.Module, entry::LLVM.Function)
+function finish_ir!(
+        @nospecialize(job::CompilerJob{PTXCompilerTarget}),
+        mod::LLVM.Module, entry::LLVM.Function
+    )
     if LLVM.version() < v"17"
         for f in functions(mod)
             lower_unreachable!(f)
@@ -206,33 +216,53 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         annotations = Metadata[entry]
 
         ## kernel metadata
-        append!(annotations, [MDString("kernel"),
-                              ConstantInt(Int32(1))])
+        append!(
+            annotations, [
+                MDString("kernel"),
+                ConstantInt(Int32(1)),
+            ]
+        )
 
         ## expected CTA sizes
         if job.config.target.minthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
                 bound = dim <= length(job.config.target.minthreads) ? job.config.target.minthreads[dim] : 1
-                append!(annotations, [MDString("reqntid$name"),
-                                      ConstantInt(Int32(bound))])
+                append!(
+                    annotations, [
+                        MDString("reqntid$name"),
+                        ConstantInt(Int32(bound)),
+                    ]
+                )
             end
         end
         if job.config.target.maxthreads !== nothing
             for (dim, name) in enumerate([:x, :y, :z])
                 bound = dim <= length(job.config.target.maxthreads) ? job.config.target.maxthreads[dim] : 1
-                append!(annotations, [MDString("maxntid$name"),
-                                      ConstantInt(Int32(bound))])
+                append!(
+                    annotations, [
+                        MDString("maxntid$name"),
+                        ConstantInt(Int32(bound)),
+                    ]
+                )
             end
         end
 
         if job.config.target.blocks_per_sm !== nothing
-            append!(annotations, [MDString("minctasm"),
-                                  ConstantInt(Int32(job.config.target.blocks_per_sm))])
+            append!(
+                annotations, [
+                    MDString("minctasm"),
+                    ConstantInt(Int32(job.config.target.blocks_per_sm)),
+                ]
+            )
         end
 
         if job.config.target.maxregs !== nothing
-            append!(annotations, [MDString("maxnreg"),
-                                  ConstantInt(Int32(job.config.target.maxregs))])
+            append!(
+                annotations, [
+                    MDString("maxnreg"),
+                    ConstantInt(Int32(job.config.target.maxregs)),
+                ]
+            )
         end
 
         push!(metadata(mod)["nvvm.annotations"], MDNode(annotations))
@@ -243,7 +273,7 @@ end
 
 function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     # allow overriding the debug info from CUDA.jl
-    if job.config.target.debuginfo
+    return if job.config.target.debuginfo
         invoke(llvm_debug_info, Tuple{CompilerJob}, job)
     else
         LLVM.API.LLVMDebugEmissionKindNoDebug
@@ -364,7 +394,7 @@ function lower_unreachable!(f::LLVM.Function)
     end
 
     # rewrite the unreachable terminators
-    @dispose builder=IRBuilder() begin
+    @dispose builder = IRBuilder() begin
         entry_block = first(blocks(f))
         for block in unreachable_blocks
             inst = terminator(block)
@@ -391,98 +421,98 @@ function nvvm_reflect!(fun::LLVM.Function)
     changed = false
     @tracepoint "nvvmreflect" begin
 
-    # find and sanity check the nnvm-reflect function
-    # TODO: also handle the llvm.nvvm.reflect intrinsic
-    haskey(LLVM.functions(mod), NVVM_REFLECT_FUNCTION) || return false
-    reflect_function = functions(mod)[NVVM_REFLECT_FUNCTION]
-    isdeclaration(reflect_function) || error("_reflect function should not have a body")
-    reflect_typ = return_type(function_type(reflect_function))
-    isa(reflect_typ, LLVM.IntegerType) || error("_reflect's return type should be integer")
+        # find and sanity check the nnvm-reflect function
+        # TODO: also handle the llvm.nvvm.reflect intrinsic
+        haskey(LLVM.functions(mod), NVVM_REFLECT_FUNCTION) || return false
+        reflect_function = functions(mod)[NVVM_REFLECT_FUNCTION]
+        isdeclaration(reflect_function) || error("_reflect function should not have a body")
+        reflect_typ = return_type(function_type(reflect_function))
+        isa(reflect_typ, LLVM.IntegerType) || error("_reflect's return type should be integer")
 
-    to_remove = []
-    for use in uses(reflect_function)
-        call = user(use)
-        isa(call, LLVM.CallInst) || continue
-        if length(operands(call)) != 2
-            @error """Unrecognized format of __nvvm_reflect call:
-                      $(string(call))
-                      Wrong number of operands: expected 2, got $(length(operands(call)))."""
-            continue
-        end
-
-        # decode the string argument
-        if LLVM.version() >= v"17"
-            sym = operands(call)[1]
-        else
-            str = operands(call)[1]
-            if !isa(str, LLVM.ConstantExpr) || opcode(str) != LLVM.API.LLVMGetElementPtr
-                @safe_error """Unrecognized format of __nvvm_reflect call:
-                               $(string(call))
-                               Operand should be a GEP instruction, got a $(typeof(str)). Please file an issue."""
+        to_remove = []
+        for use in uses(reflect_function)
+            call = user(use)
+            isa(call, LLVM.CallInst) || continue
+            if length(operands(call)) != 2
+                @error """Unrecognized format of __nvvm_reflect call:
+                $(string(call))
+                Wrong number of operands: expected 2, got $(length(operands(call)))."""
                 continue
             end
-            sym = operands(str)[1]
-            if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
-                # CUDA 11.0 or below
-                sym = operands(sym)[1]
+
+            # decode the string argument
+            if LLVM.version() >= v"17"
+                sym = operands(call)[1]
+            else
+                str = operands(call)[1]
+                if !isa(str, LLVM.ConstantExpr) || opcode(str) != LLVM.API.LLVMGetElementPtr
+                    @safe_error """Unrecognized format of __nvvm_reflect call:
+                    $(string(call))
+                    Operand should be a GEP instruction, got a $(typeof(str)). Please file an issue."""
+                    continue
+                end
+                sym = operands(str)[1]
+                if isa(sym, LLVM.ConstantExpr) && opcode(sym) == LLVM.API.LLVMGetElementPtr
+                    # CUDA 11.0 or below
+                    sym = operands(sym)[1]
+                end
             end
-        end
-        if !isa(sym, LLVM.GlobalVariable)
-            @safe_error """Unrecognized format of __nvvm_reflect call:
-                           $(string(call))
-                           Operand should be a global variable, got a $(typeof(sym)). Please file an issue."""
-            continue
-        end
-        sym_op = operands(sym)[1]
-        if !isa(sym_op, LLVM.ConstantArray) && !isa(sym_op, LLVM.ConstantDataArray)
-            @safe_error """Unrecognized format of __nvvm_reflect call:
-                           $(string(call))
-                           Operand should be a constant array, got a $(typeof(sym_op)). Please file an issue."""
-        end
-        chars = convert.(Ref(UInt8), collect(sym_op))
-        reflect_arg = String(chars[1:end-1])
+            if !isa(sym, LLVM.GlobalVariable)
+                @safe_error """Unrecognized format of __nvvm_reflect call:
+                $(string(call))
+                Operand should be a global variable, got a $(typeof(sym)). Please file an issue."""
+                continue
+            end
+            sym_op = operands(sym)[1]
+            if !isa(sym_op, LLVM.ConstantArray) && !isa(sym_op, LLVM.ConstantDataArray)
+                @safe_error """Unrecognized format of __nvvm_reflect call:
+                $(string(call))
+                Operand should be a constant array, got a $(typeof(sym_op)). Please file an issue."""
+            end
+            chars = convert.(Ref(UInt8), collect(sym_op))
+            reflect_arg = String(chars[1:(end - 1)])
 
-        # handle possible cases
-        # XXX: put some of these property in the compiler job?
-        #      and/or first set the "nvvm-reflect-*" module flag like Clang does?
-        fast_math = current_job.config.target.fastmath
-        # NOTE: we follow nvcc's --use_fast_math
-        reflect_val = if reflect_arg == "__CUDA_FTZ"
-            # single-precision denormals support
-            ConstantInt(reflect_typ, fast_math ? 1 : 0)
-        elseif reflect_arg == "__CUDA_PREC_DIV"
-            # single-precision floating-point division and reciprocals.
-            ConstantInt(reflect_typ, fast_math ? 0 : 1)
-        elseif reflect_arg == "__CUDA_PREC_SQRT"
-            # single-precision floating point square roots.
-            ConstantInt(reflect_typ, fast_math ? 0 : 1)
-        elseif reflect_arg == "__CUDA_FMAD"
-            # contraction of floating-point multiplies and adds/subtracts into
-            # floating-point multiply-add operations (FMAD, FFMA, or DFMA)
-            ConstantInt(reflect_typ, fast_math ? 1 : 0)
-        elseif reflect_arg == "__CUDA_ARCH"
-            ConstantInt(reflect_typ, job.config.target.cap.major*100 + job.config.target.cap.minor*10)
-        else
-            @safe_error """Unrecognized format of __nvvm_reflect call:
-                           $(string(call))
-                           Unknown argument $reflect_arg. Please file an issue."""
-            continue
+            # handle possible cases
+            # XXX: put some of these property in the compiler job?
+            #      and/or first set the "nvvm-reflect-*" module flag like Clang does?
+            fast_math = current_job.config.target.fastmath
+            # NOTE: we follow nvcc's --use_fast_math
+            reflect_val = if reflect_arg == "__CUDA_FTZ"
+                # single-precision denormals support
+                ConstantInt(reflect_typ, fast_math ? 1 : 0)
+            elseif reflect_arg == "__CUDA_PREC_DIV"
+                # single-precision floating-point division and reciprocals.
+                ConstantInt(reflect_typ, fast_math ? 0 : 1)
+            elseif reflect_arg == "__CUDA_PREC_SQRT"
+                # single-precision floating point square roots.
+                ConstantInt(reflect_typ, fast_math ? 0 : 1)
+            elseif reflect_arg == "__CUDA_FMAD"
+                # contraction of floating-point multiplies and adds/subtracts into
+                # floating-point multiply-add operations (FMAD, FFMA, or DFMA)
+                ConstantInt(reflect_typ, fast_math ? 1 : 0)
+            elseif reflect_arg == "__CUDA_ARCH"
+                ConstantInt(reflect_typ, job.config.target.cap.major * 100 + job.config.target.cap.minor * 10)
+            else
+                @safe_error """Unrecognized format of __nvvm_reflect call:
+                $(string(call))
+                Unknown argument $reflect_arg. Please file an issue."""
+                continue
+            end
+
+            replace_uses!(call, reflect_val)
+            push!(to_remove, call)
         end
 
-        replace_uses!(call, reflect_val)
-        push!(to_remove, call)
-    end
+        # remove the calls to the function
+        for val in to_remove
+            @assert isempty(uses(val))
+            erase!(val)
+        end
 
-    # remove the calls to the function
-    for val in to_remove
-        @assert isempty(uses(val))
-        erase!(val)
-    end
-
-    # maybe also delete the function
-    if isempty(uses(reflect_function))
-        erase!(reflect_function)
-    end
+        # maybe also delete the function
+        if isempty(uses(reflect_function))
+            erase!(reflect_function)
+        end
 
     end
     return changed

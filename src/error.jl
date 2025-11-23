@@ -5,11 +5,13 @@ export KernelError, InternalCompilerError
 struct KernelError <: Exception
     job::CompilerJob
     message::String
-    help::Union{Nothing,String}
+    help::Union{Nothing, String}
     bt::StackTraces.StackTrace
 
-    KernelError(@nospecialize(job::CompilerJob), message::String, help=nothing;
-                bt=StackTraces.StackTrace()) =
+    KernelError(
+        @nospecialize(job::CompilerJob), message::String, help = nothing;
+        bt = StackTraces.StackTrace()
+    ) =
         new(job, message, help, bt)
 end
 
@@ -18,7 +20,7 @@ function Base.showerror(io::IO, err::KernelError)
     println(io, "KernelError: $(err.message)")
     println(io)
     println(io, something(err.help, "Try inspecting the generated code with any of the @device_code_... macros."))
-    Base.show_backtrace(io, err.bt)
+    return Base.show_backtrace(io, err.bt)
 end
 
 
@@ -30,9 +32,11 @@ struct InternalCompilerError <: Exception
 end
 
 function Base.showerror(io::IO, err::InternalCompilerError)
-    println(io, """GPUCompiler.jl encountered an unexpected internal error.
-                   Please file an issue attaching the following information, including the backtrace,
-                   as well as a reproducible example (if possible).""")
+    println(
+        io, """GPUCompiler.jl encountered an unexpected internal error.
+        Please file an issue attaching the following information, including the backtrace,
+        as well as a reproducible example (if possible)."""
+    )
 
     println(io, "\nInternalCompilerError: $(err.message)")
 
@@ -40,7 +44,7 @@ function Base.showerror(io::IO, err::InternalCompilerError)
 
     if !isempty(err.meta)
         println(io, "\nAdditional information:")
-        for (key,val) in err.meta
+        for (key, val) in err.meta
             println(io, " - $key = $(repr(val))")
         end
     end
@@ -54,15 +58,20 @@ function Base.showerror(io::IO, err::InternalCompilerError)
 
     println(io)
 
-    let InteractiveUtils = Base.require(Base.PkgId(Base.UUID("b77e0a4c-d291-57a0-90e8-8db25a27a240"), "InteractiveUtils"))
+    return let InteractiveUtils = Base.require(Base.PkgId(Base.UUID("b77e0a4c-d291-57a0-90e8-8db25a27a240"), "InteractiveUtils"))
         InteractiveUtils.versioninfo(io)
     end
 end
 
 macro compiler_assert(ex, job, kwargs...)
     msg = "$ex, at $(__source__.file):$(__source__.line)"
-    return :($(esc(ex)) ? $(nothing)
-                        : throw(InternalCompilerError($(esc(job)), $msg;
-                                                      $(map(esc, kwargs)...)))
+    return :(
+        $(esc(ex)) ? $(nothing)
+            : throw(
+                InternalCompilerError(
+                    $(esc(job)), $msg;
+                    $(map(esc, kwargs)...)
+                )
             )
+    )
 end

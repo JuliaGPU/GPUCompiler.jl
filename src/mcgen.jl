@@ -6,7 +6,7 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     global current_job
     current_job = job
 
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb = NewPMPassBuilder() begin
         register!(pb, ResolveCPUReferencesPass())
 
         add!(pb, RecomputeGlobalsAAPass())
@@ -56,7 +56,7 @@ function resolve_cpu_references!(mod::LLVM.Module)
                         changed = true
                     end
                 end
-                changed
+                return changed
             end
 
             changed |= replace_bindings!(f)
@@ -69,7 +69,7 @@ ResolveCPUReferencesPass() =
     NewPMModulePass("ResolveCPUReferences", resolve_cpu_references!)
 
 
-function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
+function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format = LLVM.API.LLVMAssemblyFile)
     tm = llvm_machine(job.config.target)
 
     return String(emit(tm, mod, format))

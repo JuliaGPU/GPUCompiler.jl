@@ -18,7 +18,7 @@ using LLVM.Interop
 
 struct RuntimeMethodInstance
     # either a function defined here, or a symbol to fetch a target-specific definition
-    def::Union{Function,Symbol}
+    def::Union{Function, Symbol}
 
     return_type::Type
     types::Tuple
@@ -35,23 +35,23 @@ end
 
 function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance)
     types = if rt.llvm_types === nothing
-        LLVMType[convert(LLVMType, typ; allow_boxed=true) for typ in rt.types]
+        LLVMType[convert(LLVMType, typ; allow_boxed = true) for typ in rt.types]
     else
         rt.llvm_types()
     end
 
     return_type = if rt.llvm_return_type === nothing
-        convert(LLVMType, rt.return_type; allow_boxed=true)
+        convert(LLVMType, rt.return_type; allow_boxed = true)
     else
         rt.llvm_return_type()
     end
 
-    LLVM.FunctionType(return_type, types)
+    return LLVM.FunctionType(return_type, types)
 end
 
-const methods = Dict{Symbol,RuntimeMethodInstance}()
+const methods = Dict{Symbol, RuntimeMethodInstance}()
 function get(name::Symbol)
-    methods[name]
+    return methods[name]
 end
 
 # Register a Julia function `def` as a runtime library function identified by `name`. The
@@ -66,11 +66,15 @@ end
 # different values for `name`. The LLVM function name will be deduced from that name, but
 # you can always specify `llvm_name` to influence that. Never use an LLVM name that starts
 # with `julia_` or the function might clash with other compiled functions.
-function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=nothing;
-                 name=isa(def,Symbol) ? def : nameof(def), llvm_name="gpu_$name")
-    meth = RuntimeMethodInstance(def,
-                                 return_type, types, name,
-                                 llvm_return_type, llvm_types, llvm_name)
+function compile(
+        def, return_type, types, llvm_return_type = nothing, llvm_types = nothing;
+        name = isa(def, Symbol) ? def : nameof(def), llvm_name = "gpu_$name"
+    )
+    meth = RuntimeMethodInstance(
+        def,
+        return_type, types, name,
+        llvm_return_type, llvm_types, llvm_name
+    )
     if haskey(methods, name)
         error("Runtime function $name has already been registered!")
     end
@@ -110,7 +114,7 @@ compile(:report_exception_name, Nothing, (Ptr{Cchar},))
 ## GC
 
 # FIXME: get rid of this and allow boxed types
-T_prjlvalue() = convert(LLVMType, Any; allow_boxed=true)
+T_prjlvalue() = convert(LLVMType, Any; allow_boxed = true)
 
 function gc_pool_alloc(sz::Csize_t)
     ptr = malloc(sz)
@@ -132,26 +136,28 @@ compile(:malloc, Ptr{Nothing}, (Csize_t,))
 const tag_type = UInt
 const tag_size = sizeof(tag_type)
 
-const gc_bits = 0x3 # FIXME
+const gc_bits = 0x03 # FIXME
 
 # get the type tag of a type at run-time
-@generated function type_tag(::Val{type_name}) where type_name
-    @dispose ctx=Context() begin
+@generated function type_tag(::Val{type_name}) where {type_name}
+    return @dispose ctx = Context() begin
         T_tag = convert(LLVMType, tag_type)
         T_ptag = LLVM.PointerType(T_tag)
 
-        T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
+        T_pjlvalue = convert(LLVMType, Any; allow_boxed = true)
 
         # create function
         llvm_f, _ = create_function(T_tag)
         mod = LLVM.parent(llvm_f)
 
         # this isn't really a function, but we abuse it to get the JIT to resolve the address
-        typ = LLVM.Function(mod, "jl_" * String(type_name) * "_type",
-                            LLVM.FunctionType(T_pjlvalue))
+        typ = LLVM.Function(
+            mod, "jl_" * String(type_name) * "_type",
+            LLVM.FunctionType(T_pjlvalue)
+        )
 
         # generate IR
-        @dispose builder=IRBuilder() begin
+        @dispose builder = IRBuilder() begin
             entry = BasicBlock(llvm_f, "entry")
             position!(builder, entry)
 
@@ -168,15 +174,15 @@ end
 
 # we use `jl_value_ptr`, a Julia pseudo-intrinsic that can be used to box and unbox values
 
-@inline @generated function box(val, ::Val{type_name}) where type_name
+@inline @generated function box(val, ::Val{type_name}) where {type_name}
     sz = sizeof(val)
     allocsz = sz + tag_size
 
     # type-tags are ephemeral, so look them up at run time
     #tag = unsafe_load(convert(Ptr{tag_type}, type_name))
-    tag = :( type_tag(Val(type_name)) )
+    tag = :(type_tag(Val(type_name)))
 
-    quote
+    return quote
         ptr = malloc($(Csize_t(allocsz)))
 
         # store the type tag
@@ -184,33 +190,35 @@ end
         Core.Intrinsics.pointerset(ptr, $tag | $gc_bits, #=index=# 1, #=align=# $tag_size)
 
         # store the value
-        ptr = convert(Ptr{$val}, ptr+tag_size)
+        ptr = convert(Ptr{$val}, ptr + tag_size)
         Core.Intrinsics.pointerset(ptr, val, #=index=# 1, #=align=# $sz)
 
         unsafe_pointer_to_objref(ptr)
     end
 end
 
-@inline function unbox(obj, ::Type{T}) where T
+@inline function unbox(obj, ::Type{T}) where {T}
     ptr = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
 
     # load the value
     ptr = convert(Ptr{T}, ptr)
-    Core.Intrinsics.pointerref(ptr, #=index=# 1, #=align=# sizeof(T))
+    return Core.Intrinsics.pointerref(ptr, #=index=# 1, #=align=# sizeof(T))
 end
 
 # generate functions functions that exist in the Julia runtime (see julia/src/datatype.c)
-for (T, t) in [Int8   => :int8,  Int16  => :int16,  Int32  => :int32,  Int64  => :int64,
-               UInt8  => :uint8, UInt16 => :uint16, UInt32 => :uint32, UInt64 => :uint64,
-               Bool => :bool, Float32 => :float32, Float64 => :float64]
-    box_fn   = Symbol("box_$t")
+for (T, t) in [
+        Int8 => :int8, Int16 => :int16, Int32 => :int32, Int64 => :int64,
+        UInt8 => :uint8, UInt16 => :uint16, UInt32 => :uint32, UInt64 => :uint64,
+        Bool => :bool, Float32 => :float32, Float64 => :float64,
+    ]
+    box_fn = Symbol("box_$t")
     unbox_fn = Symbol("unbox_$t")
     @eval begin
-        $box_fn(val)   = box($T(val), Val($(QuoteNode(t))))
+        $box_fn(val) = box($T(val), Val($(QuoteNode(t))))
         $unbox_fn(obj) = unbox(obj, $T)
 
-        compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name=$"ijl_$box_fn")
-        compile($unbox_fn, $T, (Any,); llvm_name=$"ijl_$unbox_fn")
+        compile($box_fn, Any, ($T,), T_prjlvalue; llvm_name = $"ijl_$box_fn")
+        compile($unbox_fn, $T, (Any,); llvm_name = $"ijl_$unbox_fn")
     end
 end
 

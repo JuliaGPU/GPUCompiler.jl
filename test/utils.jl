@@ -1,10 +1,10 @@
 @testset "split_kwargs" begin
-    kwargs = [:(a=1), :(b=2), :(c=3), :(d=4)]
+    kwargs = [:(a = 1), :(b = 2), :(c = 3), :(d = 4)]
     groups = GPUCompiler.split_kwargs(kwargs, [:a], [:b, :c])
     @test length(groups) == 3
-    @test groups[1] == [:(a=1)]
-    @test groups[2] == [:(b=2), :(c=3)]
-    @test groups[3] == [:(d=4)]
+    @test groups[1] == [:(a = 1)]
+    @test groups[2] == [:(b = 2), :(c = 3)]
+    @test groups[3] == [:(d = 4)]
 end
 
 @testset "mangling" begin
@@ -28,7 +28,7 @@ end
     @test mangle(identity, Val{-1}) == "identity(Val<-1>)"
     @test mangle(identity, Val{Cshort(1)}) == "identity(Val<(short)1>)"
     @test mangle(identity, Val{1.0}) == "identity(Val<0x1p+0>)"
-    @test mangle(identity, Val{1f0}) == "identity(Val<0x1p+0f>)"
+    @test mangle(identity, Val{1.0f0}) == "identity(Val<0x1p+0f>)"
     @test mangle(identity, Val{'a'}) == "identity(Val<97u>)"
     @test mangle(identity, Val{'∅'}) == "identity(Val<8709u>)"
 
@@ -50,10 +50,12 @@ end
     @test mangle(identity, Tuple{Vararg{Int}}) == "identity(Tuple<>)"
 
     # many substitutions
-    @test mangle(identity, Val{1}, Val{2}, Val{3}, Val{4}, Val{5}, Val{6}, Val{7}, Val{8},
-                           Val{9}, Val{10}, Val{11}, Val{12}, Val{13}, Val{14}, Val{15},
-                           Val{16}, Val{16}) ==
-          "identity(Val<1>, Val<2>, Val<3>, Val<4>, Val<5>, Val<6>, Val<7>, Val<8>, Val<9>, Val<10>, Val<11>, Val<12>, Val<13>, Val<14>, Val<15>, Val<16>, Val<16>)"
+    @test mangle(
+        identity, Val{1}, Val{2}, Val{3}, Val{4}, Val{5}, Val{6}, Val{7}, Val{8},
+        Val{9}, Val{10}, Val{11}, Val{12}, Val{13}, Val{14}, Val{15},
+        Val{16}, Val{16}
+    ) ==
+        "identity(Val<1>, Val<2>, Val<3>, Val<4>, Val<5>, Val<6>, Val<7>, Val<8>, Val<9>, Val<10>, Val<11>, Val<12>, Val<13>, Val<14>, Val<15>, Val<16>, Val<16>)"
 
     # intertwined substitutions
     @test mangle(
@@ -111,14 +113,14 @@ DoubleStackedMT() = StackedMethodTable(Base.get_world_counter(), OtherMT, LayerM
         @test isoverlayed(DoubleStackedMT()) == true
     end
 
-    o_sin  = findsup(Tuple{typeof(sin), Float64}, OverlayMT())
-    s_sin  = findsup(Tuple{typeof(sin), Float64}, StackedMT())
+    o_sin = findsup(Tuple{typeof(sin), Float64}, OverlayMT())
+    s_sin = findsup(Tuple{typeof(sin), Float64}, StackedMT())
     ss_sin = findsup(Tuple{typeof(sin), Float64}, DoubleStackedMT())
     @test s_sin == o_sin
     @test ss_sin == o_sin
 
-    o_sin  = findall(Tuple{typeof(sin), Float64}, OverlayMT())
-    s_sin  = findall(Tuple{typeof(sin), Float64}, StackedMT())
+    o_sin = findall(Tuple{typeof(sin), Float64}, OverlayMT())
+    s_sin = findall(Tuple{typeof(sin), Float64}, StackedMT())
     ss_sin = findall(Tuple{typeof(sin), Float64}, DoubleStackedMT())
     if VERSION >= v"1.11.0-DEV.363"
         @test o_sin.matches == s_sin.matches
@@ -150,8 +152,8 @@ next_world = Base.get_world_counter()
     @test worlds.min_world > prev_world
     @test worlds.max_world == typemax(typeof(next_world))
 
-    o_sin  = findall(Tuple{typeof(sin), Float64}, OverlayMT())
-    s_sin  = findall(Tuple{typeof(sin), Float64}, StackedMT())
+    o_sin = findall(Tuple{typeof(sin), Float64}, OverlayMT())
+    s_sin = findall(Tuple{typeof(sin), Float64}, StackedMT())
     ss_sin = findall(Tuple{typeof(sin), Float64}, DoubleStackedMT())
     if VERSION >= v"1.11.0-DEV.363"
         @test o_sin.matches == s_sin.matches

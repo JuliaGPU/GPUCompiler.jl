@@ -2,12 +2,12 @@ module Enzyme
 
 using ..GPUCompiler
 
-struct EnzymeTarget{Target<:AbstractCompilerTarget} <: AbstractCompilerTarget
+struct EnzymeTarget{Target <: AbstractCompilerTarget} <: AbstractCompilerTarget
     target::Target
 end
 
-function EnzymeTarget(;kwargs...)
-    EnzymeTarget(GPUCompiler.NativeCompilerTarget(; jlruntime = true, kwargs...))
+function EnzymeTarget(; kwargs...)
+    return EnzymeTarget(GPUCompiler.NativeCompilerTarget(; jlruntime = true, kwargs...))
 end
 
 GPUCompiler.llvm_triple(target::EnzymeTarget) = GPUCompiler.llvm_triple(target.target)
@@ -18,7 +18,7 @@ GPUCompiler.have_fma(target::EnzymeTarget, T::Type) = GPUCompiler.have_fma(targe
 GPUCompiler.dwarf_version(target::EnzymeTarget) = GPUCompiler.dwarf_version(target.target)
 
 abstract type AbstractEnzymeCompilerParams <: AbstractCompilerParams end
-struct EnzymeCompilerParams{Params<:AbstractCompilerParams} <: AbstractEnzymeCompilerParams
+struct EnzymeCompilerParams{Params <: AbstractCompilerParams} <: AbstractEnzymeCompilerParams
     params::Params
 end
 struct PrimalCompilerParams <: AbstractEnzymeCompilerParams
@@ -68,14 +68,18 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
     sig = Tuple{ft, tt.parameters...}
     min_world = Ref{UInt}(typemin(UInt))
     max_world = Ref{UInt}(typemax(UInt))
-    match = ccall(:jl_gf_invoke_lookup_worlds, Any,
-                  (Any, Any, Csize_t, Ref{Csize_t}, Ref{Csize_t}),
-                  sig, #=mt=# nothing, world, min_world, max_world)
+    match = ccall(
+        :jl_gf_invoke_lookup_worlds, Any,
+        (Any, Any, Csize_t, Ref{Csize_t}, Ref{Csize_t}),
+        sig, #=mt=# nothing, world, min_world, max_world
+    )
     match === nothing && return stub(world, source, method_error)
 
     # look up the method and code instance
-    mi = ccall(:jl_specializations_get_linfo, Ref{Core.MethodInstance},
-               (Any, Any, Any), match.method, match.spec_types, match.sparams)
+    mi = ccall(
+        :jl_specializations_get_linfo, Ref{Core.MethodInstance},
+        (Any, Any, Any), match.method, match.spec_types, match.sparams
+    )
     ci = CC.retrieve_code_info(mi, world)
 
     # prepare a new code info
@@ -83,10 +87,10 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
     new_ci = copy(ci)
     empty!(new_ci.code)
     @static if isdefined(Core, :DebugInfo)
-      new_ci.debuginfo = Core.DebugInfo(:none)
+        new_ci.debuginfo = Core.DebugInfo(:none)
     else
-      empty!(new_ci.codelocs)
-      resize!(new_ci.linetable, 1)                # see note below
+        empty!(new_ci.codelocs)
+        resize!(new_ci.linetable, 1)                # see note below
     end
     empty!(new_ci.ssaflags)
     new_ci.ssavaluetypes = 0
@@ -99,7 +103,7 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
 
     # prepare the slots
     new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
-    new_ci.slotflags = UInt8[0x00 for i = 1:3]
+    new_ci.slotflags = UInt8[0x00 for i in 1:3]
     @static if isdefined(Core, :DebugInfo)
         new_ci.nargs = 3
     end
@@ -107,7 +111,7 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
     # We don't know the caller's target so EnzymeTarget uses the default NativeCompilerTarget.
     target = EnzymeTarget()
     params = EnzymeCompilerParams()
-    config = CompilerConfig(target, params; kernel=false)
+    config = CompilerConfig(target, params; kernel = false)
     job = CompilerJob(mi, config, world)
 
     id = length(deferred_codegen_jobs) + 1
@@ -116,9 +120,9 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
     # return the deferred_codegen_id
     push!(new_ci.code, CC.ReturnNode(id))
     push!(new_ci.ssaflags, 0x00)
-        @static if isdefined(Core, :DebugInfo)
+    @static if isdefined(Core, :DebugInfo)
     else
-      push!(new_ci.codelocs, 1)   # see note below
+        push!(new_ci.codelocs, 1)   # see note below
     end
     new_ci.ssavaluetypes += 1
 
@@ -137,7 +141,7 @@ end
 
 @inline function deferred_codegen(f::Type, tt::Type)
     id = deferred_codegen_id(f, tt)
-    ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), id)
+    return ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), id)
 end
 
 end

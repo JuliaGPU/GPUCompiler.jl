@@ -10,13 +10,13 @@ export split_kwargs, assign_args!
 # intended for use in macros; the resulting groups can be used in expressions.
 # can be used at run time, but not in performance critical code.
 function split_kwargs(kwargs, kw_groups...)
-    kwarg_groups = ntuple(_->[], length(kw_groups) + 1)
+    kwarg_groups = ntuple(_ -> [], length(kw_groups) + 1)
     for kwarg in kwargs
         # decode
         if Meta.isexpr(kwarg, :(=))
             # use in macros
             key, val = kwarg.args
-        elseif kwarg isa Pair{Symbol,<:Any}
+        elseif kwarg isa Pair{Symbol, <:Any}
             # use in functions
             key, val = kwarg
         else
@@ -111,12 +111,12 @@ You will need to restart your Julia environment for it to take effect.
 !!! note
     The cache functionality requires Julia 1.11
 """
-function enable_disk_cache!(state::Bool=true)
-    @set_preferences!("disk_cache"=>string(state))
+function enable_disk_cache!(state::Bool = true)
+    return @set_preferences!("disk_cache" => string(state))
 end
 
 disk_cache_path() = @get_scratch!("disk_cache")
-clear_disk_cache!() = rm(disk_cache_path(); recursive=true, force=true)
+clear_disk_cache!() = rm(disk_cache_path(); recursive = true, force = true)
 
 const cache_lock = ReentrantLock()
 
@@ -133,9 +133,11 @@ and return data that can be cached across sessions (e.g., LLVM IR). This data is
 forwarded, along with the `CompilerJob`, to the `linker` function which is allowed to create
 session-dependent objects (e.g., a `CuModule`).
 """
-function cached_compilation(cache::AbstractDict{<:Any,V},
-                            src::MethodInstance, cfg::CompilerConfig,
-                            compiler::Function, linker::Function) where {V}
+function cached_compilation(
+        cache::AbstractDict{<:Any, V},
+        src::MethodInstance, cfg::CompilerConfig,
+        compiler::Function, linker::Function
+    ) where {V}
     # NOTE: we index the cach both using (mi, world, cfg) keys, for the fast look-up,
     #       and using CodeInfo keys for the slow look-up. we need to cache both for
     #       performance, but cannot use a separate private cache for the ci->obj lookup
@@ -186,7 +188,8 @@ end
         disk_cache_path(),
         # bifurcate the cache by build id of GPUCompiler
         string(gpucompiler_buildid),
-        string(h, ".jls"))
+        string(h, ".jls")
+    )
 end
 
 struct DiskCacheEntry
@@ -195,13 +198,15 @@ struct DiskCacheEntry
     asm
 end
 
-@noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
-                                      cfg::CompilerConfig, compiler::Function, linker::Function)
+@noinline function actual_compilation(
+        cache::AbstractDict, src::MethodInstance, world::UInt,
+        cfg::CompilerConfig, compiler::Function, linker::Function
+    )
     job = CompilerJob(src, cfg, world)
     obj = nothing
 
     # fast path: find an applicable CodeInstance and see if we have compiled it before
-    ci = ci_cache_lookup(ci_cache(job), src, world, world)::Union{Nothing,CodeInstance}
+    ci = ci_cache_lookup(ci_cache(job), src, world, world)::Union{Nothing, CodeInstance}
     if ci !== nothing
         key = (ci, cfg)
         obj = get(cache, key, nothing)
@@ -234,7 +239,7 @@ end
                             @warn "Cache missmatch" src.specTypes cfg entry.src entry.cfg
                         end
                     catch ex
-                        @warn "Failed to load compiled kernel" job path exception=(ex, catch_backtrace())
+                        @warn "Failed to load compiled kernel" job path exception = (ex, catch_backtrace())
                     end
                 end
             end
@@ -256,13 +261,13 @@ end
                 entry = DiskCacheEntry(src.specTypes, cfg, asm)
 
                 # atomic write to disk
-                tmppath, io = mktemp(dirname(path); cleanup=false)
+                tmppath, io = mktemp(dirname(path); cleanup = false)
                 serialize(io, entry)
                 close(io)
                 @static if VERSION >= v"1.12.0-DEV.1023"
-                    mv(tmppath, path; force=true)
+                    mv(tmppath, path; force = true)
                 else
-                    Base.rename(tmppath, path, force=true)
+                    Base.rename(tmppath, path, force = true)
                 end
             end
         end
@@ -272,13 +277,15 @@ end
         if ci === nothing
             ci = ci_cache_lookup(ci_cache(job), src, world, world)
             if ci === nothing
-                error("""Did not find CodeInstance for $job.
+                error(
+                    """Did not find CodeInstance for $job.
 
-                         Pleaase make sure that the `compiler` function passed to `cached_compilation`
-                         invokes GPUCompiler with exactly the same configuration as passed to the API.
+                    Pleaase make sure that the `compiler` function passed to `cached_compilation`
+                    invokes GPUCompiler with exactly the same configuration as passed to the API.
 
-                         Note that you should do this by calling `GPUCompiler.compile`, and not by
-                         using reflection functions (which alter the compiler configuration).""")
+                    Note that you should do this by calling `GPUCompiler.compile`, and not by
+                    using reflection functions (which alter the compiler configuration)."""
+                )
             end
             key = (ci, cfg)
         end

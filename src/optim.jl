@@ -1,12 +1,12 @@
 # LLVM IR optimization
 
-function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
+function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level = 2)
     tm = llvm_machine(job.config.target)
 
     global current_job
     current_job = job
 
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb = NewPMPassBuilder() begin
         register!(pb, GPULowerCPUFeaturesPass())
         register!(pb, GPULowerPTLSPass())
         register!(pb, GPULowerGCFramePass())
@@ -23,7 +23,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
     # Make sure any lingering TLS getters are rewritten even if upstream LLVM passes
     # transformed them before the GPULowerPTLSPass had a chance to run.
     if occursin("StaticCompilerTarget", string(typeof(job.config.target))) &&
-       uses_julia_runtime(job)
+            uses_julia_runtime(job)
         lower_ptls!(mod)
     end
 
@@ -47,23 +47,25 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
         end
     end
     buildIntrinsicLoweringPipeline(mpm, job, opt_level)
-    buildCleanupPipeline(mpm, job, opt_level)
+    return buildCleanupPipeline(mpm, job, opt_level)
 end
 
 const BasicSimplifyCFGOptions =
-    (; switch_range_to_icmp=true,
-       switch_to_lookup=true,
-       forward_switch_cond=true,
-    )
+    (;
+    switch_range_to_icmp = true,
+    switch_to_lookup = true,
+    forward_switch_cond = true,
+)
 const AggressiveSimplifyCFGOptions =
-    (; switch_range_to_icmp=true,
-       switch_to_lookup=true,
-       forward_switch_cond=true,
-       # These mess with loop rotation, so only do them after that
-       hoist_common_insts=true,
-       # Causes an SRET assertion error in late-gc-lowering
-       #sink_common_insts=true
-    )
+    (;
+    switch_range_to_icmp = true,
+    switch_to_lookup = true,
+    forward_switch_cond = true,
+    # These mess with loop rotation, so only do them after that
+    hoist_common_insts = true,
+    # Causes an SRET assertion error in late-gc-lowering
+    #sink_common_insts=true
+)
 
 function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if should_verify()
@@ -76,7 +78,7 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
     # TODO invokePipelineStartCallbacks
     add!(mpm, Annotation2MetadataPass())
     add!(mpm, ConstantMergePass())
-    add!(mpm, NewPMFunctionPassManager()) do fpm
+    return add!(mpm, NewPMFunctionPassManager()) do fpm
         add!(fpm, LowerExpectIntrinsicPass())
         if opt_level >= 2
             add!(fpm, PropagateJuliaAddrspacesPass())
@@ -100,7 +102,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
         end
     end
     add!(mpm, GPULowerCPUFeaturesPass())
-    if opt_level >= 1
+    return if opt_level >= 1
         add!(mpm, NewPMFunctionPassManager()) do fpm
             if opt_level >= 2
                 add!(fpm, SROAPass())
@@ -128,10 +130,10 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
         # TODO invokeLateLoopOptimizationCallbacks
     end
     if opt_level >= 2
-        add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
+        add!(fpm, NewPMLoopPassManager(; use_memory_ssa = true)) do lpm
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
-            add!(lpm, SimpleLoopUnswitchPass(nontrivial=true, trivial=true))
+            add!(lpm, SimpleLoopUnswitchPass(nontrivial = true, trivial = true))
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
         end
@@ -139,7 +141,7 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
     if opt_level >= 2
         add!(fpm, IRCEPass())
     end
-    add!(fpm, NewPMLoopPassManager()) do lpm
+    return add!(fpm, NewPMLoopPassManager()) do lpm
         if opt_level >= 2
             add!(lpm, LoopInstSimplifyPass())
             add!(lpm, LoopIdiomRecognizePass())
@@ -168,7 +170,7 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
     if opt_level >= 3
         add!(fpm, GVNPass())
     end
-    if opt_level >= 2
+    return if opt_level >= 2
         add!(fpm, DSEPass())
         # TODO invokePeepholeCallbacks
         add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
@@ -192,7 +194,7 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, VectorCombinePass())
     # TODO invokeVectorizerCallbacks
     add!(fpm, ADCEPass())
-    add!(fpm, LoopUnrollPass(; opt_level))
+    return add!(fpm, LoopUnrollPass(; opt_level))
 end
 
 function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
@@ -265,7 +267,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
     # FIXME: we should fix the inliner so that inlined code gets optimized early-on
-    add!(mpm, AlwaysInlinerPass())
+    return add!(mpm, AlwaysInlinerPass())
 end
 
 function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
@@ -281,14 +283,13 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     add!(mpm, NewPMFunctionPassManager()) do fpm
         add!(fpm, AnnotationRemarksPass())
     end
-    add!(mpm, NewPMFunctionPassManager()) do fpm
+    return add!(mpm, NewPMFunctionPassManager()) do fpm
         add!(fpm, DemoteFloat16Pass())
         if opt_level >= 1
             add!(fpm, GVNPass())
         end
     end
 end
-
 
 
 ## custom passes
@@ -359,7 +360,7 @@ function lower_gc_frame!(fun::LLVM.Function)
         alloc_obj = functions(mod)["julia.gc_alloc_obj"]
         alloc_obj_ft = function_type(alloc_obj)
         T_prjlvalue = return_type(alloc_obj_ft)
-        T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
+        T_pjlvalue = convert(LLVMType, Any; allow_boxed = true)
 
         for use in uses(alloc_obj)
             call = user(use)::LLVM.CallInst
@@ -369,7 +370,7 @@ function lower_gc_frame!(fun::LLVM.Function)
             sz = ops[2]
 
             # replace with PTX alloc_obj
-            @dispose builder=IRBuilder() begin
+            @dispose builder = IRBuilder() begin
                 position!(builder, call)
                 ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz])
                 replace_uses!(call, ptr)
@@ -417,8 +418,8 @@ function lower_ptls!(mod::LLVM.Module)
     # embedding the pointer to the TLS getter. Replace the intrinsic with a declared
     # libjulia call to avoid baking absolute addresses that crash in standalone binaries.
     if haskey(functions(mod), intrinsic) &&
-       occursin("StaticCompilerTarget", string(typeof(job.config.target))) &&
-       uses_julia_runtime(job)
+            occursin("StaticCompilerTarget", string(typeof(job.config.target))) &&
+            uses_julia_runtime(job)
 
         pgc_fn = functions(mod)[intrinsic]
         jl_decl = if haskey(functions(mod), "jl_get_pgcstack")
@@ -429,7 +430,7 @@ function lower_ptls!(mod::LLVM.Module)
 
         for use in uses(pgc_fn)
             call = user(use)::LLVM.CallInst
-            @dispose builder=IRBuilder() begin
+            @dispose builder = IRBuilder() begin
                 position!(builder, call)
                 repl = call!(builder, function_type(jl_decl), jl_decl, LLVM.Value[])
                 replace_uses!(call, repl)
@@ -449,7 +450,7 @@ function lower_ptls!(mod::LLVM.Module)
                 # the validator will detect this
             end
         end
-     end
+    end
 
     # Newer Julia versions sometimes lower the TLS getter to an inttoptr call that bakes
     # the address of `jl_get_pgcstack_static` into the IR. Rewrite those calls as well to
@@ -467,8 +468,8 @@ function lower_ptls!(mod::LLVM.Module)
 
             callee = LLVM.called_operand(inst)
             if callee isa LLVM.ConstantExpr && occursin("inttoptr", string(callee)) &&
-               occursin("pgcstack", string(inst))
-                @dispose builder=IRBuilder() begin
+                    occursin("pgcstack", string(inst))
+                @dispose builder = IRBuilder() begin
                     position!(builder, inst)
                     repl = call!(builder, function_type(jl_decl), jl_decl, LLVM.Value[])
                     replace_uses!(inst, repl)

@@ -1,6 +1,6 @@
 # @test_throw, with additional testing for the exception message
 macro test_throws_message(f, typ, ex...)
-    quote
+    return quote
         msg = ""
         @test_throws $(esc(typ)) try
             $(esc(ex...))
@@ -19,20 +19,20 @@ macro test_throws_message(f, typ, ex...)
 end
 
 # helper function for sinking a value to prevent the callee from getting optimized away
-@inline @generated function sink(i::T, ::Val{addrspace}=Val(0)) where {T <: Union{Int32,UInt32}, addrspace}
+@inline @generated function sink(i::T, ::Val{addrspace} = Val(0)) where {T <: Union{Int32, UInt32}, addrspace}
     as_str = addrspace > 0 ? " addrspace($addrspace)" : ""
     llvmcall_str = """%slot = alloca i32$(addrspace > 0 ? ", addrspace($addrspace)" : "")
-                     store volatile i32 %0, i32$(as_str)* %slot
-                     %value = load volatile i32, i32$(as_str)* %slot
-                     ret i32 %value"""
+    store volatile i32 %0, i32$(as_str)* %slot
+    %value = load volatile i32, i32$(as_str)* %slot
+    ret i32 %value"""
     return :(Base.llvmcall($llvmcall_str, T, Tuple{T}, i))
 end
-@inline @generated function sink(i::T, ::Val{addrspace}=Val(0)) where {T <: Union{Int64,UInt64}, addrspace}
+@inline @generated function sink(i::T, ::Val{addrspace} = Val(0)) where {T <: Union{Int64, UInt64}, addrspace}
     as_str = addrspace > 0 ? " addrspace($addrspace)" : ""
     llvmcall_str = """%slot = alloca i64$(addrspace > 0 ? ", addrspace($addrspace)" : "")
-                     store volatile i64 %0, i64$(as_str)* %slot
-                     %value = load volatile i64, i64$(as_str)* %slot
-                     ret i64 %value"""
+    store volatile i64 %0, i64$(as_str)* %slot
+    %value = load volatile i64, i64$(as_str)* %slot
+    ret i64 %value"""
     return :(Base.llvmcall($llvmcall_str, T, Tuple{T}, i))
 end
 
@@ -47,10 +47,10 @@ module FileCheck
 
     global filecheck_path::String
     function __init__()
-        global filecheck_path = joinpath(LLVM_jll.artifact_dir, "tools", "FileCheck")
+        return global filecheck_path = joinpath(LLVM_jll.artifact_dir, "tools", "FileCheck")
     end
 
-    function filecheck_exe(; adjust_PATH::Bool=true, adjust_LIBPATH::Bool=true)
+    function filecheck_exe(; adjust_PATH::Bool = true, adjust_LIBPATH::Bool = true)
         env = Base.invokelatest(
             LLVM_jll.JLLWrappers.adjust_ENV!,
             copy(ENV),
@@ -69,12 +69,12 @@ module FileCheck
 
     function filecheck(f, input)
         # FileCheck assumes that the input is available as a file
-        mktemp() do path, input_io
+        return mktemp() do path, input_io
             write(input_io, input)
             close(input_io)
 
             # capture the output of `f` and write it into a temporary buffer
-            result = IOCapture.capture(rethrow=Union{}) do
+            result = IOCapture.capture(rethrow = Union{}) do
                 f(input)
             end
             output_io = IOBuffer()
@@ -90,9 +90,11 @@ module FileCheck
             end
 
             # determine some useful prefixes for FileCheck
-            prefixes = ["CHECK",
-                        "JULIA$(VERSION.major)_$(VERSION.minor)",
-                        "LLVM$(Base.libllvm_version.major)"]
+            prefixes = [
+                "CHECK",
+                "JULIA$(VERSION.major)_$(VERSION.minor)",
+                "LLVM$(Base.libllvm_version.major)",
+            ]
             ## whether we use typed pointers or opaque pointers
             if julia_typed_pointers
                 push!(prefixes, "TYPED")
@@ -110,11 +112,11 @@ module FileCheck
             seekstart(output_io)
             filecheck_io = Pipe()
             cmd = ```$(filecheck_exe())
-                     --color
-                     --allow-unused-prefixes
-                     --check-prefixes $(join(prefixes, ','))
-                     $path```
-            proc = run(pipeline(ignorestatus(cmd); stdin=output_io, stdout=filecheck_io, stderr=filecheck_io); wait=false)
+            --color
+            --allow-unused-prefixes
+            --check-prefixes $(join(prefixes, ','))
+            $path```
+            proc = run(pipeline(ignorestatus(cmd); stdin = output_io, stdout = filecheck_io, stderr = filecheck_io); wait = false)
             close(filecheck_io.in)
 
             # collect the output of FileCheck
@@ -135,7 +137,7 @@ module FileCheck
     const checks = String[]
     macro check_str(str)
         push!(checks, str)
-        nothing
+        return nothing
     end
 
     macro filecheck(ex)
@@ -146,10 +148,12 @@ module FileCheck
         check_str = join(checks, "\n")
         empty!(checks)
 
-        esc(quote
-            filecheck($check_str) do _
-                $ex
+        return esc(
+            quote
+                filecheck($check_str) do _
+                    $ex
+                end
             end
-        end)
+        )
     end
 end

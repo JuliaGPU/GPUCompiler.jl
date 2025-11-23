@@ -4,38 +4,42 @@ using ..GPUCompiler
 import ..TestRuntime
 
 struct CompilerParams <: AbstractCompilerParams end
-GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
+GPUCompiler.runtime_module(::CompilerJob{<:Any, CompilerParams}) = TestRuntime
 
-function create_job(@nospecialize(func), @nospecialize(types);
-                   supports_fp16=true, supports_fp64=true, backend::Symbol,
-                   kwargs...)
+function create_job(
+        @nospecialize(func), @nospecialize(types);
+        supports_fp16 = true, supports_fp64 = true, backend::Symbol,
+        kwargs...
+    )
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = SPIRVCompilerTarget(; backend, validate=true, optimize=true,
-                                   supports_fp16, supports_fp64)
+    target = SPIRVCompilerTarget(;
+        backend, validate = true, optimize = true,
+        supports_fp16, supports_fp64
+    )
     params = CompilerParams()
-    config = CompilerConfig(target, params; kernel=false, config_kwargs...)
-    CompilerJob(source, config), kwargs
+    config = CompilerConfig(target, params; kernel = false, config_kwargs...)
+    return CompilerJob(source, config), kwargs
 end
 
 function code_typed(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = create_job(func, types; kwargs...)
-    GPUCompiler.code_typed(job; kwargs...)
+    return GPUCompiler.code_typed(job; kwargs...)
 end
 
 function code_warntype(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = create_job(func, types; kwargs...)
-    GPUCompiler.code_warntype(io, job; kwargs...)
+    return GPUCompiler.code_warntype(io, job; kwargs...)
 end
 
 function code_llvm(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = create_job(func, types; kwargs...)
-    GPUCompiler.code_llvm(io, job; kwargs...)
+    return GPUCompiler.code_llvm(io, job; kwargs...)
 end
 
 function code_native(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = create_job(func, types; kwargs...)
-    GPUCompiler.code_native(io, job; kwargs...)
+    return GPUCompiler.code_native(io, job; kwargs...)
 end
 
 # aliases without ::IO argument
@@ -49,8 +53,8 @@ end
 
 # simulates codegen for a kernel function: validates by default
 function code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
-    job, kwargs = create_job(func, types; kernel=true, kwargs...)
-    JuliaContext() do ctx
+    job, kwargs = create_job(func, types; kernel = true, kwargs...)
+    return JuliaContext() do ctx
         GPUCompiler.compile(:asm, job; kwargs...)
     end
 end

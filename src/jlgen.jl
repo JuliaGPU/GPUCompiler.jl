@@ -24,7 +24,7 @@ end
 # create a MethodError from a function type
 # TODO: fix upstream
 function unsafe_function_from_type(ft::Type)
-    if isdefined(ft, :instance)
+    return if isdefined(ft, :instance)
         ft.instance
     else
         # HACK: dealing with a closure or something... let's do somthing really invalid,
@@ -33,14 +33,14 @@ function unsafe_function_from_type(ft::Type)
     end
 end
 global MethodError
-function MethodError(ft::Type{<:Function}, tt::Type, world::Integer=typemax(UInt))
-    Base.MethodError(unsafe_function_from_type(ft), tt, world)
+function MethodError(ft::Type{<:Function}, tt::Type, world::Integer = typemax(UInt))
+    return Base.MethodError(unsafe_function_from_type(ft), tt, world)
 end
-MethodError(ft, tt, world=typemax(UInt)) = Base.MethodError(ft, tt, world)
+MethodError(ft, tt, world = typemax(UInt)) = Base.MethodError(ft, tt, world)
 
 # generate a LineInfoNode for the current source code location
 macro LineInfoNode(method)
-    Core.LineInfoNode(__module__, method, __source__.file, Int32(__source__.line), Int32(0))
+    return Core.LineInfoNode(__module__, method, __source__.file, Int32(__source__.line), Int32(0))
 end
 
 """
@@ -60,8 +60,10 @@ pass at run time. For non-concrete signatures, use `generic_methodinstance` inst
 """
 methodinstance
 
-function generic_methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
-                                world::Integer=tls_world_age())
+function generic_methodinstance(
+        @nospecialize(ft::Type), @nospecialize(tt::Type),
+        world::Integer = tls_world_age()
+    )
     sig = signature_type_by_tt(ft, tt)
 
     match, _ = CC._findsup(sig, nothing, world)
@@ -76,85 +78,93 @@ end
 # Julia's cached method lookup to simply look up method instances at run time.
 @static if VERSION >= v"1.11.0-DEV.1552"
 
-# XXX: version of Base.method_instance that uses a function type
-@inline function methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
-                                world::Integer=tls_world_age())
-    sig = signature_type_by_tt(ft, tt)
-    @assert Base.isdispatchtuple(sig)   # JuliaLang/julia#52233
+    # XXX: version of Base.method_instance that uses a function type
+    @inline function methodinstance(
+            @nospecialize(ft::Type), @nospecialize(tt::Type),
+            world::Integer = tls_world_age()
+        )
+        sig = signature_type_by_tt(ft, tt)
+        @assert Base.isdispatchtuple(sig)   # JuliaLang/julia#52233
 
-    mi = ccall(:jl_method_lookup_by_tt, Any,
-               (Any, Csize_t, Any),
-               sig, world, #=method_table=# nothing)
-    mi === nothing && throw(MethodError(ft, tt, world))
-    mi = mi::MethodInstance
+        mi = ccall(
+            :jl_method_lookup_by_tt, Any,
+            (Any, Csize_t, Any),
+            sig, world, #=method_table=# nothing
+        )
+        mi === nothing && throw(MethodError(ft, tt, world))
+        mi = mi::MethodInstance
 
-    # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
-    if !Base.isdispatchtuple(mi.specTypes)
-        mi = CC.specialize_method(mi.def, sig, mi.sparam_vals)::MethodInstance
+        # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
+        if !Base.isdispatchtuple(mi.specTypes)
+            mi = CC.specialize_method(mi.def, sig, mi.sparam_vals)::MethodInstance
+        end
+
+        return mi
     end
 
-    return mi
-end
-
-# on older versions of Julia, we always need to use the generic lookup
+    # on older versions of Julia, we always need to use the generic lookup
 else
 
-const methodinstance = generic_methodinstance
+    const methodinstance = generic_methodinstance
 
-function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
-    @nospecialize
-    @assert CC.isType(ft) && CC.isType(tt)
-    ft = ft.parameters[1]
-    tt = tt.parameters[1]
+    function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
+        @nospecialize
+        @assert CC.isType(ft) && CC.isType(tt)
+        ft = ft.parameters[1]
+        tt = tt.parameters[1]
 
-    stub = Core.GeneratedFunctionStub(identity, Core.svec(:methodinstance, :ft, :tt), Core.svec())
+        stub = Core.GeneratedFunctionStub(identity, Core.svec(:methodinstance, :ft, :tt), Core.svec())
 
-    # look up the method match
-    method_error = :(throw(MethodError(ft, tt, $world)))
-    sig = Tuple{ft, tt.parameters...}
-    min_world = Ref{UInt}(typemin(UInt))
-    max_world = Ref{UInt}(typemax(UInt))
-    match = ccall(:jl_gf_invoke_lookup_worlds, Any,
-                  (Any, Any, Csize_t, Ref{Csize_t}, Ref{Csize_t}),
-                  sig, #=mt=# nothing, world, min_world, max_world)
-    match === nothing && return stub(world, source, method_error)
+        # look up the method match
+        method_error = :(throw(MethodError(ft, tt, $world)))
+        sig = Tuple{ft, tt.parameters...}
+        min_world = Ref{UInt}(typemin(UInt))
+        max_world = Ref{UInt}(typemax(UInt))
+        match = ccall(
+            :jl_gf_invoke_lookup_worlds, Any,
+            (Any, Any, Csize_t, Ref{Csize_t}, Ref{Csize_t}),
+            sig, #=mt=# nothing, world, min_world, max_world
+        )
+        match === nothing && return stub(world, source, method_error)
 
-    # look up the method and code instance
-    mi = ccall(:jl_specializations_get_linfo, Ref{MethodInstance},
-               (Any, Any, Any), match.method, match.spec_types, match.sparams)
-    ci = CC.retrieve_code_info(mi, world)
+        # look up the method and code instance
+        mi = ccall(
+            :jl_specializations_get_linfo, Ref{MethodInstance},
+            (Any, Any, Any), match.method, match.spec_types, match.sparams
+        )
+        ci = CC.retrieve_code_info(mi, world)
 
-    # prepare a new code info
-    new_ci = copy(ci)
-    empty!(new_ci.code)
-    empty!(new_ci.codelocs)
-    empty!(new_ci.linetable)
-    empty!(new_ci.ssaflags)
-    new_ci.ssavaluetypes = 0
+        # prepare a new code info
+        new_ci = copy(ci)
+        empty!(new_ci.code)
+        empty!(new_ci.codelocs)
+        empty!(new_ci.linetable)
+        empty!(new_ci.ssaflags)
+        new_ci.ssavaluetypes = 0
 
-    # propagate edge metadata
-    new_ci.min_world = min_world[]
-    new_ci.max_world = max_world[]
-    new_ci.edges = MethodInstance[mi]
+        # propagate edge metadata
+        new_ci.min_world = min_world[]
+        new_ci.max_world = max_world[]
+        new_ci.edges = MethodInstance[mi]
 
-    # prepare the slots
-    new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
-    new_ci.slotflags = UInt8[0x00 for i = 1:3]
+        # prepare the slots
+        new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
+        new_ci.slotflags = UInt8[0x00 for i in 1:3]
 
-    # return the method instance
-    push!(new_ci.code, CC.ReturnNode(mi))
-    push!(new_ci.ssaflags, 0x00)
-    push!(new_ci.linetable, @LineInfoNode(methodinstance))
-    push!(new_ci.codelocs, 1)
-    new_ci.ssavaluetypes += 1
+        # return the method instance
+        push!(new_ci.code, CC.ReturnNode(mi))
+        push!(new_ci.ssaflags, 0x00)
+        push!(new_ci.linetable, @LineInfoNode(methodinstance))
+        push!(new_ci.codelocs, 1)
+        new_ci.ssavaluetypes += 1
 
-    return new_ci
-end
+        return new_ci
+    end
 
-@eval function methodinstance(ft, tt)
-    $(Expr(:meta, :generated_only))
-    $(Expr(:meta, :generated, methodinstance_generator))
-end
+    @eval function methodinstance(ft, tt)
+        $(Expr(:meta, :generated_only))
+        $(Expr(:meta, :generated, methodinstance_generator))
+    end
 
 end
 
@@ -163,133 +173,135 @@ end
 const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
 
 if !HAS_INTEGRATED_CACHE
-struct CodeCache
-    dict::IdDict{MethodInstance,Vector{CodeInstance}}
+    struct CodeCache
+        dict::IdDict{MethodInstance, Vector{CodeInstance}}
 
-    CodeCache() = new(IdDict{MethodInstance,Vector{CodeInstance}}())
-end
+        CodeCache() = new(IdDict{MethodInstance, Vector{CodeInstance}}())
+    end
 
-function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
-    print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init=0)) entries")
-    if !isempty(cc.dict)
-        print(io, ": ")
-        for (mi, cis) in cc.dict
-            println(io)
-            print(io, "  ")
-            show(io, mi)
+    function Base.show(io::IO, ::MIME"text/plain", cc::CodeCache)
+        print(io, "CodeCache with $(mapreduce(length, +, values(cc.dict); init = 0)) entries")
+        return if !isempty(cc.dict)
+            print(io, ": ")
+            for (mi, cis) in cc.dict
+                println(io)
+                print(io, "  ")
+                show(io, mi)
 
-            function worldstr(min_world, max_world)
-                if min_world == typemax(UInt)
-                    "empty world range"
-                elseif max_world == typemax(UInt)
-                    "worlds $(Int(min_world))+"
-                else
-                    "worlds $(Int(min_world)) to $(Int(max_world))"
+                function worldstr(min_world, max_world)
+                    return if min_world == typemax(UInt)
+                        "empty world range"
+                    elseif max_world == typemax(UInt)
+                        "worlds $(Int(min_world))+"
+                    else
+                        "worlds $(Int(min_world)) to $(Int(max_world))"
+                    end
+                end
+
+                for (i, ci) in enumerate(cis)
+                    println(io)
+                    print(io, "    CodeInstance for ", worldstr(ci.min_world, ci.max_world))
                 end
             end
+        end
+    end
 
-            for (i,ci) in enumerate(cis)
-                println(io)
-                print(io, "    CodeInstance for ", worldstr(ci.min_world, ci.max_world))
+    Base.empty!(cc::CodeCache) = empty!(cc.dict)
+
+    const GLOBAL_CI_CACHES = Dict{CompilerConfig, CodeCache}()
+    const GLOBAL_CI_CACHES_LOCK = ReentrantLock()
+
+
+    ## method invalidations
+
+    function CC.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
+        # make sure the invalidation callback is attached to the method instance
+        add_codecache_callback!(cache, mi)
+        cis = get!(cache.dict, mi, CodeInstance[])
+        return push!(cis, ci)
+    end
+
+    # invalidation (like invalidate_method_instance, but for our cache)
+    struct CodeCacheCallback
+        cache::CodeCache
+    end
+
+    @static if VERSION ≥ v"1.11.0-DEV.798"
+
+        function add_codecache_callback!(cache::CodeCache, mi::MethodInstance)
+            callback = CodeCacheCallback(cache)
+            CC.add_invalidation_callback!(callback, mi)
+        end
+        function (callback::CodeCacheCallback)(replaced::MethodInstance, max_world::UInt32)
+            cis = get(callback.cache.dict, replaced, nothing)
+            if cis === nothing
+                return
             end
-        end
-    end
-end
-
-Base.empty!(cc::CodeCache) = empty!(cc.dict)
-
-const GLOBAL_CI_CACHES = Dict{CompilerConfig, CodeCache}()
-const GLOBAL_CI_CACHES_LOCK = ReentrantLock()
-
-
-## method invalidations
-
-function CC.setindex!(cache::CodeCache, ci::CodeInstance, mi::MethodInstance)
-    # make sure the invalidation callback is attached to the method instance
-    add_codecache_callback!(cache, mi)
-    cis = get!(cache.dict, mi, CodeInstance[])
-    push!(cis, ci)
-end
-
-# invalidation (like invalidate_method_instance, but for our cache)
-struct CodeCacheCallback
-    cache::CodeCache
-end
-
-@static if VERSION ≥ v"1.11.0-DEV.798"
-
-function add_codecache_callback!(cache::CodeCache, mi::MethodInstance)
-    callback = CodeCacheCallback(cache)
-    CC.add_invalidation_callback!(callback, mi)
-end
-function (callback::CodeCacheCallback)(replaced::MethodInstance, max_world::UInt32)
-    cis = get(callback.cache.dict, replaced, nothing)
-    if cis === nothing
-        return
-    end
-    for ci in cis
-        if ci.max_world == ~0 % Csize_t
-            @assert ci.min_world - 1 <= max_world "attempting to set illogical constraints"
-@static if VERSION >= v"1.11.0-DEV.1390"
-            @atomic ci.max_world = max_world
-else
-            ci.max_world = max_world
-end
-        end
-        @assert ci.max_world <= max_world
-    end
-end
-
-else
-
-function add_codecache_callback!(cache::CodeCache, mi::MethodInstance)
-    callback = CodeCacheCallback(cache)
-    if !isdefined(mi, :callbacks)
-        mi.callbacks = Any[callback]
-    elseif !in(callback, mi.callbacks)
-        push!(mi.callbacks, callback)
-    end
-end
-function (callback::CodeCacheCallback)(replaced::MethodInstance, max_world::UInt32,
-                                       seen::Set{MethodInstance}=Set{MethodInstance}())
-    push!(seen, replaced)
-
-    cis = get(callback.cache.dict, replaced, nothing)
-    if cis === nothing
-        return
-    end
-    for ci in cis
-        if ci.max_world == ~0 % Csize_t
-            @assert ci.min_world - 1 <= max_world "attempting to set illogical constraints"
-            ci.max_world = max_world
-        end
-        @assert ci.max_world <= max_world
-    end
-
-    # recurse to all backedges to update their valid range also
-    if isdefined(replaced, :backedges)
-        backedges = filter(replaced.backedges) do @nospecialize(mi)
-            if mi isa MethodInstance
-                mi ∉ seen
-            elseif mi isa Type
-                # an `invoke` call, which is a `(sig, MethodInstance)` pair.
-                # let's ignore the `sig` and process the `MethodInstance` next.
-                false
-            else
-                error("invalid backedge")
+            for ci in cis
+                if ci.max_world == ~0 % Csize_t
+                    @assert ci.min_world - 1 <= max_world "attempting to set illogical constraints"
+                    @static if VERSION >= v"1.11.0-DEV.1390"
+                        @atomic ci.max_world = max_world
+                    else
+                        ci.max_world = max_world
+                    end
+                end
+                @assert ci.max_world <= max_world
             end
         end
 
-        # Don't touch/empty backedges `invalidate_method_instance` in C will do that later
-        # replaced.backedges = Any[]
+    else
 
-        for mi in backedges
-            callback(mi::MethodInstance, max_world, seen)
+        function add_codecache_callback!(cache::CodeCache, mi::MethodInstance)
+            callback = CodeCacheCallback(cache)
+            if !isdefined(mi, :callbacks)
+                mi.callbacks = Any[callback]
+            elseif !in(callback, mi.callbacks)
+                push!(mi.callbacks, callback)
+            end
         end
-    end
-end
+        function (callback::CodeCacheCallback)(
+                replaced::MethodInstance, max_world::UInt32,
+                seen::Set{MethodInstance} = Set{MethodInstance}()
+            )
+            push!(seen, replaced)
 
-end
+            cis = get(callback.cache.dict, replaced, nothing)
+            if cis === nothing
+                return
+            end
+            for ci in cis
+                if ci.max_world == ~0 % Csize_t
+                    @assert ci.min_world - 1 <= max_world "attempting to set illogical constraints"
+                    ci.max_world = max_world
+                end
+                @assert ci.max_world <= max_world
+            end
+
+            # recurse to all backedges to update their valid range also
+            if isdefined(replaced, :backedges)
+                backedges = filter(replaced.backedges) do @nospecialize(mi)
+                    if mi isa MethodInstance
+                        mi ∉ seen
+                    elseif mi isa Type
+                        # an `invoke` call, which is a `(sig, MethodInstance)` pair.
+                        # let's ignore the `sig` and process the `MethodInstance` next.
+                        false
+                    else
+                        error("invalid backedge")
+                    end
+                end
+
+                # Don't touch/empty backedges `invalidate_method_instance` in C will do that later
+                # replaced.backedges = Any[]
+
+                for mi in backedges
+                    callback(mi::MethodInstance, max_world, seen)
+                end
+            end
+        end
+
+    end
 end # !HAS_INTEGRATED_CACHE
 
 
@@ -300,7 +312,7 @@ Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
 # Implements a priority lookup for method tables, where the first match in the stack get's returned.
 # An alternative to this would be to use a "Union" where we would query the parent method table and
 # do a most-specific match.
-struct StackedMethodTable{MTV<:CC.MethodTableView} <: CC.MethodTableView
+struct StackedMethodTable{MTV <: CC.MethodTableView} <: CC.MethodTableView
     world::UInt
     mt::Core.MethodTable
     parent::MTV
@@ -313,7 +325,7 @@ CC.isoverlayed(::StackedMethodTable) = true
 @static if VERSION >= v"1.11.0-DEV.363"
     # https://github.com/JuliaLang/julia/pull/51078
     # same API as before but without returning isoverlayed flag
-    function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int=-1)
+    function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int = -1)
         result = CC._findall(sig, table.mt, table.world, limit)
         result === nothing && return nothing # to many matches
         nr = CC.length(result)
@@ -330,8 +342,10 @@ CC.isoverlayed(::StackedMethodTable) = true
             CC.vcat(result.matches, parent_result.matches),
             CC.WorldRange(
                 CC.max(result.valid_worlds.min_world, parent_result.valid_worlds.min_world),
-                CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)),
-            result.ambig | parent_result.ambig)
+                CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)
+            ),
+            result.ambig | parent_result.ambig
+        )
     end
 
     function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
@@ -342,11 +356,12 @@ CC.isoverlayed(::StackedMethodTable) = true
             parent_match,
             CC.WorldRange(
                 max(valid_worlds.min_world, parent_valid_worlds.min_world),
-                min(valid_worlds.max_world, parent_valid_worlds.max_world))
-            )
+                min(valid_worlds.max_world, parent_valid_worlds.max_world)
+            ),
+        )
     end
 else
-    function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int=-1)
+    function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int = -1)
         result = CC._findall(sig, table.mt, table.world, limit)
         result === nothing && return nothing # to many matches
         nr = CC.length(result)
@@ -363,13 +378,16 @@ else
 
         # merge the parent match results with the internal method table
         return CC.MethodMatchResult(
-        CC.MethodLookupResult(
-            CC.vcat(result.matches, parent_result.matches),
-            CC.WorldRange(
-                CC.max(result.valid_worlds.min_world, parent_result.valid_worlds.min_world),
-                CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)),
-            result.ambig | parent_result.ambig),
-        overlayed)
+            CC.MethodLookupResult(
+                CC.vcat(result.matches, parent_result.matches),
+                CC.WorldRange(
+                    CC.max(result.valid_worlds.min_world, parent_result.valid_worlds.min_world),
+                    CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)
+                ),
+                result.ambig | parent_result.ambig
+            ),
+            overlayed
+        )
     end
 
     function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
@@ -380,8 +398,10 @@ else
             parent_match,
             CC.WorldRange(
                 max(valid_worlds.min_world, parent_valid_worlds.min_world),
-                min(valid_worlds.max_world, parent_valid_worlds.max_world)),
-            overlayed)
+                min(valid_worlds.max_world, parent_valid_worlds.max_world)
+            ),
+            overlayed,
+        )
     end
 end
 
@@ -404,15 +424,15 @@ end
 
 get_method_table_view(world::UInt, mt::CC.MethodTable) = CC.OverlayMethodTable(world, mt)
 
-struct GPUInterpreter{MTV<:CC.MethodTableView} <: CC.AbstractInterpreter
+struct GPUInterpreter{MTV <: CC.MethodTableView} <: CC.AbstractInterpreter
     world::UInt
     method_table_view::MTV
 
-@static if HAS_INTEGRATED_CACHE
-    token::Any
-else
-    code_cache::CodeCache
-end
+    @static if HAS_INTEGRATED_CACHE
+        token::Any
+    else
+        code_cache::CodeCache
+    end
     inf_cache::Vector{CC.InferenceResult}
 
     inf_params::CC.InferenceParams
@@ -420,59 +440,75 @@ end
 end
 
 @static if HAS_INTEGRATED_CACHE
-function GPUInterpreter(world::UInt=Base.get_world_counter();
-                        method_table_view::CC.MethodTableView,
-                        token::Any,
-                        inf_params::CC.InferenceParams,
-                        opt_params::CC.OptimizationParams)
-    @assert world <= Base.get_world_counter()
+    function GPUInterpreter(
+            world::UInt = Base.get_world_counter();
+            method_table_view::CC.MethodTableView,
+            token::Any,
+            inf_params::CC.InferenceParams,
+            opt_params::CC.OptimizationParams
+        )
+        @assert world <= Base.get_world_counter()
 
-    inf_cache = Vector{CC.InferenceResult}()
+        inf_cache = Vector{CC.InferenceResult}()
 
-    return GPUInterpreter(world, method_table_view,
-                          token, inf_cache,
-                          inf_params, opt_params)
-end
+        return GPUInterpreter(
+            world, method_table_view,
+            token, inf_cache,
+            inf_params, opt_params
+        )
+    end
 
-function GPUInterpreter(interp::GPUInterpreter;
-                        world::UInt=interp.world,
-                        method_table_view::CC.MethodTableView=interp.method_table_view,
-                        token::Any=interp.token,
-                        inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
-                        inf_params::CC.InferenceParams=interp.inf_params,
-                        opt_params::CC.OptimizationParams=interp.opt_params)
-    return GPUInterpreter(world, method_table_view,
-                          token, inf_cache,
-                          inf_params, opt_params)
-end
+    function GPUInterpreter(
+            interp::GPUInterpreter;
+            world::UInt = interp.world,
+            method_table_view::CC.MethodTableView = interp.method_table_view,
+            token::Any = interp.token,
+            inf_cache::Vector{CC.InferenceResult} = interp.inf_cache,
+            inf_params::CC.InferenceParams = interp.inf_params,
+            opt_params::CC.OptimizationParams = interp.opt_params
+        )
+        return GPUInterpreter(
+            world, method_table_view,
+            token, inf_cache,
+            inf_params, opt_params
+        )
+    end
 
 else
 
-function GPUInterpreter(world::UInt=Base.get_world_counter();
-                        method_table_view::CC.MethodTableView,
-                        code_cache::CodeCache,
-                        inf_params::CC.InferenceParams,
-                        opt_params::CC.OptimizationParams)
-    @assert world <= Base.get_world_counter()
+    function GPUInterpreter(
+            world::UInt = Base.get_world_counter();
+            method_table_view::CC.MethodTableView,
+            code_cache::CodeCache,
+            inf_params::CC.InferenceParams,
+            opt_params::CC.OptimizationParams
+        )
+        @assert world <= Base.get_world_counter()
 
-    inf_cache = Vector{CC.InferenceResult}()
+        inf_cache = Vector{CC.InferenceResult}()
 
-    return GPUInterpreter(world, method_table_view,
-                          code_cache, inf_cache,
-                          inf_params, opt_params)
-end
+        return GPUInterpreter(
+            world, method_table_view,
+            code_cache, inf_cache,
+            inf_params, opt_params
+        )
+    end
 
-function GPUInterpreter(interp::GPUInterpreter;
-                        world::UInt=interp.world,
-                        method_table_view::CC.MethodTableView=interp.method_table_view,
-                        code_cache::CodeCache=interp.code_cache,
-                        inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
-                        inf_params::CC.InferenceParams=interp.inf_params,
-                        opt_params::CC.OptimizationParams=interp.opt_params)
-    return GPUInterpreter(world, method_table_view,
-                          code_cache, inf_cache,
-                          inf_params, opt_params)
-end
+    function GPUInterpreter(
+            interp::GPUInterpreter;
+            world::UInt = interp.world,
+            method_table_view::CC.MethodTableView = interp.method_table_view,
+            code_cache::CodeCache = interp.code_cache,
+            inf_cache::Vector{CC.InferenceResult} = interp.inf_cache,
+            inf_params::CC.InferenceParams = interp.inf_params,
+            opt_params::CC.OptimizationParams = interp.opt_params
+        )
+        return GPUInterpreter(
+            world, method_table_view,
+            code_cache, inf_cache,
+            inf_params, opt_params
+        )
+    end
 end # HAS_INTEGRATED_CACHE
 
 CC.InferenceParams(interp::GPUInterpreter) = interp.inf_params
@@ -490,33 +526,41 @@ CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 CC.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
 function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
-    @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
+    return @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
 end
 
 CC.may_optimize(interp::GPUInterpreter) = true
 CC.may_compress(interp::GPUInterpreter) = true
 CC.may_discard_trees(interp::GPUInterpreter) = true
 @static if VERSION <= v"1.12.0-DEV.1531"
-CC.verbose_stmt_info(interp::GPUInterpreter) = false
+    CC.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 CC.method_table(interp::GPUInterpreter) = interp.method_table_view
 
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
-function CC.concrete_eval_eligible(interp::GPUInterpreter,
-    @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
+function CC.concrete_eval_eligible(
+        interp::GPUInterpreter,
+        @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState
+    )
     # NOTE it's fine to skip overloading with `sv::IRInterpretationState` since we disables
     #      semi-concrete interpretation anyway.
-    ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
-        f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
+    ret = @invoke CC.concrete_eval_eligible(
+        interp::CC.AbstractInterpreter,
+        f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState
+    )
     if ret === :semi_concrete_eval
         return :none
     end
     return ret
 end
-function CC.concrete_eval_eligible(interp::GPUInterpreter,
-    @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo)
-    ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
-        f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo)
+function CC.concrete_eval_eligible(
+        interp::GPUInterpreter,
+        @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo
+    )
+    ret = @invoke CC.concrete_eval_eligible(
+        interp::CC.AbstractInterpreter,
+        f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo
+    )
     ret === false && return nothing
     return ret
 end
@@ -527,37 +571,39 @@ using Core.Compiler: WorldView
 
 if !HAS_INTEGRATED_CACHE
 
-function CC.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
-    CC.get(wvc, mi, nothing) !== nothing
-end
-
-function CC.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
-    # check the cache
-    for ci in get!(wvc.cache.dict, mi, CodeInstance[])
-        if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
-            # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
-            src = if ci.inferred isa Vector{UInt8}
-                ccall(:jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
-                       mi.def, C_NULL, ci.inferred)
-            else
-                ci.inferred
-            end
-            return ci
-        end
+    function CC.haskey(wvc::WorldView{CodeCache}, mi::MethodInstance)
+        return CC.get(wvc, mi, nothing) !== nothing
     end
 
-    return default
-end
+    function CC.get(wvc::WorldView{CodeCache}, mi::MethodInstance, default)
+        # check the cache
+        for ci in get!(wvc.cache.dict, mi, CodeInstance[])
+            if ci.min_world <= wvc.worlds.min_world && wvc.worlds.max_world <= ci.max_world
+                # TODO: if (code && (code == jl_nothing || jl_ir_flag_inferred((jl_array_t*)code)))
+                src = if ci.inferred isa Vector{UInt8}
+                    ccall(
+                        :jl_uncompress_ir, Any, (Any, Ptr{Cvoid}, Any),
+                        mi.def, C_NULL, ci.inferred
+                    )
+                else
+                    ci.inferred
+                end
+                return ci
+            end
+        end
 
-function CC.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
-    r = CC.get(wvc, mi, nothing)
-    r === nothing && throw(KeyError(mi))
-    return r::CodeInstance
-end
+        return default
+    end
 
-function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
-    CC.setindex!(wvc.cache, ci, mi)
-end
+    function CC.getindex(wvc::WorldView{CodeCache}, mi::MethodInstance)
+        r = CC.get(wvc, mi, nothing)
+        r === nothing && throw(KeyError(mi))
+        return r::CodeInstance
+    end
+
+    function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodInstance)
+        return CC.setindex!(wvc.cache, ci, mi)
+    end
 
 end # HAS_INTEGRATED_CACHE
 
@@ -664,7 +710,7 @@ const _method_instances = Ref{Any}()
 const _cache = Ref{Any}()
 function _lookup_fun(mi, min_world, max_world)
     push!(_method_instances[], mi)
-    ci_cache_lookup(_cache[], mi, min_world, max_world)
+    return ci_cache_lookup(_cache[], mi, min_world, max_world)
 end
 
 @enum CompilationPolicy::Cint begin
@@ -706,7 +752,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     if Sys.ARCH == :x86 || Sys.ARCH == :x86_64
         function lookup_fun(mi, min_world, max_world)
             push!(method_instances, mi)
-            ci_cache_lookup(cache, mi, min_world, max_world)
+            return ci_cache_lookup(cache, mi, min_world, max_world)
         end
         lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     else
@@ -720,21 +766,22 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     imaging = imaging_mode(job)
 
     cgparams = (;
-        track_allocations  = false,
-        code_coverage      = false,
-        prefer_specsig     = true,
-        gnu_pubnames       = false,
-        debug_info_kind    = Cint(debug_info_kind),
+        track_allocations = false,
+        code_coverage = false,
+        prefer_specsig = true,
+        gnu_pubnames = false,
+        debug_info_kind = Cint(debug_info_kind),
         safepoint_on_entry = can_safepoint(job),
-        gcstack_arg        = false)
+        gcstack_arg = false,
+    )
     if :use_jlplt in fieldnames(Base.CodegenParams)
         cgparams = (; cgparams..., use_jlplt = imaging)
     end
     if VERSION < v"1.12.0-DEV.1667"
-        cgparams = (; lookup = Base.unsafe_convert(Ptr{Nothing}, lookup_cb), cgparams... )
+        cgparams = (; lookup = Base.unsafe_convert(Ptr{Nothing}, lookup_cb), cgparams...)
     end
     if v"1.12.0-DEV.2126" <= VERSION < v"1.13-" || VERSION >= v"1.13.0-DEV.285"
-        cgparams = (; force_emit_all = true , cgparams...)
+        cgparams = (; force_emit_all = true, cgparams...)
     end
     params = Base.CodegenParams(; cgparams...)
 
@@ -765,19 +812,25 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             end
             @ccall jl_emit_native(codeinfos::Vector{Any}, ts_mod::LLVM.API.LLVMOrcThreadSafeModuleRef, Ref(params)::Ptr{Base.CodegenParams}, #=extern linkage=# false::Cint)::Ptr{Cvoid}
         elseif VERSION >= v"1.12.0-DEV.1667"
-            ccall(:jl_create_native, Ptr{Cvoid},
+            ccall(
+                :jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t, Ptr{Cvoid}),
-                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, imaging_flag, #=external linkage=# 0, job.world, Base.unsafe_convert(Ptr{Nothing}, lookup_cb))
+                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, imaging_flag, #=external linkage=# 0, job.world, Base.unsafe_convert(Ptr{Nothing}, lookup_cb)
+            )
         else
-            ccall(:jl_create_native, Ptr{Cvoid},
+            ccall(
+                :jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t),
-                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, imaging_flag, #=external linkage=# 0, job.world)
+                [job.source], ts_mod, Ref(params), CompilationPolicyExtern, imaging_flag, #=external linkage=# 0, job.world
+            )
         end
         @assert native_code != C_NULL
 
         llvm_mod_ref =
-            ccall(:jl_get_llvm_module, LLVM.API.LLVMOrcThreadSafeModuleRef,
-                  (Ptr{Cvoid},), native_code)
+            ccall(
+            :jl_get_llvm_module, LLVM.API.LLVMOrcThreadSafeModuleRef,
+            (Ptr{Cvoid},), native_code
+        )
         @assert llvm_mod_ref != C_NULL
 
         # XXX: this is wrong; we can't expose the underlying LLVM module, but should
@@ -797,14 +850,20 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # Since Julia 1.13, the caller is responsible for initializing global variables that
         # point to global values or bindings with their address in memory.
         num_gvars = Ref{Csize_t}(0)
-        @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
-                               C_NULL::Ptr{Cvoid})::Nothing
+        @ccall jl_get_llvm_gvs(
+            native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+            C_NULL::Ptr{Cvoid}
+        )::Nothing
         gvs = Vector{Ptr{LLVM.API.LLVMOpaqueValue}}(undef, num_gvars[])
-        @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
-                               gvs::Ptr{LLVM.API.LLVMOpaqueValue})::Nothing
+        @ccall jl_get_llvm_gvs(
+            native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+            gvs::Ptr{LLVM.API.LLVMOpaqueValue}
+        )::Nothing
         inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
-        @ccall jl_get_llvm_gv_inits(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
-                                    inits::Ptr{Cvoid})::Nothing
+        @ccall jl_get_llvm_gv_inits(
+            native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+            inits::Ptr{Cvoid}
+        )::Nothing
 
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
@@ -819,11 +878,15 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # lookup function (used to populate method_instances) isn't always called then.
 
         num_cis = Ref{Csize_t}(0)
-        @ccall jl_get_llvm_cis(native_code::Ptr{Cvoid}, num_cis::Ptr{Csize_t},
-                               C_NULL::Ptr{Cvoid})::Nothing
+        @ccall jl_get_llvm_cis(
+            native_code::Ptr{Cvoid}, num_cis::Ptr{Csize_t},
+            C_NULL::Ptr{Cvoid}
+        )::Nothing
         resize!(method_instances, num_cis[])
-        @ccall jl_get_llvm_cis(native_code::Ptr{Cvoid}, num_cis::Ptr{Csize_t},
-                               method_instances::Ptr{Cvoid})::Nothing
+        @ccall jl_get_llvm_cis(
+            native_code::Ptr{Cvoid}, num_cis::Ptr{Csize_t},
+            method_instances::Ptr{Cvoid}
+        )::Nothing
 
         for (i, ci) in enumerate(method_instances)
             method_instances[i] = ci.def::MethodInstance
@@ -833,11 +896,15 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # slightly older versions of Julia used MIs directly
 
         num_mis = Ref{Csize_t}(0)
-        @ccall jl_get_llvm_mis(native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
-                               C_NULL::Ptr{Cvoid})::Nothing
+        @ccall jl_get_llvm_mis(
+            native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
+            C_NULL::Ptr{Cvoid}
+        )::Nothing
         resize!(method_instances, num_mis[])
-        @ccall jl_get_llvm_mis(native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
-                               method_instances::Ptr{Cvoid})::Nothing
+        @ccall jl_get_llvm_mis(
+            native_code::Ptr{Cvoid}, num_mis::Ptr{Csize_t},
+            method_instances::Ptr{Cvoid}
+        )::Nothing
     end
 
     # process all compiled method instances
@@ -849,15 +916,19 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # get the function index
         llvm_func_idx = Ref{Int32}(-1)
         llvm_specfunc_idx = Ref{Int32}(-1)
-        ccall(:jl_get_function_id, Nothing,
-              (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
-              native_code, ci, llvm_func_idx, llvm_specfunc_idx)
+        ccall(
+            :jl_get_function_id, Nothing,
+            (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
+            native_code, ci, llvm_func_idx, llvm_specfunc_idx
+        )
         @assert llvm_func_idx[] != -1 || llvm_specfunc_idx[] != -1 "Static compilation failed"
 
         # get the function
         llvm_func = if llvm_func_idx[] >= 1
-            llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                                  (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
+            llvm_func_ref = ccall(
+                :jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[] - 1
+            )
             @assert llvm_func_ref != C_NULL
             LLVM.name(LLVM.Function(llvm_func_ref))
         else
@@ -865,8 +936,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
 
         llvm_specfunc = if llvm_specfunc_idx[] >= 1
-            llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
-                                      (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
+            llvm_specfunc_ref = ccall(
+                :jl_get_llvm_function, LLVM.API.LLVMValueRef,
+                (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[] - 1
+            )
             @assert llvm_specfunc_ref != C_NULL
             LLVM.name(LLVM.Function(llvm_specfunc_ref))
         else
@@ -875,7 +948,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
         # NOTE: it's not safe to store raw LLVM functions here, since those may get
         #       removed or renamed during optimization, so we store their name instead.
-        compiled[mi] = (; ci, func=llvm_func, specfunc=llvm_specfunc)
+        compiled[mi] = (; ci, func = llvm_func, specfunc = llvm_specfunc)
     end
 
     # ensure that the requested method instance was compiled
@@ -886,15 +959,15 @@ end
 
 # partially revert JuliaLangjulia#49391
 @static if v"1.11.0-DEV.1603" <= VERSION < v"1.12.0-DEV.347" && # reverted on master
-           !(v"1.11-beta2" <= VERSION < v"1.12")                # reverted on 1.11-beta2
-function CC.typeinf(interp::GPUInterpreter, frame::CC.InferenceState)
-    if CC.__measure_typeinf__[]
-        CC.Timings.enter_new_timer(frame)
-        v = CC._typeinf(interp, frame)
-        CC.Timings.exit_current_timer(frame)
-        return v
-    else
-        return CC._typeinf(interp, frame)
+        !(v"1.11-beta2" <= VERSION < v"1.12")                # reverted on 1.11-beta2
+    function CC.typeinf(interp::GPUInterpreter, frame::CC.InferenceState)
+        if CC.__measure_typeinf__[]
+            CC.Timings.enter_new_timer(frame)
+            v = CC._typeinf(interp, frame)
+            CC.Timings.exit_current_timer(frame)
+            return v
+        else
+            return CC._typeinf(interp, frame)
+        end
     end
-end
 end

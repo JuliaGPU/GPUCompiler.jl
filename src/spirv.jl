@@ -5,17 +5,25 @@
 # https://github.com/KhronosGroup/SPIRV-LLVM-Translator/blob/master/docs/SPIRVRepresentationInLLVM.rst
 
 const SPIRV_LLVM_Backend_jll =
-    LazyModule("SPIRV_LLVM_Backend_jll",
-               UUID("4376b9bf-cff8-51b6-bb48-39421dff0d0c"))
+    LazyModule(
+    "SPIRV_LLVM_Backend_jll",
+    UUID("4376b9bf-cff8-51b6-bb48-39421dff0d0c")
+)
 const SPIRV_LLVM_Translator_unified_jll =
-    LazyModule("SPIRV_LLVM_Translator_unified_jll",
-               UUID("85f0d8ed-5b39-5caa-b1ae-7472de402361"))
+    LazyModule(
+    "SPIRV_LLVM_Translator_unified_jll",
+    UUID("85f0d8ed-5b39-5caa-b1ae-7472de402361")
+)
 const SPIRV_LLVM_Translator_jll =
-    LazyModule("SPIRV_LLVM_Translator_jll",
-               UUID("4a5d46fc-d8cf-5151-a261-86b458210efb"))
+    LazyModule(
+    "SPIRV_LLVM_Translator_jll",
+    UUID("4a5d46fc-d8cf-5151-a261-86b458210efb")
+)
 const SPIRV_Tools_jll =
-    LazyModule("SPIRV_Tools_jll",
-               UUID("6ac6d60f-d740-5983-97d7-a4482c0689f4"))
+    LazyModule(
+    "SPIRV_Tools_jll",
+    UUID("6ac6d60f-d740-5983-97d7-a4482c0689f4")
+)
 
 
 ## target
@@ -23,7 +31,7 @@ const SPIRV_Tools_jll =
 export SPIRVCompilerTarget
 
 Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
-    version::Union{Nothing,VersionNumber} = nothing
+    version::Union{Nothing, VersionNumber} = nothing
     extensions::Vector{String} = []
     supports_fp16::Bool = true
     supports_fp64::Bool = true
@@ -36,21 +44,21 @@ end
 
 function llvm_triple(target::SPIRVCompilerTarget)
     if target.backend == :llvm
-        architecture = Int===Int64 ? "spirv64" : "spirv32"  # could also be "spirv" for logical addressing
+        architecture = Int === Int64 ? "spirv64" : "spirv32"  # could also be "spirv" for logical addressing
         subarchitecture = target.version === nothing ? "" : "v$(target.version.major).$(target.version.minor)"
         vendor = "unknown"  # could also be AMD
         os = "unknown"
         environment = "unknown"
         return "$architecture$subarchitecture-$vendor-$os-$environment"
     elseif target.backend == :khronos
-        return Int===Int64 ? "spir64-unknown-unknown" : "spirv-unknown-unknown"
+        return Int === Int64 ? "spir64-unknown-unknown" : "spirv-unknown-unknown"
     end
 end
 
 # SPIRV is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::SPIRVCompilerTarget) = nothing
 
-llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
+llvm_datalayout(::SPIRVCompilerTarget) = Int === Int64 ?
     "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1" :
     "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1"
 
@@ -62,8 +70,10 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) =
     "spirv-" * String(job.config.target.backend)
 
-function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
-                        entry::LLVM.Function)
+function finish_module!(
+        job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
+        entry::LLVM.Function
+    )
     # update calling convention
     for f in functions(mod)
         # JuliaGPU/GPUCompiler.jl#97
@@ -90,8 +100,10 @@ function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     return errors
 end
 
-function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
-                    entry::LLVM.Function)
+function finish_ir!(
+        job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
+        entry::LLVM.Function
+    )
     # convert the kernel state argument to a byval reference
     if job.config.kernel
         state = kernel_state_type(job)
@@ -115,19 +127,33 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
 
     # add module metadata
     ## OpenCL 2.0
-    push!(metadata(mod)["opencl.ocl.version"],
-          MDNode([ConstantInt(Int32(2)),
-                  ConstantInt(Int32(0))]))
+    push!(
+        metadata(mod)["opencl.ocl.version"],
+        MDNode(
+            [
+                ConstantInt(Int32(2)),
+                ConstantInt(Int32(0)),
+            ]
+        )
+    )
     ## SPIR-V 1.5
-    push!(metadata(mod)["opencl.spirv.version"],
-          MDNode([ConstantInt(Int32(1)),
-                  ConstantInt(Int32(5))]))
+    push!(
+        metadata(mod)["opencl.spirv.version"],
+        MDNode(
+            [
+                ConstantInt(Int32(1)),
+                ConstantInt(Int32(5)),
+            ]
+        )
+    )
 
     return entry
 end
 
-@unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
-                         format=LLVM.API.LLVMAssemblyFile)
+@unlocked function mcgen(
+        job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
+        format = LLVM.API.LLVMAssemblyFile
+    )
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
@@ -140,14 +166,14 @@ end
     rm_freeze!(mod)
 
     # translate to SPIR-V
-    input = tempname(cleanup=false) * ".bc"
-    translated = tempname(cleanup=false) * ".spv"
+    input = tempname(cleanup = false) * ".bc"
+    translated = tempname(cleanup = false) * ".spv"
     write(input, mod)
     if job.config.target.backend === :llvm
         cmd = `$(SPIRV_LLVM_Backend_jll.llc()) $input -filetype=obj -o $translated`
 
         if !isempty(job.config.target.extensions)
-            str = join(map(ext->"+$ext", job.config.target.extensions), ",")
+            str = join(map(ext -> "+$ext", job.config.target.extensions), ",")
             cmd = `$(cmd) -spirv-ext=$str`
         end
     elseif job.config.target.backend === :khronos
@@ -161,7 +187,7 @@ end
         cmd = `$translator -o $translated $input --spirv-debug-info-version=ocl-100`
 
         if !isempty(job.config.target.extensions)
-            str = join(map(ext->"+$ext", job.config.target.extensions), ",")
+            str = join(map(ext -> "+$ext", job.config.target.extensions), ",")
             cmd = `$(cmd) --spirv-ext=$str`
         end
 
@@ -172,8 +198,10 @@ end
     try
         run(cmd)
     catch e
-        error("""Failed to translate LLVM code to SPIR-V.
-                 If you think this is a bug, please file an issue and attach $(input).""")
+        error(
+            """Failed to translate LLVM code to SPIR-V.
+            If you think this is a bug, please file an issue and attach $(input)."""
+        )
     end
 
     # validate
@@ -181,20 +209,26 @@ end
         try
             run(`$(SPIRV_Tools_jll.spirv_val()) $translated`)
         catch e
-            error("""Failed to validate generated SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+            error(
+                """Failed to validate generated SPIR-V.
+                If you think this is a bug, please file an issue and attach $(input) and $(translated)."""
+            )
         end
     end
 
     # optimize
-    optimized = tempname(cleanup=false) * ".spv"
+    optimized = tempname(cleanup = false) * ".spv"
     if job.config.target.optimize
         try
-            run(```$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation
-                                                  $translated -o $optimized```)
+            run(
+                ```$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation
+                $translated -o $optimized```
+            )
         catch
-            error("""Failed to optimize generated SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+            error(
+                """Failed to optimize generated SPIR-V.
+                If you think this is a bug, please file an issue and attach $(input) and $(translated)."""
+            )
         end
     else
         cp(translated, optimized)
@@ -215,12 +249,12 @@ end
 end
 
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
-function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
-    config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
+function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool = false, dump_module::Bool = false)
+    config = CompilerConfig(job.config; strip = !raw, only_entry = !dump_module, validate = false)
     obj, _ = JuliaContext() do ctx
         compile(:obj, CompilerJob(job; config))
     end
-    mktemp() do input_path, input_io
+    return mktemp() do input_path, input_io
         write(input_io, obj)
         flush(input_io)
 
@@ -246,20 +280,20 @@ function rm_trap!(mod::LLVM.Module)
     changed = false
     @tracepoint "remove trap" begin
 
-    if haskey(functions(mod), "llvm.trap")
-        trap = functions(mod)["llvm.trap"]
+        if haskey(functions(mod), "llvm.trap")
+            trap = functions(mod)["llvm.trap"]
 
-        for use in uses(trap)
-            val = user(use)
-            if isa(val, LLVM.CallInst)
-                erase!(val)
-                changed = true
+            for use in uses(trap)
+                val = user(use)
+                if isa(val, LLVM.CallInst)
+                    erase!(val)
+                    changed = true
+                end
             end
-        end
 
-        @compiler_assert isempty(uses(trap)) job
-        erase!(trap)
-    end
+            @compiler_assert isempty(uses(trap)) job
+            erase!(trap)
+        end
 
     end
     return changed
@@ -272,15 +306,15 @@ function rm_freeze!(mod::LLVM.Module)
     changed = false
     @tracepoint "remove freeze" begin
 
-    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
-        if inst isa LLVM.FreezeInst
-            orig = first(operands(inst))
-            replace_uses!(inst, orig)
-            @compiler_assert isempty(uses(inst)) job
-            erase!(inst)
-            changed = true
+        for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+            if inst isa LLVM.FreezeInst
+                orig = first(operands(inst))
+                replace_uses!(inst, orig)
+                @compiler_assert isempty(uses(inst)) job
+                erase!(inst)
+                changed = true
+            end
         end
-    end
 
     end
     return changed
@@ -293,50 +327,50 @@ function convert_i128_allocas!(mod::LLVM.Module)
     changed = false
     @tracepoint "convert i128 allocas" begin
 
-    for f in functions(mod), bb in blocks(f)
-        for inst in instructions(bb)
-            if inst isa LLVM.AllocaInst
-                alloca_type = LLVMType(LLVM.API.LLVMGetAllocatedType(inst))
+        for f in functions(mod), bb in blocks(f)
+            for inst in instructions(bb)
+                if inst isa LLVM.AllocaInst
+                    alloca_type = LLVMType(LLVM.API.LLVMGetAllocatedType(inst))
 
-                # Check if this is an i128 or an array of i128
-                if alloca_type isa LLVM.ArrayType
-                    T = eltype(alloca_type)
-                else
-                    T = alloca_type
-                end
-                if T isa LLVM.IntegerType && width(T) == 128
-                    # replace i128 with <2 x i64>
-                    vec_type = LLVM.VectorType(LLVM.Int64Type(), 2)
-
+                    # Check if this is an i128 or an array of i128
                     if alloca_type isa LLVM.ArrayType
-                        array_size = length(alloca_type)
-                        new_alloca_type = LLVM.ArrayType(vec_type, array_size)
+                        T = eltype(alloca_type)
                     else
-                        new_alloca_type = vec_type
+                        T = alloca_type
                     end
-                    align_val = alignment(inst)
+                    if T isa LLVM.IntegerType && width(T) == 128
+                        # replace i128 with <2 x i64>
+                        vec_type = LLVM.VectorType(LLVM.Int64Type(), 2)
 
-                    # Create new alloca with vector type
-                    @dispose builder=IRBuilder() begin
-                        position!(builder, inst)
-                        new_alloca = alloca!(builder, new_alloca_type)
-                        alignment!(new_alloca, align_val)
+                        if alloca_type isa LLVM.ArrayType
+                            array_size = length(alloca_type)
+                            new_alloca_type = LLVM.ArrayType(vec_type, array_size)
+                        else
+                            new_alloca_type = vec_type
+                        end
+                        align_val = alignment(inst)
 
-                        # Bitcast the new alloca back to the original pointer type
-                        # XXX: The issue only seems to manifest itself on LLVM >= 18
-                        #      where we use opaque pointers anyways, so not sure this
-                        #      is needed
-                        old_ptr_type = LLVMType(LLVM.API.LLVMTypeOf(inst.ref))
-                        bitcast_ptr = bitcast!(builder, new_alloca, old_ptr_type)
+                        # Create new alloca with vector type
+                        @dispose builder = IRBuilder() begin
+                            position!(builder, inst)
+                            new_alloca = alloca!(builder, new_alloca_type)
+                            alignment!(new_alloca, align_val)
 
-                        replace_uses!(inst, bitcast_ptr)
-                        erase!(inst)
-                        changed = true
+                            # Bitcast the new alloca back to the original pointer type
+                            # XXX: The issue only seems to manifest itself on LLVM >= 18
+                            #      where we use opaque pointers anyways, so not sure this
+                            #      is needed
+                            old_ptr_type = LLVMType(LLVM.API.LLVMTypeOf(inst.ref))
+                            bitcast_ptr = bitcast!(builder, new_alloca, old_ptr_type)
+
+                            replace_uses!(inst, bitcast_ptr)
+                            erase!(inst)
+                            changed = true
+                        end
                     end
                 end
             end
         end
-    end
 
     end
     return changed
@@ -380,7 +414,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
     # emit IR performing the "conversions"
     new_args = Vector{LLVM.Value}()
-    @dispose builder=IRBuilder() begin
+    @dispose builder = IRBuilder() begin
         entry = BasicBlock(new_f, "conversion")
         position!(builder, entry)
 
@@ -397,12 +431,14 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
         # map the arguments
         value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => new_args[i] for (i,param) in enumerate(parameters(f))
+            param => new_args[i] for (i, param) in enumerate(parameters(f))
         )
 
         value_map[f] = new_f
-        clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+        clone_into!(
+            new_f, f; value_map,
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
+        )
 
         # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
         for i in 1:length(byval)

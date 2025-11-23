@@ -19,7 +19,7 @@ module TestRuntime
 end
 
 struct TestCompilerParams <: AbstractCompilerParams end
-GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntime
+GPUCompiler.runtime_module(::CompilerJob{<:Any, TestCompilerParams}) = TestRuntime
 
 
 ## JIT integration
@@ -58,8 +58,8 @@ const jit = Ref{CompilerInstance}()
 function get_trampoline(job)
     compiler = jit[]
     lljit = compiler.jit
-    lctm  = compiler.lctm
-    ism   = compiler.ism
+    lctm = compiler.lctm
+    ism = compiler.ism
 
     # We could also use one dylib per job
     jd = JITDylib(lljit)
@@ -68,11 +68,14 @@ function get_trampoline(job)
     target_sym = String(gensym(:target))
     flags = LLVM.API.LLVMJITSymbolFlags(
         LLVM.API.LLVMJITSymbolGenericFlagsCallable |
-        LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
+            LLVM.API.LLVMJITSymbolGenericFlagsExported, 0
+    )
     entry = LLVM.API.LLVMOrcCSymbolAliasMapPair(
         mangle(lljit, entry_sym),
         LLVM.API.LLVMOrcCSymbolAliasMapEntry(
-            mangle(lljit, target_sym), flags))
+            mangle(lljit, target_sym), flags
+        )
+    )
 
     mu = LLVM.reexports(lctm, ism, jd, Ref(entry))
     LLVM.define(jd, mu)
@@ -85,7 +88,7 @@ function get_trampoline(job)
 
     function materialize(mr)
         buf = JuliaContext() do ctx
-            ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
+            ir, meta = GPUCompiler.compile(:llvm, job; validate = false)
 
             # Rename entry to match target_sym
             LLVM.name!(meta.entry, target_sym)
@@ -117,14 +120,14 @@ function get_trampoline(job)
 end
 
 import GPUCompiler: deferred_codegen_jobs
-@generated function deferred_codegen(f::F, ::Val{tt}, ::Val{world}) where {F,tt,world}
+@generated function deferred_codegen(f::F, ::Val{tt}, ::Val{world}) where {F, tt, world}
     # manual version of native_job because we have a function type
     source = methodinstance(F, Base.to_tuple_type(tt), world)
-    target = NativeCompilerTarget(; jlruntime=true, llvm_always_inline=true)
+    target = NativeCompilerTarget(; jlruntime = true, llvm_always_inline = true)
     # XXX: do we actually require the Julia runtime?
     #      with jlruntime=false, we reach an unreachable.
     params = TestCompilerParams()
-    config = CompilerConfig(target, params; kernel=false)
+    config = CompilerConfig(target, params; kernel = false)
     job = CompilerJob(source, config, world)
     # XXX: invoking GPUCompiler from a generated function is not allowed!
     #      for things to work, we need to forward the correct world, at least.
@@ -135,7 +138,7 @@ import GPUCompiler: deferred_codegen_jobs
 
     deferred_codegen_jobs[id] = job
 
-    quote
+    return quote
         ptr = ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Ptr{Cvoid},), $trampoline)
         assume(ptr != C_NULL)
         return ptr
@@ -143,8 +146,8 @@ import GPUCompiler: deferred_codegen_jobs
 end
 
 @generated function abi_call(f::Ptr{Cvoid}, rt::Type{RT}, tt::Type{T}, func::F, args::Vararg{Any, N}) where {T, RT, F, N}
-    argtt    = tt.parameters[1]
-    rettype  = rt.parameters[1]
+    argtt = tt.parameters[1]
+    rettype = rt.parameters[1]
     argtypes = DataType[argtt.parameters...]
 
     argexprs = Union{Expr, Symbol}[]
@@ -199,7 +202,7 @@ end
         if GPUCompiler.isghosttype(rettype) || Core.Compiler.isconstType(rettype)
             # Do nothing...
             # In theory we could set `rettype` to `T_void`, but ccall will do that for us
-        # elseif jl_is_uniontype?
+            # elseif jl_is_uniontype?
         elseif !GPUCompiler.deserves_retbox(rettype)
             rt = convert(LLVMType, rettype)
             if !isa(rt, LLVM.VoidType) && GPUCompiler.deserves_sret(rettype, rt)
@@ -214,26 +217,26 @@ end
         end
     end
 
-    quote
+    return quote
         $before
         ret = ccall(f, $rettype, ($(ccall_types...),), $(argexprs...))
         $after
     end
 end
 
-@inline function call_delayed(f::F, args...) where F
+@inline function call_delayed(f::F, args...) where {F}
     tt = Tuple{map(Core.Typeof, args)...}
     rt = Core.Compiler.return_type(f, tt)
     world = GPUCompiler.tls_world_age()
     ptr = deferred_codegen(f, Val(tt), Val(world))
-    abi_call(ptr, rt, tt, f, args...)
+    return abi_call(ptr, rt, tt, f, args...)
 end
 
 optlevel = LLVM.API.LLVMCodeGenLevelDefault
-tm = GPUCompiler.JITTargetMachine(optlevel=optlevel)
+tm = GPUCompiler.JITTargetMachine(optlevel = optlevel)
 LLVM.asm_verbosity!(tm, true)
 
-lljit = LLJIT(;tm)
+lljit = LLJIT(; tm)
 
 jd_main = JITDylib(lljit)
 
@@ -267,36 +270,36 @@ using Test
 f(A) = (A[] += 42; nothing)
 global flag = [0]
 function caller()
-    call_delayed(f, flag::Vector{Int})
+    return call_delayed(f, flag::Vector{Int})
 end
 @test caller() === nothing
 @test flag[] == 42
 
 # test that we can call a function with a return value
-add(x, y) = x+y
+add(x, y) = x + y
 function call_add(x, y)
-    call_delayed(add, x, y)
+    return call_delayed(add, x, y)
 end
 @test call_add(1, 3) == 4
 
 incr(r) = r[] += 1
 function call_incr(r)
-    call_delayed(incr, r)
+    return call_delayed(incr, r)
 end
 r = Ref{Int}(0)
 @test call_incr(r) == 1
 @test r[] == 1
 
 function call_real(c)
-    call_delayed(real, c)
+    return call_delayed(real, c)
 end
-@test call_real(1.0+im) == 1.0
+@test call_real(1.0 + im) == 1.0
 
 # tests struct return
 if Sys.ARCH != :aarch64
-    @test call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
+    @test call_delayed(complex, 1.0, 2.0) == 1.0 + 2.0im
 else
-    @test_broken call_delayed(complex, 1.0, 2.0) == 1.0+2.0im
+    @test_broken call_delayed(complex, 1.0, 2.0) == 1.0 + 2.0im
 end
 
 throws(arr, i) = arr[i]
@@ -306,11 +309,11 @@ throws(arr, i) = arr[i]
 struct Closure
     x::Int64
 end
-(c::Closure)(b) = c.x+b
+(c::Closure)(b) = c.x + b
 @test call_delayed(Closure(3), 5) == 8
 
 struct Closure2
     x::Integer
 end
-(c::Closure2)(b) = c.x+b
+(c::Closure2)(b) = c.x + b
 @test call_delayed(Closure2(3), 5) == 8
