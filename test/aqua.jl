@@ -1,3 +1,3 @@
 using Aqua
 
-Aqua.test_all(GPUCompiler)
+Aqua.test_all(GPUCompiler    stale_deps=(ignore=[:SomePackage],),)
