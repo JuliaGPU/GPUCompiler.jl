@@ -55,6 +55,11 @@ function irgen(@nospecialize(job::CompilerJob))
         new_name = safe_name(old_name)
         if old_name != new_name
             LLVM.name!(val, new_name)
+            val = get(gv_to_value, old_name, nothing)
+            if val !== nothing
+                delete!(gv_to_value, old_name)
+                gv_to_value[new_name] = val
+            end
         end
     end
 
@@ -119,8 +124,6 @@ function irgen(@nospecialize(job::CompilerJob))
         current_job = job
         can_throw(job) || lower_throw!(mod)
     end
-
-    # TODO: should we filter out non-preserved_gvs?
 
     return mod, compiled, gv_to_value
 end
