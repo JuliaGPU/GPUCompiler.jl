@@ -1,7 +1,7 @@
 # LLVM IR generation
 
 function irgen(@nospecialize(job::CompilerJob))
-    mod, compiled = @tracepoint "emission" compile_method_instance(job)
+    mod, compiled, gv_to_value = @tracepoint "emission" compile_method_instance(job)
     if job.config.entry_abi === :specfunc
         entry_fn = compiled[job.source].specfunc
     else
@@ -120,7 +120,9 @@ function irgen(@nospecialize(job::CompilerJob))
         can_throw(job) || lower_throw!(mod)
     end
 
-    return mod, compiled
+    # TODO: should we filter out non-preserved_gvs?
+
+    return mod, compiled, gv_to_value
 end
 
 

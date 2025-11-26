@@ -197,7 +197,7 @@ const __llvm_initialized = Ref(false)
     end
 
     @tracepoint "IR generation" begin
-        ir, compiled = irgen(job)
+        ir, compiled, gv_to_value = irgen(job)
         if job.config.entry_abi === :specfunc
             entry_fn = compiled[job.source].specfunc
         else
@@ -422,7 +422,7 @@ const __llvm_initialized = Ref(false)
         @tracepoint "verification" verify(ir)
     end
 
-    return ir, (; entry, compiled)
+    return ir, (; entry, compiled, gv_to_value)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
