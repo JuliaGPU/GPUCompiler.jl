@@ -253,12 +253,12 @@ end
             if !ondisk_hit && path !== nothing && disk_cache_enabled()
                 @debug "Writing out on-disk cache" job path
                 mkpath(dirname(path))
-                if haskey(asm.meta, :gv_to_value)
+                if haskey(asm[2].meta, :gv_to_value)
                     # TODO: Serializer cannot handle Core.IntrinsicFunction
                     # We kinda want Julia to serialize the values in `gv_to_value` in the pkgimg and us just having to store an index
                     # for now we just empty them out
                     # We would need to remove the initializers from LLVM IR as well to be correct, and then link these in at runtime
-                    empty!(asm.meta.gv_to_value)
+                    empty!(asm[2].meta.gv_to_value)
                 end
                 entry = DiskCacheEntry(src.specTypes, cfg, asm)
 
