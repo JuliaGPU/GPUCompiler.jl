@@ -3,7 +3,6 @@ module GPUCompiler
 using LLVM
 using LLVM.Interop
 
-using Tracy
 
 using ExprTools: splitdef, combinedef
 
@@ -12,6 +11,26 @@ using Libdl
 using Serialization
 using Scratch: @get_scratch!
 using Preferences
+
+const ENABLE_TRACY = parse(Bool, @load_preference("tracy", "false"))
+
+"""
+    enable_tracy!(state::Bool=true)
+
+Activate tracy in the current environment.
+You will need to restart your Julia environment for it to take effect.
+"""
+function enable_tracy!(state::Bool=true)
+    @set_preferences!("tracy"=>string(state))
+end
+
+if ENABLE_TRACY
+    using Tracy
+else
+    macro tracepoint(name, expr)
+        return esc(expr)
+    end
+end
 
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
@@ -65,7 +84,9 @@ function __init__()
     mkpath(dir)
     global compile_cache = dir
 
-    Tracy.@register_tracepoints()
+    @static if ENABLE_TRACY
+        Tracy.@register_tracepoints()
+    end
     register_deferred_codegen()
 end
 
