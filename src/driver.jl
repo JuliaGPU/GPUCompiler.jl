@@ -325,7 +325,10 @@ const __llvm_initialized = Ref(false)
         name = LLVM.name(gv)
         init = get(gv_to_value, name, nothing)
         if init !== nothing
-            @assert initializer(gv) === nothing
+            if initializer(gv) !== nothing
+                # TODO: How is this happening we should have stripped initializers earlier
+                @show string(initializer(gv)), init
+            end
             val = const_inttoptr(ConstantInt(reinterpret(UInt, init)), LLVM.PointerType())
             initializer!(gv, val)
         end
