@@ -13,9 +13,32 @@ precompile_test_harness("Inference caching") do load_path
             A[1] = x
             return
         end
+             
+        function kernel_w_global(A, x, sym)
+            if sym == :A
+                A[1] = x
+            end
+            return
+        end
+
+        function func_with_return(box, x)
+            box[] = x
+            return box[]::Float64
+        end
 
         let
             job, _ = NativeCompiler.Native.create_job(kernel, (Vector{Int}, Int))
+            precompile(job)
+        end
+
+        let
+            job, _ = NativeCompiler.Native.create_job(kernel_w_global, (Vector{Int}, Int, Symbol))
+            precompile(job)
+        end
+
+        let
+            NativeCompiler.Native.code_llvm(stdout, func_with_return, (Base.RefValue{Any}, Float64,), entry_abi=:func, dump_module=true, optimize=false)
+            job, _ = NativeCompiler.Native.create_job(func_with_return, (Base.RefValue{Any}, Float64,))
             precompile(job)
         end
 
@@ -28,7 +51,7 @@ precompile_test_harness("Inference caching") do load_path
         end
     end) |> string)
 
-    Base.compilecache(Base.PkgId("NativeBackend"))
+    Base.compilecache(Base.PkgId("NativeBackend"), stderr, stdout)
     @eval let
         import NativeCompiler
 
@@ -46,6 +69,12 @@ precompile_test_harness("Inference caching") do load_path
         # Check that kernel survived
         kernel_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel), Tuple{Vector{Int}, Int})
         @test check_presence(kernel_mi, token)
+
+        kernel_w_global_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel_w_global), Tuple{Vector{Int}, Int, Symbol})
+        @test check_presence(kernel_w_global_mi, token)
+
+        func_with_return_mi = GPUCompiler.methodinstance(typeof(NativeBackend.func_with_return), Tuple{Base.RefValue{Any}, Float64})
+        @test check_presence(func_with_return_mi, token)
 
         # check that identity survived
         @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"

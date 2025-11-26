@@ -36,16 +36,19 @@ end
     @testset "compilation database" begin
         mod = @eval module $(gensym())
             @noinline inner(x) = x+1
-            function outer(x)
+        function outer(x, sym)
+            if sym == :a
                 return inner(x)
             end
+            return x
+        end
         end
 
-        job, _ = Native.create_job(mod.outer, (Int,))
+        job, _ = Native.create_job(mod.outer, (Int, Symbol))
         JuliaContext() do ctx
-            ir, meta = GPUCompiler.compile(:llvm, job)
+            ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
 
-            meth = only(methods(mod.outer, (Int,)))
+            meth = only(methods(mod.outer, (Int, Symbol)))
 
             mis = filter(mi->mi.def == meth, keys(meta.compiled))
             @test length(mis) == 1
@@ -53,6 +56,14 @@ end
             other_mis = filter(mi->mi.def != meth, keys(meta.compiled))
             @test length(other_mis) == 1
             @test only(other_mis).def in methods(mod.inner)
+
+            @test_broken length(meta.gv_to_value) >= 1
+            # TODO: Global values get privatized, so we can't find them by name anymore.
+            # %.not = icmp eq ptr %"sym::Symbol", inttoptr (i64 140096668482288 to ptr), !dbg !38
+            # for (name, v) in meta.gv_to_value
+            #     gv = globals(ir)[name]
+            #     @test LLVM.initializer(gv) === v
+            # end
         end
     end
 
