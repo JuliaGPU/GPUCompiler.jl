@@ -256,6 +256,7 @@ const __llvm_initialized = Ref(false)
                     dyn_ir, dyn_meta = codegen(:llvm, CompilerJob(dyn_job; config))
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
+                    merge!(gv_to_value, dyn_meta.gv_to_value)
                     @assert context(dyn_ir) == context(ir)
                     link!(ir, dyn_ir)
                     changed = true
@@ -316,6 +317,17 @@ const __llvm_initialized = Ref(false)
                                                 undefined_fns)
                 @tracepoint "runtime library" link_library!(ir, runtime)
             end
+        end
+    end
+
+    # TODO: Move this to somewhere else?
+    @tracepoint "Resolve relocations eagerly" for gv in globals(ir)
+        name = LLVM.name(gv)
+        init = get(gv_to_value, name, nothing)
+        if init !== nothing
+            @assert initializer(gv) === nothing
+            val = const_inttoptr(ConstantInt(reinterpret(UInt, init)), LLVM.PointerType())
+            initializer!(gv, val)
         end
     end
 

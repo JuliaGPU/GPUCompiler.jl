@@ -788,11 +788,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         cache_gbl = nothing
     end
 
-    gv_to_value = Dict{String, Any}()
+    gv_to_value = Dict{String, Ptr{Cvoid}}()
 
+    # The caller is responsible for initializing global variables that
+    # point to global values or bindings with their address in memory.
+    # For Julia < v"1.13" to enable relocation we strip out the initializers here.
     if VERSION >= v"1.13.0-DEV.623"
-        # Since Julia 1.13, the caller is responsible for initializing global variables that
-        # point to global values or bindings with their address in memory.
         num_gvars = Ref{Csize_t}(0)
         @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
                            C_NULL::Ptr{Cvoid})::Nothing
@@ -806,12 +807,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
-            val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
-            initializer!(gv, val)
-
-            # TODO: jl_binding_t?
-            @show LLVM.name(gv), val
-            gv_to_value[LLVM.name(gv)] = Base.unsafe_pointer_to_objref(val)
+            gv_to_value[LLVM.name(gv)] = init
         end
     else
         # Prior to this version of Julia we only had access to the values that the global variables
@@ -850,11 +846,15 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             end
             ptr = reinterpret(Ptr{Cvoid}, convert(UInt, init))
             if ptr in gvalues
-                gv_to_value[LLVM.name(gv)] = Base.unsafe_pointer_to_objref(ptr)
+                gv_to_value[LLVM.name(gv)] = ptr
             end
+            LLVM.initializer!(gv, nothing)
         end
         @assert length(gv_to_value) == length(gvalues)
     end
+    # It's valid to call Base.unsafe_pointer_to_objref on values(gv_to_value),
+    # but we may not be able to "easily" obtain the pointer back later.
+    # (Types, etc, disallow Base.pointer_from_objref on them.)
 
     if VERSION >= v"1.13.0-DEV.1120"
         # on sufficiently recent versions of Julia, we can query the CIs compiled.
