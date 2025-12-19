@@ -182,3 +182,7 @@ function kernels(mod::LLVM.Module)
     end
     return vals
 end
+
+## method overrides
+
+Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)

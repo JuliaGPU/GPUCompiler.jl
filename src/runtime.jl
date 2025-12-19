@@ -12,6 +12,26 @@ module Runtime
 using ..GPUCompiler
 using LLVM
 using LLVM.Interop
+using ExprTools: splitdef, combinedef
+
+
+macro device_function(ex)
+    ex = macroexpand(__module__, ex)
+    def = splitdef(ex)
+
+    # generate a function that errors
+    def[:body] = quote
+        error("This function is not intended for use on the CPU")
+    end
+
+    esc(quote
+        $(combinedef(def))
+
+        # NOTE: no use of `@consistent_overlay` here because the regular function errors
+        Base.Experimental.@overlay($(GPUCompiler).GLOBAL_METHOD_TABLE, $ex)
+    end)
+end
+
 
 
 ## representation of a runtime method instance
@@ -71,6 +91,8 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     meth = RuntimeMethodInstance(def,
                                  return_type, types, name,
                                  llvm_return_type, llvm_types, llvm_name)
+    println("Compile called for def $(def)")
+
     if haskey(methods, name)
         error("Runtime function $name has already been registered!")
     end
@@ -81,8 +103,9 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     #        work around that by generating an llvmcall stub. can we do better by
     #        using the new nonrecursive codegen to handle function lookup ourselves?
     if def isa Symbol
+        println("Symbol passed to compile: $(def)")
         args = [gensym() for typ in types]
-        @eval @inline $def($(args...)) =
+        @eval @device_function @inline $def($(args...)) =
             ccall($("extern $llvm_name"), llvmcall, $return_type, ($(types...),), $(args...))
     end
 
