@@ -83,7 +83,7 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     #        using the new nonrecursive codegen to handle function lookup ourselves?
     if def isa Symbol
         args = [gensym() for typ in types]
-        @eval @device_function @inline $def($(args...)) =
+        @eval GPUCompiler.@device_function @inline $def($(args...)) =
             ccall($("extern $llvm_name"), llvmcall, $return_type, ($(types...),), $(args...))
     end
 
