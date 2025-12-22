@@ -241,3 +241,22 @@ end
 ## method overrides
 
 Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
+using ExprTools: splitdef, combinedef
+macro device_function(ex)
+    ex = macroexpand(__module__, ex)
+    def = splitdef(ex)
+
+    # generate a function that errors
+    def[:body] = quote
+        error("This function is not intended for use on the CPU")
+    end
+
+    esc(quote
+        $(combinedef(def))
+
+        # NOTE: no use of `@consistent_overlay` here because the regular function errors
+        Base.Experimental.@overlay($(GPUCompiler).GLOBAL_METHOD_TABLE, $ex)
+    end)
+end
+
+
