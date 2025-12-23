@@ -93,7 +93,6 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob); kwarg
     ## LLVM IR
 
     ir, ir_meta = emit_llvm(job)
-
     if output == :llvm
         if job.config.strip
             @tracepoint "strip debug info" strip_debuginfo!(ir)
