@@ -252,7 +252,6 @@ macro device_function(rt, ex)
     # NOTE: using Int64(1) is a bit odd. This is because Ptr(Int64(0)) == C_NULL, and julia code lowering
     #       seems to get rid of this automatically.
     def[:body] = quote
-        @warn "This function is not intended for use on the CPU something may have gone wrong"
         $rt(1)
     end
 
