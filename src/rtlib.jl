@@ -78,8 +78,6 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
 
-    println("emit_function!: source: $(source)")
-    #println(code_typed(CompilerJob(source, config)))
     if return_type(ft) != return_type(expected_ft)
         error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
     end
@@ -111,15 +109,12 @@ function build_runtime(@nospecialize(job::CompilerJob))
     config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false, strip=false)
 
     for method in values(Runtime.methods)
-        #println("build_runtime: method.def: $(method.def)")
-        #println("build_runtime: method.name: $(method.name)")
         def = if isa(method.def, Symbol)
             isdefined(runtime_module(job), method.def) || continue
             getfield(runtime_module(job), method.def)
         else
             method.def
         end
-        println("build_runtime: def: $(def)")
         emit_function!(mod, config, typeof(def), method)
     end
 
