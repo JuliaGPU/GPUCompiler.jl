@@ -310,7 +310,6 @@ CC.isoverlayed(::StackedMethodTable) = true
     # https://github.com/JuliaLang/julia/pull/51078
     # same API as before but without returning isoverlayed flag
     function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int=-1)
-        #println("findall: sig: $(sig), mt: $(table)")
         result = CC._findall(sig, table.mt, table.world, limit)
         result === nothing && return nothing # to many matches
         nr = CC.length(result)
@@ -332,7 +331,6 @@ CC.isoverlayed(::StackedMethodTable) = true
     end
 
     function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
-        #println("findsup: sig: $(sig), mt: $(table)")
         match, valid_worlds = CC._findsup(sig, table.mt, table.world)
         match !== nothing && return match, valid_worlds
         parent_match, parent_valid_worlds = CC.findsup(sig, table.parent)
