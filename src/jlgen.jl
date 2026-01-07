@@ -501,26 +501,6 @@ CC.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 CC.method_table(interp::GPUInterpreter) = interp.method_table_view
 
-# semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
-function CC.concrete_eval_eligible(interp::GPUInterpreter,
-    @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
-    # NOTE it's fine to skip overloading with `sv::IRInterpretationState` since we disables
-    #      semi-concrete interpretation anyway.
-    ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
-        f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
-    if ret === :semi_concrete_eval
-        return :none
-    end
-    return ret
-end
-function CC.concrete_eval_eligible(interp::GPUInterpreter,
-    @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo)
-    ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
-        f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo)
-    ret === false && return nothing
-    return ret
-end
-
 
 ## world view of the cache
 using Core.Compiler: WorldView
