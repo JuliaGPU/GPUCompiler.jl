@@ -1,5 +1,6 @@
 [deps]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
 IOCapture = "b5f81e59-6552-4d32-b1f0-c071b021bf89"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
@@ -19,5 +20,5 @@ demumble_jll = "1e29f10c-031c-5a83-9565-69cddfc27673"
 Aqua = "0.8"
 ParallelTestRunner = "1"
 
-[extras]
-GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
+[sources]
+GPUCompiler = {path = ".."}

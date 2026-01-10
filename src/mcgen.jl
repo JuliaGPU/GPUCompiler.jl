@@ -29,6 +29,27 @@ end
 # but at the same time the GPU can't resolve them at run-time.
 #
 # this pass performs that resolution at link time.
+function replace_bindings!(value, dereferenced)
+    changed = false
+    for use in uses(value)
+        val = user(use)
+        changed |= if isa(val, LLVM.ConstantExpr)
+            # recurse
+            replace_bindings!(val, dereferenced)
+        elseif isa(val, LLVM.LoadInst)
+            # resolve
+            replace_uses!(val, dereferenced)
+            erase!(val)
+            # FIXME: iterator invalidation?
+            true
+        else
+            # `changed` didn't change
+            changed
+        end
+    end
+    changed
+end
+
 function resolve_cpu_references!(mod::LLVM.Module)
     job = current_job::CompilerJob
     changed = false
@@ -38,28 +59,9 @@ function resolve_cpu_references!(mod::LLVM.Module)
         if isdeclaration(f) && !LLVM.isintrinsic(f) && startswith(fn, "jl_")
             # eagerly resolve the address of the binding
             address = ccall(:jl_cglobal, Any, (Any, Any), fn, UInt)
-            dereferenced = unsafe_load(address)
-            dereferenced = LLVM.ConstantInt(dereferenced)
+            dereferenced = LLVM.ConstantInt(unsafe_load(address))
 
-            function replace_bindings!(value)
-                changed = false
-                for use in uses(value)
-                    val = user(use)
-                    if isa(val, LLVM.ConstantExpr)
-                        # recurse
-                        changed |= replace_bindings!(val)
-                    elseif isa(val, LLVM.LoadInst)
-                        # resolve
-                        replace_uses!(val, dereferenced)
-                        erase!(val)
-                        # FIXME: iterator invalidation?
-                        changed = true
-                    end
-                end
-                changed
-            end
-
-            changed |= replace_bindings!(f)
+            changed |= replace_bindings!(f, dereferenced)
         end
     end
 
