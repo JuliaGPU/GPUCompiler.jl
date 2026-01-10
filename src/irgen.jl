@@ -933,7 +933,7 @@ function scan_uses!(additions, val, worklist)
     return
 end
 
-function input_arguments_rewrite_uses!(f, new_f)
+function input_arguments_rewrite_uses!(f, new_f, nargs)
     # update uses
     return @dispose builder = IRBuilder() begin
         for use in uses(f)
@@ -962,7 +962,7 @@ function input_arguments_rewrite_uses!(f, new_f)
                 target = operands(val)[1]
                 @assert target == f
                 new_val = LLVM.const_bitcast(new_f, value_type(val))
-                input_arguments_rewrite_uses!(val, new_val)
+                input_arguments_rewrite_uses!(val, new_val, nargs)
                 # we can't simply replace this constant expression, as it may be used
                 # as a call, taking arguments (so we need to rewrite it to pass the input arguments)
 
@@ -1063,7 +1063,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     # update other uses of the old function, modifying call sites to pass the arguments
     for (f, new_f) in workmap
-        input_arguments_rewrite_uses!(f, new_f)
+        input_arguments_rewrite_uses!(f, new_f, nargs)
         @assert isempty(uses(f))
         replace_metadata_uses!(f, new_f)
         erase!(f)
