@@ -524,78 +524,7 @@ function kernel_state_check_user!(additions, val, worklist)
     end
 end
 
-function kernel_state_rewrite_uses!(f, ft)
-    # update uses
-    return @dispose builder = IRBuilder() begin
-        for use in uses(f)
-            val = user(use)
-            if val isa LLVM.CallBase && called_operand(val) == f
-                # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
-                #       as those have a fixed argument list, passing actual arguments
-                #       in an array of objects. that doesn't matter, for now, since
-                #       GPU back-ends don't support such calls anyhow. but if we ever
-                #       want to support kernel state passing on more capable back-ends,
-                #       we'll need to update the argument array instead.
-                if callconv(val) == 37 || callconv(val) == 38
-                    # TODO: update for LLVM 15 when JuliaLang/julia#45088 is merged.
-                    continue
-                end
-
-                # forward the state argument
-                position!(builder, val)
-                state = call!(builder, state_intr_ft, state_intr, Value[], "state")
-                new_val = if val isa LLVM.CallInst
-                    call!(builder, ft, f, [state, arguments(val)...], operand_bundles(val))
-                else
-                    # TODO: invoke and callbr
-                    error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
-                end
-                callconv!(new_val, callconv(val))
-
-                replace_uses!(val, new_val)
-                @assert isempty(uses(val))
-                erase!(val)
-            elseif val isa LLVM.CallBase
-                # the function is being passed as an argument. to avoid having to
-                # rewrite the target function, instead case the rewritten function to
-                # the old stateless type.
-                # XXX: we won't have to do this with opaque pointers.
-                position!(builder, val)
-                target_ft = called_type(val)
-                new_args = map(
-                    zip(
-                        parameters(target_ft),
-                        arguments(val)
-                    )
-                ) do (param_typ, arg)
-                    if value_type(arg) != param_typ
-                        const_bitcast(arg, param_typ)
-                    else
-                        arg
-                    end
-                end
-                new_val = call!(
-                    builder, called_type(val), called_operand(val), new_args,
-                    operand_bundles(val)
-                )
-                callconv!(new_val, callconv(val))
-
-                replace_uses!(val, new_val)
-                @assert isempty(uses(val))
-                erase!(val)
-            elseif val isa LLVM.StoreInst
-                # the function is being stored, which again we'll permit like before.
-            elseif val isa ConstantExpr
-                kernel_state_rewrite_uses!(val, ft)
-            else
-                error("Cannot rewrite $(typeof(val)) use of function: $val")
-            end
-        end
-    end
-end
-
 # add a state argument to every function in the module, starting from the kernel entry point
-# update uses of the new function, modifying call sites to include the kernel state
 function add_kernel_state!(mod::LLVM.Module)
     job = current_job::CompilerJob
 
@@ -711,9 +640,73 @@ function add_kernel_state!(mod::LLVM.Module)
         erase!(f)
     end
 
+    # update uses of the new function, modifying call sites to include the kernel state
+    function rewrite_uses!(f, ft)
+        # update uses
+        @dispose builder=IRBuilder() begin
+            for use in uses(f)
+                val = user(use)
+                if val isa LLVM.CallBase && called_operand(val) == f
+                    # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
+                    #       as those have a fixed argument list, passing actual arguments
+                    #       in an array of objects. that doesn't matter, for now, since
+                    #       GPU back-ends don't support such calls anyhow. but if we ever
+                    #       want to support kernel state passing on more capable back-ends,
+                    #       we'll need to update the argument array instead.
+                    if callconv(val) == 37 || callconv(val) == 38
+                        # TODO: update for LLVM 15 when JuliaLang/julia#45088 is merged.
+                        continue
+                    end
+
+                    # forward the state argument
+                    position!(builder, val)
+                    state = call!(builder, state_intr_ft, state_intr, Value[], "state")
+                    new_val = if val isa LLVM.CallInst
+                        call!(builder, ft, f, [state, arguments(val)...], operand_bundles(val))
+                    else
+                        # TODO: invoke and callbr
+                        error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
+                    end
+                    callconv!(new_val, callconv(val))
+
+                    replace_uses!(val, new_val)
+                    @assert isempty(uses(val))
+                    erase!(val)
+                elseif val isa LLVM.CallBase
+                    # the function is being passed as an argument. to avoid having to
+                    # rewrite the target function, instead case the rewritten function to
+                    # the old stateless type.
+                    # XXX: we won't have to do this with opaque pointers.
+                    position!(builder, val)
+                    target_ft = called_type(val)
+                    new_args = map(zip(parameters(target_ft),
+                                       arguments(val))) do (param_typ, arg)
+                        if value_type(arg) != param_typ
+                            const_bitcast(arg, param_typ)
+                        else
+                            arg
+                        end
+                    end
+                    new_val = call!(builder, called_type(val), called_operand(val), new_args,
+                                    operand_bundles(val))
+                    callconv!(new_val, callconv(val))
+
+                    replace_uses!(val, new_val)
+                    @assert isempty(uses(val))
+                    erase!(val)
+                elseif val isa LLVM.StoreInst
+                    # the function is being stored, which again we'll permit like before.
+                elseif val isa ConstantExpr
+                    rewrite_uses!(val, ft)
+                else
+                    error("Cannot rewrite $(typeof(val)) use of function: $val")
+                end
+            end
+        end
+    end
     for f in values(workmap)
         ft = function_type(f)
-        kernel_state_rewrite_uses!(f, ft)
+        rewrite_uses!(f, ft)
     end
 
     return true
