@@ -660,7 +660,7 @@ function add_kernel_state!(mod::LLVM.Module)
 
                     # forward the state argument
                     position!(builder, val)
-                    state = call!(builder, state_intr_ft, state_intr, Value[], "state")
+                    local state = call!(builder, state_intr_ft, state_intr, Value[], "state")
                     new_val = if val isa LLVM.CallInst
                         call!(builder, ft, f, [state, arguments(val)...], operand_bundles(val))
                     else
