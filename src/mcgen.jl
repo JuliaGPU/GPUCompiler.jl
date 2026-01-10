@@ -47,7 +47,7 @@ function replace_bindings!(value, dereferenced)
             changed
         end
     end
-    changed
+    return changed
 end
 
 function resolve_cpu_references!(mod::LLVM.Module)

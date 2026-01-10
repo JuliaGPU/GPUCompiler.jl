@@ -510,7 +510,7 @@ end
 # so that the julia.gpu.state_getter` can be simplified to return an opaque pointer.
 
 function kernel_state_check_user!(additions, val, worklist)
-    if val isa Instruction
+    return if val isa Instruction
         bb = LLVM.parent(val)
         new_f = LLVM.parent(bb)
         in(new_f, worklist) || push!(additions, new_f)
@@ -526,7 +526,7 @@ end
 
 function kernel_state_rewrite_uses!(f, ft)
     # update uses
-    @dispose builder=IRBuilder() begin
+    return @dispose builder = IRBuilder() begin
         for use in uses(f)
             val = user(use)
             if val isa LLVM.CallBase && called_operand(val) == f
@@ -562,16 +562,22 @@ function kernel_state_rewrite_uses!(f, ft)
                 # XXX: we won't have to do this with opaque pointers.
                 position!(builder, val)
                 target_ft = called_type(val)
-                new_args = map(zip(parameters(target_ft),
-                                   arguments(val))) do (param_typ, arg)
-                                       if value_type(arg) != param_typ
-                                           const_bitcast(arg, param_typ)
-                                       else
-                                           arg
-                                       end
-                                   end
-                new_val = call!(builder, called_type(val), called_operand(val), new_args,
-                                operand_bundles(val))
+                new_args = map(
+                    zip(
+                        parameters(target_ft),
+                        arguments(val)
+                    )
+                ) do (param_typ, arg)
+                    if value_type(arg) != param_typ
+                        const_bitcast(arg, param_typ)
+                    else
+                        arg
+                    end
+                end
+                new_val = call!(
+                    builder, called_type(val), called_operand(val), new_args,
+                    operand_bundles(val)
+                )
                 callconv!(new_val, callconv(val))
 
                 replace_uses!(val, new_val)
@@ -931,11 +937,12 @@ function scan_uses!(additions, val, worklist)
             error("Don't know how to check uses of $candidate. Please file an issue.")
         end
     end
+    return
 end
 
 function input_arguments_rewrite_uses!(f, new_f)
     # update uses
-    @dispose builder=IRBuilder() begin
+    return @dispose builder = IRBuilder() begin
         for use in uses(f)
             val = user(use)
             if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
@@ -943,9 +950,11 @@ function input_arguments_rewrite_uses!(f, new_f)
                 # forward the arguments
                 position!(builder, val)
                 new_val = if val isa LLVM.CallInst
-                    call!(builder, function_type(new_f), new_f,
-                          [arguments(val)..., parameters(callee_f)[end-nargs+1:end]...],
-                          operand_bundles(val))
+                    call!(
+                        builder, function_type(new_f), new_f,
+                        [arguments(val)..., parameters(callee_f)[(end - nargs + 1):end]...],
+                        operand_bundles(val)
+                    )
                 else
                     # TODO: invoke and callbr
                     error("Rewrite of $(typeof(val))-based calls is not implemented: $val")

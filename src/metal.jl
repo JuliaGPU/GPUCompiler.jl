@@ -343,7 +343,7 @@ end
 # global constant objects need to reside in address space 2, so we clone each function
 # that uses global objects and rewrite the globals used by it
 function metal_check_user!(function_worklist, val)
-    if val isa LLVM.Instruction
+    return if val isa LLVM.Instruction
         bb = LLVM.parent(val)
         f = LLVM.parent(bb)
 
@@ -740,7 +740,7 @@ end
 
 function type_suffix(typ)
     # XXX: can't we use LLVM to do this kind of mangling?
-    if typ isa LLVM.IntegerType
+    return if typ isa LLVM.IntegerType
         "i$(width(typ))"
     elseif typ == LLVM.HalfType()
         "f16"
