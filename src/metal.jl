@@ -230,6 +230,23 @@ end
 # NOTE: this pass also only rewrites pointers _without_ address spaces, which requires it to
 # be executed after optimization (where Julia's address spaces are stripped). If we ever
 # want to execute it earlier, adapt remapType to rewrite all pointer types.
+function remapType(src)
+    # TODO: shouldn't we recurse into structs here, making sure the parent object's
+    #       address space matches the contained one? doesn't matter right now as we
+    #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
+    #       device addrss space (i.e. no mismatch between parent and field possible)
+    dst = if src isa LLVM.PointerType && addrspace(src) == 0
+        if supports_typed_pointers(context())
+            LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
+        else
+            LLVM.PointerType(#=device=# 1)
+        end
+    else
+        src
+    end
+    return dst
+end
+
 function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                        f::LLVM.Function)
     ft = function_type(f)
@@ -242,23 +259,6 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
     end
     for arg in args
         byref[arg.idx] = (arg.cc == BITS_REF || arg.cc == KERNEL_STATE)
-    end
-
-    function remapType(src)
-        # TODO: shouldn't we recurse into structs here, making sure the parent object's
-        #       address space matches the contained one? doesn't matter right now as we
-        #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
-        #       device addrss space (i.e. no mismatch between parent and field possible)
-        dst = if src isa LLVM.PointerType && addrspace(src) == 0
-            if supports_typed_pointers(context())
-                LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
-            else
-                LLVM.PointerType(#=device=# 1)
-            end
-        else
-            src
-        end
-        return dst
     end
 
     # generate the new function type & definition
@@ -342,6 +342,19 @@ end
 #
 # global constant objects need to reside in address space 2, so we clone each function
 # that uses global objects and rewrite the globals used by it
+function metal_check_user!(function_worklist, val)
+    return if val isa LLVM.Instruction
+        bb = LLVM.parent(val)
+        f = LLVM.parent(bb)
+
+        push!(function_worklist, f)
+    elseif val isa LLVM.ConstantExpr
+        for use in uses(val)
+            metal_check_user!(function_worklist, user(use))
+        end
+    end
+end
+
 function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                     entry::LLVM.Function)
     # determine global variables we need to update
@@ -374,20 +387,8 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
 
     # determine which functions we need to update
     function_worklist = Set{LLVM.Function}()
-    function check_user(val)
-        if val isa LLVM.Instruction
-            bb = LLVM.parent(val)
-            f = LLVM.parent(bb)
-
-            push!(function_worklist, f)
-        elseif val isa LLVM.ConstantExpr
-            for use in uses(val)
-                check_user(user(use))
-            end
-        end
-    end
     for gv in keys(global_map), use in uses(gv)
-        check_user(user(use))
+        metal_check_user!(function_worklist, user(use))
     end
 
     # update functions that use the global
@@ -737,6 +738,23 @@ end
 #
 # we don't have a proper back-end, so we're missing out on intrinsics-related functionality.
 
+function type_suffix(typ)
+    # XXX: can't we use LLVM to do this kind of mangling?
+    return if typ isa LLVM.IntegerType
+        "i$(width(typ))"
+    elseif typ == LLVM.HalfType()
+        "f16"
+    elseif typ == LLVM.FloatType()
+        "f32"
+    elseif typ == LLVM.DoubleType()
+        "f64"
+    elseif typ isa LLVM.VectorType
+        "v$(length(typ))$(type_suffix(eltype(typ)))"
+    else
+        error("Unsupported intrinsic type: $typ")
+    end
+end
+
 # replace LLVM intrinsics with AIR equivalents
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
@@ -796,23 +814,6 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
             # determine type of the intrinsic
             typ = value_type(call)
-            function type_suffix(typ)
-                # XXX: can't we use LLVM to do this kind of mangling?
-                if typ isa LLVM.IntegerType
-                    "i$(width(typ))"
-                elseif typ == LLVM.HalfType()
-                    "f16"
-                elseif typ == LLVM.FloatType()
-                    "f32"
-                elseif typ == LLVM.DoubleType()
-                    "f64"
-                elseif typ isa LLVM.VectorType
-                    "v$(length(typ))$(type_suffix(eltype(typ)))"
-                else
-                    error("Unsupported intrinsic type: $typ")
-                end
-            end
-
             if typ isa LLVM.IntegerType || (typ isa LLVM.VectorType && eltype(typ) isa LLVM.IntegerType)
                 fn *= "." * (signed::Bool ? "s" : "u") * "." * type_suffix(typ)
             else
@@ -1013,11 +1014,11 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
                 end
                 push!(attrs, EnumAttribute(name, 0))
             end
-            changed = true
+            return true
         end
 
         # synchronization
-        if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
+        changed |= if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
             add_attributes("nounwind", "convergent")
 
         # atomics
@@ -1033,6 +1034,9 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
         elseif match(r"^air.atomic.(local|global).(add|sub|min|max|and|or|xor)", fn) !== nothing
             # TODO: "memory(argmem: readwrite)" on LLVM 16+
             add_attributes("argmemonly", "nounwind")
+        else
+            # `changed` didn't change
+            changed
         end
     end
 

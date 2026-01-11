@@ -757,9 +757,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         #      instead always go through the callback in order to unlock it properly.
         #      rework this once we depend on Julia 1.9 or later.
         llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref)
-        llvm_mod = nothing
-        llvm_ts_mod() do mod
-            llvm_mod = mod
+        llvm_mod = llvm_ts_mod() do mod
+            mod
         end
     end
     if !(Sys.ARCH == :x86 || Sys.ARCH == :x86_64)
