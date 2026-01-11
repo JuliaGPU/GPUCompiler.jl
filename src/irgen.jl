@@ -525,7 +525,7 @@ function kernel_state_check_user!(additions, val, worklist)
 end
 
 # update uses of the new function, modifying call sites to include the kernel state
-function kernel_state_rewrite_uses!(f, ft)
+function kernel_state_rewrite_uses!(f, ft, state_intr_ft, state_intr)
     # update uses
     return @dispose builder = IRBuilder() begin
         for use in uses(f)
@@ -537,7 +537,7 @@ function kernel_state_rewrite_uses!(f, ft)
                 #       GPU back-ends don't support such calls anyhow. but if we ever
                 #       want to support kernel state passing on more capable back-ends,
                 #       we'll need to update the argument array instead.
-                if callconv(val) == 37 || callconv(val) == 38
+                if callconv(val) in (37, 38)
                     # TODO: update for LLVM 15 when JuliaLang/julia#45088 is merged.
                     continue
                 end
@@ -587,7 +587,7 @@ function kernel_state_rewrite_uses!(f, ft)
             elseif val isa LLVM.StoreInst
                 # the function is being stored, which again we'll permit like before.
             elseif val isa ConstantExpr
-                kernel_state_rewrite_uses!(val, ft)
+                kernel_state_rewrite_uses!(val, ft, state_intr_ft, state_intr)
             else
                 error("Cannot rewrite $(typeof(val)) use of function: $val")
             end
@@ -713,7 +713,7 @@ function add_kernel_state!(mod::LLVM.Module)
 
     for f in values(workmap)
         ft = function_type(f)
-        kernel_state_rewrite_uses!(f, ft)
+        kernel_state_rewrite_uses!(f, ft, state_intr_ft, state_intr)
     end
 
     return true
