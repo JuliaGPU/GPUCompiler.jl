@@ -179,12 +179,14 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob); kwargs...)
+@locked function emit_llvm(@nospecialize(compiler_job::CompilerJob); kwargs...)
     # XXX: remove on next major version
-    if !isempty(kwargs)
+    job = if !isempty(kwargs)
         Base.depwarn("The GPUCompiler `emit_llvm` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :emit_llvm)
-        config = CompilerConfig(job.config; kwargs...)
-        job = CompilerJob(job.source, config)
+        config = CompilerConfig(compiler_job.config; kwargs...)
+        CompilerJob(compiler_job.source, config)
+    else
+        compiler_job
     end
 
     if !__llvm_initialized[]
@@ -299,10 +301,11 @@ const __llvm_initialized = Ref(false)
 
     if job.config.toplevel && job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
-        if !uses_julia_runtime(job)
+        runtime_fns, runtime_intrinsics = if !uses_julia_runtime(job)
             runtime = load_runtime(job)
-            runtime_fns = LLVM.name.(defs(runtime))
-            runtime_intrinsics = ["julia.gc_alloc_obj"]
+            LLVM.name.(defs(runtime)), ["julia.gc_alloc_obj"]
+        else
+            String[], String[]
         end
 
         @tracepoint "Library linking" begin
