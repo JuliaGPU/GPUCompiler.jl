@@ -832,7 +832,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 end
             end
         end
-        gvalues = Set(gvalues)
         for gv in globals(llvm_mod)
             init = LLVM.initializer(gv)
             if init === nothing
