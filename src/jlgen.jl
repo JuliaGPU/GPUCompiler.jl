@@ -675,6 +675,38 @@ end
         end
     end
 
+    function get_llvm_global_vars(native_code::Ptr{Cvoid})
+        gvs_list = ArrayList()
+        GC.@preserve gvs_list begin
+            p_gvs = Base.pointer_from_objref(gvs_list)
+            @ccall jl_get_llvm_gvs_globals(native_code::Ptr{Cvoid}, p_gvs::Ptr{Cvoid})::Nothing
+            gvs = Vector{Ptr{LLVM.API.LLVMOpaqueValue}}(undef, gvs_list.len)
+            items = Base.unsafe_convert(Ptr{Ptr{LLVM.API.LLVMOpaqueValue}}, gvs_list.items)
+            for i in 1:gvs_list.len
+                gvs[i] = unsafe_load(items, i)
+            end
+        end
+        return gvs
+    end
+
+    function get_llvm_global_inits(native_code::Ptr{Cvoid})
+        inits_list = ArrayList()
+        GC.@preserve inits_list begin
+            p_inits = Base.pointer_from_objref(inits_list)
+            @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, p_inits::Ptr{Cvoid})::Nothing
+            inits = Vector{Ptr{Cvoid}}(undef, inits_list.len)
+            for i in 1:inits_list.len
+                inits[i] = unsafe_load(inits_list.items, i)
+            end
+        end
+        return inits
+    end
+end
+
+import Libdl
+
+if VERSION < v"1.13.0-DEV.623"
+    const HAS_LLVM_GVS_GLOBALS = Libdl.dlsym(Libdl.dlopen(""), :jl_get_llvm_gvs_globals, throw_error=false) !== nothing
 end
 
 """
@@ -693,10 +725,6 @@ function Base.precompile(@nospecialize(job::CompilerJob))
     cache = CC.code_cache(interp)
     ci_cache_populate(interp, cache, job.source, job.world, job.world)
     return true
-end
-
-function precompiling()
-    return (@ccall jl_generating_output()::Cint) == 1
 end
 
 function compile_method_instance(@nospecialize(job::CompilerJob))
@@ -795,11 +823,14 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         cache_gbl = nothing
     end
 
+    # Since Julia 1.13, the caller is responsible for initializing global variables that
+    # point to global values or bindings with their address in memory.
+    # Similarly on previous versions when imaging=true, it is also the caller's responsibility
+    # (see https://github.com/JuliaGPU/GPUCompiler.jl/issues/753), but we can support this on versions
+    # that have HAS_LLVM_GVS_GLOBALS.
     gvs = nothing
     inits = nothing
-    if VERSION >= v"1.13.0-DEV.623"
-        # Since Julia 1.13, the caller is responsible for initializing global variables that
-        # point to global values or bindings with their address in memory.
+    @static if VERSION >= v"1.13.0-DEV.623"
         num_gvars = Ref{Csize_t}(0)
         @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
             C_NULL::Ptr{Cvoid}
@@ -812,33 +843,23 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
         @ccall jl_get_llvm_gv_inits(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
                                     inits::Ptr{Cvoid})::Nothing
-    else
-        # TODO: https://github.com/JuliaGPU/GPUCompiler.jl/issues/753
-        #       Obtain the global variables `gvs` in the same order as `inits` 
-
-        # get the global variable initializers
+    elseif HAS_LLVM_GVS_GLOBALS
         if VERSION >= v"1.12.0-DEV.1703"
             num_gvars = Ref{Csize_t}(0)
-            @ccall jl_get_llvm_gvs(
-                native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+            @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
                 C_NULL::Ptr{Cvoid}
             )::Nothing
+            gvs = Vector{Ptr{LLVM.API.LLVMOpaqueValue}}(undef, num_gvars[])
+            @ccall jl_get_llvm_gvs_globals(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                gvs::Ptr{LLVM.API.LLVMOpaqueValue}
+            )::Nothing
             inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
-            @ccall jl_get_llvm_gvs(
-                native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+            @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
                 inits::Ptr{Cvoid}
             )::Nothing
         else
-            # On older version of Julia we have to use `arraylist_t` which doesn't have a Julia API.
-            inits_list = ArrayList()
-            GC.@preserve inits_list begin
-                p_inits = Base.pointer_from_objref(inits_list)
-                @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, p_inits::Ptr{Cvoid})::Nothing
-                inits = Vector{Ptr{Cvoid}}(undef, inits_list.len)
-                for i in 1:inits_list.len
-                    inits[i] = unsafe_load(inits_list.items, i)
-                end
-            end
+            gvs = get_llvm_global_vars(native_code)
+            inits = get_llvm_global_inits(native_code)
         end
     end
 
@@ -849,7 +870,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # thus we store raw pointers here.
     # Currently GVs are privatized, so users may have to handle embedded pointers,
     # but this dictionary provides a clear indication that the embedded pointer is
-    # valid Julia object.
+    # indeed avalid Julia object.
     gv_to_value = Dict{String, Ptr{Cvoid}}()
 
     # On certain version of Julia we have no reliable way to match the `gvs` to their initializers `inits`.
