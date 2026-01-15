@@ -795,17 +795,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         cache_gbl = nothing
     end
 
-    # Maintain a map from global variables to their initialized Julia values.
-    # The objects pointed to are perma-rooted, during codegen.
-    # It is legal to call `Base.unsafe_pointer_to_objref` on `values(gv_to_value)`,
-    # but x->pointer_from_objref(Base.unsafe_pointer_to_objref(x)) is not idempotent,
-    # thus we store raw pointers here.
-    # Currently GVs are privatized, so users may have to handle embedded pointers,
-    # but this dictionary provides a clear indication that the embedded pointer is
-    # valid Julia object.
-    gv_to_value = Dict{String, Ptr{Cvoid}}()
-
-    # TODO: To enable relocation we should strip out the initializers here.
+    gvs = nothing
+    inits = nothing
     if VERSION >= v"1.13.0-DEV.623"
         # Since Julia 1.13, the caller is responsible for initializing global variables that
         # point to global values or bindings with their address in memory.
@@ -821,45 +812,48 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
         @ccall jl_get_llvm_gv_inits(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
                                     inits::Ptr{Cvoid})::Nothing
-
-        for (gv_ref, init) in zip(gvs, inits)
-            gv = GlobalVariable(gv_ref)
-            gv_to_value[LLVM.name(gv)] = init
-            # set the initializer
-            val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
-            initializer!(gv, val)
-        end
     else
-        # Prior to version v"1.13.0-DEV.623" we only had access to the values that the global variables
-        # were initialized with, so we have to match them up manually.
+        # TODO: https://github.com/JuliaGPU/GPUCompiler.jl/issues/753
+        #       Obtain the global variables `gvs` in the same order as `inits` 
 
-        # get the global values
+        # get the global variable initializers
         if VERSION >= v"1.12.0-DEV.1703"
             num_gvars = Ref{Csize_t}(0)
             @ccall jl_get_llvm_gvs(
                 native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
                 C_NULL::Ptr{Cvoid}
             )::Nothing
-            gvalues = Vector{Ptr{Cvoid}}(undef, num_gvars[])
+            inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
             @ccall jl_get_llvm_gvs(
                 native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
-                gvalues::Ptr{Cvoid}
+                inits::Ptr{Cvoid}
             )::Nothing
         else
             # On older version of Julia we have to use `arraylist_t` which doesn't have a Julia API.
-            gvars = ArrayList()
-            GC.@preserve gvars begin
-                p_gvars = Base.pointer_from_objref(gvars)
-                @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, p_gvars::Ptr{Cvoid})::Nothing
-                gvalues = Vector{Ptr{Cvoid}}(undef, gvars.len)
-                for i in 1:gvars.len
-                    gvalues[i] = unsafe_load(gvars.items, i)
+            inits_list = ArrayList()
+            GC.@preserve inits_list begin
+                p_inits = Base.pointer_from_objref(inits_list)
+                @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, p_inits::Ptr{Cvoid})::Nothing
+                inits = Vector{Ptr{Cvoid}}(undef, inits_list.len)
+                for i in 1:inits_list.len
+                    inits[i] = unsafe_load(inits_list.items, i)
                 end
             end
         end
-        # Currently we have no reliable way to match the `globals(llvm_mod)`` to their initializers `gvars`,
-        # so for now we only place a marker
-        # TODO: To fix https://github.com/JuliaGPU/GPUCompiler.jl/issues/753 we would need to initialize the
+    end
+
+    # Maintain a map from global variables to their initialized Julia values.
+    # The objects pointed to are perma-rooted, during codegen.
+    # It is legal to call `Base.unsafe_pointer_to_objref` on `values(gv_to_value)`,
+    # but x->pointer_from_objref(Base.unsafe_pointer_to_objref(x)) is not idempotent,
+    # thus we store raw pointers here.
+    # Currently GVs are privatized, so users may have to handle embedded pointers,
+    # but this dictionary provides a clear indication that the embedded pointer is
+    # valid Julia object.
+    gv_to_value = Dict{String, Ptr{Cvoid}}()
+
+    # On certain version of Julia we have no reliable way to match the `gvs` to their initializers `inits`.
+    if gvs === nothing
         # global variables here properly.
         for gv in globals(llvm_mod)
             if !haskey(metadata(gv), "julia.constgv")
@@ -867,7 +861,18 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             end
             gv_to_value[LLVM.name(gv)] = C_NULL
         end
-        @assert length(gv_to_value) == length(gvalues)
+    else
+        @assert init !== nothing
+        for (gv_ref, init) in zip(gvs, inits)
+            gv = GlobalVariable(gv_ref)
+            gv_to_value[LLVM.name(gv)] = init
+            # set the initializer
+            # TODO: To enable full relocation we should strip out the initializers here.
+            if initializer(gv) === nothing
+                val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
+                initializer!(gv, val)
+            end
+        end
     end
 
     if VERSION >= v"1.13.0-DEV.1120"
