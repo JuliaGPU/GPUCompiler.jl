@@ -36,12 +36,12 @@ end
     @testset "compilation database" begin
         mod = @eval module $(gensym())
             @noinline inner(x) = x+1
-        function outer(x, sym)
-            if sym == :a
-                return inner(x)
+            function outer(x, sym)
+                if sym == :a
+                    return inner(x)
+                end
+                return x
             end
-            return x
-        end
         end
 
         job, _ = Native.create_job(mod.outer, (Int, Symbol))
