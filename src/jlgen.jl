@@ -888,8 +888,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             gv = GlobalVariable(gv_ref)
             gv_to_value[LLVM.name(gv)] = init
             # set the initializer
-            # TODO: To enable full relocation we should strip out the initializers here.
-            if initializer(gv) === nothing
+            # TODO: To enable full relocation we should actually strip out the initializers here.
+            if initializer(gv) isa LLVM.PointerNull
                 val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
                 initializer!(gv, val)
             end
