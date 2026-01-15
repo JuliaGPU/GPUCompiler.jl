@@ -883,7 +883,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             gv_to_value[LLVM.name(gv)] = C_NULL
         end
     else
-        @assert init !== nothing
+        @assert inits !== nothing
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
             gv_to_value[LLVM.name(gv)] = init
