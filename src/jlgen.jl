@@ -706,7 +706,8 @@ end
 import Libdl
 
 if VERSION < v"1.13.0-DEV.623"
-    const HAS_LLVM_GVS_GLOBALS = Libdl.dlsym(Libdl.dlopen(""), :jl_get_llvm_gvs_globals, throw_error=false) !== nothing
+    const HAS_LLVM_GVS_GLOBALS = Libdl.dlsym(
+        unsafe_load(cglobal(:jl_libjulia_handle, Ptr{Cvoid})), :jl_get_llvm_gvs_globals, throw_error=false) !== nothing
 end
 
 """
