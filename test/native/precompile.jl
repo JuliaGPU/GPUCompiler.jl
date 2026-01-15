@@ -21,9 +21,8 @@ precompile_test_harness("Inference caching") do load_path
             return
         end
 
-        function func_with_return(box, x)
-            box[] = x
-            return box[]::Float64
+        function square(x)
+            return x*x
         end
 
         let
@@ -37,8 +36,8 @@ precompile_test_harness("Inference caching") do load_path
         end
 
         let
-            NativeCompiler.Native.code_llvm(stdout, func_with_return, (Base.RefValue{Any}, Float64,), entry_abi=:func, dump_module=true, optimize=false)
-            job, _ = NativeCompiler.Native.create_job(func_with_return, (Base.RefValue{Any}, Float64,))
+            # Emit the func abi to box the return
+            job, _ = NativeCompiler.Native.create_job(square, (Float64,), entry_abi=:func)
             precompile(job)
         end
 
@@ -73,8 +72,8 @@ precompile_test_harness("Inference caching") do load_path
         kernel_w_global_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel_w_global), Tuple{Vector{Int}, Int, Symbol})
         @test check_presence(kernel_w_global_mi, token)
 
-        func_with_return_mi = GPUCompiler.methodinstance(typeof(NativeBackend.func_with_return), Tuple{Base.RefValue{Any}, Float64})
-        @test check_presence(func_with_return_mi, token)
+        square_mi = GPUCompiler.methodinstance(typeof(NativeBackend.square), Tuple{Float64})
+        @test check_presence(square_mi, token)
 
         # check that identity survived
         @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"

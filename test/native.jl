@@ -57,7 +57,9 @@ end
             @test length(other_mis) == 1
             @test only(other_mis).def in methods(mod.inner)
 
-            @test_broken length(meta.gv_to_value) >= 1
+            if VERSION >= v"1.12"
+                @test length(meta.gv_to_value) == 1
+            end
             # TODO: Global values get privatized, so we can't find them by name anymore.
             # %.not = icmp eq ptr %"sym::Symbol", inttoptr (i64 140096668482288 to ptr), !dbg !38
             # for (name, v) in meta.gv_to_value

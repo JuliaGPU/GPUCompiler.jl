@@ -859,6 +859,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
         # Currently we have no reliable way to match the `globals(llvm_mod)`` to their initializers `gvars`,
         # so for now we only place a marker
+        # TODO: To fix https://github.com/JuliaGPU/GPUCompiler.jl/issues/753 we would need to initialize the
+        # global variables here properly.
         for gv in globals(llvm_mod)
             if !haskey(metadata(gv), "julia.constgv")
                 continue
