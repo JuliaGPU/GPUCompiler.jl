@@ -653,6 +653,11 @@ end
 end
 
 @static if VERSION < v"1.13.0-DEV.623"
+    import Libdl
+
+    const HAS_LLVM_GVS_GLOBALS = Libdl.dlsym(
+        unsafe_load(cglobal(:jl_libjulia_handle, Ptr{Cvoid})), :jl_get_llvm_gvs_globals, throw_error=false) !== nothing
+
     const AL_N_INLINE = 29
 
     # Mirrors arraylist_t
@@ -701,13 +706,6 @@ end
         end
         return inits
     end
-end
-
-import Libdl
-
-if VERSION < v"1.13.0-DEV.623"
-    const HAS_LLVM_GVS_GLOBALS = Libdl.dlsym(
-        unsafe_load(cglobal(:jl_libjulia_handle, Ptr{Cvoid})), :jl_get_llvm_gvs_globals, throw_error=false) !== nothing
 end
 
 """
