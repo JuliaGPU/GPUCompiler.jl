@@ -256,7 +256,9 @@ const __llvm_initialized = Ref(false)
                     dyn_ir, dyn_meta = codegen(:llvm, CompilerJob(dyn_job; config))
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
-                    merge!(gv_to_value, dyn_meta.gv_to_value)
+                    if haskey(dyn_meta, :gv_to_value)
+                        merge!(gv_to_value, dyn_meta.gv_to_value)
+                    end    
                     @assert context(dyn_ir) == context(ir)
                     link!(ir, dyn_ir)
                     changed = true
