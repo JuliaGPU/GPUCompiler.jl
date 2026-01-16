@@ -671,9 +671,9 @@ function Base.precompile(@nospecialize(job::CompilerJob))
 end
 
 
-const HAS_LLVM_GET_CIS = VERSION >= v"1.13.0-DEV.1120" || Libdl.dlsym(
+const HAS_LLVM_GET_CIS = (VERSION >= v"1.13.0-DEV.1120" || (Libdl.dlsym(
     unsafe_load(cglobal(:jl_libjulia_handle, Ptr{Cvoid})), :jl_get_llvm_cis, throw_error = false
-) !== nothing
+   ) !== nothing))
 
 function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.source.def.primary_world > job.world
