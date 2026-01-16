@@ -822,8 +822,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     if !HAS_LLVM_GET_CIS
         for mi in method_instances
-        ci = ci_cache_lookup(cache, mi, job.world, job.world)
-        ci === nothing && continue
+            ci = ci_cache_lookup(cache, mi, job.world, job.world)
+            ci === nothing && continue
 
             llvm_func_idx = Ref{Int32}(-1)
             llvm_specfunc_idx = Ref{Int32}(-1)
@@ -832,16 +832,32 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
                 native_code, ci, llvm_func_idx, llvm_specfunc_idx
             )
-            if llvm_func_idx[] != -1
+            if llvm_func_idx[] == -1
                 continue
             end
             push!(code_instances, ci)
         end
+    else
+        # To avoid a clash in the compiled cache containing both with an interpreter token (like GPUCompiler.GPUCompilerCacheToken) and native,
+        # prefer the non-native code-instance.
+        # TODO: in the future we should migrate compiled to have the ci as the key, not the mi.
+        native_mis = Set{MethodInstance}()
+        for ci in code_instances
+            if ci.cache !== nothing
+                push!(native_mis, ci.def::MethodInstance)
+            end
+        end
+        filter!(code_instances) do ci
+            return ci.cache !== nothing || in(ci.def, native_mis)
+        end
     end
+
+    # Avoid redundant code_instances. This is necessary to avoid false positives trying to add the same key'd mi to the compiled Dict.
+    unique!(code_instances)
 
     resize!(method_instances, length(code_instances))
     for (i, ci) in enumerate(code_instances)
-        code_instances[i] = ci.def::MethodInstance
+        method_instances[i] = ci.def::MethodInstance
     end
 
     # process all compiled method instances
