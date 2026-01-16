@@ -652,62 +652,6 @@ end
     CompilationPolicyExtern = 1
 end
 
-@static if VERSION < v"1.13.0-DEV.623"
-    import Libdl
-
-    const HAS_LLVM_GVS_GLOBALS = Libdl.dlsym(
-        unsafe_load(cglobal(:jl_libjulia_handle, Ptr{Cvoid})), :jl_get_llvm_gvs_globals, throw_error=false) !== nothing
-
-    const AL_N_INLINE = 29
-
-    # Mirrors arraylist_t
-    mutable struct ArrayList
-        len::Csize_t
-        max::Csize_t
-        items::Ptr{Ptr{Cvoid}}
-        _space::NTuple{AL_N_INLINE, Ptr{Cvoid}}
-
-        function ArrayList()
-            list = new(0, AL_N_INLINE, Ptr{Ptr{Cvoid}}(C_NULL), ntuple(_ -> Ptr{Cvoid}(C_NULL), AL_N_INLINE))
-            list.items = Base.pointer_from_objref(list) + fieldoffset(typeof(list), 4)
-
-            finalizer(list) do list
-                if list.items != Base.pointer_from_objref(list) + fieldoffset(typeof(list), 4)
-                    Libc.free(list.items)
-                end
-            end
-            return list
-        end
-    end
-
-    function get_llvm_global_vars(native_code::Ptr{Cvoid})
-        gvs_list = ArrayList()
-        GC.@preserve gvs_list begin
-            p_gvs = Base.pointer_from_objref(gvs_list)
-            @ccall jl_get_llvm_gvs_globals(native_code::Ptr{Cvoid}, p_gvs::Ptr{Cvoid})::Nothing
-            gvs = Vector{Ptr{LLVM.API.LLVMOpaqueValue}}(undef, gvs_list.len)
-            items = Base.unsafe_convert(Ptr{Ptr{LLVM.API.LLVMOpaqueValue}}, gvs_list.items)
-            for i in 1:gvs_list.len
-                gvs[i] = unsafe_load(items, i)
-            end
-        end
-        return gvs
-    end
-
-    function get_llvm_global_inits(native_code::Ptr{Cvoid})
-        inits_list = ArrayList()
-        GC.@preserve inits_list begin
-            p_inits = Base.pointer_from_objref(inits_list)
-            @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, p_inits::Ptr{Cvoid})::Nothing
-            inits = Vector{Ptr{Cvoid}}(undef, inits_list.len)
-            for i in 1:inits_list.len
-                inits[i] = unsafe_load(inits_list.items, i)
-            end
-        end
-        return inits
-    end
-end
-
 """
     precompile(job::CompilerJob)
 
