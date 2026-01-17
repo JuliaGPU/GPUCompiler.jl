@@ -503,7 +503,9 @@ CC.method_table(interp::GPUInterpreter) = interp.method_table_view
 
 
 ## world view of the cache
-using Core.Compiler: WorldView
+@static if VERSION < v"1.14-"
+    using Core.Compiler: WorldView
+end
 
 if !HAS_INTEGRATED_CACHE
 
@@ -624,6 +626,16 @@ function ci_cache_populate(interp, cache, mi, min_world, max_world)
     return codeinfos
 end
 
+@static if VERSION >= v"1.14-"
+function ci_cache_lookup(cache, mi, min_world, max_world)
+    # In Julia 1.14+, WorldView was replaced by InternalCodeCache with WorldRange
+    # cache is OverlayCodeCache{InternalCodeCache}, extract owner from globalcache
+    owner = cache.globalcache.owner
+    wvc = CC.InternalCodeCache(owner, CC.WorldRange(min_world, max_world))
+    ci = CC.get(wvc, mi, nothing)
+    return ci
+end
+else
 function ci_cache_lookup(cache, mi, min_world, max_world)
     wvc = WorldView(cache, min_world, max_world)
     ci = CC.get(wvc, mi, nothing)
@@ -635,6 +647,7 @@ function ci_cache_lookup(cache, mi, min_world, max_world)
     end
     return ci
 end
+end # @static if
 
 
 ## interface
