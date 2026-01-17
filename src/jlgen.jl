@@ -135,7 +135,7 @@ function methodinstance_generator(world::UInt, source, self, ft::Type, tt::Type)
     # propagate edge metadata
     new_ci.min_world = min_world[]
     new_ci.max_world = max_world[]
-    new_ci.edges = MethodInstance[mi]
+    new_ci.edges = Any[mi]
 
     # prepare the slots
     new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
