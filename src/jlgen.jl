@@ -665,6 +665,28 @@ end
     CompilationPolicyExtern = 1
 end
 
+const AL_N_INLINE = 29
+# mirrows arraylist_t
+mutable struct ArrayList
+    len::Csize_t
+    max::Csize_t
+    items::Ptr{Ptr{Cvoid}}
+    _space::NTuple{AL_N_INLINE, Ptr{Cvoid}}
+
+    function ArrayList()
+        list = new(0, AL_N_INLINE, Ptr{Ptr{Cvoid}}(C_NULL), ntuple(_->Ptr{Cvoid}(C_NULL), AL_N_INLINE))
+        list.items = Base.pointer_from_objref(list) + fieldoffset(typeof(list), 4)
+
+        finalizer(list) do list
+            if list.items != Base.pointer_from_objref(list) + fieldoffset(typeof(list), 4)
+                Libc.free(list.items)
+            end
+        end
+        return list
+    end
+end
+
+
 """
     precompile(job::CompilerJob)
 
@@ -779,25 +801,72 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         cache_gbl = nothing
     end
 
+    gv_to_value = Dict{String, Ptr{Cvoid}}()
+
+    # The caller is responsible for initializing global variables that
+    # point to global values or bindings with their address in memory.
+    # For Julia < v"1.13" to enable relocation we strip out the initializers here.
     if VERSION >= v"1.13.0-DEV.623"
-        # Since Julia 1.13, the caller is responsible for initializing global variables that
-        # point to global values or bindings with their address in memory.
         num_gvars = Ref{Csize_t}(0)
         @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
-                               C_NULL::Ptr{Cvoid})::Nothing
+                           C_NULL::Ptr{Cvoid})::Nothing
         gvs = Vector{Ptr{LLVM.API.LLVMOpaqueValue}}(undef, num_gvars[])
         @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
-                               gvs::Ptr{LLVM.API.LLVMOpaqueValue})::Nothing
+                           gvs::Ptr{LLVM.API.LLVMOpaqueValue})::Nothing
+
         inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
         @ccall jl_get_llvm_gv_inits(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
                                     inits::Ptr{Cvoid})::Nothing
 
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
-            val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
-            initializer!(gv, val)
+            gv_to_value[LLVM.name(gv)] = init
         end
+    else
+        # Prior to this version of Julia we only had access to the values that the global variables
+        # were initialized with, so we have to match them up manually.
+        # get the global values
+        if VERSION >= v"1.12.0-DEV.1703"
+            num_gvars = Ref{Csize_t}(0)
+            @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                            C_NULL::Ptr{Cvoid})::Nothing
+            gvalues = Vector{Ptr{Cvoid}}(undef, num_gvars[])
+            @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                            gvalues::Ptr{Cvoid})::Nothing
+        else
+            # Sigh on older version of Julia we have to use `arraylist_t` which doesn't have a Julia API.
+            gvars = ArrayList()
+            GC.@preserve gvars begin
+                p_gvars = Base.pointer_from_objref(gvars)
+                @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, p_gvars::Ptr{Cvoid})::Nothing
+                gvalues = Vector{Ptr{Cvoid}}(undef, gvars.len)
+                for i in 1:gvars.len
+                    gvalues[i] = unsafe_load(gvars.items, i)
+                end
+            end
+        end
+        for gv in globals(llvm_mod)
+            init = LLVM.initializer(gv)
+            if init === nothing
+                continue
+            end
+            if init isa LLVM.ConstantExpr && opcode(init) == LLVM.API.LLVMIntToPtr
+                init = operands(init)[1]
+            end
+            if !(init isa LLVM.ConstantInt)
+                continue
+            end
+            ptr = reinterpret(Ptr{Cvoid}, convert(UInt, init))
+            if ptr in gvalues
+                gv_to_value[LLVM.name(gv)] = ptr
+            end
+            LLVM.initializer!(gv, nothing)
+        end
+        @assert length(gv_to_value) == length(gvalues)
     end
+    # It's valid to call Base.unsafe_pointer_to_objref on values(gv_to_value),
+    # but we may not be able to "easily" obtain the pointer back later.
+    # (Types, etc, disallow Base.pointer_from_objref on them.)
 
     if VERSION >= v"1.13.0-DEV.1120"
         # on sufficiently recent versions of Julia, we can query the CIs compiled.
@@ -867,7 +936,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # ensure that the requested method instance was compiled
     @assert haskey(compiled, job.source)
 
-    return llvm_mod, compiled
+    return llvm_mod, compiled, gv_to_value
 end
 
 # partially revert JuliaLangjulia#49391
