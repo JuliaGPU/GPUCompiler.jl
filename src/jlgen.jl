@@ -832,6 +832,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
                 native_code, ci, llvm_func_idx, llvm_specfunc_idx
             )
+            # Suppose we have two nested interpreters in use at the same time.
+            # Looking up a ci from the cache is not unique for a given mi.
+            # Consequently its possible we may not have compiled the ci found
+            # by the cache (instead having compiled the ci from the other interp).
             if llvm_func_idx[] == -1
                 continue
             end
