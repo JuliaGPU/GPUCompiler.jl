@@ -788,23 +788,76 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         cache_gbl = nothing
     end
 
-    if VERSION >= v"1.13.0-DEV.623"
-        # Since Julia 1.13, the caller is responsible for initializing global variables that
-        # point to global values or bindings with their address in memory.
+    # Since Julia 1.13, the caller is responsible for initializing global variables that
+    # point to global values or bindings with their address in memory.
+    # Similarly on previous versions when imaging=true, it is also the caller's responsibility
+    # (see https://github.com/JuliaGPU/GPUCompiler.jl/issues/753), but we can support this on versions
+    # that have HAS_LLVM_GVS_GLOBALS.
+    gvs = nothing
+    inits = nothing
+    @static if VERSION >= v"1.13.0-DEV.623"
         num_gvars = Ref{Csize_t}(0)
         @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
-                               C_NULL::Ptr{Cvoid})::Nothing
+            C_NULL::Ptr{Cvoid}
+        )::Nothing
         gvs = Vector{Ptr{LLVM.API.LLVMOpaqueValue}}(undef, num_gvars[])
         @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
-                               gvs::Ptr{LLVM.API.LLVMOpaqueValue})::Nothing
+            gvs::Ptr{LLVM.API.LLVMOpaqueValue}
+        )::Nothing
+
         inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
         @ccall jl_get_llvm_gv_inits(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
                                     inits::Ptr{Cvoid})::Nothing
+    elseif HAS_LLVM_GVS_GLOBALS
+        if VERSION >= v"1.12.0-DEV.1703"
+            num_gvars = Ref{Csize_t}(0)
+            @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                C_NULL::Ptr{Cvoid}
+            )::Nothing
+            gvs = Vector{Ptr{LLVM.API.LLVMOpaqueValue}}(undef, num_gvars[])
+            @ccall jl_get_llvm_gvs_globals(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                gvs::Ptr{LLVM.API.LLVMOpaqueValue}
+            )::Nothing
+            inits = Vector{Ptr{Cvoid}}(undef, num_gvars[])
+            @ccall jl_get_llvm_gvs(native_code::Ptr{Cvoid}, num_gvars::Ptr{Csize_t},
+                inits::Ptr{Cvoid}
+            )::Nothing
+        else
+            gvs = get_llvm_global_vars(native_code)
+            inits = get_llvm_global_inits(native_code)
+        end
+    end
 
+    # Maintain a map from global variables to their initialized Julia values.
+    # The objects pointed to are perma-rooted, during codegen.
+    # It is legal to call `Base.unsafe_pointer_to_objref` on `values(gv_to_value)`,
+    # but x->pointer_from_objref(Base.unsafe_pointer_to_objref(x)) is not idempotent,
+    # thus we store raw pointers here.
+    # Currently GVs are privatized, so users may have to handle embedded pointers,
+    # but this dictionary provides a clear indication that the embedded pointer is
+    # indeed avalid Julia object.
+    gv_to_value = Dict{String, Ptr{Cvoid}}()
+
+    # On certain version of Julia we have no reliable way to match the `gvs` to their initializers `inits`.
+    if gvs === nothing
+        # global variables here properly.
+        for gv in globals(llvm_mod)
+            if !haskey(metadata(gv), "julia.constgv")
+                continue
+            end
+            gv_to_value[LLVM.name(gv)] = C_NULL
+        end
+    else
+        @assert inits !== nothing
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
-            val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
-            initializer!(gv, val)
+            gv_to_value[LLVM.name(gv)] = init
+            # set the initializer
+            # TODO(vc): To enable full relocation we should actually strip out the initializers here.
+            if LLVM.isnull(initializer(gv))
+                val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
+                initializer!(gv, val)
+            end
         end
     end
 
@@ -918,7 +971,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # ensure that the requested method instance was compiled
     @assert haskey(compiled, job.source)
 
-    return llvm_mod, compiled
+    return llvm_mod, compiled, gv_to_value
 end
 
 # partially revert JuliaLangjulia#49391

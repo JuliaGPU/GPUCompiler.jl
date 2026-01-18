@@ -13,9 +13,31 @@ precompile_test_harness("Inference caching") do load_path
             A[1] = x
             return
         end
+             
+        function kernel_w_global(A, x, sym)
+            if sym == :A
+                A[1] = x
+            end
+            return
+        end
+
+        function square(x)
+            return x*x
+        end
 
         let
             job, _ = NativeCompiler.Native.create_job(kernel, (Vector{Int}, Int))
+            precompile(job)
+        end
+
+        let
+            job, _ = NativeCompiler.Native.create_job(kernel_w_global, (Vector{Int}, Int, Symbol))
+            precompile(job)
+        end
+
+        let
+            # Emit the func abi to box the return
+            job, _ = NativeCompiler.Native.create_job(square, (Float64,), entry_abi=:func)
             precompile(job)
         end
 
@@ -28,7 +50,7 @@ precompile_test_harness("Inference caching") do load_path
         end
     end) |> string)
 
-    Base.compilecache(Base.PkgId("NativeBackend"))
+    Base.compilecache(Base.PkgId("NativeBackend"), stderr, stdout)
     @eval let
         import NativeCompiler
 
@@ -46,6 +68,12 @@ precompile_test_harness("Inference caching") do load_path
         # Check that kernel survived
         kernel_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel), Tuple{Vector{Int}, Int})
         @test check_presence(kernel_mi, token)
+
+        kernel_w_global_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel_w_global), Tuple{Vector{Int}, Int, Symbol})
+        @test check_presence(kernel_w_global_mi, token)
+
+        square_mi = GPUCompiler.methodinstance(typeof(NativeBackend.square), Tuple{Float64})
+        @test check_presence(square_mi, token)
 
         # check that identity survived
         @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"

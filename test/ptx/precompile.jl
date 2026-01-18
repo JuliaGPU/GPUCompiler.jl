@@ -25,7 +25,7 @@ precompile_test_harness("Inference caching") do load_path
         end
     end) |> string)
 
-    Base.compilecache(Base.PkgId("PTXBackend"))
+    Base.compilecache(Base.PkgId("PTXBackend"), stderr, stdout)
     @eval let
         import PTXCompiler
 

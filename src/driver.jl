@@ -197,7 +197,7 @@ const __llvm_initialized = Ref(false)
     end
 
     @tracepoint "IR generation" begin
-        ir, compiled = irgen(job)
+        ir, compiled, gv_to_value = irgen(job)
         if job.config.entry_abi === :specfunc
             entry_fn = compiled[job.source].specfunc
         else
@@ -256,6 +256,9 @@ const __llvm_initialized = Ref(false)
                     dyn_ir, dyn_meta = codegen(:llvm, CompilerJob(dyn_job; config))
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
+                    if haskey(dyn_meta, :gv_to_value)
+                        merge!(gv_to_value, dyn_meta.gv_to_value)
+                    end    
                     @assert context(dyn_ir) == context(ir)
                     link!(ir, dyn_ir)
                     changed = true
@@ -422,7 +425,7 @@ const __llvm_initialized = Ref(false)
         @tracepoint "verification" verify(ir)
     end
 
-    return ir, (; entry, compiled)
+    return ir, (; entry, compiled, gv_to_value)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,

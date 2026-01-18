@@ -1,7 +1,7 @@
 # LLVM IR generation
 
 function irgen(@nospecialize(job::CompilerJob))
-    mod, compiled = @tracepoint "emission" compile_method_instance(job)
+    mod, compiled, gv_to_value = @tracepoint "emission" compile_method_instance(job)
     if job.config.entry_abi === :specfunc
         entry_fn = compiled[job.source].specfunc
     else
@@ -55,6 +55,11 @@ function irgen(@nospecialize(job::CompilerJob))
         new_name = safe_name(old_name)
         if old_name != new_name
             LLVM.name!(val, new_name)
+            val = get(gv_to_value, old_name, nothing)
+            if val !== nothing
+                delete!(gv_to_value, old_name)
+                gv_to_value[new_name] = val
+            end
         end
     end
 
@@ -120,7 +125,7 @@ function irgen(@nospecialize(job::CompilerJob))
         can_throw(job) || lower_throw!(mod)
     end
 
-    return mod, compiled
+    return mod, compiled, gv_to_value
 end
 
 
