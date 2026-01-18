@@ -683,6 +683,15 @@ function Base.precompile(@nospecialize(job::CompilerJob))
     return true
 end
 
+
+const HAS_LLVM_GET_CIS = (
+    VERSION >= v"1.13.0-DEV.1120" || (
+        Libdl.dlsym(
+            unsafe_load(cglobal(:jl_libjulia_handle, Ptr{Cvoid})), :jl_get_llvm_cis, throw_error = false
+        ) !== nothing
+    )
+)
+
 function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.source.def.primary_world > job.world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
@@ -799,7 +808,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
     end
 
-    if VERSION >= v"1.13.0-DEV.1120"
+    code_instances = Core.CodeInstance[]
+
+    if HAS_LLVM_GET_CIS
         # on sufficiently recent versions of Julia, we can query the CIs compiled.
         # this is required after the move to `invoke(::CodeInstance)`, because our
         # lookup function (used to populate method_instances) isn't always called then.
@@ -807,14 +818,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         num_cis = Ref{Csize_t}(0)
         @ccall jl_get_llvm_cis(native_code::Ptr{Cvoid}, num_cis::Ptr{Csize_t},
                                C_NULL::Ptr{Cvoid})::Nothing
-        resize!(method_instances, num_cis[])
+        resize!(code_instances, num_cis[])
         @ccall jl_get_llvm_cis(native_code::Ptr{Cvoid}, num_cis::Ptr{Csize_t},
-                               method_instances::Ptr{Cvoid})::Nothing
-
-        for (i, ci) in enumerate(method_instances)
-            method_instances[i] = ci.def::MethodInstance
-        end
-
+            code_instances::Ptr{Cvoid}
+        )::Nothing
     elseif VERSION >= v"1.12.0-DEV.1703"
         # slightly older versions of Julia used MIs directly
 
@@ -826,11 +833,53 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                                method_instances::Ptr{Cvoid})::Nothing
     end
 
+    if !HAS_LLVM_GET_CIS
+        for mi in method_instances
+            ci = ci_cache_lookup(cache, mi, job.world, job.world)
+            ci === nothing && continue
+
+            llvm_func_idx = Ref{Int32}(-1)
+            llvm_specfunc_idx = Ref{Int32}(-1)
+            ccall(
+                :jl_get_function_id, Nothing,
+                (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
+                native_code, ci, llvm_func_idx, llvm_specfunc_idx
+            )
+            # Suppose we have two nested interpreters in use at the same time.
+            # Looking up a ci from the cache is not unique for a given mi.
+            # Consequently its possible we may not have compiled the ci found
+            # by the cache (instead having compiled the ci from the other interp).
+            if llvm_func_idx[] == -1
+                continue
+            end
+            push!(code_instances, ci)
+        end
+    else
+        # To avoid a clash in the compiled cache containing both with an interpreter token (like GPUCompiler.GPUCompilerCacheToken) and native,
+        # prefer the non-native code-instance.
+        # TODO: in the future we should migrate compiled to have the ci as the key, not the mi.
+        native_mis = Set{MethodInstance}()
+        for ci in code_instances
+            if ci.owner !== nothing
+                push!(native_mis, ci.def::MethodInstance)
+            end
+        end
+        filter!(code_instances) do ci
+            return ci.owner !== nothing || in(ci.def, native_mis)
+        end
+    end
+
+    # Avoid redundant code_instances. This is necessary to avoid false positives trying to add the same key'd mi to the compiled Dict.
+    unique!(code_instances)
+
+    resize!(method_instances, length(code_instances))
+    for (i, ci) in enumerate(code_instances)
+        method_instances[i] = ci.def::MethodInstance
+    end
+
     # process all compiled method instances
     compiled = Dict()
-    for mi in method_instances
-        ci = ci_cache_lookup(cache, mi, job.world, job.world)
-        ci === nothing && continue
+    for (ci, mi) in zip(code_instances, method_instances)
 
         # get the function index
         llvm_func_idx = Ref{Int32}(-1)
@@ -858,6 +907,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         else
             nothing
         end
+
+        @assert !haskey(compiled, mi)
 
         # NOTE: it's not safe to store raw LLVM functions here, since those may get
         #       removed or renamed during optimization, so we store their name instead.
