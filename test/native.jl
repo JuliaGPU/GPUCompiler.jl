@@ -643,7 +643,12 @@ end
         end
 
         Base.Experimental.@MethodTable method_table
-        Base.Experimental.@overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} = return
+        # @consistent_overlay (Julia 1.11+) is needed for the compiler to optimize through the overlay
+        @static if VERSION >= v"1.11-"
+            Base.Experimental.@consistent_overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} = return
+        else
+            Base.Experimental.@overlay method_table @noinline Core.throw_inexacterror(f::Symbol, ::Type{T}, val) where {T} = return
+        end
     end
 
     @test @filecheck begin
