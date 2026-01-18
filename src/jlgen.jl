@@ -293,10 +293,6 @@ end
 end # !HAS_INTEGRATED_CACHE
 
 
-## method overrides
-
-Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
-
 # Implements a priority lookup for method tables, where the first match in the stack get's returned.
 # An alternative to this would be to use a "Union" where we would query the parent method table and
 # do a most-specific match.
@@ -490,7 +486,7 @@ CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 CC.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
 function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
-    @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
+    #@safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
 end
 
 CC.may_optimize(interp::GPUInterpreter) = true
