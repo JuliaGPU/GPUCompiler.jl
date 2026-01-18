@@ -847,12 +847,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # TODO: in the future we should migrate compiled to have the ci as the key, not the mi.
         native_mis = Set{MethodInstance}()
         for ci in code_instances
-            if ci.cache !== nothing
+            if ci.owner !== nothing
                 push!(native_mis, ci.def::MethodInstance)
             end
         end
         filter!(code_instances) do ci
-            return ci.cache !== nothing || in(ci.def, native_mis)
+            return ci.owner !== nothing || in(ci.def, native_mis)
         end
     end
 
