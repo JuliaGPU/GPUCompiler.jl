@@ -846,6 +846,20 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 continue
             end
             gv_to_value[LLVM.name(gv)] = C_NULL
+            val = initializer(gv)
+            if val === nothing
+                continue
+            end
+            while isa(val, LLVM.ConstantExpr)
+                if in(opcode(val), (LLVM.API.LLVMBitCast, LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMIntToPtr))
+                    val = operands(val)[1]
+                    continue
+                end
+                break
+            end
+            if isa(val, LLVM.ConstantInt)
+                gv_to_value[LLVM.name(gv)] = reinterpret(Ptr{Cvoid}, convert(UInt, val))
+            end
         end
     else
         @assert inits !== nothing
@@ -855,7 +869,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             # set the initializer
             # TODO(vc): To enable full relocation we should actually strip out the initializers here.
             if LLVM.isnull(initializer(gv))
-                val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
+                val = const_inttoptr(ConstantInt(Int64(init)), value_type(initializer(gv)))
                 initializer!(gv, val)
             end
         end
