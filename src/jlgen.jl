@@ -855,7 +855,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             # set the initializer
             # TODO(vc): To enable full relocation we should actually strip out the initializers here.
             if LLVM.isnull(initializer(gv))
-                val = const_inttoptr(ConstantInt(Int64(init)), LLVM.PointerType())
+                val = const_inttoptr(ConstantInt(Int64(init)), value_type(initializer(gv)))
                 initializer!(gv, val)
             end
         end
