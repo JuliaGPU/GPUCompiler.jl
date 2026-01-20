@@ -59,6 +59,9 @@ end
 
             if VERSION >= v"1.12"
                 @test length(meta.gv_to_value) == 1
+		for (k,v) in meta.gv_to_value
+		    @test v != C_NULL
+		end
             end
             # TODO: Global values get privatized, so we can't find them by name anymore.
             # %.not = icmp eq ptr %"sym::Symbol", inttoptr (i64 140096668482288 to ptr), !dbg !38
