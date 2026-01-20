@@ -857,7 +857,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 end
                 break
             end
-            if !isa(val, LLVM.ConstantInt)
+            if isa(val, LLVM.ConstantInt)
                 gv_to_value[LLVM.name(gv)] = reinterpret(Ptr{Cvoid}, convert(UInt, val))
             end
         end
