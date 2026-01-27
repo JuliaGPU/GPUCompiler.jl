@@ -1016,9 +1016,25 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
             changed = true
         end
 
+        function add_param_attributes(idx, names...)
+            param_attrs = parameter_attributes(f, idx)
+            for name in names
+                push!(param_attrs, EnumAttribute(name, 0))
+        # sincos
+        elseif match(r"^air.sincos", fn) !== nothing
+            add_param_attributes(2, "nocapture", "writeonly")
+
+            end
+            changed = true
+        end
+
         # synchronization
         if fn == "air.wg.barrier" || fn == "air.simdgroup.barrier"
             add_attributes("nounwind", "mustprogress", "convergent", "willreturn")
+
+        # sincos
+        elseif match(r"^air.sincos", fn) !== nothing
+            add_param_attributes(2, "nocapture", "writeonly")
 
         # atomics
         elseif match(r"air.atomic.(local|global).load", fn) !== nothing
