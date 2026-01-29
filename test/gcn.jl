@@ -11,12 +11,12 @@ sink_gcn(i) = sink(i, Val(5))
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: amdgpu_kernel"
+        @check_not "amdgpu_kernel"
         GCN.code_llvm(mod.kernel, Tuple{}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK: amdgpu_kernel"
+        @check "amdgpu_kernel"
         GCN.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
     end
 end
@@ -30,9 +30,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: {{julia_throw_boundserror_[0-9]+}}"
-        check"CHECK: @gpu_report_exception"
-        check"CHECK: @gpu_signal_exception"
+        @check_not "{{julia_throw_boundserror_[0-9]+}}"
+        @check "@gpu_report_exception"
+        @check "@gpu_signal_exception"
         GCN.code_llvm(mod.kernel, Tuple{})
     end
 end
@@ -63,9 +63,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{(julia|j)_kernel_[0-9]+}}:"
-        check"CHECK: s_cbranch_exec"
-        check"CHECK: s_trap 2"
+        @check_label "{{(julia|j)_kernel_[0-9]+}}:"
+        @check "s_cbranch_exec"
+        @check "s_trap 2"
         GCN.code_native(mod.kernel, Tuple{})
     end
 end
@@ -83,9 +83,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{(julia|j)_parent_[0-9]+}}:"
-        check"CHECK: s_add_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
-        check"CHECK: s_addc_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
+        @check_label "{{(julia|j)_parent_[0-9]+}}:"
+        @check "s_add_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
+        @check "s_addc_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
         GCN.code_native(mod.parent, Tuple{Int64}; dump_module=true)
     end
 end
@@ -101,9 +101,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: .amdhsa_kernel {{(julia|j)_nonentry_[0-9]+}}"
-        check"CHECK: .type {{(julia|j)_nonentry_[0-9]+}},@function"
-        check"CHECK: .amdhsa_kernel _Z5entry5Int64"
+        @check_not ".amdhsa_kernel {{(julia|j)_nonentry_[0-9]+}}"
+        @check ".type {{(julia|j)_nonentry_[0-9]+}},@function"
+        @check ".amdhsa_kernel _Z5entry5Int64"
         GCN.code_native(mod.entry, Tuple{Int64}; dump_module=true, kernel=true)
     end
 end
@@ -126,12 +126,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: .type {{(julia|j)_child_[0-9]+}},@function"
+        @check ".type {{(julia|j)_child_[0-9]+}},@function"
         GCN.code_native(mod.parent1, Tuple{Int}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK: .type {{(julia|j)_child_[0-9]+}},@function"
+        @check ".type {{(julia|j)_child_[0-9]+}},@function"
         GCN.code_native(mod.parent2, Tuple{Int}; dump_module=true)
     end
 end
@@ -155,14 +155,14 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-DAG: .type {{(julia|j)_child1_[0-9]+}},@function"
-        check"CHECK-DAG: .type {{(julia|j)_child2_[0-9]+}},@function"
+        @check_dag ".type {{(julia|j)_child1_[0-9]+}},@function"
+        @check_dag ".type {{(julia|j)_child2_[0-9]+}},@function"
         GCN.code_native(mod.parent1, Tuple{Int}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK-DAG: .type {{(julia|j)_child1_[0-9]+}},@function"
-        check"CHECK-DAG: .type {{(julia|j)_child2_[0-9]+}},@function"
+        @check_dag ".type {{(julia|j)_child1_[0-9]+}},@function"
+        @check_dag ".type {{(julia|j)_child2_[0-9]+}},@function"
         GCN.code_native(mod.parent2, Tuple{Int}; dump_module=true)
     end
 end
@@ -182,9 +182,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{(julia|j)_kernel_[0-9]+}}:"
-        check"CHECK-NOT: jl_throw"
-        check"CHECK-NOT: jl_invoke"
+        @check_label "{{(julia|j)_kernel_[0-9]+}}:"
+        @check_not "jl_throw"
+        @check_not "jl_invoke"
         GCN.code_native(mod.kernel, Tuple{Ptr{Int32}})
     end
 end
@@ -234,11 +234,11 @@ false && @testset "GC and TLS lowering" begin
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: jl_push_gc_frame"
-        check"CHECK-NOT: jl_pop_gc_frame"
-        check"CHECK-NOT: jl_get_gc_frame_slot"
-        check"CHECK-NOT: jl_new_gc_frame"
-        check"CHECK: gpu_gc_pool_alloc"
+        @check_not "jl_push_gc_frame"
+        @check_not "jl_pop_gc_frame"
+        @check_not "jl_get_gc_frame_slot"
+        @check_not "jl_new_gc_frame"
+        @check "gpu_gc_pool_alloc"
         GCN.code_native(mod.kernel, Tuple{Int})
     end
 
@@ -256,7 +256,7 @@ false && @testset "GC and TLS lowering" begin
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: gpu_gc_pool_alloc"
+        @check_not "gpu_gc_pool_alloc"
         GCN.code_native(ref_kernel, Tuple{Ptr{Int64}, Int})
     end
 end
@@ -275,8 +275,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"CHECK: jl_box_float32"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "jl_box_float32"
         GCN.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}})
     end
     GCN.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})

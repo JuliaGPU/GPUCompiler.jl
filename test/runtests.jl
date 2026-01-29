@@ -12,7 +12,7 @@ const init_code = quote
             include(joinpath(@__DIR__, "helpers", file))
         end
     end
-    using .FileCheck
+    using FileCheck
 end
 
 function test_filter(test)

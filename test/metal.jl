@@ -7,17 +7,17 @@
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"TYPED-SAME: ({{(\{ i64 \}|\[1 x i64\])}}*"
-        check"OPAQUE-SAME: (ptr"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check_same cond=typed_ptrs "({{(\\{ i64 \\}|\\[1 x i64\\])}}*"
+        @check_same cond=opaque_ptrs "(ptr"
         Metal.code_llvm(mod.kernel, Tuple{Tuple{Int}})
     end
 
     # for kernels, every pointer argument needs to take an address space
     @test @filecheck begin
-        check"CHECK-LABEL: define void @_Z6kernel5TupleI5Int64E"
-        check"TYPED-SAME: ({{(\{ i64 \}|\[1 x i64\])}} addrspace(1)*"
-        check"OPAQUE-SAME: (ptr addrspace(1)"
+        @check_label "define void @_Z6kernel5TupleI5Int64E"
+        @check_same cond=typed_ptrs "({{(\\{ i64 \\}|\\[1 x i64\\])}} addrspace(1)*"
+        @check_same cond=opaque_ptrs "(ptr addrspace(1)"
         Metal.code_llvm(mod.kernel, Tuple{Tuple{Int}}; kernel=true)
     end
 end
@@ -28,16 +28,16 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"CHECK-SAME: (i64"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check_same "(i64"
         Metal.code_llvm(mod.kernel, Tuple{Int})
     end
 
     # for kernels, every pointer argument needs to take an address space
     @test @filecheck begin
-        check"CHECK-LABEL: define void @_Z6kernel5Int64"
-        check"TYPED-SAME: (i64 addrspace(1)*"
-        check"OPAQUE-SAME: (ptr addrspace(1)"
+        @check_label "define void @_Z6kernel5Int64"
+        @check_same cond=typed_ptrs "(i64 addrspace(1)*"
+        @check_same cond=opaque_ptrs "(ptr addrspace(1)"
         Metal.code_llvm(mod.kernel, Tuple{Int}; kernel=true)
     end
 end
@@ -48,9 +48,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: air.version"
-        check"CHECK: air.language_version"
-        check"CHECK: air.max_device_buffers"
+        @check "air.version"
+        @check "air.language_version"
+        @check "air.max_device_buffers"
         Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
     end
 end
@@ -61,7 +61,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: air.buffer"
+        @check "air.buffer"
         Metal.code_llvm(mod.kernel, Tuple{Int}; dump_module=true, kernel=true)
     end
 
@@ -80,18 +80,18 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"TYPED-SAME: ({{.+}} addrspace(1)* %{{.+}})"
-        check"OPAQUE-SAME: (ptr addrspace(1) %{{.+}})"
-        check"CHECK: call i32 @julia.air.thread_position_in_threadgroup.i32"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check_same cond=typed_ptrs "({{.+}} addrspace(1)* %{{.+}})"
+        @check_same cond=opaque_ptrs "(ptr addrspace(1) %{{.+}})"
+        @check "call i32 @julia.air.thread_position_in_threadgroup.i32"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}})
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @_Z6kernel7LLVMPtrI5Int64Li1EE"
-        check"TYPED-SAME: ({{.+}} addrspace(1)* %{{.+}}, i32 %thread_position_in_threadgroup)"
-        check"OPAQUE-SAME: (ptr addrspace(1) %{{.+}}, i32 %thread_position_in_threadgroup)"
-        check"CHECK-NOT: call i32 @julia.air.thread_position_in_threadgroup.i32"
+        @check_label "define void @_Z6kernel7LLVMPtrI5Int64Li1EE"
+        @check_same cond=typed_ptrs "({{.+}} addrspace(1)* %{{.+}}, i32 %thread_position_in_threadgroup)"
+        @check_same cond=opaque_ptrs "(ptr addrspace(1) %{{.+}}, i32 %thread_position_in_threadgroup)"
+        @check_not "call i32 @julia.air.thread_position_in_threadgroup.i32"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true)
     end
 end
@@ -103,8 +103,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define <2 x i64> @{{(julia|j)_foo_[0-9]+}}"
-        check"CHECK: air.max.s.v2i64"
+        @check_label "define <2 x i64> @{{(julia|j)_foo_[0-9]+}}"
+        @check "air.max.s.v2i64"
         Metal.code_llvm(mod.foo, (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}))
     end
 end
@@ -143,8 +143,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"CHECK: @metal_os_log"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "@metal_os_log"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Float32,1}}; validate=true)
     end
 
@@ -174,8 +174,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: @{{.+}} ={{.*}} addrspace(2) constant [2 x float]"
-        check"CHECK: define void @_Z6kernel7LLVMPtrI7Float32Li1EE5Int64"
+        @check "@{{.+}} ={{.*}} addrspace(2) constant [2 x float]"
+        @check "define void @_Z6kernel7LLVMPtrI7Float32Li1EE5Int64"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int};
                         dump_module=true, kernel=true)
     end
