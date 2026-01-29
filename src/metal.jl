@@ -171,10 +171,10 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         add_module_metadata!(job, mod)
     end
 
-    # JuliaLang/Metal.jl#113
+    # JuliaGPU/Metal.jl#113
     hide_noreturn!(mod)
 
-    # get rid of unreachable control flow (JuliaLang/Metal.jl#370).
+    # get rid of unreachable control flow (JuliaGPU/Metal.jl#370).
     # note that this currently works in tandem with the `hide_noreturn!` pass above,
     # as `replace_unreachable!` doesn't handle functions that _only_ contain `unreachable`.
     if job.config.target.macos < v"15"
