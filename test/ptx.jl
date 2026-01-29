@@ -5,11 +5,11 @@
         foobar() = throw(DivideError())
     end
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_foobar_[0-9]+}}"
+        @check_label "define void @{{(julia|j)_foobar_[0-9]+}}"
         # plain exceptions should get lowered to a call to the GPU run-time
         # not a jl_throw referencing a jl_value_t representing the exception
-        check"CHECK-NOT: jl_throw"
-        check"CHECK: gpu_report_exception"
+        @check_not "jl_throw"
+        @check "gpu_report_exception"
 
         PTX.code_llvm(mod.foobar, Tuple{}; dump_module=true)
     end
@@ -26,16 +26,16 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"TYPED-SAME: ({{({ i64 }|\[1 x i64\])}}*"
-        check"OPAQUE-SAME: (ptr"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check_same cond=typed_ptrs "({{({ i64 }|\\[1 x i64\\])}}*"
+        @check_same cond=opaque_ptrs "(ptr"
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate})
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define ptx_kernel void @_Z6kernel9Aggregate"
-        check"TYPED-NOT: *"
-        check"OPAQUE-NOT: ptr"
+        @check_label "define ptx_kernel void @_Z6kernel9Aggregate"
+        @check_not cond=typed_ptrs "*"
+        @check_not cond=opaque_ptrs "ptr"
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; kernel=true)
     end
 end
@@ -46,40 +46,40 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: nvvm.annotations"
+        @check_not "nvvm.annotations"
         PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: maxntid"
-        check"CHECK-NOT: reqntid"
-        check"CHECK-NOT: minctasm"
-        check"CHECK-NOT: maxnreg"
-        check"CHECK: nvvm.annotations"
+        @check_not "maxntid"
+        @check_not "reqntid"
+        @check_not "minctasm"
+        @check_not "maxnreg"
+        @check "nvvm.annotations"
         PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
     end
 
     @test @filecheck begin
-        check"CHECK: maxntidx\", i32 42"
-        check"CHECK: maxntidy\", i32 1"
-        check"CHECK: maxntidz\", i32 1"
+        @check "maxntidx\", i32 42"
+        @check "maxntidy\", i32 1"
+        @check "maxntidz\", i32 1"
         PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, maxthreads=42)
     end
 
     @test @filecheck begin
-        check"CHECK: reqntidx\", i32 42"
-        check"CHECK: reqntidy\", i32 1"
-        check"CHECK: reqntidz\", i32 1"
+        @check "reqntidx\", i32 42"
+        @check "reqntidy\", i32 1"
+        @check "reqntidz\", i32 1"
         PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, minthreads=42)
     end
 
     @test @filecheck begin
-        check"CHECK: minctasm\", i32 42"
+        @check "minctasm\", i32 42"
         PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, blocks_per_sm=42)
     end
 
     @test @filecheck begin
-        check"CHECK: maxnreg\", i32 42"
+        @check "maxnreg\", i32 42"
         PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, maxregs=42)
     end
 end
@@ -90,12 +90,12 @@ LLVM.version() >= v"8" && @testset "calling convention" begin
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: ptx_kernel"
+        @check_not "ptx_kernel"
         PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK: ptx_kernel"
+        @check "ptx_kernel"
         PTX.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
     end
 end
@@ -108,12 +108,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: @{{(julia|j)_kernel[0-9_]*}}()"
+        @check "@{{(julia|j)_kernel[0-9_]*}}()"
         PTX.code_llvm(mod.kernel, Tuple{})
     end
 
     @test @filecheck begin
-        check"CHECK: @_Z6kernel([1 x i64] %state)"
+        @check "@_Z6kernel([1 x i64] %state)"
         PTX.code_llvm(mod.kernel, Tuple{}; kernel=true)
     end
 
@@ -135,18 +135,18 @@ end
 
     # kernel should take state argument before all else
     @test @filecheck begin
-        check"CHECK-LABEL: define ptx_kernel void @_Z6kernelP5Int64([1 x i64] %state"
-        check"CHECK-NOT: julia.gpu.state_getter"
+        @check_label "define ptx_kernel void @_Z6kernelP5Int64([1 x i64] %state"
+        @check_not "julia.gpu.state_getter"
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
     end
     # child1 doesn't use the state
     @test @filecheck begin
-        check"CHECK-LABEL: define{{.*}} i64 @{{(julia|j)_child1_[0-9]+}}"
+        @check_label "define{{.*}} i64 @{{(julia|j)_child1_[0-9]+}}"
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
     end
     # child2 does
     @test @filecheck begin
-        check"CHECK-LABEL: define{{.*}} i64 @{{(julia|j)_child2_[0-9]+}}"
+        @check_label "define{{.*}} i64 @{{(julia|j)_child2_[0-9]+}}"
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
     end
 end
@@ -189,9 +189,9 @@ if :NVPTX in LLVM.backends()
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: .visible .func {{(julia|j)_parent[0-9_]*}}"
-        check"CHECK: call.uni"
-        check"CHECK-NEXT: {{(julia|j)_child_}}"
+        @check_label ".visible .func {{(julia|j)_parent[0-9_]*}}"
+        @check "call.uni"
+        @check_next "{{(julia|j)_child_}}"
         PTX.code_native(mod.parent, Tuple{Int64})
     end
 end
@@ -207,36 +207,36 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: .visible .func {{(julia|j)_nonentry}}"
-        check"CHECK-LABEL: .visible .entry _Z5entry5Int64"
-        check"CHECK: {{(julia|j)_nonentry}}"
+        @check_not ".visible .func {{(julia|j)_nonentry}}"
+        @check_label ".visible .entry _Z5entry5Int64"
+        @check "{{(julia|j)_nonentry}}"
         PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, dump_module=true)
     end
 
 @testset "property_annotations" begin
     @test @filecheck begin
-        check"CHECK-NOT: maxntid"
+        @check_not "maxntid"
         PTX.code_native(mod.entry, Tuple{Int64}; kernel=true)
     end
 
     @test @filecheck begin
-        check"CHECK: .maxntid 42, 1, 1"
+        @check ".maxntid 42, 1, 1"
         PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, maxthreads=42)
     end
 
     @test @filecheck begin
-        check"CHECK: .reqntid 42, 1, 1"
+        @check ".reqntid 42, 1, 1"
         PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, minthreads=42)
     end
 
     @test @filecheck begin
-        check"CHECK: .minnctapersm 42"
+        @check ".minnctapersm 42"
         PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, blocks_per_sm=42)
     end
 
     if LLVM.version() >= v"4.0"
         @test @filecheck begin
-            check"CHECK: .maxnreg 42"
+            @check ".maxnreg 42"
             PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, maxregs=42)
         end
     end
@@ -261,12 +261,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: .func {{(julia|j)_child}}"
+        @check ".func {{(julia|j)_child}}"
         PTX.code_native(mod.parent1, Tuple{Int})
     end
 
     @test @filecheck begin
-        check"CHECK: .func {{(julia|j)_child}}"
+        @check ".func {{(julia|j)_child}}"
         PTX.code_native(mod.parent2, Tuple{Int})
     end
 end
@@ -290,14 +290,14 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-DAG: .func {{(julia|j)_child1}}"
-        check"CHECK-DAG: .func {{(julia|j)_child2}}"
+        @check_dag ".func {{(julia|j)_child1}}"
+        @check_dag ".func {{(julia|j)_child2}}"
         PTX.code_native(mod.parent1, Tuple{Int})
     end
 
     @test @filecheck begin
-        check"CHECK-DAG: .func {{(julia|j)_child1}}"
-        check"CHECK-DAG: .func {{(julia|j)_child2}}"
+        @check_dag ".func {{(julia|j)_child1}}"
+        @check_dag ".func {{(julia|j)_child2}}"
         PTX.code_native(mod.parent2, Tuple{Int})
     end
 end
@@ -316,9 +316,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: .visible .func {{(julia|j)_kernel[0-9_]*}}"
-        check"CHECK-NOT: jl_throw"
-        check"CHECK-NOT: jl_invoke"
+        @check_label ".visible .func {{(julia|j)_kernel[0-9_]*}}"
+        @check_not "jl_throw"
+        @check_not "jl_invoke"
         PTX.code_native(mod.kernel, Tuple{Ptr{Int32}})
     end
 end
@@ -367,12 +367,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: .visible .func {{(julia|j)_kernel[0-9_]*}}"
-        check"CHECK-NOT: julia.push_gc_frame"
-        check"CHECK-NOT: julia.pop_gc_frame"
-        check"CHECK-NOT: julia.get_gc_frame_slot"
-        check"CHECK-NOT: julia.new_gc_frame"
-        check"CHECK: gpu_gc_pool_alloc"
+        @check_label ".visible .func {{(julia|j)_kernel[0-9_]*}}"
+        @check_not "julia.push_gc_frame"
+        @check_not "julia.pop_gc_frame"
+        @check_not "julia.get_gc_frame_slot"
+        @check_not "julia.new_gc_frame"
+        @check "gpu_gc_pool_alloc"
         PTX.code_native(mod.kernel, Tuple{Int})
     end
 
@@ -392,8 +392,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: .visible .func {{(julia|j)_ref_kernel[0-9_]*}}"
-        check"CHECK-NOT: gpu_gc_pool_alloc"
+        @check_label ".visible .func {{(julia|j)_ref_kernel[0-9_]*}}"
+        @check_not "gpu_gc_pool_alloc"
         PTX.code_native(mod.ref_kernel, Tuple{Ptr{Int64}, Int})
     end
 end
@@ -412,8 +412,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"CHECK: jl_box_float32"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "jl_box_float32"
         PTX.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}})
     end
     PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})

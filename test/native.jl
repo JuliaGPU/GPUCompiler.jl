@@ -7,17 +7,17 @@
     @test rt === Int
 
     @test @filecheck begin
-        check"CHECK: MethodInstance for identity"
+        @check "MethodInstance for identity"
         GPUCompiler.code_warntype(job)
     end
 
     @test @filecheck begin
-        check"CHECK: @{{(julia|j)_identity_[0-9]+}}"
+        @check "@{{(julia|j)_identity_[0-9]+}}"
         GPUCompiler.code_llvm(job)
     end
 
     @test @filecheck begin
-        check"CHECK: @{{(julia|j)_identity_[0-9]+}}"
+        @check "@{{(julia|j)_identity_[0-9]+}}"
         GPUCompiler.code_native(job)
     end
 end
@@ -105,8 +105,8 @@ end
         # smoke test
         job, _ = Native.create_job(mod.kernel, (Int64,))
         @test @filecheck begin
-            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            check"CHECK: add i64 %{{[0-9]+}}, 1"
+            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add i64 %{{[0-9]+}}, 1"
             GPUCompiler.code_llvm(job)
         end
 
@@ -114,8 +114,8 @@ end
         @eval mod kernel(i) = child(i)+2
         job, _ = Native.create_job(mod.kernel, (Int64,))
         @test @filecheck begin
-            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            check"CHECK: add i64 %{{[0-9]+}}, 2"
+            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add i64 %{{[0-9]+}}, 2"
             GPUCompiler.code_llvm(job)
         end
 
@@ -136,16 +136,16 @@ end
         # initial compilation
         source = methodinstance(ft, tt, Base.get_world_counter())
         @test @filecheck begin
-            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            check"CHECK: add i64 %{{[0-9]+}}, 2"
+            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add i64 %{{[0-9]+}}, 2"
             Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         end
         @test invocations[] == 1
 
         # cached compilation
         @test @filecheck begin
-            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            check"CHECK: add i64 %{{[0-9]+}}, 2"
+            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add i64 %{{[0-9]+}}, 2"
             Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         end
         @test invocations[] == 1
@@ -154,16 +154,16 @@ end
         @eval mod kernel(i) = child(i)+3
         source = methodinstance(ft, tt, Base.get_world_counter())
         @test @filecheck begin
-            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            check"CHECK: add i64 %{{[0-9]+}}, 3"
+            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add i64 %{{[0-9]+}}, 3"
             Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         end
         @test invocations[] == 2
 
         # cached compilation
         @test @filecheck begin
-            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            check"CHECK: add i64 %{{[0-9]+}}, 3"
+            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add i64 %{{[0-9]+}}, 3"
             Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
         end
         @test invocations[] == 2
@@ -185,7 +185,7 @@ end
         # change in configuration
         config = CompilerConfig(job.config; name="foobar")
         @test @filecheck begin
-            check"CHECK: define i64 @foobar"
+            @check "define i64 @foobar"
             Base.invokelatest(GPUCompiler.cached_compilation, cache, source, config, compiler, linker)
         end
         @test invocations[] == 4
@@ -206,8 +206,8 @@ end
         @test contains(ir, r"add i64 %\d+, 4")
         notify(c2)      # wake up the task
         @test @filecheck begin
-            check"CHECK-LABEL: define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            check"CHECK: add i64 %{{[0-9]+}}, 3"
+            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add i64 %{{[0-9]+}}, 3"
             fetch(t)
         end
     end
@@ -237,7 +237,7 @@ end
 
     @test @filecheck begin
         # module should contain our function + a generic call wrapper
-        check"CHECK: @{{(julia|j)_valid_kernel_[0-9]+}}"
+        @check "@{{(julia|j)_valid_kernel_[0-9]+}}"
         Native.code_llvm(mod.valid_kernel, Tuple{}; optimize=false, dump_module=true)
     end
 
@@ -261,8 +261,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define i64 @{{(julia|j)_parent_[0-9]+}}"
-        check"CHECK: call{{.*}} i64 @{{(julia|j)_child_[0-9]+}}"
+        @check_label "define i64 @{{(julia|j)_parent_[0-9]+}}"
+        @check "call{{.*}} i64 @{{(julia|j)_child_[0-9]+}}"
         Native.code_llvm(mod.parent, Tuple{Int})
     end
 end
@@ -276,7 +276,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: jlsys_"
+        @check_not "jlsys_"
         Native.code_llvm(mod.foobar, Tuple{Ptr{Int},Int})
     end
 end
@@ -329,18 +329,18 @@ end
         f = () -> x+1
     end
     @test @filecheck begin
-        check"CHECK: define {{.+}} @julia"
-        check"TYPED: define nonnull {}* @jfptr"
-        check"OPAQUE: define nonnull ptr @jfptr"
-        check"CHECK: call {{.+}} @julia"
+        @check "define {{.+}} @julia"
+        @check cond=typed_ptrs "define nonnull {}* @jfptr"
+        @check cond=opaque_ptrs "define nonnull ptr @jfptr"
+        @check "call {{.+}} @julia"
         Native.code_llvm(mod.f, Tuple{}; entry_abi=:func, dump_module=true)
     end
 end
 
 @testset "function entry safepoint emission" begin
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_identity_[0-9]+}}"
-        check"CHECK-NOT: %safepoint"
+        @check_label "define void @{{(julia|j)_identity_[0-9]+}}"
+        @check_not "%safepoint"
         Native.code_llvm(identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true)
     end
 
@@ -348,8 +348,8 @@ end
     #      see https://github.com/JuliaLang/julia/pull/57010/files#r2079576894
     if VERSION < v"1.13.0-DEV.533"
         @test @filecheck begin
-            check"CHECK-LABEL: define void @{{(julia|j)_identity_[0-9]+}}"
-            check"CHECK: %safepoint"
+            @check_label "define void @{{(julia|j)_identity_[0-9]+}}"
+            @check "%safepoint"
             Native.code_llvm(identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true)
         end
     end
@@ -374,22 +374,22 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: @{{(julia|j)_expensive_[0-9]+}}"
+        @check "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
     @test @filecheck(begin
-        check"CHECK-NOT: @{{(julia|j)_expensive_[0-9]+}}"
+        @check_not "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
     end) broken=broken
 
     @test @filecheck begin
-        check"CHECK: @{{(julia|j)_expensive_[0-9]+}}"
+        @check "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
     @test @filecheck(begin
-        check"CHECK-NOT: @{{(julia|j)_expensive_[0-9]+}}"
+        @check_not "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
     end) broken=broken
 end
@@ -412,7 +412,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: attributes #{{.}} = { convergent }"
+        @check "attributes #{{.}} = { convergent }"
         Native.code_llvm(mod.convergent_barrier, Tuple{}; dump_module=true, raw=true)
     end
 end
@@ -598,8 +598,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: @julia_kernel"
-        check"CHECK: ret i64 0"
+        @check_label "@julia_kernel"
+        @check "ret i64 0"
         Native.code_llvm(mod.kernel, Tuple{})
     end
 
@@ -615,8 +615,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: @julia_kernel"
-        check"CHECK: ret i64 1"
+        @check_label "@julia_kernel"
+        @check "ret i64 1"
         Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
     end
 end
@@ -640,9 +640,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: @julia_kernel"
-        check"CHECK-NOT: apply_generic"
-        check"CHECK: llvm.floor"
+        @check_label "@julia_kernel"
+        @check_not "apply_generic"
+        @check "llvm.floor"
         Native.code_llvm(mod.kernel, Tuple{Int, Int}; debuginfo=:none, mod.method_table)
     end
 end
@@ -668,12 +668,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: @julia_parent"
-        check"CHECK-NOT: jl_invoke"
-        check"CHECK-NOT: apply_iterate"
-        check"CHECK-NOT: inttoptr"
-        check"CHECK-NOT: apply_type"
-        check"CHECK: ret void"
+        @check_label "@julia_parent"
+        @check_not "jl_invoke"
+        @check_not "apply_iterate"
+        @check_not "inttoptr"
+        @check_not "apply_type"
+        @check "ret void"
         Native.code_llvm(mod.parent, Tuple{}; debuginfo=:none, mod.method_table)
     end
 end
