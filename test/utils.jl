@@ -193,3 +193,40 @@ end
     # Check that we can call this function from the CPU, to support deferred codegen for Enzyme.
     @test ccall("extern deferred_codegen", llvmcall, UInt, (UInt,), 3) == 3
 end
+
+@testset "@device_function macro" begin
+    # Test that @device_function creates both CPU stub and overlay
+    # The macro should:
+    # 1. Define a CPU-visible function that returns the expected type
+    # 2. Register an overlay in GLOBAL_METHOD_TABLE for GPU compilation
+
+    # Create a test module to contain the device functions
+    test_mod = @eval module $(gensym("DeviceFunctionTest"))
+        using GPUCompiler
+
+        # Test with Ptr return type (common for runtime functions)
+        GPUCompiler.@device_function(Ptr{Nothing},
+            @inline test_device_ptr() = ccall("extern gpu_test", llvmcall, Ptr{Nothing}, ())
+        )
+
+        # Test with primitive return type
+        GPUCompiler.@device_function(Nothing,
+            @inline test_device_nothing() = ccall("extern gpu_test2", llvmcall, Nothing, ())
+        )
+    end
+
+    # Verify the functions are defined in the test module
+    @test isdefined(test_mod, :test_device_ptr)
+    @test isdefined(test_mod, :test_device_nothing)
+
+    # Verify the overlay exists in the global method table
+    mt_view = GPUCompiler.get_method_table_view(Base.get_world_counter(), GPUCompiler.GLOBAL_METHOD_TABLE)
+    sig_ptr = Tuple{typeof(test_mod.test_device_ptr)}
+    sig_nothing = Tuple{typeof(test_mod.test_device_nothing)}
+
+    # The overlay should be findable in the method table
+    result_ptr = findsup(sig_ptr, mt_view)
+    result_nothing = findsup(sig_nothing, mt_view)
+    @test result_ptr !== nothing
+    @test result_nothing !== nothing
+end

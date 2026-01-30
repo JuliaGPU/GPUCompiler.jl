@@ -77,6 +77,7 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     new_mod, meta = compile_unhooked(:llvm, CompilerJob(source, config))
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
+
     if return_type(ft) != return_type(expected_ft)
         error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
     end

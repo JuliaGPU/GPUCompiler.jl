@@ -238,3 +238,29 @@ end
         return inits
     end
 end
+## method overrides
+
+Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
+using ExprTools: splitdef, combinedef
+macro device_function(rt, ex)
+    ex = macroexpand(__module__, ex)
+    def = splitdef(ex)
+
+    # generate a function that warns and returns the expected type
+    # FIXME: The type may not have a default constructor, what do we do then?
+    #        Currently we are using the constructor with an Int64(1) as an argument.
+    # NOTE: using Int64(1) is a bit odd. This is because Ptr(Int64(0)) == C_NULL, and julia code lowering
+    #       seems to get rid of this automatically.
+    def[:body] = quote
+        $rt(1)
+    end
+
+    esc(quote
+        $(combinedef(def))
+
+        # NOTE: no use of `@consistent_overlay` here because the regular function errors
+        Base.Experimental.@overlay($(GPUCompiler).GLOBAL_METHOD_TABLE, $ex)
+    end)
+end
+
+
