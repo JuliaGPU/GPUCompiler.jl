@@ -486,7 +486,10 @@ CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 CC.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
 function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
-    #@safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
+    # NOTE: @safe_debug is disabled here because including logging/warning code causes
+    # CPU runtime functions (ccalls to Julia internals) to leak into the GPU IR,
+    # breaking AOT compilation. See PR #749 for details.
+    return nothing
 end
 
 CC.may_optimize(interp::GPUInterpreter) = true
