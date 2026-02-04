@@ -4,9 +4,9 @@
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: julia_kernel_{{[0-9_]*}}:"
-        check"CHECK: r0 = 0"
-        check"CHECK-NEXT: exit"
+        @check_label "julia_kernel_{{[0-9_]*}}:"
+        @check "r0 = 0"
+        @check_next "exit"
         BPF.code_native(mod.kernel, ())
     end
 end
@@ -16,9 +16,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: julia_kernel_{{[0-9_]*}}:"
-        check"CHECK: r0 = r1"
-        check"CHECK-NEXT: exit"
+        @check_label "julia_kernel_{{[0-9_]*}}:"
+        @check "r0 = r1"
+        @check_next "exit"
         BPF.code_native(mod.kernel, (UInt64,))
     end
 end
@@ -28,10 +28,10 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: julia_kernel_{{[0-9_]*}}:"
-        check"CHECK: r0 = r1"
-        check"CHECK-NEXT: r0 += 1"
-        check"CHECK-NEXT: exit"
+        @check_label "julia_kernel_{{[0-9_]*}}:"
+        @check "r0 = r1"
+        @check_next "r0 += 1"
+        @check_next "exit"
         BPF.code_native(mod.kernel, (UInt64,))
     end
 end
@@ -50,9 +50,9 @@ end
         end
 
         @test @filecheck begin
-            check"CHECK-LABEL: julia_kernel_{{[0-9_]*}}:"
-            check"CHECK: call"
-            check"CHECK-NEXT: exit"
+            @check_label "julia_kernel_{{[0-9_]*}}:"
+            @check "call"
+            @check_next "exit"
             BPF.code_native(mod.kernel, (Int,))
         end
     end

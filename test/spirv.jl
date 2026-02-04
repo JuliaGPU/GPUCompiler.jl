@@ -9,12 +9,12 @@ for backend in (:khronos, :llvm)
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: spir_kernel"
+        @check_not "spir_kernel"
         SPIRV.code_llvm(mod.kernel, Tuple{}; backend, dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK: spir_kernel"
+        @check "spir_kernel"
         SPIRV.code_llvm(mod.kernel, Tuple{}; backend, dump_module=true, kernel=true)
     end
 end
@@ -25,12 +25,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
         SPIRV.code_llvm(mod.kernel, Tuple{Tuple{Int}}; backend)
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define spir_kernel void @_Z6kernel"
+        @check_label "define spir_kernel void @_Z6kernel"
         SPIRV.code_llvm(mod.kernel, Tuple{Tuple{Int}}; backend, kernel=true)
     end
 end
@@ -41,7 +41,7 @@ end
         @noinline kernel() = return
     end
     @test @filecheck begin
-        check"CHECK-LABEL: define spir_kernel void @_Z6kernel"
+        @check_label "define spir_kernel void @_Z6kernel"
         SPIRV.code_llvm(mod.kernel, Tuple{}; backend, kernel=true)
     end
 end
@@ -56,20 +56,20 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"CHECK: store half"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "store half"
         SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float16}, Float16}; backend)
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"CHECK: store float"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "store float"
         SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float32}, Float32}; backend)
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"CHECK: store double"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "store double"
         SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float64}, Float64}; backend)
     end
 
@@ -105,7 +105,7 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: %_Z6kernel4Bool = OpFunction %void None"
+        @check "%_Z6kernel4Bool = OpFunction %void None"
         SPIRV.code_native(mod.kernel, Tuple{Bool}; backend, kernel=true)
     end
 end
@@ -131,16 +131,16 @@ end
 
     @test @filecheck begin
         # TODO: should structs of `NTuple{VecElement{T}}` be passed by value instead of sret?
-        check"CHECK-NOT: i128"
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        @static VERSION >= v"1.12" && check"CHECK: alloca <2 x i64>, align 16"
+        @check_not "i128"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check cond=(VERSION >= v"1.12") "alloca <2 x i64>, align 16"
         SPIRV.code_llvm(mod.kernel, NTuple{2, mod.Vec{4, Float32}}; backend, dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: i128"
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        @static VERSION >= v"1.12" && check"CHECK: alloca [2 x <2 x i64>], align 16"
+        @check_not "i128"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check cond=(VERSION >= v"1.12") "alloca [2 x <2 x i64>], align 16"
         SPIRV.code_llvm(mod.kernel, NTuple{2, mod.Vec{8, Float32}}; backend, dump_module=true)
     end
 end
