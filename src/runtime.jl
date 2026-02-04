@@ -71,6 +71,7 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     meth = RuntimeMethodInstance(def,
                                  return_type, types, name,
                                  llvm_return_type, llvm_types, llvm_name)
+
     if haskey(methods, name)
         error("Runtime function $name has already been registered!")
     end
@@ -82,8 +83,10 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     #        using the new nonrecursive codegen to handle function lookup ourselves?
     if def isa Symbol
         args = [gensym() for typ in types]
-        @eval @inline $def($(args...)) =
-            ccall($("extern $llvm_name"), llvmcall, $return_type, ($(types...),), $(args...))
+        @eval GPUCompiler.@device_function($return_type,
+                                           @inline $def($(args...)) =
+                                               ccall($("extern $llvm_name"), llvmcall, $return_type, ($(types...),), $(args...))
+                                           )
     end
 
     return
