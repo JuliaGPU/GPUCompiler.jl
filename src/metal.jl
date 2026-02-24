@@ -1041,6 +1041,10 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
             add_attributes("convergent", "mustprogress", "nofree", "nounwind", "readonly", "willreturn")
         elseif match(r"air.simdgroup_matrix_8x8_store", fn) !== nothing
             add_attributes("convergent", "mustprogress", "nounwind", "willreturn", "writeonly")
+
+            # simd voting/ballot
+        elseif match(r"air.simd_ballot", fn) !== nothing || match(r"air.simd_vote_all", fn) !== nothing || match(r"air.simd_vote_any", fn) !== nothing
+            add_attributes("convergent", "mustprogress", "nounwind", "willreturn")
         end
     end
 
