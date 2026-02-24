@@ -565,7 +565,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     args = classify_arguments(job, entry_ft; post_optimization=job.config.optimize)
     i = 1
     for arg in args
-        arg.idx ===  nothing && continue
+        arg.idx === nothing && continue
         if job.config.optimize
             @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
         else
