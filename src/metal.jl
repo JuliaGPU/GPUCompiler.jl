@@ -1042,8 +1042,9 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
         elseif match(r"air.simdgroup_matrix_8x8_store", fn) !== nothing
             add_attributes("convergent", "mustprogress", "nounwind", "willreturn", "writeonly")
 
-            # simd voting/ballot
-        elseif match(r"air.simd_ballot", fn) !== nothing || match(r"air.simd_vote_all", fn) !== nothing || match(r"air.simd_vote_any", fn) !== nothing
+            # simd intrinsics
+        elseif match(r"air.simd_(ballot|vote_all|vote_any|shuffle|shuffle_xor|shuffle_down|\
+            shuffle_up|shuffle_and_fill_down|shuffle_and_fill_up)", fn) !== nothing
             add_attributes("convergent", "mustprogress", "nounwind", "willreturn")
         end
     end
