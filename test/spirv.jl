@@ -133,14 +133,16 @@ end
         # TODO: should structs of `NTuple{VecElement{T}}` be passed by value instead of sret?
         check"CHECK-NOT: i128"
         check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        @static VERSION >= v"1.12" && check"CHECK: alloca <2 x i64>, align 16"
+        @static v"1.12" <= VERSION < v"1.12.5" && check"CHECK: alloca <2 x i64>, align 16"
+        @static VERSION >= v"1.12.5" && check"CHECK: alloca [2 x i64], align 16"
         SPIRV.code_llvm(mod.kernel, NTuple{2, mod.Vec{4, Float32}}; backend, dump_module=true)
     end
 
     @test @filecheck begin
         check"CHECK-NOT: i128"
         check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        @static VERSION >= v"1.12" && check"CHECK: alloca [2 x <2 x i64>], align 16"
+        @static v"1.12" <= VERSION < v"1.12.5" && check"CHECK: alloca [2 x <2 x i64>], align 16"
+        @static VERSION >= v"1.12.5" && check"CHECK: alloca [4 x i64], align 16"
         SPIRV.code_llvm(mod.kernel, NTuple{2, mod.Vec{8, Float32}}; backend, dump_module=true)
     end
 end

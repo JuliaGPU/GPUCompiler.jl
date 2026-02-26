@@ -13,7 +13,7 @@ precompile_test_harness("Inference caching") do load_path
             A[1] = x
             return
         end
-             
+
         function kernel_w_global(A, x, sym)
             if sym == :A
                 A[1] = x
@@ -76,7 +76,7 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(square_mi, token)
 
         # check that identity survived
-        @test check_presence(identity_mi, token) broken=VERSION>=v"1.12.0-DEV.1268"
+        @test check_presence(identity_mi, token) broken=(v"1.12.0-DEV.1268" <= VERSION < v"1.12.5" || VERSION>=v"1.13.0-")
 
         GPUCompiler.clear_disk_cache!()
         @test GPUCompiler.disk_cache_enabled() == false
