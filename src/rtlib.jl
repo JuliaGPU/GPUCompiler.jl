@@ -173,13 +173,3 @@ const runtime_cache = Dict{String, Vector{UInt8}}()
         return lib
     end
 end
-
-# remove the existing cache
-# NOTE: call this function from global scope, so any change triggers recompilation.
-function reset_runtime()
-    lock(runtime_lock) do
-        rm(compile_cache; recursive=true, force=true)
-    end
-
-    return
-end
