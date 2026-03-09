@@ -400,6 +400,9 @@ end
 
 get_method_table_view(world::UInt, mt::CC.MethodTable) = CC.OverlayMethodTable(world, mt)
 
+# VERSION >= v"1.14.0-DEV.1691"
+const INFERENCE_CACHE_TYPE = isdefined(CC, :InferenceCache) ? CC.InferenceCache : Vector{CC.InferenceResult}
+
 struct GPUInterpreter{MTV<:CC.MethodTableView} <: CC.AbstractInterpreter
     world::UInt
     method_table_view::MTV
@@ -409,7 +412,7 @@ struct GPUInterpreter{MTV<:CC.MethodTableView} <: CC.AbstractInterpreter
 else
     code_cache::CodeCache
 end
-    inf_cache::Vector{CC.InferenceResult}
+    inf_cache::INFERENCE_CACHE_TYPE
 
     inf_params::CC.InferenceParams
     opt_params::CC.OptimizationParams
@@ -423,7 +426,7 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         opt_params::CC.OptimizationParams)
     @assert world <= Base.get_world_counter()
 
-    inf_cache = Vector{CC.InferenceResult}()
+    inf_cache = INFERENCE_CACHE_TYPE()
 
     return GPUInterpreter(world, method_table_view,
                           token, inf_cache,
@@ -434,7 +437,7 @@ function GPUInterpreter(interp::GPUInterpreter;
                         world::UInt=interp.world,
                         method_table_view::CC.MethodTableView=interp.method_table_view,
                         token::Any=interp.token,
-                        inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
+                        inf_cache::INFERENCE_CACHE_TYPE=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
                         opt_params::CC.OptimizationParams=interp.opt_params)
     return GPUInterpreter(world, method_table_view,

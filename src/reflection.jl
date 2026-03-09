@@ -167,6 +167,10 @@ InteractiveUtils.code_warntype(err::KernelError; kwargs...) = code_warntype(err.
 struct jl_llvmf_dump
     TSM::LLVM.API.LLVMOrcThreadSafeModuleRef
     F::LLVM.API.LLVMValueRef
+@static if VERSION >= v"1.14.0-DEV.1823" # JuliaLang/julia#60698
+    dump::Ptr{Nothing}
+    jl_llvmf_dump(TSM::LLVM.API.LLVMOrcThreadSafeModuleRef, F::LLVM.API.LLVMValueRef) = new(TSM, F, C_NULL)
+end
 end
 
 """
