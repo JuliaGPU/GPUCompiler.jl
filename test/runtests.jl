@@ -15,18 +15,25 @@ const init_code = quote
     using .FileCheck
 end
 
-function test_filter(test)
-    if startswith(test, "helpers/")
-        return false
+testsuite = find_tests(@__DIR__)
+args = parse_args(ARGS)
+
+if filter_tests!(testsuite, args)
+    helperkeys = String[]
+    for key in collect(keys(testsuite))
+        startswith(key, "helpers/") && push!(helperkeys, key)
     end
+    for key in helperkeys
+        delete!(testsuite, key)
+    end
+
     if LLVM.is_asserts() && test == "gcn"
-        # XXX: GCN's non-0 stack address space triggers LLVM assertions due to Julia bugs
-        return false
-     end
-     if VERSION < v"1.11" && test in ("ptx/precompile", "native/precompile")
-         return false
-     end
-    return true
+        delete!(testsuite, "gcn")
+    end
+    if VERSION < v"1.11"
+        delete!(testsuite, "ptx/precompile")
+        delete!(testsuite, "native/precompile")
+    end
 end
 
-runtests(GPUCompiler, ARGS; init_code, test_filter)
+runtests(GPUCompiler, args; testsuite, init_code)
