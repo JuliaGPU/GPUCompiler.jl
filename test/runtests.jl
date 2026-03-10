@@ -27,7 +27,7 @@ if filter_tests!(testsuite, args)
         delete!(testsuite, key)
     end
 
-    if LLVM.is_asserts() && test == "gcn"
+    if LLVM.is_asserts()
         delete!(testsuite, "gcn")
     end
     if VERSION < v"1.11"

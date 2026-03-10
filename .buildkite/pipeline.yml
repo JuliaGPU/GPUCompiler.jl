@@ -6,6 +6,7 @@ steps:
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
+      unset LD_LIBRARY_PATH
       julia -e 'println("--- :julia: Instantiating project")
                 using Pkg
                 Pkg.develop(; path=pwd())
