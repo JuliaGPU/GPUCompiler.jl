@@ -152,7 +152,10 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
     erase!(f)
     LLVM.name!(new_f, fn)
 
-    # propagate addrspace(4) through GEPs and loads, then clean up
+    # propagate addrspace(4) through GEPs and loads, then clean up.
+    # InferAddressSpaces needs TargetTransformInfo (via TargetMachine) to know
+    # that flat address space is 0 on AMDGPU.
+    tm = llvm_machine(job.config.target)
     @dispose pb=NewPMPassBuilder() begin
         add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, InferAddressSpacesPass())
@@ -163,8 +166,9 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
             add!(fpm, EarlyCSEPass())
             add!(fpm, InstCombinePass())
         end
-        run!(pb, mod)
+        run!(pb, mod, tm)
     end
+    dispose(tm)
 
     return functions(mod)[fn]
 end
