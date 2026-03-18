@@ -46,19 +46,31 @@ pass_by_ref(@nospecialize(job::CompilerJob{GCNCompilerTarget})) = true
 const GCN_ADDRSPACE_CONSTANT = 4
 
 # Rewrite byref pointer parameters from addrspace 0 to addrspace 4 (kernarg),
-# inserting addrspacecasts so the function body can continue using generic pointers.
+# loading the data into local allocas so the function body can use generic pointers.
+# SROA will decompose the allocas during the optimization pipeline that follows.
 function rewrite_byref_addrspaces!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                                    mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)
 
-    # find byref parameters
+    # find byref parameters and their types
+    args = classify_arguments(job, ft)
+    filter!(args) do arg
+        arg.cc != GHOST
+    end
+
     byref = BitVector(undef, length(parameters(ft)))
+    byref_types = Vector{Any}(undef, length(parameters(ft)))
     for i in 1:length(byref)
         byref[i] = false
         for attr in collect(parameter_attributes(f, i))
             if kind(attr) == kind(TypeAttribute("byref", LLVM.VoidType()))
                 byref[i] = true
             end
+        end
+    end
+    for arg in args
+        if arg.idx !== nothing && byref[arg.idx]
+            byref_types[arg.idx] = arg.typ
         end
     end
     any(byref) || return f
@@ -87,7 +99,7 @@ function rewrite_byref_addrspaces!(@nospecialize(job::CompilerJob{GCNCompilerTar
         end
     end
 
-    # insert addrspacecasts in entry block
+    # load byref arguments from addrspace(4) into local allocas
     new_args = LLVM.Value[]
     @dispose builder=IRBuilder() begin
         entry = BasicBlock(new_f, "conversion")
@@ -95,8 +107,13 @@ function rewrite_byref_addrspaces!(@nospecialize(job::CompilerJob{GCNCompilerTar
 
         for (i, param) in enumerate(parameters(ft))
             if byref[i]
-                # cast from addrspace(4) to addrspace(0) for the function body
-                ptr = addrspacecast!(builder, parameters(new_f)[i], param)
+                # load the value from the kernarg pointer and store into a stack slot,
+                # so the function body can keep using addrspace(0) pointers.
+                # SROA will decompose this during optimization.
+                llvm_typ = convert(LLVMType, byref_types[i])
+                val = load!(builder, llvm_typ, parameters(new_f)[i])
+                ptr = alloca!(builder, llvm_typ)
+                store!(builder, val, ptr)
                 push!(new_args, ptr)
             else
                 push!(new_args, parameters(new_f)[i])
