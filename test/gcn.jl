@@ -37,6 +37,32 @@ end
     end
 end
 
+@testset "kernarg address space for byref parameters" begin
+    mod = @eval module $(gensym())
+        struct MyStruct
+            x::Float64
+            y::Float64
+        end
+
+        function kernel(s::MyStruct)
+            s.x + s.y
+            return
+        end
+    end
+
+    # byref struct params should be ptr addrspace(4) in kernel IR
+    @test @filecheck begin
+        check"CHECK: define amdgpu_kernel void @_Z6kernel8MyStruct(ptr addrspace(4)"
+        GCN.code_llvm(mod.kernel, Tuple{mod.MyStruct}; dump_module=true, kernel=true)
+    end
+
+    # non-kernel should NOT have addrspace(4)
+    @test @filecheck begin
+        check"CHECK-NOT: addrspace(4)"
+        GCN.code_llvm(mod.kernel, Tuple{mod.MyStruct}; dump_module=true, kernel=false)
+    end
+end
+
 @testset "https://github.com/JuliaGPU/AMDGPU.jl/issues/846" begin
     ir, rt = GCN.code_typed((Tuple{Tuple{Val{4}}, Tuple{Float32}},); always_inline=true) do t
         t[1]
@@ -48,6 +74,26 @@ end
 
 ############################################################################################
 @testset "assembly" begin
+
+@testset "s_load for kernarg struct access" begin
+    mod = @eval module $(gensym())
+        struct MyStruct
+            x::Float64
+            y::Float64
+        end
+
+        function kernel(s::MyStruct, out::Ptr{Float64})
+            unsafe_store!(out, s.x + s.y)
+            return
+        end
+    end
+
+    @test @filecheck begin
+        check"CHECK: s_load_dwordx"
+        check"CHECK-NOT: flat_load"
+        GCN.code_native(mod.kernel, Tuple{mod.MyStruct, Ptr{Float64}}; kernel=true)
+    end
+end
 
 @testset "skip scalar trap" begin
     mod = @eval module $(gensym())
