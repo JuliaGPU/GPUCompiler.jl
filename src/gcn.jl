@@ -58,6 +58,20 @@ function finish_ir!(@nospecialize(job::CompilerJob{GCNCompilerTarget}), mod::LLV
                     entry::LLVM.Function)
     if job.config.kernel
         entry = add_kernarg_address_spaces!(job, mod, entry)
+
+        # optimize after address space rewriting: propagate addrspace(4) through
+        # the addrspacecast chains, then clean up newly-exposed opportunities
+        tm = llvm_machine(job.config.target)
+        @dispose pb=NewPMPassBuilder() tm begin
+            add!(pb, NewPMFunctionPassManager()) do fpm
+                add!(fpm, InferAddressSpacesPass())
+                add!(fpm, SROAPass())
+                add!(fpm, InstCombinePass())
+                add!(fpm, EarlyCSEPass())
+                add!(fpm, SimplifyCFGPass())
+            end
+            run!(pb, mod, tm)
+        end
     end
     return entry
 end
@@ -159,12 +173,7 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
     erase!(f)
     LLVM.name!(new_f, fn)
 
-    # clean up the extra conversion block.
-    # NOTE: we do NOT run InferAddressSpaces here — the AMDGPU backend's
-    # AMDGPULowerKernelArguments pass traces addrspacecast chains during codegen
-    # and correctly produces s_load for addrspace(4) provenance. Running
-    # InferAddressSpaces with a TargetMachine can over-propagate addrspace(4)
-    # into pointer values loaded from the struct (which should remain flat/global).
+    # clean up the extra conversion block
     @dispose pb=NewPMPassBuilder() begin
         add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
