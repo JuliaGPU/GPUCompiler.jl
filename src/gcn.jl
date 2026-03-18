@@ -40,6 +40,90 @@ runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.config.target.dev
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
 
+pass_by_ref(@nospecialize(job::CompilerJob{GCNCompilerTarget})) = true
+
+# AMDGPU constant/kernarg address space
+const GCN_ADDRSPACE_CONSTANT = 4
+
+# Rewrite byref pointer parameters from addrspace 0 to addrspace 4 (kernarg),
+# inserting addrspacecasts so the function body can continue using generic pointers.
+function rewrite_byref_addrspaces!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                                   mod::LLVM.Module, f::LLVM.Function)
+    ft = function_type(f)
+
+    # find byref parameters
+    byref = BitVector(undef, length(parameters(ft)))
+    for i in 1:length(byref)
+        byref[i] = false
+        for attr in collect(parameter_attributes(f, i))
+            if kind(attr) == kind(TypeAttribute("byref", LLVM.VoidType()))
+                byref[i] = true
+            end
+        end
+    end
+    any(byref) || return f
+
+    # build new function type with addrspace(4) pointers for byref params
+    new_types = LLVMType[]
+    for (i, param) in enumerate(parameters(ft))
+        if byref[i]
+            push!(new_types, LLVM.PointerType(GCN_ADDRSPACE_CONSTANT))
+        else
+            push!(new_types, param)
+        end
+    end
+    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_f = LLVM.Function(mod, "", new_ft)
+    linkage!(new_f, linkage(f))
+    callconv!(new_f, callconv(f))
+    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+        LLVM.name!(new_arg, LLVM.name(arg))
+    end
+
+    # copy parameter attributes
+    for (i, _) in enumerate(parameters(ft))
+        for attr in collect(parameter_attributes(f, i))
+            push!(parameter_attributes(new_f, i), attr)
+        end
+    end
+
+    # insert addrspacecasts in entry block
+    new_args = LLVM.Value[]
+    @dispose builder=IRBuilder() begin
+        entry = BasicBlock(new_f, "conversion")
+        position!(builder, entry)
+
+        for (i, param) in enumerate(parameters(ft))
+            if byref[i]
+                # cast from addrspace(4) to addrspace(0) for the function body
+                ptr = addrspacecast!(builder, parameters(new_f)[i], param)
+                push!(new_args, ptr)
+            else
+                push!(new_args, parameters(new_f)[i])
+            end
+        end
+
+        value_map = Dict{LLVM.Value, LLVM.Value}(
+            param => new_args[i] for (i, param) in enumerate(parameters(f))
+        )
+        value_map[f] = new_f
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+
+        br!(builder, blocks(new_f)[2])
+    end
+
+    # replace old function
+    fn = LLVM.name(f)
+    prune_constexpr_uses!(f)
+    @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
+    erase!(f)
+    LLVM.name!(new_f, fn)
+
+    return new_f
+end
+
 function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     lower_throw_extra!(mod)
@@ -48,8 +132,8 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
         # calling convention
         callconv!(entry, LLVM.API.LLVMAMDGPUKERNELCallConv)
 
-        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
-        entry = lower_byval(job, mod, entry)
+        # rewrite byref parameters to use the kernarg address space
+        entry = rewrite_byref_addrspaces!(job, mod, entry)
     end
 
     return entry
