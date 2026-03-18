@@ -113,8 +113,8 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
     end
 
     # insert addrspacecasts from kernarg (4) back to flat (0) so that the cloned IR
-    # (which expects flat pointers) continues to work. InferAddressSpaces will then
-    # propagate addrspace(4) through GEPs and loads, eliminating the casts.
+    # (which expects flat pointers) continues to work. The AMDGPU backend's
+    # AMDGPULowerKernelArguments traces these casts and produces s_load.
     new_args = LLVM.Value[]
     @dispose builder=IRBuilder() begin
         entry_bb = BasicBlock(new_f, "conversion")
@@ -126,9 +126,6 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
                 push!(new_args, cast)
             else
                 push!(new_args, parameters(new_f)[i])
-            end
-            for attr in collect(parameter_attributes(f, i))
-                push!(parameter_attributes(new_f, i), attr)
             end
         end
 
@@ -144,6 +141,16 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
         br!(builder, blocks(new_f)[2])
     end
 
+    # copy parameter attributes AFTER clone_into!, because CloneFunctionInto
+    # overwrites all attributes via setAttributes. For byref params, the VMap
+    # maps old args to addrspacecast instructions (not Arguments), so LLVM's
+    # attribute remapping silently drops them. We must re-add them here.
+    for i in 1:length(parameters(ft))
+        for attr in collect(parameter_attributes(f, i))
+            push!(parameter_attributes(new_f, i), attr)
+        end
+    end
+
     # replace the old function
     fn = LLVM.name(f)
     prune_constexpr_uses!(f)
@@ -152,23 +159,18 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
     erase!(f)
     LLVM.name!(new_f, fn)
 
-    # propagate addrspace(4) through GEPs and loads, then clean up.
-    # InferAddressSpaces needs TargetTransformInfo (via TargetMachine) to know
-    # that flat address space is 0 on AMDGPU.
-    tm = llvm_machine(job.config.target)
+    # clean up the extra conversion block.
+    # NOTE: we do NOT run InferAddressSpaces here — the AMDGPU backend's
+    # AMDGPULowerKernelArguments pass traces addrspacecast chains during codegen
+    # and correctly produces s_load for addrspace(4) provenance. Running
+    # InferAddressSpaces with a TargetMachine can over-propagate addrspace(4)
+    # into pointer values loaded from the struct (which should remain flat/global).
     @dispose pb=NewPMPassBuilder() begin
         add!(pb, NewPMFunctionPassManager()) do fpm
-            add!(fpm, InferAddressSpacesPass())
-        end
-        add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
-            add!(fpm, SROAPass())
-            add!(fpm, EarlyCSEPass())
-            add!(fpm, InstCombinePass())
         end
-        run!(pb, mod, tm)
+        run!(pb, mod)
     end
-    dispose(tm)
 
     return functions(mod)[fn]
 end
