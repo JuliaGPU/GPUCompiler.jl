@@ -92,10 +92,16 @@ function rewrite_byref_addrspaces!(@nospecialize(job::CompilerJob{GCNCompilerTar
         LLVM.name!(new_arg, LLVM.name(arg))
     end
 
-    # copy parameter attributes
+    # copy parameter attributes, ensuring byref is preserved with correct type
     for (i, _) in enumerate(parameters(ft))
         for attr in collect(parameter_attributes(f, i))
             push!(parameter_attributes(new_f, i), attr)
+        end
+        # explicitly re-add byref with the correct type, in case the copy
+        # dropped it due to the parameter type change
+        if byref[i]
+            llvm_typ = convert(LLVMType, byref_types[i])
+            push!(parameter_attributes(new_f, i), TypeAttribute("byref", llvm_typ))
         end
     end
 
