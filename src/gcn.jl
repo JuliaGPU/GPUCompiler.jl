@@ -54,15 +54,17 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
     return entry
 end
 
-function finish_ir!(@nospecialize(job::CompilerJob{GCNCompilerTarget}), mod::LLVM.Module,
-                    entry::LLVM.Function)
+function finish_ir!(
+        @nospecialize(job::CompilerJob{GCNCompilerTarget}), mod::LLVM.Module,
+        entry::LLVM.Function
+    )
     if job.config.kernel
         entry = add_kernarg_address_spaces!(job, mod, entry)
 
         # optimize after address space rewriting: propagate addrspace(4) through
         # the addrspacecast chains, then clean up newly-exposed opportunities
         tm = llvm_machine(job.config.target)
-        @dispose pb=NewPMPassBuilder() tm begin
+        @dispose pb = NewPMPassBuilder() tm begin
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, InferAddressSpacesPass())
                 add!(fpm, SROAPass())
@@ -76,23 +78,26 @@ function finish_ir!(@nospecialize(job::CompilerJob{GCNCompilerTarget}), mod::LLV
     return entry
 end
 
-# Rewrite byref kernel parameters from flat (addrspace 0) to kernarg (addrspace 4).
+# Rewrite byref kernel parameters from flat (addrspace 0) to constant (addrspace 4).
 #
-# On AMDGPU, the kernarg segment is in address space 4 and is scalar-loadable via s_load.
-# Clang emits byref parameters as `ptr addrspace(4)` from the frontend, but Julia's
-# RemoveJuliaAddrspacesPass strips all address spaces to flat. This pass restores the
-# correct address space so that struct field loads from byref arguments become s_load
-# instead of flat_load.
+# On AMDGPU, kernel arguments reside in the constant address space (addrspace 4),
+# which is scalar-loadable via s_load. Julia initially emits byref parameters as
+# pointers in addrspace(11) (tracked/derived), but RemoveJuliaAddrspacesPass strips
+# all non-integral address spaces to flat (addrspace 0) during optimization. This pass
+# restores addrspace(4) on byref parameters so that the backend can emit s_load
+# instead of flat_load for struct field accesses.
 #
 # NOTE: must run after optimization, where RemoveJuliaAddrspacesPass has already
 # converted Julia's addrspace(11) to flat (addrspace 0) on these parameters.
-function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                     f::LLVM.Function)
+function add_kernarg_address_spaces!(
+        @nospecialize(job::CompilerJob), mod::LLVM.Module,
+        f::LLVM.Function
+    )
     ft = function_type(f)
 
     # find the byref parameters
     byref_mask = BitVector(undef, length(parameters(ft)))
-    args = classify_arguments(job, ft; post_optimization=job.config.optimize)
+    args = classify_arguments(job, ft; post_optimization = job.config.optimize)
     filter!(args) do arg
         arg.cc != GHOST
     end
@@ -114,7 +119,7 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
     new_types = LLVMType[]
     for (i, param) in enumerate(parameters(ft))
         if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
-            push!(new_types, LLVM.PointerType(#=kernarg=# 4))
+            push!(new_types, LLVM.PointerType(#=constant=# 4))
         else
             push!(new_types, param)
         end
@@ -130,7 +135,7 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
     # (which expects flat pointers) continues to work. The AMDGPU backend's
     # AMDGPULowerKernelArguments traces these casts and produces s_load.
     new_args = LLVM.Value[]
-    @dispose builder=IRBuilder() begin
+    @dispose builder = IRBuilder() begin
         entry_bb = BasicBlock(new_f, "conversion")
         position!(builder, entry_bb)
 
@@ -148,8 +153,10 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
             param => new_args[i] for (i, param) in enumerate(parameters(f))
         )
         value_map[f] = new_f
-        clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+        clone_into!(
+            new_f, f; value_map,
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
+        )
 
         # fall through from conversion block to cloned entry
         br!(builder, blocks(new_f)[2])
@@ -174,7 +181,7 @@ function add_kernarg_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.
     LLVM.name!(new_f, fn)
 
     # clean up the extra conversion block
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb = NewPMPassBuilder() begin
         add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
         end
