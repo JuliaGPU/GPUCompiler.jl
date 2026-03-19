@@ -64,7 +64,7 @@ function finish_ir!(
         # optimize after address space rewriting: propagate addrspace(4) through
         # the addrspacecast chains, then clean up newly-exposed opportunities
         tm = llvm_machine(job.config.target)
-        @dispose pb = NewPMPassBuilder() tm begin
+        @dispose pb=NewPMPassBuilder() tm begin
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, InferAddressSpacesPass())
                 add!(fpm, SROAPass())
@@ -135,7 +135,7 @@ function add_kernarg_address_spaces!(
     # (which expects flat pointers) continues to work. The AMDGPU backend's
     # AMDGPULowerKernelArguments traces these casts and produces s_load.
     new_args = LLVM.Value[]
-    @dispose builder = IRBuilder() begin
+    @dispose builder=IRBuilder() begin
         entry_bb = BasicBlock(new_f, "conversion")
         position!(builder, entry_bb)
 
@@ -181,7 +181,7 @@ function add_kernarg_address_spaces!(
     LLVM.name!(new_f, fn)
 
     # clean up the extra conversion block
-    @dispose pb = NewPMPassBuilder() begin
+    @dispose pb=NewPMPassBuilder() begin
         add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
         end
