@@ -115,11 +115,15 @@ function add_kernarg_address_spaces!(
     end
     needs_rewrite || return f
 
-    # generate the new function type with kernarg address space on byref params
+    # generate the new function type with constant address space on byref params
     new_types = LLVMType[]
     for (i, param) in enumerate(parameters(ft))
         if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
-            push!(new_types, LLVM.PointerType(#=constant=# 4))
+            if supports_typed_pointers(context())
+                push!(new_types, LLVM.PointerType(eltype(param), #=constant=# 4))
+            else
+                push!(new_types, LLVM.PointerType(#=constant=# 4))
+            end
         else
             push!(new_types, param)
         end
@@ -141,7 +145,7 @@ function add_kernarg_address_spaces!(
 
         for (i, param) in enumerate(parameters(ft))
             if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
-                cast = addrspacecast!(builder, parameters(new_f)[i], LLVM.PointerType(0))
+                cast = addrspacecast!(builder, parameters(new_f)[i], param)
                 push!(new_args, cast)
             else
                 push!(new_args, parameters(new_f)[i])
