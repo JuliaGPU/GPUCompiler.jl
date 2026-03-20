@@ -95,14 +95,14 @@ function add_kernarg_address_spaces!(
     )
     ft = function_type(f)
 
-    # find the byref parameters
+    # find the byref parameters by checking for the byref attribute directly,
+    # rather than re-classifying arguments (which can fail on typed-pointer LLVM
+    # due to element type mismatches in classify_arguments assertions).
+    byref_kind = LLVM.API.LLVMGetEnumAttributeKindForName("byref", 5)
     byref_mask = BitVector(undef, length(parameters(ft)))
-    args = classify_arguments(job, ft; post_optimization = job.config.optimize)
-    filter!(args) do arg
-        arg.cc != GHOST
-    end
-    for arg in args
-        byref_mask[arg.idx] = (arg.cc == BITS_REF || arg.cc == KERNEL_STATE)
+    for i in 1:length(parameters(ft))
+        attrs = collect(parameter_attributes(f, i))
+        byref_mask[i] = any(a -> a isa TypeAttribute && kind(a) == byref_kind, attrs)
     end
 
     # check if any flat pointer byref params need rewriting
