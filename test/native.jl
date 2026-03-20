@@ -44,9 +44,9 @@ end
             end
         end
 
-        job, _ = Native.create_job(mod.outer, (Int, Symbol))
+        job, _ = Native.create_job(mod.outer, (Int, Symbol); validate=false)
         JuliaContext() do ctx
-            ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
+            ir, meta = GPUCompiler.compile(:llvm, job)
 
             meth = only(methods(mod.outer, (Int, Symbol)))
 
