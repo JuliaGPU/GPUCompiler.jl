@@ -37,6 +37,122 @@ end
     end
 end
 
+@testset "kernarg address space for byref parameters" begin
+    mod = @eval module $(gensym())
+        struct MyStruct
+            x::Float64
+            y::Float64
+        end
+
+        function kernel(s::MyStruct)
+            s.x + s.y
+            return
+        end
+    end
+
+    # byref struct params should be ptr addrspace(4) in kernel IR
+    @test @filecheck begin
+        check"CHECK: define amdgpu_kernel void @_Z6kernel8MyStruct(ptr addrspace(4)"
+        GCN.code_llvm(mod.kernel, Tuple{mod.MyStruct}; dump_module=true, kernel=true)
+    end
+
+    # non-kernel should NOT have addrspace(4)
+    @test @filecheck begin
+        check"CHECK-NOT: addrspace(4)"
+        GCN.code_llvm(mod.kernel, Tuple{mod.MyStruct}; dump_module=true, kernel=false)
+    end
+end
+
+@testset "byref attribute preserved on kernarg parameters" begin
+    mod = @eval module $(gensym())
+        struct LargeStruct
+            a::Float64
+            b::Float64
+            c::Float64
+            d::Float64
+        end
+
+        function kernel(s::LargeStruct, out::Ptr{Float64})
+            unsafe_store!(out, s.a + s.b + s.c + s.d)
+            return
+        end
+    end
+
+    # the byref attribute must survive the addrspace rewrite (clone_into! can drop it)
+    @test @filecheck begin
+        check"CHECK: byref"
+        check"CHECK: addrspace(4)"
+        GCN.code_llvm(mod.kernel, Tuple{mod.LargeStruct, Ptr{Float64}};
+                       dump_module=true, kernel=true)
+    end
+end
+
+@testset "mixed byref and scalar kernel parameters" begin
+    mod = @eval module $(gensym())
+        struct Params
+            x::Float64
+            y::Float64
+        end
+
+        function kernel(a::Float64, s::Params, out::Ptr{Float64})
+            unsafe_store!(out, a + s.x + s.y)
+            return
+        end
+    end
+
+    # scalar Float64 should NOT be in addrspace(4),
+    # only the struct byref param should be.
+    # NOTE: Ptr{Float64} is lowered to i64 on Julia ≤1.11 and ptr on Julia 1.12+.
+    @test @filecheck begin
+        check"CHECK: define amdgpu_kernel void"
+        check"CHECK-SAME: double"
+        check"CHECK-SAME: ptr addrspace(4)"
+        check"CHECK-SAME: {{(i64|ptr)}}"
+        GCN.code_llvm(mod.kernel, Tuple{Float64, mod.Params, Ptr{Float64}};
+                       dump_module=true, kernel=true)
+    end
+end
+
+@testset "add_kernarg_address_spaces! rewrites IR correctly" begin
+    mod = @eval module $(gensym())
+        struct KernelArgs
+            x::Float64
+            y::Float64
+            z::Float64
+        end
+
+        function kernel(s::KernelArgs, scale::Float64, out::Ptr{Float64})
+            unsafe_store!(out, (s.x + s.y + s.z) * scale)
+            return
+        end
+    end
+
+    job, _ = GCN.create_job(mod.kernel, Tuple{mod.KernelArgs, Float64, Ptr{Float64}};
+                             kernel=true)
+    JuliaContext() do ctx
+        ir, meta = GPUCompiler.compile(:llvm, job)
+
+        entry = meta.entry
+        ft = function_type(entry)
+        params = parameters(ft)
+
+        # the struct byref param should be ptr addrspace(4)
+        has_as4 = any(p -> p isa LLVM.PointerType && addrspace(p) == 4, params)
+        @test has_as4
+
+        # non-struct params (double, and i64/ptr for Ptr{Float64}) should NOT
+        # be in addrspace(4). Ptr{Float64} is i64 on Julia ≤1.11, ptr on 1.12+.
+        non_byref = filter(p -> !(p isa LLVM.PointerType && addrspace(p) == 4), params)
+        @test !isempty(non_byref)  # double (and i64 or ptr) params
+
+        # byref attribute must be present
+        ir_str = string(ir)
+        @test occursin("byref", ir_str)
+
+        dispose(ir)
+    end
+end
+
 @testset "https://github.com/JuliaGPU/AMDGPU.jl/issues/846" begin
     ir, rt = GCN.code_typed((Tuple{Tuple{Val{4}}, Tuple{Float32}},); always_inline=true) do t
         t[1]
@@ -48,6 +164,48 @@ end
 
 ############################################################################################
 @testset "assembly" begin
+
+@testset "s_load for kernarg struct access" begin
+    mod = @eval module $(gensym())
+        struct MyStruct
+            x::Float64
+            y::Float64
+        end
+
+        function kernel(s::MyStruct, out::Ptr{Float64})
+            unsafe_store!(out, s.x + s.y)
+            return
+        end
+    end
+
+    # struct field loads from kernarg should use s_load, not flat_load
+    @test @filecheck begin
+        check"CHECK: s_load_dwordx"
+        check"CHECK-NOT: flat_load"
+        GCN.code_native(mod.kernel, Tuple{mod.MyStruct, Ptr{Float64}}; kernel=true)
+    end
+end
+
+@testset "no scratch spills for small struct kernarg" begin
+    mod = @eval module $(gensym())
+        struct SmallStruct
+            x::Float64
+            y::Float64
+        end
+
+        function kernel(s::SmallStruct, out::Ptr{Float64})
+            unsafe_store!(out, s.x + s.y)
+            return
+        end
+    end
+
+    # a small struct kernel should not need scratch memory
+    @test @filecheck begin
+        check"CHECK: .private_segment_fixed_size: 0"
+        GCN.code_native(mod.kernel, Tuple{mod.SmallStruct, Ptr{Float64}};
+                         dump_module=true, kernel=true)
+    end
+end
 
 @testset "skip scalar trap" begin
     mod = @eval module $(gensym())

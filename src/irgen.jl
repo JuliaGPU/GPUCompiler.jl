@@ -94,7 +94,11 @@ function irgen(@nospecialize(job::CompilerJob))
             for arg in args
                 if arg.cc == BITS_REF
                     llvm_typ = convert(LLVMType, arg.typ)
-                    attr = TypeAttribute("byval", llvm_typ)
+                    if pass_by_ref(job)
+                        attr = TypeAttribute("byref", llvm_typ)
+                    else
+                        attr = TypeAttribute("byval", llvm_typ)
+                    end
                     push!(parameter_attributes(entry, arg.idx), attr)
                 end
             end

@@ -272,6 +272,12 @@ kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
 # Does the target need to pass kernel arguments by value?
 pass_by_value(@nospecialize(job::CompilerJob)) = true
 
+# Should the target use byref instead of byval+lower_byval for kernel arguments?
+# When true, aggregate arguments are passed as pointers with the byref attribute,
+# allowing the backend to load fields directly from the argument memory (e.g. kernarg
+# segment on AMDGPU) instead of materializing the entire struct via first-class aggregates.
+pass_by_ref(@nospecialize(job::CompilerJob)) = false
+
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 

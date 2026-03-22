@@ -40,6 +40,8 @@ runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.config.target.dev
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
 
+pass_by_ref(@nospecialize(job::CompilerJob{GCNCompilerTarget})) = true
+
 function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     lower_throw_extra!(mod)
@@ -47,12 +49,150 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
     if job.config.kernel
         # calling convention
         callconv!(entry, LLVM.API.LLVMAMDGPUKERNELCallConv)
-
-        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
-        entry = lower_byval(job, mod, entry)
     end
 
     return entry
+end
+
+function finish_ir!(
+        @nospecialize(job::CompilerJob{GCNCompilerTarget}), mod::LLVM.Module,
+        entry::LLVM.Function
+    )
+    if job.config.kernel
+        entry = add_kernarg_address_spaces!(job, mod, entry)
+
+        # optimize after address space rewriting: propagate addrspace(4) through
+        # the addrspacecast chains, then clean up newly-exposed opportunities
+        tm = llvm_machine(job.config.target)
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, NewPMFunctionPassManager()) do fpm
+                add!(fpm, InferAddressSpacesPass())
+                add!(fpm, SROAPass())
+                add!(fpm, InstCombinePass())
+                add!(fpm, EarlyCSEPass())
+                add!(fpm, SimplifyCFGPass())
+            end
+            run!(pb, mod, tm)
+        end
+    end
+    return entry
+end
+
+# Rewrite byref kernel parameters from flat (addrspace 0) to constant (addrspace 4).
+#
+# On AMDGPU, kernel arguments reside in the constant address space (addrspace 4),
+# which is scalar-loadable via s_load. Julia initially emits byref parameters as
+# pointers in addrspace(11) (tracked/derived), but RemoveJuliaAddrspacesPass strips
+# all non-integral address spaces to flat (addrspace 0) during optimization. This pass
+# restores addrspace(4) on byref parameters so that the backend can emit s_load
+# instead of flat_load for struct field accesses.
+#
+# NOTE: must run after optimization, where RemoveJuliaAddrspacesPass has already
+# converted Julia's addrspace(11) to flat (addrspace 0) on these parameters.
+function add_kernarg_address_spaces!(
+        @nospecialize(job::CompilerJob), mod::LLVM.Module,
+        f::LLVM.Function
+    )
+    ft = function_type(f)
+
+    # find the byref parameters by checking for the byref attribute directly,
+    # rather than re-classifying arguments (which can fail on typed-pointer LLVM
+    # due to element type mismatches in classify_arguments assertions).
+    byref_kind = LLVM.API.LLVMGetEnumAttributeKindForName("byref", 5)
+    byref_mask = BitVector(undef, length(parameters(ft)))
+    for i in 1:length(parameters(ft))
+        attrs = collect(parameter_attributes(f, i))
+        byref_mask[i] = any(a -> a isa TypeAttribute && kind(a) == byref_kind, attrs)
+    end
+
+    # check if any flat pointer byref params need rewriting
+    needs_rewrite = false
+    for (i, param) in enumerate(parameters(ft))
+        if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
+            needs_rewrite = true
+            break
+        end
+    end
+    needs_rewrite || return f
+
+    # generate the new function type with constant address space on byref params
+    new_types = LLVMType[]
+    for (i, param) in enumerate(parameters(ft))
+        if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
+            if supports_typed_pointers(context())
+                push!(new_types, LLVM.PointerType(eltype(param), #=constant=# 4))
+            else
+                push!(new_types, LLVM.PointerType(#=constant=# 4))
+            end
+        else
+            push!(new_types, param)
+        end
+    end
+    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_f = LLVM.Function(mod, "", new_ft)
+    linkage!(new_f, linkage(f))
+    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+        LLVM.name!(new_arg, LLVM.name(arg))
+    end
+
+    # insert addrspacecasts from kernarg (4) back to flat (0) so that the cloned IR
+    # (which expects flat pointers) continues to work. The AMDGPU backend's
+    # AMDGPULowerKernelArguments traces these casts and produces s_load.
+    new_args = LLVM.Value[]
+    @dispose builder=IRBuilder() begin
+        entry_bb = BasicBlock(new_f, "conversion")
+        position!(builder, entry_bb)
+
+        for (i, param) in enumerate(parameters(ft))
+            if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
+                cast = addrspacecast!(builder, parameters(new_f)[i], param)
+                push!(new_args, cast)
+            else
+                push!(new_args, parameters(new_f)[i])
+            end
+        end
+
+        # clone the original function body
+        value_map = Dict{LLVM.Value, LLVM.Value}(
+            param => new_args[i] for (i, param) in enumerate(parameters(f))
+        )
+        value_map[f] = new_f
+        clone_into!(
+            new_f, f; value_map,
+            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
+        )
+
+        # fall through from conversion block to cloned entry
+        br!(builder, blocks(new_f)[2])
+    end
+
+    # copy parameter attributes AFTER clone_into!, because CloneFunctionInto
+    # overwrites all attributes via setAttributes. For byref params, the VMap
+    # maps old args to addrspacecast instructions (not Arguments), so LLVM's
+    # attribute remapping silently drops them. We must re-add them here.
+    for i in 1:length(parameters(ft))
+        for attr in collect(parameter_attributes(f, i))
+            push!(parameter_attributes(new_f, i), attr)
+        end
+    end
+
+    # replace the old function
+    fn = LLVM.name(f)
+    prune_constexpr_uses!(f)
+    @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
+    erase!(f)
+    LLVM.name!(new_f, fn)
+
+    # clean up the extra conversion block
+    @dispose pb=NewPMPassBuilder() begin
+        add!(pb, NewPMFunctionPassManager()) do fpm
+            add!(fpm, SimplifyCFGPass())
+        end
+        run!(pb, mod)
+    end
+
+    return functions(mod)[fn]
 end
 
 
