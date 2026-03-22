@@ -170,7 +170,7 @@ struct jl_llvmf_dump
 end
 
 """
-    code_llvm([io], job; optimize=true, raw=false, dump_module=false)
+    code_llvm([io], job; optimize=job.config.optimize, raw=false, dump_module=false)
 
 Prints the device LLVM IR generated for the given compiler job to `io` (default `stdout`).
 
@@ -183,7 +183,7 @@ The following keyword arguments are supported:
 
 See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
 """
-function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=true, raw::Bool=false,
+function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=job.config.optimize, raw::Bool=false,
                    debuginfo::Symbol=:default, dump_module::Bool=false, kwargs...)
     # NOTE: jl_dump_function_ir supports stripping metadata, so don't do it in the driver
     config = CompilerConfig(job.config; validate=false, strip=false, optimize)
@@ -383,7 +383,7 @@ macro device_code(ex...)
         end
 
         open(joinpath(dir, "$fn.opt.ll"), "w") do io
-            code_llvm(io, job; dump_module=true, raw=true)
+            code_llvm(io, job; dump_module=true, raw=true, optimize=true)
         end
 
         open(joinpath(dir, "$fn.asm"), "w") do io
