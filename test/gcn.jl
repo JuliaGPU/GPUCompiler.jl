@@ -261,9 +261,9 @@ end
     end
 
     @test @filecheck begin
+        check"CHECK: .type {{(julia|j)_nonentry_[0-9]+}},@function"
         check"CHECK: .amdhsa_kernel _Z5entry5Int64"
         check"CHECK-NOT: .amdhsa_kernel {{(julia|j)_nonentry_[0-9]+}}"
-        check"CHECK: .type {{(julia|j)_nonentry_[0-9]+}},@function"
         GCN.code_native(mod.entry, Tuple{Int64}; dump_module=true, kernel=true)
     end
 end
