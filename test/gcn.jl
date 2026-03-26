@@ -52,7 +52,8 @@ end
 
     # byref struct params should be ptr addrspace(4) in kernel IR
     @test @filecheck begin
-        check"CHECK: define amdgpu_kernel void @_Z6kernel8MyStruct(ptr addrspace(4)"
+        check"TYPED: define amdgpu_kernel void @_Z6kernel8MyStruct({{.*}} addrspace(4)*"
+        check"OPAQUE: define amdgpu_kernel void @_Z6kernel8MyStruct(ptr addrspace(4)"
         GCN.code_llvm(mod.kernel, Tuple{mod.MyStruct}; dump_module=true, kernel=true)
     end
 
@@ -106,7 +107,8 @@ end
     @test @filecheck begin
         check"CHECK: define amdgpu_kernel void"
         check"CHECK-SAME: double"
-        check"CHECK-SAME: ptr addrspace(4)"
+        check"TYPED-SAME: {{.*}} addrspace(4)*"
+        check"OPAQUE-SAME: ptr addrspace(4)"
         check"CHECK-SAME: {{(i64|ptr)}}"
         GCN.code_llvm(mod.kernel, Tuple{Float64, mod.Params, Ptr{Float64}};
                        dump_module=true, kernel=true)
@@ -259,9 +261,9 @@ end
     end
 
     @test @filecheck begin
+        check"CHECK: .amdhsa_kernel _Z5entry5Int64"
         check"CHECK-NOT: .amdhsa_kernel {{(julia|j)_nonentry_[0-9]+}}"
         check"CHECK: .type {{(julia|j)_nonentry_[0-9]+}},@function"
-        check"CHECK: .amdhsa_kernel _Z5entry5Int64"
         GCN.code_native(mod.entry, Tuple{Int64}; dump_module=true, kernel=true)
     end
 end
