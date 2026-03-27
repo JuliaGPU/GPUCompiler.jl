@@ -61,7 +61,7 @@ function compile(target::Symbol, @nospecialize(job::CompilerJob); kwargs...)
     end
 
     if compile_hook[] !== nothing
-        compile_hook[](job)
+        Base.invokelatest(compile_hook[], job)
     end
 
     return compile_unhooked(target, job)
