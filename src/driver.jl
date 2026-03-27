@@ -238,8 +238,8 @@ const __llvm_initialized = Ref(false)
                     dyn_val
                 else
                     ft, tt = dyn_val
-                    dyn_src = methodinstance(ft, tt, tls_world_age())
-                    CompilerJob(dyn_src, job.config)
+                    dyn_src = methodinstance(ft, tt, job.world)
+                    CompilerJob(dyn_src, job.config, job.world)
                 end
 
                 push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
