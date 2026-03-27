@@ -11,12 +11,12 @@ sink_gcn(i) = sink(i, Val(5))
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: amdgpu_kernel"
+        @check_not "amdgpu_kernel"
         GCN.code_llvm(mod.kernel, Tuple{}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK: amdgpu_kernel"
+        @check "amdgpu_kernel"
         GCN.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
     end
 end
@@ -30,9 +30,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: {{julia_throw_boundserror_[0-9]+}}"
-        check"CHECK: @gpu_report_exception"
-        check"CHECK: @gpu_signal_exception"
+        @check_not "{{julia_throw_boundserror_[0-9]+}}"
+        @check "@gpu_report_exception"
+        @check "@gpu_signal_exception"
         GCN.code_llvm(mod.kernel, Tuple{})
     end
 end
@@ -52,14 +52,14 @@ end
 
     # byref struct params should be ptr addrspace(4) in kernel IR
     @test @filecheck begin
-        check"TYPED: define amdgpu_kernel void @_Z6kernel8MyStruct({{.*}} addrspace(4)*"
-        check"OPAQUE: define amdgpu_kernel void @_Z6kernel8MyStruct(ptr addrspace(4)"
+        @check cond=typed_ptrs "define amdgpu_kernel void @_Z6kernel8MyStruct({{.*}} addrspace(4)*"
+        @check cond=opaque_ptrs "define amdgpu_kernel void @_Z6kernel8MyStruct(ptr addrspace(4)"
         GCN.code_llvm(mod.kernel, Tuple{mod.MyStruct}; dump_module=true, kernel=true)
     end
 
     # non-kernel should NOT have addrspace(4)
     @test @filecheck begin
-        check"CHECK-NOT: addrspace(4)"
+        @check_not "addrspace(4)"
         GCN.code_llvm(mod.kernel, Tuple{mod.MyStruct}; dump_module=true, kernel=false)
     end
 end
@@ -81,8 +81,8 @@ end
 
     # the byref attribute must survive the addrspace rewrite (clone_into! can drop it)
     @test @filecheck begin
-        check"CHECK: byref"
-        check"CHECK: addrspace(4)"
+        @check "byref"
+        @check "addrspace(4)"
         GCN.code_llvm(mod.kernel, Tuple{mod.LargeStruct, Ptr{Float64}};
                        dump_module=true, kernel=true)
     end
@@ -105,11 +105,11 @@ end
     # only the struct byref param should be.
     # NOTE: Ptr{Float64} is lowered to i64 on Julia ≤1.11 and ptr on Julia 1.12+.
     @test @filecheck begin
-        check"CHECK: define amdgpu_kernel void"
-        check"CHECK-SAME: double"
-        check"TYPED-SAME: {{.*}} addrspace(4)*"
-        check"OPAQUE-SAME: ptr addrspace(4)"
-        check"CHECK-SAME: {{(i64|ptr)}}"
+        @check "define amdgpu_kernel void"
+        @check_same "double"
+        @check_same cond=typed_ptrs "{{.*}} addrspace(4)*"
+        @check_same cond=opaque_ptrs "ptr addrspace(4)"
+        @check_same "{{(i64|ptr)}}"
         GCN.code_llvm(mod.kernel, Tuple{Float64, mod.Params, Ptr{Float64}};
                        dump_module=true, kernel=true)
     end
@@ -182,8 +182,8 @@ end
 
     # struct field loads from kernarg should use s_load, not flat_load
     @test @filecheck begin
-        check"CHECK: s_load_dwordx"
-        check"CHECK-NOT: flat_load"
+        @check "s_load_dwordx"
+        @check_not "flat_load"
         GCN.code_native(mod.kernel, Tuple{mod.MyStruct, Ptr{Float64}}; kernel=true)
     end
 end
@@ -203,7 +203,7 @@ end
 
     # a small struct kernel should not need scratch memory
     @test @filecheck begin
-        check"CHECK: .private_segment_fixed_size: 0"
+        @check ".private_segment_fixed_size: 0"
         GCN.code_native(mod.kernel, Tuple{mod.SmallStruct, Ptr{Float64}};
                          dump_module=true, kernel=true)
     end
@@ -223,9 +223,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{(julia|j)_kernel_[0-9]+}}:"
-        check"CHECK: s_cbranch_exec"
-        check"CHECK: s_trap 2"
+        @check_label "{{(julia|j)_kernel_[0-9]+}}:"
+        @check "s_cbranch_exec"
+        @check "s_trap 2"
         GCN.code_native(mod.kernel, Tuple{})
     end
 end
@@ -243,9 +243,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{(julia|j)_parent_[0-9]+}}:"
-        check"CHECK: s_add_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
-        check"CHECK: s_addc_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
+        @check_label "{{(julia|j)_parent_[0-9]+}}:"
+        @check "s_add_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
+        @check "s_addc_u32 {{.+}} {{(julia|j)_child_[0-9]+}}@rel32@"
         GCN.code_native(mod.parent, Tuple{Int64}; dump_module=true)
     end
 end
@@ -261,9 +261,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: .type {{(julia|j)_nonentry_[0-9]+}},@function"
-        check"CHECK: .symbol:{{.*}}_Z5entry5Int64.kd"
-        check"CHECK-NOT: .symbol:{{.*}}nonentry"
+        @check ".type {{(julia|j)_nonentry_[0-9]+}},@function"
+        @check ".symbol:{{.*}}_Z5entry5Int64.kd"
+        @check_not ".symbol:{{.*}}nonentry"
         GCN.code_native(mod.entry, Tuple{Int64}; dump_module=true, kernel=true)
     end
 end
@@ -286,12 +286,12 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK: .type {{(julia|j)_child_[0-9]+}},@function"
+        @check ".type {{(julia|j)_child_[0-9]+}},@function"
         GCN.code_native(mod.parent1, Tuple{Int}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK: .type {{(julia|j)_child_[0-9]+}},@function"
+        @check ".type {{(julia|j)_child_[0-9]+}},@function"
         GCN.code_native(mod.parent2, Tuple{Int}; dump_module=true)
     end
 end
@@ -315,14 +315,14 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-DAG: .type {{(julia|j)_child1_[0-9]+}},@function"
-        check"CHECK-DAG: .type {{(julia|j)_child2_[0-9]+}},@function"
+        @check_dag ".type {{(julia|j)_child1_[0-9]+}},@function"
+        @check_dag ".type {{(julia|j)_child2_[0-9]+}},@function"
         GCN.code_native(mod.parent1, Tuple{Int}; dump_module=true)
     end
 
     @test @filecheck begin
-        check"CHECK-DAG: .type {{(julia|j)_child1_[0-9]+}},@function"
-        check"CHECK-DAG: .type {{(julia|j)_child2_[0-9]+}},@function"
+        @check_dag ".type {{(julia|j)_child1_[0-9]+}},@function"
+        @check_dag ".type {{(julia|j)_child2_[0-9]+}},@function"
         GCN.code_native(mod.parent2, Tuple{Int}; dump_module=true)
     end
 end
@@ -342,9 +342,9 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: {{(julia|j)_kernel_[0-9]+}}:"
-        check"CHECK-NOT: jl_throw"
-        check"CHECK-NOT: jl_invoke"
+        @check_label "{{(julia|j)_kernel_[0-9]+}}:"
+        @check_not "jl_throw"
+        @check_not "jl_invoke"
         GCN.code_native(mod.kernel, Tuple{Ptr{Int32}})
     end
 end
@@ -394,11 +394,11 @@ false && @testset "GC and TLS lowering" begin
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: jl_push_gc_frame"
-        check"CHECK-NOT: jl_pop_gc_frame"
-        check"CHECK-NOT: jl_get_gc_frame_slot"
-        check"CHECK-NOT: jl_new_gc_frame"
-        check"CHECK: gpu_gc_pool_alloc"
+        @check_not "jl_push_gc_frame"
+        @check_not "jl_pop_gc_frame"
+        @check_not "jl_get_gc_frame_slot"
+        @check_not "jl_new_gc_frame"
+        @check "gpu_gc_pool_alloc"
         GCN.code_native(mod.kernel, Tuple{Int})
     end
 
@@ -416,7 +416,7 @@ false && @testset "GC and TLS lowering" begin
     end
 
     @test @filecheck begin
-        check"CHECK-NOT: gpu_gc_pool_alloc"
+        @check_not "gpu_gc_pool_alloc"
         GCN.code_native(ref_kernel, Tuple{Ptr{Int64}, Int})
     end
 end
@@ -435,8 +435,8 @@ end
     end
 
     @test @filecheck begin
-        check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-        check"CHECK: jl_box_float32"
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "jl_box_float32"
         GCN.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}})
     end
     GCN.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
