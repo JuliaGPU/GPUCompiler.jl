@@ -88,6 +88,23 @@ end
         occursin("[1] unsafe_store!", msg) &&
         occursin(r"\[\d+\] kernel", msg)
     end
+
+    @static if isdefined(Core, :BFloat16)
+        @test @filecheck begin
+            check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
+            check"CHECK: store bfloat"
+            SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Core.BFloat16}, Core.BFloat16};
+                            backend, supports_bfloat16=true)
+        end
+
+        @test_throws_message(InvalidIRError,
+                             SPIRV.code_execution(mod.kernel, Tuple{Ptr{Core.BFloat16}, Core.BFloat16};
+                                                  backend, supports_bfloat16=false)) do msg
+            occursin("unsupported use of bfloat value", msg) &&
+            occursin("[1] unsafe_store!", msg) &&
+            occursin(r"\[\d+\] kernel", msg)
+        end
+    end
 end
 
 end

@@ -27,6 +27,7 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     extensions::Vector{String} = []
     supports_fp16::Bool = true
     supports_fp64::Bool = true
+    supports_bfloat16::Bool = false
 
     backend::Symbol = isavailable(SPIRV_LLVM_Backend_jll) ? :llvm : :khronos
     # XXX: these don't really belong in the _target_ struct
@@ -85,6 +86,9 @@ function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     end
     if !job.config.target.supports_fp64
         append!(errors, check_ir_values(mod, LLVM.DoubleType()))
+    end
+    if !job.config.target.supports_bfloat16 && isdefined(LLVM, :BFloatType)
+        append!(errors, check_ir_values(mod, LLVM.BFloatType()))
     end
 
     return errors
