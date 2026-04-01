@@ -88,7 +88,7 @@ jobs:
           arch: ${{ matrix.arch }}
 
       - name: Set-up cache
-        uses: julia-actions/cache@v2
+        uses: julia-actions/cache@v3
 
       - name: Run tests
         uses: julia-actions/julia-runtest@v1
@@ -139,7 +139,7 @@ jobs:
           echo $PWD/../julia-*/bin >> $GITHUB_PATH
 
       - name: Set-up cache
-        uses: julia-actions/cache@v2
+        uses: julia-actions/cache@v3
 
       - name: Run tests
         uses: julia-actions/julia-runtest@v1
