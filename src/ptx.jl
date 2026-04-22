@@ -155,10 +155,9 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     @dispose pb=NewPMPassBuilder() begin
         register!(pb, NVVMReflectPass())
 
-        add!(pb, NewPMFunctionPassManager()) do fpm
-            # TODO: need to run this earlier; optimize_module! is called after addOptimizationPasses!
-            add!(fpm, NVVMReflectPass())
+        add!(pb, NVVMReflectPass())
 
+        add!(pb, NewPMFunctionPassManager()) do fpm
             # needed by GemmKernels.jl-like code
             add!(fpm, SpeculativeExecutionPass())
 
@@ -385,9 +384,8 @@ end
 #       not exported. It is meant to be added to a pass pipeline automatically, by
 #       calling adjustPassManager, but we don't use a PassManagerBuilder so cannot do so.
 const NVVM_REFLECT_FUNCTION = "__nvvm_reflect"
-function nvvm_reflect!(fun::LLVM.Function)
+function nvvm_reflect!(mod::LLVM.Module)
     job = current_job::CompilerJob
-    mod = LLVM.parent(fun)
     changed = false
     @tracepoint "nvvmreflect" begin
 
@@ -487,4 +485,4 @@ function nvvm_reflect!(fun::LLVM.Function)
     end
     return changed
 end
-NVVMReflectPass() = NewPMFunctionPass("custom-nvvm-reflect", nvvm_reflect!)
+NVVMReflectPass() = NewPMModulePass("custom-nvvm-reflect", nvvm_reflect!)
