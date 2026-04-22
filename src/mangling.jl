@@ -7,8 +7,8 @@
 
 safe_name(fn::String) = replace(fn, r"[^A-Za-z0-9]"=>"_")
 
-safe_name(t::DataType) = safe_name(String(nameof(t)))
-function safe_name(t::Type{<:Function})
+safe_name(@nospecialize(t::DataType)) = safe_name(String(nameof(t)))
+function safe_name(@nospecialize(t::Type{<:Function}))
     # like Base.nameof, but for function types
     fn = @static if !hasfield(Core.TypeName, :mt)
         t.name.singletonname
@@ -25,7 +25,7 @@ function safe_name(t::Type{<:Function})
 end
 safe_name(::Type{Union{}}) = "Bottom"
 
-safe_name(x) = safe_name(repr(x))
+safe_name(@nospecialize(x)) = safe_name(repr(x))
 
 
 # C++ mangling
@@ -33,11 +33,19 @@ safe_name(x) = safe_name(repr(x))
 # we generate function names that look like C++ functions, because many tools, like NVIDIA's
 # profilers, support them (grouping different instantiations of the same kernel together).
 
-function mangle_param(t, substitutions = Any[], top = false)
+function mangle_param(@nospecialize(t), substitutions = Any[], top = false)
     t == Nothing && return "v"
 
-    function find_substitution(x)
-        sub = findfirst(isequal(x), substitutions)
+    # Manual lookup instead of `findfirst(isequal(x), substitutions)`: the latter
+    # builds a `Base.Fix{2, isequal, typeof(x)}` that specializes `findfirst` per
+    # `x`-type. Trace-compile on CUDA's broadcast testsuite shows ~2600 such
+    # events (each unique mangled type triggers one `findnext` + one `Fix`
+    # specialization). `===` comparison in a loop avoids both.
+    function find_substitution(@nospecialize(x))
+        sub = nothing
+        for (i, s) in enumerate(substitutions)
+            s === x && (sub = i; break)
+        end
         res = if sub === nothing
             nothing
         elseif sub == 1
@@ -168,7 +176,7 @@ function mangle_param(t, substitutions = Any[], top = false)
     end
 end
 
-function mangle_sig(sig)
+function mangle_sig(@nospecialize(sig))
     ft, tt... = sig.parameters
 
     # mangle the function name
