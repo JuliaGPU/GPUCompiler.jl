@@ -152,6 +152,15 @@ function hide_noreturn!(mod::LLVM.Module)
     return true
 end
 
+# Metal has no target machine (and thus no TTI), so we supply a minimal one:
+# addrspace 0 is the flat/generic AS, and casts to/from it are noops (matching
+# Metal's AS hierarchy). That's enough to let InferAddressSpacesPass fold casts
+# introduced by parameter/global AS rewrites.
+struct MetalTTI <: LLVM.AbstractTargetTransformInfo end
+LLVM.flat_address_space(::MetalTTI) = UInt(0)
+LLVM.is_noop_addr_space_cast(::MetalTTI, from::Unsigned, to::Unsigned) =
+    from == 0 || to == 0
+
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
@@ -165,6 +174,22 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     if job.config.kernel
         entry = add_parameter_address_spaces!(job, mod, entry)
         entry = add_global_address_spaces!(job, mod, entry)
+
+        # propagate specific address spaces through addrspacecast chains introduced
+        # by the rewrites above, so that loads/stores happen in the right address
+        # space (e.g. constant globals in addrspace 2 rather than via a cast to 0,
+        # which Metal's backend cannot handle correctly for dynamic indices).
+        @dispose pb=NewPMPassBuilder() begin
+            LLVM.target_transform_info!(pb, MetalTTI())
+            add!(pb, NewPMFunctionPassManager()) do fpm
+                add!(fpm, InferAddressSpacesPass())
+                add!(fpm, SROAPass())
+                add!(fpm, InstCombinePass())
+                add!(fpm, EarlyCSEPass())
+                add!(fpm, SimplifyCFGPass())
+            end
+            run!(pb, mod)
+        end
 
         add_argument_metadata!(job, mod, entry)
 
