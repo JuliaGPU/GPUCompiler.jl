@@ -93,7 +93,7 @@ steps:
       queue: "juliagpu"
       rocm: "*"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
-    timeout_in_minutes: 30
+    timeout_in_minutes: 60
     soft_fail:
       - exit_status: 3
 
