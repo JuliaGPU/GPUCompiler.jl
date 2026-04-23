@@ -26,10 +26,14 @@ LLVM.addrspaces_may_alias(::MetalTTI, a::Unsigned, b::Unsigned) =
 # UniformityAnalysis — which we don't have consumers for anyway.
 LLVM.has_branch_divergence(::MetalTTI) = true
 
-# threadgroup memory is uninitialized per dispatch, so globals in those spaces
-# cannot carry a non-undef initializer.
+# deliberately not overriding `is_single_threaded`: a kernel is multi-lane, and
+# returning `true` would let LICM sink stores onto paths that didn't store,
+# producing races across lanes.
+
+# only the spaces backed by static storage admit non-undef initializers; thread,
+# threadgroup and ray-payload spaces are populated at dispatch/invocation time.
 LLVM.can_have_non_undef_global_initializer_in_address_space(::MetalTTI, as::Unsigned) =
-    as != 3 && as != 5
+    as == 0 || as == 1 || as == 2
 
 
 ## target
@@ -110,6 +114,7 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
     # we emit properties (of the air and metal version) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
     @dispose pb=NewPMPassBuilder() begin
+        LLVM.target_transform_info!(pb, MetalTTI())
         add!(pb, RecomputeGlobalsAAPass())
         add!(pb, GlobalOptPass())
         run!(pb, mod)
@@ -175,6 +180,7 @@ function hide_noreturn!(mod::LLVM.Module)
     any_noreturn || return false
 
     @dispose pb=NewPMPassBuilder() begin
+        LLVM.target_transform_info!(pb, MetalTTI())
         add!(pb, AlwaysInlinerPass())
         add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
