@@ -1,5 +1,37 @@
 # implementation of the GPUCompiler interfaces for generating Metal code
 
+
+## target info
+
+# Metal has no target machine, so provide our own TTI
+struct MetalTTI <: LLVM.AbstractTargetTransformInfo end
+
+# teache LLVM about Metal's address-space hierarchy:
+#   0: Generic    1: Device       2: Constant
+#   3: ThreadGroup 4: Thread      5: ThreadGroup_ImgBlock  6: Ray
+# AS 0 is the flat/generic space; only casts involving it are legal, and the
+# specific spaces are mutually disjoint.
+LLVM.flat_address_space(::MetalTTI) = UInt(0)
+LLVM.is_noop_addr_space_cast(::MetalTTI, from::Unsigned, to::Unsigned) =
+    from == 0 || to == 0
+LLVM.is_valid_addr_space_cast(::MetalTTI, from::Unsigned, to::Unsigned) =
+    from == to || from == 0 || to == 0
+
+# distinct specific address spaces are disjoint; only the generic AS overlaps.
+LLVM.addrspaces_may_alias(::MetalTTI, a::Unsigned, b::Unsigned) =
+    a == b || a == 0 || b == 0
+
+# used as a coarse "this is a GPU target" switch by several IR passes (e.g.
+# JumpThreading and non-trivial SimpleLoopUnswitch become no-ops), not just
+# UniformityAnalysis — which we don't have consumers for anyway.
+LLVM.has_branch_divergence(::MetalTTI) = true
+
+# threadgroup memory is uninitialized per dispatch, so globals in those spaces
+# cannot carry a non-undef initializer.
+LLVM.can_have_non_undef_global_initializer_in_address_space(::MetalTTI, as::Unsigned) =
+    as != 3 && as != 5
+
+
 ## target
 
 export MetalCompilerTarget
@@ -34,6 +66,8 @@ llvm_datalayout(target::MetalCompilerTarget) =
     "-f32:32:32-f64:64:64"*
     "-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024"*
     "-n8:16:32"
+
+llvm_targetinfo(::MetalCompilerTarget) = MetalTTI()
 
 pass_by_value(job::CompilerJob{MetalCompilerTarget}) = false
 
@@ -151,17 +185,6 @@ function hide_noreturn!(mod::LLVM.Module)
 
     return true
 end
-
-# Metal has no target machine (and thus no TTI), so we supply a minimal one:
-# addrspace 0 is the flat/generic AS, and casts to/from it are noops (matching
-# Metal's AS hierarchy). That's enough to let InferAddressSpacesPass fold casts
-# introduced by parameter/global AS rewrites.
-struct MetalTTI <: LLVM.AbstractTargetTransformInfo end
-LLVM.flat_address_space(::MetalTTI) = UInt(0)
-LLVM.is_noop_addr_space_cast(::MetalTTI, from::Unsigned, to::Unsigned) =
-    from == 0 || to == 0
-
-llvm_targetinfo(::MetalCompilerTarget) = MetalTTI()
 
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
