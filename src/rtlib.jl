@@ -133,14 +133,16 @@ const runtime_cache = Dict{String, Vector{UInt8}}()
         name = "runtime_$(slug).bc"
         path = joinpath(compile_cache, name)
 
-        # cache the runtime library on disk and in memory
+        # cache the runtime library on disk and in memory. the bytes are kept alive by
+        # `runtime_cache`, so we can parse them lazily and let the linker materialize only
+        # the functions that end up being referenced.
         lib = if haskey(runtime_cache, slug)
-            parse(LLVM.Module, runtime_cache[slug])
+            parse(LLVM.Module, runtime_cache[slug]; lazy=true)
         elseif ispath(path)
             runtime_cache[slug] = open(path) do io
                 read(io)
             end
-            parse(LLVM.Module, runtime_cache[slug])
+            parse(LLVM.Module, runtime_cache[slug]; lazy=true)
         end
 
         if lib === nothing

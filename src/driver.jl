@@ -328,25 +328,18 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
-            # GPU run-time library: link if any of `ir`'s undefined functions are
-            # defined in the runtime, or if `julia.gc_alloc_obj` is present (which
-            # lower_gc_frame! rewrites into a `gc_pool_alloc` call later on)
+            # GPU run-time library. `load_runtime` returns a lazily-parsed module, so
+            # `only_needed=true` linking only materializes functions that `ir` references.
+            # `lower_gc_frame!` rewrites `julia.gc_alloc_obj` into `gc_pool_alloc` _after_
+            # linking, so pre-declare `gc_pool_alloc` in `ir` to make the linker pick it up.
             if !uses_julia_runtime(job)
-                runtime_fns = Set{String}()
-                for f in functions(runtime)
-                    isdeclaration(f) || push!(runtime_fns, LLVM.name(f))
+                if haskey(functions(ir), "julia.gc_alloc_obj")
+                    rt = Runtime.get(:gc_pool_alloc)
+                    if !haskey(functions(ir), rt.llvm_name)
+                        LLVM.Function(ir, rt.llvm_name, convert(LLVM.FunctionType, rt))
+                    end
                 end
-                need_runtime = haskey(functions(ir), "julia.gc_alloc_obj") ||
-                               any(f -> isdeclaration(f) && !LLVM.isintrinsic(f) &&
-                                        LLVM.name(f) in runtime_fns,
-                                   functions(ir))
-                if need_runtime
-                    # `load_runtime` returns a freshly-parsed module, so linking is
-                    # destructive but safe — no defensive copy needed
-                    @tracepoint "runtime library" link!(ir, runtime)
-                else
-                    dispose(runtime)
-                end
+                @tracepoint "runtime library" link!(ir, runtime; only_needed=true)
             end
         end
     end
