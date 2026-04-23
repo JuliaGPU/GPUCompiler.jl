@@ -161,6 +161,8 @@ LLVM.flat_address_space(::MetalTTI) = UInt(0)
 LLVM.is_noop_addr_space_cast(::MetalTTI, from::Unsigned, to::Unsigned) =
     from == 0 || to == 0
 
+llvm_targetinfo(::MetalCompilerTarget) = MetalTTI()
+
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
