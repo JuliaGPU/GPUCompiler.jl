@@ -166,6 +166,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
                 add!(fpm, AggressiveInstCombinePass())
                 add!(fpm, JumpThreadingPass())
                 add!(fpm, CorrelatedValuePropagationPass())
+                add!(fpm, LibCallsShrinkWrapPass())
                 add!(fpm, ReassociatePass())
                 add!(fpm, ConstraintEliminationPass())
                 add!(fpm, AllocOptPass())
@@ -390,7 +391,7 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     end
     add!(mpm, NewPMFunctionPassManager()) do fpm
         add!(fpm, DemoteFloat16Pass())
-        if opt_level >= 1
+        if opt_level >= 2
             add!(fpm, GVNPass())
         end
     end
