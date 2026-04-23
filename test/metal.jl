@@ -181,6 +181,31 @@ end
     end
 end
 
+# Tuples with a dynamic index are lowered to an addrspace(2) constant plus a
+# GEP+load. Without InferAddressSpaces propagating AS 2 through the cast to
+# the generic AS introduced during `add_global_address_spaces!`, the load
+# would end up in AS 0 and Metal's back-end miscompiles it into zeroes.
+@testset "dynamic constant global access" begin
+    mod = @eval module $(gensym())
+        function kernel(ptr, i)
+            t = (1.0f0, 2.0f0, 3.0f0, 4.0f0)
+            @inbounds unsafe_store!(ptr, t[i])
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check "@{{.+}} ={{.*}} addrspace(2) constant [4 x float]"
+        @check_label "define void @_Z6kernel7LLVMPtrI7Float32Li1EE5Int64"
+        # the load must happen in addrspace(2); Metal miscompiles loads of
+        # the constant if they occur via an addrspacecast to the generic AS
+        @check cond=opaque_ptrs "load float, ptr addrspace(2)"
+        @check cond=typed_ptrs "load float, float addrspace(2)*"
+        Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int};
+                        dump_module=true, kernel=true)
+    end
+end
+
 end
 
 end

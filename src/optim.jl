@@ -2,11 +2,14 @@
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
     tm = llvm_machine(job.config.target)
+    tti = llvm_targetinfo(job.config.target)
 
     global current_job
     current_job = job
 
     @dispose pb=NewPMPassBuilder() begin
+        tti === nothing || LLVM.target_transform_info!(pb, tti)
+
         register!(pb, GPULowerCPUFeaturesPass())
         register!(pb, GPULowerPTLSPass())
         register!(pb, GPULowerGCFramePass())

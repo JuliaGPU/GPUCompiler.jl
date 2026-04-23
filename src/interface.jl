@@ -37,6 +37,10 @@ end
 
 llvm_datalayout(target::AbstractCompilerTarget) = DataLayout(llvm_machine(target))
 
+# a custom `TargetTransformInfo` for targets that don't have (or can't rely on) a
+# `TargetMachine`-supplied TTI. Return `nothing` to fall back to LLVM's native TTI.
+llvm_targetinfo(@nospecialize(target::AbstractCompilerTarget)) = nothing
+
 # the target's datalayout, with Julia's non-integral address spaces added to it
 function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     dl = llvm_datalayout(target)

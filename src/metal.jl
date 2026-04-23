@@ -1,5 +1,41 @@
 # implementation of the GPUCompiler interfaces for generating Metal code
 
+
+## target info
+
+# Metal has no target machine, so provide our own TTI
+struct MetalTTI <: LLVM.AbstractTargetTransformInfo end
+
+# teache LLVM about Metal's address-space hierarchy:
+#   0: Generic    1: Device       2: Constant
+#   3: ThreadGroup 4: Thread      5: ThreadGroup_ImgBlock  6: Ray
+# AS 0 is the flat/generic space; only casts involving it are legal, and the
+# specific spaces are mutually disjoint.
+LLVM.flat_address_space(::MetalTTI) = UInt(0)
+LLVM.is_noop_addr_space_cast(::MetalTTI, from::Unsigned, to::Unsigned) =
+    from == 0 || to == 0
+LLVM.is_valid_addr_space_cast(::MetalTTI, from::Unsigned, to::Unsigned) =
+    from == to || from == 0 || to == 0
+
+# distinct specific address spaces are disjoint; only the generic AS overlaps.
+LLVM.addrspaces_may_alias(::MetalTTI, a::Unsigned, b::Unsigned) =
+    a == b || a == 0 || b == 0
+
+# used as a coarse "this is a GPU target" switch by several IR passes (e.g.
+# JumpThreading and non-trivial SimpleLoopUnswitch become no-ops), not just
+# UniformityAnalysis — which we don't have consumers for anyway.
+LLVM.has_branch_divergence(::MetalTTI) = true
+
+# deliberately not overriding `is_single_threaded`: a kernel is multi-lane, and
+# returning `true` would let LICM sink stores onto paths that didn't store,
+# producing races across lanes.
+
+# only the spaces backed by static storage admit non-undef initializers; thread,
+# threadgroup and ray-payload spaces are populated at dispatch/invocation time.
+LLVM.can_have_non_undef_global_initializer_in_address_space(::MetalTTI, as::Unsigned) =
+    as == 0 || as == 1 || as == 2
+
+
 ## target
 
 export MetalCompilerTarget
@@ -34,6 +70,8 @@ llvm_datalayout(target::MetalCompilerTarget) =
     "-f32:32:32-f64:64:64"*
     "-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024"*
     "-n8:16:32"
+
+llvm_targetinfo(::MetalCompilerTarget) = MetalTTI()
 
 pass_by_value(job::CompilerJob{MetalCompilerTarget}) = false
 
@@ -76,6 +114,7 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
     # we emit properties (of the air and metal version) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
     @dispose pb=NewPMPassBuilder() begin
+        LLVM.target_transform_info!(pb, MetalTTI())
         add!(pb, RecomputeGlobalsAAPass())
         add!(pb, GlobalOptPass())
         run!(pb, mod)
@@ -141,6 +180,7 @@ function hide_noreturn!(mod::LLVM.Module)
     any_noreturn || return false
 
     @dispose pb=NewPMPassBuilder() begin
+        LLVM.target_transform_info!(pb, MetalTTI())
         add!(pb, AlwaysInlinerPass())
         add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
@@ -165,6 +205,22 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     if job.config.kernel
         entry = add_parameter_address_spaces!(job, mod, entry)
         entry = add_global_address_spaces!(job, mod, entry)
+
+        # propagate specific address spaces through addrspacecast chains introduced
+        # by the rewrites above, so that loads/stores happen in the right address
+        # space (e.g. constant globals in addrspace 2 rather than via a cast to 0,
+        # which Metal's backend cannot handle correctly for dynamic indices).
+        @dispose pb=NewPMPassBuilder() begin
+            LLVM.target_transform_info!(pb, MetalTTI())
+            add!(pb, NewPMFunctionPassManager()) do fpm
+                add!(fpm, InferAddressSpacesPass())
+                add!(fpm, SROAPass())
+                add!(fpm, InstCombinePass())
+                add!(fpm, EarlyCSEPass())
+                add!(fpm, SimplifyCFGPass())
+            end
+            run!(pb, mod)
+        end
 
         add_argument_metadata!(job, mod, entry)
 
