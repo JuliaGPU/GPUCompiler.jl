@@ -91,8 +91,8 @@ end
 
     @static if isdefined(Core, :BFloat16)
         @test @filecheck begin
-            check"CHECK-LABEL: define void @{{(julia|j)_kernel_[0-9]+}}"
-            check"CHECK: store bfloat"
+            @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+            @check "store bfloat"
             SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Core.BFloat16}, Core.BFloat16};
                             backend, supports_bfloat16=true)
         end
