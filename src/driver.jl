@@ -257,7 +257,7 @@ const __llvm_initialized = Ref(false)
                     merge!(compiled, dyn_meta.compiled)
                     if haskey(dyn_meta, :gv_to_value)
                         merge!(gv_to_value, dyn_meta.gv_to_value)
-                    end    
+                    end
                     @assert context(dyn_ir) == context(ir)
                     link!(ir, dyn_ir)
                     changed = true
@@ -306,10 +306,9 @@ const __llvm_initialized = Ref(false)
         end
 
         @tracepoint "Library linking" begin
-            # target-specific libraries. the legacy 3-arg override
-            # `link_libraries!(job, mod, undefined_fns)` is still honored with a
-            # depwarn; new overrides should target the 2-arg form.
+            # target-specific libraries
             @tracepoint "target libraries" begin
+                # 3-arg version has been deprecated
                 if hasmethod(link_libraries!,
                              Tuple{typeof(job), LLVM.Module, Vector{String}})
                     Base.depwarn(
@@ -328,17 +327,17 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
-            # GPU run-time library. `load_runtime` returns a lazily-parsed module, so
-            # `only_needed=true` linking only materializes functions that `ir` references.
-            # `lower_gc_frame!` rewrites `julia.gc_alloc_obj` into `gc_pool_alloc` _after_
-            # linking, so pre-declare `gc_pool_alloc` in `ir` to make the linker pick it up.
+            # GPU run-time library
             if !uses_julia_runtime(job)
+                # Calls to `gc_pool_alloc` are inserted after linking, so spoof
+                # it here so that lazy linking pulls it in, if needed.
                 if haskey(functions(ir), "julia.gc_alloc_obj")
                     rt = Runtime.get(:gc_pool_alloc)
                     if !haskey(functions(ir), rt.llvm_name)
                         LLVM.Function(ir, rt.llvm_name, convert(LLVM.FunctionType, rt))
                     end
                 end
+
                 @tracepoint "runtime library" link!(ir, runtime; only_needed=true)
             end
         end
