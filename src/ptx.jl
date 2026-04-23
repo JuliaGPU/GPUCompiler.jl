@@ -153,9 +153,14 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     tm = llvm_machine(job.config.target)
     # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
     @dispose pb=NewPMPassBuilder() begin
-        register!(pb, NVVMReflectPass())
-
-        add!(pb, NVVMReflectPass())
+        if LLVM.version() < v"17"
+            # Pre-17 LLVM has no way to invoke EP callbacks from the string
+            # API, so fall back to our own nvvm_reflect! implementation.
+            # LLVM 17+ picks up NVPTX's built-in NVVMReflectPass through the
+            # PipelineStart EP invocations woven into `buildNewPMPipeline!`.
+            register!(pb, NVVMReflectPass())
+            add!(pb, NVVMReflectPass())
+        end
 
         add!(pb, NewPMFunctionPassManager()) do fpm
             # needed by GemmKernels.jl-like code

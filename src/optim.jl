@@ -68,7 +68,9 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
         add!(mpm, VerifierPass())
     end
     add!(mpm, ForceFunctionAttrsPass())
-    # TODO invokePipelineStartCallbacks
+    if LLVM.version() >= v"17"
+        add!(mpm, PipelineStartCallbacks(; opt_level))
+    end
     add!(mpm, Annotation2MetadataPass())
     add!(mpm, ConstantMergePass())
     add!(mpm, NewPMFunctionPassManager()) do fpm
@@ -82,12 +84,19 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
             add!(fpm, SROAPass())
         end
     end
-    # TODO invokeEarlySimplificationCallbacks
+    if LLVM.version() >= v"17"
+        add!(mpm, PipelineEarlySimplificationCallbacks(; opt_level))
+    end
 end
 
 function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
+    if LLVM.version() >= v"17"
+        add!(mpm, OptimizerEarlyCallbacks(; opt_level))
+    end
     add!(mpm, NewPMCGSCCPassManager()) do cgpm
-        # TODO invokeCGSCCCallbacks
+        if LLVM.version() >= v"17"
+            add!(cgpm, CGSCCOptimizerLateCallbacks(; opt_level))
+        end
         add!(cgpm, NewPMFunctionPassManager()) do fpm
             add!(fpm, AllocOptPass())
             add!(fpm, Float2IntPass())
@@ -109,8 +118,10 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
                 add!(fpm, InstCombinePass())
                 add!(fpm, EarlyCSEPass())
             end
+            if LLVM.version() >= v"17"
+                add!(fpm, PeepholeCallbacks(; opt_level))
+            end
         end
-        # TODO invokePeepholeCallbacks
     end
 end
 
@@ -120,7 +131,9 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
         if opt_level >= 2
             add!(lpm, LoopRotatePass())
         end
-        # TODO invokeLateLoopOptimizationCallbacks
+        if LLVM.version() >= v"17"
+            add!(lpm, LateLoopOptimizationsCallbacks(; opt_level))
+        end
     end
     if opt_level >= 2
         add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
@@ -142,7 +155,9 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
             add!(lpm, LoopDeletionPass())
             add!(lpm, LoopFullUnrollPass())
         end
-        # TODO invokeLoopOptimizerEndCallbacks
+        if LLVM.version() >= v"17"
+            add!(lpm, LoopOptimizerEndCallbacks(; opt_level))
+        end
     end
 end
 
@@ -165,7 +180,9 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
     end
     if opt_level >= 2
         add!(fpm, DSEPass())
-        # TODO invokePeepholeCallbacks
+        if LLVM.version() >= v"17"
+            add!(fpm, PeepholeCallbacks(; opt_level))
+        end
         add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
         add!(fpm, AllocOptPass())
         add!(fpm, NewPMLoopPassManager()) do lpm
@@ -174,7 +191,9 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
         end
         add!(fpm, LoopDistributePass())
     end
-    # TODO invokeScalarOptimizerCallbacks
+    if LLVM.version() >= v"17"
+        add!(fpm, ScalarOptimizerLateCallbacks(; opt_level))
+    end
 end
 
 function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
@@ -185,9 +204,14 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
     add!(fpm, SLPVectorizerPass())
     add!(fpm, VectorCombinePass())
-    # TODO invokeVectorizerCallbacks
+    if LLVM.version() >= v"17"
+        add!(fpm, VectorizerStartCallbacks(; opt_level))
+    end
     add!(fpm, ADCEPass())
     add!(fpm, LoopUnrollPass(; opt_level))
+    if LLVM.version() >= v"21"
+        add!(fpm, VectorizerEndCallbacks(; opt_level))
+    end
 end
 
 function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
@@ -272,7 +296,9 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
             add!(fpm, DivRemPairsPass())
         end
     end
-    # TODO invokeOptimizerLastCallbacks
+    if LLVM.version() >= v"17"
+        add!(mpm, OptimizerLastCallbacks(; opt_level))
+    end
     add!(mpm, NewPMFunctionPassManager()) do fpm
         add!(fpm, AnnotationRemarksPass())
     end
