@@ -67,6 +67,8 @@ include("driver.jl")
 include("execution.jl")
 include("reflection.jl")
 
+include("deprecated.jl")
+
 include("precompile.jl")
 
 function __init__()

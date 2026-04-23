@@ -1,16 +1,5 @@
 # compiler support for working with run-time libraries
 
-link_library!(mod::LLVM.Module, lib::LLVM.Module) = link_library!(mod, [lib])
-function link_library!(mod::LLVM.Module, libs::Vector{LLVM.Module})
-    # linking is destructive, so copy the libraries
-    libs = [copy(lib) for lib in libs]
-
-    for lib in libs
-        link!(mod, lib)
-    end
-end
-
-
 #
 # GPU run-time library
 #

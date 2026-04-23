@@ -303,20 +303,50 @@ const __llvm_initialized = Ref(false)
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
             runtime = load_runtime(job)
-            runtime_fns = LLVM.name.(defs(runtime))
-            runtime_intrinsics = ["julia.gc_alloc_obj"]
         end
 
         @tracepoint "Library linking" begin
-            # target-specific libraries
-            undefined_fns = LLVM.name.(decls(ir))
-            @tracepoint "target libraries" link_libraries!(job, ir, undefined_fns)
+            # target-specific libraries. the legacy 3-arg override
+            # `link_libraries!(job, mod, undefined_fns)` is still honored with a
+            # depwarn; new overrides should target the 2-arg form.
+            @tracepoint "target libraries" begin
+                if hasmethod(link_libraries!,
+                             Tuple{typeof(job), LLVM.Module, Vector{String}})
+                    Base.depwarn(
+                        "3-arg `link_libraries!(job, mod, undefined_fns)` is deprecated; " *
+                        "migrate your override to the 2-arg form `link_libraries!(job, mod)`. " *
+                        "Instead of inspecting `undefined_fns` to decide what to link, " *
+                        "parse the library lazily with `parse(LLVM.Module, bytes; lazy=true)` " *
+                        "and link it with `LLVM.link!(mod, lib; only_needed=true)` — " *
+                        "the linker will then materialize only the referenced symbols.",
+                        :link_libraries!)
+                    undefined_fns = [LLVM.name(f) for f in functions(ir)
+                                     if isdeclaration(f) && !LLVM.isintrinsic(f)]
+                    link_libraries!(job, ir, undefined_fns)
+                else
+                    link_libraries!(job, ir)
+                end
+            end
 
-            # GPU run-time library
-            if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
-                                                        fn in runtime_intrinsics,
-                                                undefined_fns)
-                @tracepoint "runtime library" link_library!(ir, runtime)
+            # GPU run-time library: link if any of `ir`'s undefined functions are
+            # defined in the runtime, or if `julia.gc_alloc_obj` is present (which
+            # lower_gc_frame! rewrites into a `gc_pool_alloc` call later on)
+            if !uses_julia_runtime(job)
+                runtime_fns = Set{String}()
+                for f in functions(runtime)
+                    isdeclaration(f) || push!(runtime_fns, LLVM.name(f))
+                end
+                need_runtime = haskey(functions(ir), "julia.gc_alloc_obj") ||
+                               any(f -> isdeclaration(f) && !LLVM.isintrinsic(f) &&
+                                        LLVM.name(f) in runtime_fns,
+                                   functions(ir))
+                if need_runtime
+                    # `load_runtime` returns a freshly-parsed module, so linking is
+                    # destructive but safe — no defensive copy needed
+                    @tracepoint "runtime library" link!(ir, runtime)
+                else
+                    dispose(runtime)
+                end
             end
         end
     end

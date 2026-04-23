@@ -1,7 +1,3 @@
-defs(mod::LLVM.Module)  = filter(f -> !isdeclaration(f), collect(functions(mod)))
-decls(mod::LLVM.Module) = filter(f ->  isdeclaration(f) && !LLVM.isintrinsic(f),
-                                 collect(functions(mod)))
-
 ## debug verification
 
 should_verify() = ccall(:jl_is_debugbuild, Cint, ()) == 1 ||
