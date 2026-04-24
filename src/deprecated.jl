@@ -30,8 +30,16 @@ link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
 # `true` when a downstream package has defined a 3-arg `link_libraries!`
 # override for `job`, i.e. the dispatched method isn't our fallback above.
+#
+# Uses the same `jl_gf_invoke_lookup` path as `Core._hasmethod` rather than
+# `which`, so it's safe to call from generated-function-adjacent contexts
+# where `Base.get_world_counter()` returns `typemax(UInt)` and reflection
+# queries like `which` / `methods` fail (see JuliaLang/julia#48611).
+# All this because Enzyme.jl calls GPUCompiler.jl from a generated function.
 function has_legacy_link_libraries(@nospecialize(job::CompilerJob))
-    m = which(link_libraries!,
-              Tuple{typeof(job), LLVM.Module, Vector{String}})
-    return m.module !== @__MODULE__
+    tt = Tuple{typeof(link_libraries!), typeof(job),
+               LLVM.Module, Vector{String}}
+    world = ccall(:jl_get_tls_world_age, UInt, ())
+    m = ccall(:jl_gf_invoke_lookup, Any, (Any, Any, UInt), tt, nothing, world)
+    return m !== nothing && (m::Method).module !== @__MODULE__
 end
