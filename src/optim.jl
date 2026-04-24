@@ -257,7 +257,11 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     if LLVM.version() >= v"21"
         add!(fpm, VectorizerEndCallbacks(; opt_level))
     end
-    add!(fpm, SROAPass(; preserve_cfg=true))
+    if LLVM.version() >= v"16"
+        add!(fpm, SROAPass(; preserve_cfg=true))
+    else
+        add!(fpm, SROAPass())
+    end
     add!(fpm, InstSimplifyPass())
 end
 
