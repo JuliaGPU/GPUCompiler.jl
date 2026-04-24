@@ -257,7 +257,7 @@ const __llvm_initialized = Ref(false)
                     merge!(compiled, dyn_meta.compiled)
                     if haskey(dyn_meta, :gv_to_value)
                         merge!(gv_to_value, dyn_meta.gv_to_value)
-                    end    
+                    end
                     @assert context(dyn_ir) == context(ir)
                     link!(ir, dyn_ir)
                     changed = true
@@ -303,20 +303,40 @@ const __llvm_initialized = Ref(false)
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
             runtime = load_runtime(job)
-            runtime_fns = LLVM.name.(defs(runtime))
-            runtime_intrinsics = ["julia.gc_alloc_obj"]
         end
 
         @tracepoint "Library linking" begin
             # target-specific libraries
-            undefined_fns = LLVM.name.(decls(ir))
-            @tracepoint "target libraries" link_libraries!(job, ir, undefined_fns)
+            @tracepoint "target libraries" begin
+                if has_legacy_link_libraries(job)
+                    Base.depwarn(
+                        "3-arg `link_libraries!(job, mod, undefined_fns)` is deprecated; " *
+                        "migrate your override to the 2-arg form `link_libraries!(job, mod)`. " *
+                        "Instead of inspecting `undefined_fns` to decide what to link, " *
+                        "parse the library lazily with `parse(LLVM.Module, bytes; lazy=true)` " *
+                        "and link it with `LLVM.link!(mod, lib; only_needed=true)` — " *
+                        "the linker will then materialize only the referenced symbols.",
+                        :link_libraries!)
+                    undefined_fns = [LLVM.name(f) for f in functions(ir)
+                                     if isdeclaration(f) && !LLVM.isintrinsic(f)]
+                    link_libraries!(job, ir, undefined_fns)
+                else
+                    link_libraries!(job, ir)
+                end
+            end
 
             # GPU run-time library
-            if !uses_julia_runtime(job) && any(fn -> fn in runtime_fns ||
-                                                        fn in runtime_intrinsics,
-                                                undefined_fns)
-                @tracepoint "runtime library" link_library!(ir, runtime)
+            if !uses_julia_runtime(job)
+                # Calls to `gc_pool_alloc` are inserted after linking, so spoof
+                # it here so that lazy linking pulls it in, if needed.
+                if haskey(functions(ir), "julia.gc_alloc_obj")
+                    rt = Runtime.get(:gc_pool_alloc)
+                    if !haskey(functions(ir), rt.llvm_name)
+                        LLVM.Function(ir, rt.llvm_name, convert(LLVM.FunctionType, rt))
+                    end
+                end
+
+                @tracepoint "runtime library" link!(ir, runtime; only_needed=true)
             end
         end
     end

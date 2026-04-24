@@ -360,8 +360,7 @@ prepare_job!(@nospecialize(job::CompilerJob)) = return
 
 # early extension point used to link-in external bitcode files.
 # this is typically used by downstream packages to link vendor libraries.
-link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                undefined_fns::Vector{String}) = return
+link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
 # finalization of the module, before deferred codegen and optimization
 finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =

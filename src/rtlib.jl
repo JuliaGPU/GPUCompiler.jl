@@ -1,16 +1,5 @@
 # compiler support for working with run-time libraries
 
-link_library!(mod::LLVM.Module, lib::LLVM.Module) = link_library!(mod, [lib])
-function link_library!(mod::LLVM.Module, libs::Vector{LLVM.Module})
-    # linking is destructive, so copy the libraries
-    libs = [copy(lib) for lib in libs]
-
-    for lib in libs
-        link!(mod, lib)
-    end
-end
-
-
 #
 # GPU run-time library
 #
@@ -126,60 +115,38 @@ function build_runtime(@nospecialize(job::CompilerJob))
     mod
 end
 
-const runtime_lock = ReentrantLock()
-
-const runtime_cache = Dict{String, Vector{UInt8}}()
-
 @locked function load_runtime(@nospecialize(job::CompilerJob))
     global compile_cache
     if compile_cache === nothing    # during precompilation
         return build_runtime(job)
     end
 
-    lock(runtime_lock) do
-        slug = runtime_slug(job)
-        if !supports_typed_pointers(context())
-            slug *= "-opaque"
-        end
-        name = "runtime_$(slug).bc"
-        path = joinpath(compile_cache, name)
-
-        # cache the runtime library on disk and in memory
-        lib = if haskey(runtime_cache, slug)
-            parse(LLVM.Module, runtime_cache[slug])
-        elseif ispath(path)
-            runtime_cache[slug] = open(path) do io
-                read(io)
-            end
-            parse(LLVM.Module, runtime_cache[slug])
-        end
-
-        if lib === nothing
-            @debug "Building the GPU runtime library at $path"
-            mkpath(compile_cache)
-            lib = build_runtime(job)
-
-            # atomic write to disk
-            temp_path, io = mktemp(dirname(path); cleanup=false)
-            write(io, lib)
-            close(io)
-            @static if VERSION >= v"1.12.0-DEV.1023"
-                mv(temp_path, path; force=true)
-            else
-                Base.rename(temp_path, path, force=true)
-            end
-        end
-
-        return lib
+    slug = runtime_slug(job)
+    if !supports_typed_pointers(context())
+        slug *= "-opaque"
     end
+    name = "runtime_$(slug).bc"
+    path = joinpath(compile_cache, name)
+
+    if !ispath(path)
+        @debug "Building the GPU runtime library at $path"
+        mkpath(compile_cache)
+        lib = build_runtime(job)
+
+        # atomic write to disk
+        temp_path, io = mktemp(dirname(path); cleanup=false)
+        write(io, lib)
+        close(io)
+        @static if VERSION >= v"1.12.0-DEV.1023"
+            mv(temp_path, path; force=true)
+        else
+            Base.rename(temp_path, path, force=true)
+        end
+    end
+
+    return parse(LLVM.Module, MemoryBufferFile(path); lazy=true)
 end
 
 # remove the existing cache
 # NOTE: call this function from global scope, so any change triggers recompilation.
-function reset_runtime()
-    lock(runtime_lock) do
-        rm(compile_cache; recursive=true, force=true)
-    end
-
-    return
-end
+reset_runtime() = rm(compile_cache; recursive=true, force=true)
