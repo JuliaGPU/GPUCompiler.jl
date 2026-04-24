@@ -21,3 +21,17 @@ function link_library!(mod::LLVM.Module, libs::Vector{LLVM.Module})
         link!(mod, lib)
     end
 end
+
+# no-op 3-arg fallback so downstream overrides that chain via
+# `invoke(GPUCompiler.link_libraries!, Tuple{CompilerJob, Module,
+# Vector{String}}, ...)` still resolve.
+link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                undefined_fns::Vector{String}) = return
+
+# `true` when a downstream package has defined a 3-arg `link_libraries!`
+# override for `job`, i.e. the dispatched method isn't our fallback above.
+function has_legacy_link_libraries(@nospecialize(job::CompilerJob))
+    m = which(link_libraries!,
+              Tuple{typeof(job), LLVM.Module, Vector{String}})
+    return m.module !== @__MODULE__
+end

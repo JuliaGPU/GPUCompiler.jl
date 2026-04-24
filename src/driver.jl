@@ -308,9 +308,7 @@ const __llvm_initialized = Ref(false)
         @tracepoint "Library linking" begin
             # target-specific libraries
             @tracepoint "target libraries" begin
-                # 3-arg version has been deprecated
-                if hasmethod(link_libraries!,
-                             Tuple{typeof(job), LLVM.Module, Vector{String}})
+                if has_legacy_link_libraries(job)
                     Base.depwarn(
                         "3-arg `link_libraries!(job, mod, undefined_fns)` is deprecated; " *
                         "migrate your override to the 2-arg form `link_libraries!(job, mod)`. " *
