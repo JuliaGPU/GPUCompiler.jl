@@ -68,30 +68,52 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
         add!(mpm, VerifierPass())
     end
     add!(mpm, ForceFunctionAttrsPass())
-    # TODO invokePipelineStartCallbacks
+    if LLVM.version() >= v"17"
+        add!(mpm, PipelineStartCallbacks(; opt_level))
+    end
     add!(mpm, Annotation2MetadataPass())
+    add!(mpm, InferFunctionAttrsPass())
     add!(mpm, ConstantMergePass())
     add!(mpm, NewPMFunctionPassManager()) do fpm
         add!(fpm, LowerExpectIntrinsicPass())
         if opt_level >= 2
             add!(fpm, PropagateJuliaAddrspacesPass())
         end
+        # DCE must come before simplifycfg: codegen can generate unused
+        # statements that would otherwise alter how simplifycfg optimizes the CFG.
+        add!(fpm, DCEPass())
         add!(fpm, SimplifyCFGPass(; BasicSimplifyCFGOptions...))
         if opt_level >= 1
-            add!(fpm, DCEPass())
             add!(fpm, SROAPass())
+            add!(fpm, EarlyCSEPass())
         end
     end
-    # TODO invokeEarlySimplificationCallbacks
+    if opt_level >= 1
+        add!(mpm, GlobalOptPass())
+        add!(mpm, NewPMFunctionPassManager()) do fpm
+            add!(fpm, PromotePass())
+            add!(fpm, InstCombinePass())
+        end
+    end
+    if LLVM.version() >= v"17"
+        add!(mpm, PipelineEarlySimplificationCallbacks(; opt_level))
+    end
 end
 
 function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
+    if LLVM.version() >= v"17"
+        add!(mpm, OptimizerEarlyCallbacks(; opt_level))
+    end
     add!(mpm, NewPMCGSCCPassManager()) do cgpm
-        # TODO invokeCGSCCCallbacks
-        add!(cgpm, NewPMFunctionPassManager()) do fpm
-            add!(fpm, AllocOptPass())
-            add!(fpm, Float2IntPass())
-            add!(fpm, LowerConstantIntrinsicsPass())
+        if LLVM.version() >= v"17"
+            add!(cgpm, CGSCCOptimizerLateCallbacks(; opt_level))
+        end
+        if opt_level >= 2
+            add!(cgpm, NewPMFunctionPassManager()) do fpm
+                add!(fpm, AllocOptPass())
+                add!(fpm, Float2IntPass())
+                add!(fpm, LowerConstantIntrinsicsPass())
+            end
         end
     end
     add!(mpm, GPULowerCPUFeaturesPass())
@@ -99,50 +121,63 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
         add!(mpm, NewPMFunctionPassManager()) do fpm
             if opt_level >= 2
                 add!(fpm, SROAPass())
+                add!(fpm, EarlyCSEPass(; memssa=true))
                 add!(fpm, InstCombinePass())
+                add!(fpm, AggressiveInstCombinePass())
                 add!(fpm, JumpThreadingPass())
                 add!(fpm, CorrelatedValuePropagationPass())
+                add!(fpm, LibCallsShrinkWrapPass())
                 add!(fpm, ReassociatePass())
-                add!(fpm, EarlyCSEPass())
+                add!(fpm, ConstraintEliminationPass())
                 add!(fpm, AllocOptPass())
             else
-                add!(fpm, InstCombinePass())
                 add!(fpm, EarlyCSEPass())
+                add!(fpm, InstCombinePass())
+            end
+            if LLVM.version() >= v"17"
+                add!(fpm, PeepholeCallbacks(; opt_level))
             end
         end
-        # TODO invokePeepholeCallbacks
     end
+    add!(mpm, GlobalOptPass())
+    add!(mpm, GlobalDCEPass())
 end
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
-    add!(fpm, NewPMLoopPassManager()) do lpm
+    add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
         add!(lpm, LowerSIMDLoopPass())
         if opt_level >= 2
+            add!(lpm, LoopInstSimplifyPass())
+            add!(lpm, LoopSimplifyCFGPass())
+            # run LICM with AllowSpeculation=false before rotation to avoid
+            # speculating loads that rotation can hoist more precisely.
+            add!(lpm, LICMPass(; allowspeculation=false))
+            add!(lpm, JuliaLICMPass())
             add!(lpm, LoopRotatePass())
-        end
-        # TODO invokeLateLoopOptimizationCallbacks
-    end
-    if opt_level >= 2
-        add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
             add!(lpm, SimpleLoopUnswitchPass(nontrivial=true, trivial=true))
-            add!(lpm, LICMPass())
-            add!(lpm, JuliaLICMPass())
+        end
+        if LLVM.version() >= v"17"
+            add!(lpm, LateLoopOptimizationsCallbacks(; opt_level))
         end
     end
     if opt_level >= 2
         add!(fpm, IRCEPass())
     end
+    add!(fpm, SimplifyCFGPass(; BasicSimplifyCFGOptions...))
+    add!(fpm, InstCombinePass())
     add!(fpm, NewPMLoopPassManager()) do lpm
         if opt_level >= 2
-            add!(lpm, LoopInstSimplifyPass())
             add!(lpm, LoopIdiomRecognizePass())
             add!(lpm, IndVarSimplifyPass())
+            add!(lpm, SimpleLoopUnswitchPass(nontrivial=true, trivial=true))
             add!(lpm, LoopDeletionPass())
             add!(lpm, LoopFullUnrollPass())
         end
-        # TODO invokeLoopOptimizerEndCallbacks
+        if LLVM.version() >= v"17"
+            add!(lpm, LoopOptimizerEndCallbacks(; opt_level))
+        end
     end
 end
 
@@ -150,44 +185,84 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
     if opt_level >= 2
         add!(fpm, AllocOptPass())
         add!(fpm, SROAPass())
-        add!(fpm, InstSimplifyPass())
+        add!(fpm, VectorCombinePass())
+        add!(fpm, MergedLoadStoreMotionPass())
         add!(fpm, GVNPass())
+        add!(fpm, SCCPPass())
+        add!(fpm, BDCEPass())
+        add!(fpm, InstCombinePass())
+        add!(fpm, CorrelatedValuePropagationPass())
+        add!(fpm, ADCEPass())
+        add!(fpm, MemCpyOptPass())
+        add!(fpm, DSEPass())
+        add!(fpm, IRCEPass())
+        add!(fpm, JumpThreadingPass())
+        add!(fpm, ConstraintEliminationPass())
+    elseif opt_level >= 1
+        add!(fpm, AllocOptPass())
+        add!(fpm, SROAPass())
         add!(fpm, MemCpyOptPass())
         add!(fpm, SCCPPass())
-        add!(fpm, CorrelatedValuePropagationPass())
-        add!(fpm, DCEPass())
-        add!(fpm, IRCEPass())
+        add!(fpm, BDCEPass())
         add!(fpm, InstCombinePass())
-        add!(fpm, JumpThreadingPass())
+        add!(fpm, ADCEPass())
     end
     if opt_level >= 3
         add!(fpm, GVNPass())
     end
     if opt_level >= 2
         add!(fpm, DSEPass())
-        # TODO invokePeepholeCallbacks
+        if LLVM.version() >= v"17"
+            add!(fpm, PeepholeCallbacks(; opt_level))
+        end
         add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
         add!(fpm, AllocOptPass())
-        add!(fpm, NewPMLoopPassManager()) do lpm
-            add!(lpm, LoopDeletionPass())
-            add!(lpm, LoopInstSimplifyPass())
+        add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
+            add!(lpm, LICMPass())
+            add!(lpm, JuliaLICMPass())
         end
-        add!(fpm, LoopDistributePass())
+        add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
+        add!(fpm, InstCombinePass())
+    elseif opt_level >= 1
+        add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
     end
-    # TODO invokeScalarOptimizerCallbacks
+    if LLVM.version() >= v"17"
+        add!(fpm, ScalarOptimizerLateCallbacks(; opt_level))
+    end
 end
 
 function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
+    # re-rotate loops that might have been unrotated in the simplification above
+    add!(fpm, NewPMLoopPassManager()) do lpm
+        add!(lpm, LoopRotatePass())
+        add!(lpm, LoopDeletionPass())
+    end
+    add!(fpm, LoopDistributePass())
     add!(fpm, InjectTLIMappings())
     add!(fpm, LoopVectorizePass())
     add!(fpm, LoopLoadEliminationPass())
-    add!(fpm, InstCombinePass())
     add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
+    add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
+        add!(lpm, LICMPass())
+    end
+    add!(fpm, EarlyCSEPass())
+    add!(fpm, CorrelatedValuePropagationPass())
+    add!(fpm, InstCombinePass())
     add!(fpm, SLPVectorizerPass())
     add!(fpm, VectorCombinePass())
-    # TODO invokeVectorizerCallbacks
-    add!(fpm, ADCEPass())
+    if LLVM.version() >= v"17"
+        add!(fpm, VectorizerStartCallbacks(; opt_level))
+    end
     add!(fpm, LoopUnrollPass(; opt_level))
+    if LLVM.version() >= v"21"
+        add!(fpm, VectorizerEndCallbacks(; opt_level))
+    end
+    if LLVM.version() >= v"16"
+        add!(fpm, SROAPass(; preserve_cfg=true))
+    else
+        add!(fpm, SROAPass())
+    end
+    add!(fpm, InstSimplifyPass())
 end
 
 function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
@@ -272,13 +347,15 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
             add!(fpm, DivRemPairsPass())
         end
     end
-    # TODO invokeOptimizerLastCallbacks
+    if LLVM.version() >= v"17"
+        add!(mpm, OptimizerLastCallbacks(; opt_level))
+    end
     add!(mpm, NewPMFunctionPassManager()) do fpm
         add!(fpm, AnnotationRemarksPass())
     end
     add!(mpm, NewPMFunctionPassManager()) do fpm
         add!(fpm, DemoteFloat16Pass())
-        if opt_level >= 1
+        if opt_level >= 2
             add!(fpm, GVNPass())
         end
     end

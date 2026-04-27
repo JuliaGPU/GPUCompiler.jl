@@ -105,6 +105,12 @@ runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
 
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
+    # tell NVVMReflect whether to flush denormals; this mirrors what Clang does
+    # for `-fcuda-flush-denormals-to-zero` and is the only `__nvvm_reflect` key
+    # LLVM's NVVMReflectPass honors besides `__CUDA_ARCH`.
+    flags(mod)["nvvm-reflect-ftz", LLVM.API.LLVMModuleFlagBehaviorOverride] =
+        Metadata(ConstantInt(Int32(job.config.target.fastmath ? 1 : 0)))
+
     # emit the device capability and ptx isa version as constants in the module. this makes
     # it possible to 'query' these in device code, relying on LLVM to optimize the checks
     # away and generate static code. note that we only do so if there's actual uses of these
@@ -153,9 +159,14 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     tm = llvm_machine(job.config.target)
     # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
     @dispose pb=NewPMPassBuilder() begin
-        register!(pb, NVVMReflectPass())
-
-        add!(pb, NVVMReflectPass())
+        if LLVM.version() < v"17"
+            # Pre-17 LLVM has no way to invoke EP callbacks from the string
+            # API, so fall back to our own nvvm_reflect! implementation.
+            # LLVM 17+ picks up NVPTX's built-in NVVMReflectPass through the
+            # PipelineStart EP invocations woven into `buildNewPMPipeline!`.
+            register!(pb, NVVMReflectPass())
+            add!(pb, NVVMReflectPass())
+        end
 
         add!(pb, NewPMFunctionPassManager()) do fpm
             # needed by GemmKernels.jl-like code
@@ -380,9 +391,12 @@ end
 
 # Replace occurrences of __nvvm_reflect("foo") and llvm.nvvm.reflect with an integer.
 #
-# NOTE: this is the same as LLVM's NVVMReflect pass, which we cannot use because it is
-#       not exported. It is meant to be added to a pass pipeline automatically, by
-#       calling adjustPassManager, but we don't use a PassManagerBuilder so cannot do so.
+# This is a back-port of LLVM's NVVMReflectPass for LLVM < 17, where the
+# built-in pass cannot be invoked via the string-API PipelineStart EP callback.
+# Semantics match LLVM's: `__CUDA_ARCH` is derived from the target capability,
+# `__CUDA_FTZ` is read from the `nvvm-reflect-ftz` module flag, and every other
+# key folds to 0. Knobs like denormal flushing or FMAD contraction must be
+# configured through module flags or LLVM fast-math flags, not here.
 const NVVM_REFLECT_FUNCTION = "__nvvm_reflect"
 function nvvm_reflect!(mod::LLVM.Module)
     job = current_job::CompilerJob
@@ -396,6 +410,18 @@ function nvvm_reflect!(mod::LLVM.Module)
     isdeclaration(reflect_function) || error("_reflect function should not have a body")
     reflect_typ = return_type(function_type(reflect_function))
     isa(reflect_typ, LLVM.IntegerType) || error("_reflect's return type should be integer")
+
+    # pull __CUDA_FTZ from the nvvm-reflect-ftz module flag (same source LLVM uses)
+    ftz_val = 0
+    if haskey(flags(mod), "nvvm-reflect-ftz")
+        flag = flags(mod)["nvvm-reflect-ftz"]
+        if flag isa LLVM.ConstantAsMetadata
+            c = LLVM.Value(flag)
+            if c isa ConstantInt
+                ftz_val = Int(convert(Int64, c))
+            end
+        end
+    end
 
     to_remove = []
     for use in uses(reflect_function)
@@ -440,31 +466,14 @@ function nvvm_reflect!(mod::LLVM.Module)
         chars = convert.(Ref(UInt8), collect(sym_op))
         reflect_arg = String(chars[1:end-1])
 
-        # handle possible cases
-        # XXX: put some of these property in the compiler job?
-        #      and/or first set the "nvvm-reflect-*" module flag like Clang does?
-        fast_math = current_job.config.target.fastmath
-        # NOTE: we follow nvcc's --use_fast_math
-        reflect_val = if reflect_arg == "__CUDA_FTZ"
-            # single-precision denormals support
-            ConstantInt(reflect_typ, fast_math ? 1 : 0)
-        elseif reflect_arg == "__CUDA_PREC_DIV"
-            # single-precision floating-point division and reciprocals.
-            ConstantInt(reflect_typ, fast_math ? 0 : 1)
-        elseif reflect_arg == "__CUDA_PREC_SQRT"
-            # single-precision floating point square roots.
-            ConstantInt(reflect_typ, fast_math ? 0 : 1)
-        elseif reflect_arg == "__CUDA_FMAD"
-            # contraction of floating-point multiplies and adds/subtracts into
-            # floating-point multiply-add operations (FMAD, FFMA, or DFMA)
-            ConstantInt(reflect_typ, fast_math ? 1 : 0)
-        elseif reflect_arg == "__CUDA_ARCH"
-            ConstantInt(reflect_typ, job.config.target.cap.major*100 + job.config.target.cap.minor*10)
+        # match LLVM's NVVMReflectPass: unknown keys fold to 0.
+        reflect_val = if reflect_arg == "__CUDA_ARCH"
+            ConstantInt(reflect_typ,
+                        job.config.target.cap.major*100 + job.config.target.cap.minor*10)
+        elseif reflect_arg == "__CUDA_FTZ"
+            ConstantInt(reflect_typ, ftz_val)
         else
-            @safe_error """Unrecognized format of __nvvm_reflect call:
-                           $(string(call))
-                           Unknown argument $reflect_arg. Please file an issue."""
-            continue
+            ConstantInt(reflect_typ, 0)
         end
 
         replace_uses!(call, reflect_val)
