@@ -245,14 +245,20 @@ const __llvm_initialized = Ref(false)
                 push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
             end
 
+            function deferred_codegen(@nospecialize(dyn_job::CompilerJob), @nospecialize(job::CompilerJob))
+                target = nest_target(dyn_job.config.target, job.config.target)
+                params = nest_params(dyn_job.config.params, job.config.params)
+                config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
+                return codegen(:llvm, CompilerJob(dyn_job; config))
+            end
+
             # compile and link
             for dyn_job in keys(worklist)
                 # cached compilation
                 dyn_entry_fn = get!(jobs, dyn_job) do
-                    target = nest_target(dyn_job.config.target, job.config.target)
-                    params = nest_params(dyn_job.config.params, job.config.params)
-                    config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
-                    dyn_ir, dyn_meta = codegen(:llvm, CompilerJob(dyn_job; config))
+                    # We are potentially calling into a sibling compiler (Enzyme)
+                    # which was loaded in a newer world.
+                    dyn_ir, dyn_meta = @invokelatest deferred_codegen(dyn_job, job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     if haskey(dyn_meta, :gv_to_value)
