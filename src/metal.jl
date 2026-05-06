@@ -162,7 +162,7 @@ end
 # note that it isn't enough to remove the function attribute, because the Metal LLVM
 # compiler re-optimizes and will rediscover the property. to avoid this, we inline
 # all functions that are marked noreturn, i.e., until LLVM cannot rediscover it.
-function hide_noreturn!(mod::LLVM.Module)
+function hide_noreturn!(job::CompilerJob, mod::LLVM.Module)
     noreturn_attr = EnumAttribute("noreturn", 0)
     noinline_attr = EnumAttribute("noinline", 0)
     alwaysinline_attr = EnumAttribute("alwaysinline", 0)
@@ -184,7 +184,11 @@ function hide_noreturn!(mod::LLVM.Module)
         add!(pb, AlwaysInlinerPass())
         add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
-            add!(fpm, InstCombinePass())
+            if use_instcombine(job)
+                add!(fpm, InstCombinePass())
+            else
+                add!(fpm, InstSimplifyPass())
+            end
         end
         run!(pb, mod)
     end
@@ -215,7 +219,11 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, InferAddressSpacesPass())
                 add!(fpm, SROAPass())
-                add!(fpm, InstCombinePass())
+                if use_instcombine(job)
+                    add!(fpm, InstCombinePass())
+                else
+                    add!(fpm, InstSimplifyPass())
+                end
                 add!(fpm, EarlyCSEPass())
                 add!(fpm, SimplifyCFGPass())
             end
@@ -228,7 +236,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     end
 
     # JuliaGPU/Metal.jl#113
-    hide_noreturn!(mod)
+    hide_noreturn!(job, mod)
 
     # get rid of unreachable control flow (JuliaGPU/Metal.jl#370).
     # note that this currently works in tandem with the `hide_noreturn!` pass above,
@@ -250,7 +258,11 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
             add!(pb, AlwaysInlinerPass())
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, SimplifyCFGPass())
-                add!(fpm, InstCombinePass())
+                if use_instcombine(job)
+                    add!(fpm, InstCombinePass())
+                else
+                    add!(fpm, InstSimplifyPass())
+                end
             end
             run!(pb, mod)
         end
@@ -386,7 +398,11 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
         add!(pb, SimplifyCFGPass())
         add!(pb, SROAPass())
         add!(pb, EarlyCSEPass())
-        add!(pb, InstCombinePass())
+        if use_instcombine(job)
+            add!(pb, InstCombinePass())
+        else
+            add!(pb, InstSimplifyPass())
+        end
 
         run!(pb, mod)
     end

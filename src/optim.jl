@@ -99,14 +99,22 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
         add!(mpm, NewPMFunctionPassManager()) do fpm
             if opt_level >= 2
                 add!(fpm, SROAPass())
-                add!(fpm, InstCombinePass())
+                if use_instcombine(job)
+                    add!(fpm, InstCombinePass())
+                else
+                    add!(fpm, InstSimplifyPass())
+                end
                 add!(fpm, JumpThreadingPass())
                 add!(fpm, CorrelatedValuePropagationPass())
                 add!(fpm, ReassociatePass())
                 add!(fpm, EarlyCSEPass())
                 add!(fpm, AllocOptPass())
             else
-                add!(fpm, InstCombinePass())
+                if use_instcombine(job)
+                    add!(fpm, InstCombinePass())
+                else
+                    add!(fpm, InstSimplifyPass())
+                end
                 add!(fpm, EarlyCSEPass())
             end
         end
@@ -157,7 +165,11 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
         add!(fpm, CorrelatedValuePropagationPass())
         add!(fpm, DCEPass())
         add!(fpm, IRCEPass())
-        add!(fpm, InstCombinePass())
+        if use_instcombine(job)
+            add!(fpm, InstCombinePass())
+        else
+            add!(fpm, InstSimplifyPass())
+        end
         add!(fpm, JumpThreadingPass())
     end
     if opt_level >= 3
@@ -181,7 +193,11 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, InjectTLIMappings())
     add!(fpm, LoopVectorizePass())
     add!(fpm, LoopLoadEliminationPass())
-    add!(fpm, InstCombinePass())
+    if use_instcombine(job)
+        add!(fpm, InstCombinePass())
+    else
+        add!(fpm, InstSimplifyPass())
+    end
     add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
     add!(fpm, SLPVectorizerPass())
     add!(fpm, VectorCombinePass())
@@ -250,7 +266,11 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     if opt_level >= 1
         add!(mpm, NewPMFunctionPassManager()) do fpm
-            add!(fpm, InstCombinePass())
+            if use_instcombine(job)
+                add!(fpm, InstCombinePass())
+            else
+                add!(fpm, InstSimplifyPass())
+            end
             add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
         end
     end
