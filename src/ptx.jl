@@ -19,14 +19,11 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     maxregs::Union{Nothing,Int} = nothing
 
     fastmath::Bool = Base.JLOptions().fast_math == 1
-    instcombine::Bool = true
 
     # deprecated; remove with next major version
     exitable::Union{Nothing,Bool} = nothing
     unreachable::Union{Nothing,Bool} = nothing
 end
-
-use_instcombine(@nospecialize(job::CompilerJob{PTXCompilerTarget})) = job.config.target.instcombine
 
 function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.cap, h)
@@ -39,7 +36,6 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.blocks_per_sm, h)
     h = hash(target.maxregs, h)
     h = hash(target.fastmath, h)
-    h = hash(target.instcombine, h)
 
     h
 end
@@ -95,7 +91,6 @@ function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
     job.config.target.blocks_per_sm !== nothing && print(io, ", blocks_per_sm=$(job.config.target.blocks_per_sm)")
     job.config.target.maxregs !== nothing && print(io, ", maxregs=$(job.config.target.maxregs)")
     job.config.target.fastmath && print(io, ", fast math enabled")
-    !job.config.target.instcombine && print(io, ", instcombine disabled")
 end
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
@@ -169,11 +164,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             # NVPTX's target machine info enables runtime unrolling,
             # but Julia's pass sequence only invokes the simple unroller.
             add!(fpm, LoopUnrollPass(; job.config.opt_level))
-            if use_instcombine(job)
-                add!(fpm, InstCombinePass())        # clean-up redundancy
-            else
-                add!(fpm, InstSimplifyPass())
-            end
+            add!(fpm, instcombine_pass(job))        # clean-up redundancy
             add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
                 add!(lpm, LICMPass())           # the inner runtime check might be
                                                 # outer loop invariant

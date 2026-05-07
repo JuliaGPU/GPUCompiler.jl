@@ -184,11 +184,7 @@ function hide_noreturn!(job::CompilerJob, mod::LLVM.Module)
         add!(pb, AlwaysInlinerPass())
         add!(pb, NewPMFunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
-            if use_instcombine(job)
-                add!(fpm, InstCombinePass())
-            else
-                add!(fpm, InstSimplifyPass())
-            end
+            add!(fpm, instcombine_pass(job))
         end
         run!(pb, mod)
     end
@@ -219,11 +215,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, InferAddressSpacesPass())
                 add!(fpm, SROAPass())
-                if use_instcombine(job)
-                    add!(fpm, InstCombinePass())
-                else
-                    add!(fpm, InstSimplifyPass())
-                end
+                add!(fpm, instcombine_pass(job))
                 add!(fpm, EarlyCSEPass())
                 add!(fpm, SimplifyCFGPass())
             end
@@ -258,11 +250,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
             add!(pb, AlwaysInlinerPass())
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, SimplifyCFGPass())
-                if use_instcombine(job)
-                    add!(fpm, InstCombinePass())
-                else
-                    add!(fpm, InstSimplifyPass())
-                end
+                add!(fpm, instcombine_pass(job))
             end
             run!(pb, mod)
         end
@@ -398,11 +386,7 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
         add!(pb, SimplifyCFGPass())
         add!(pb, SROAPass())
         add!(pb, EarlyCSEPass())
-        if use_instcombine(job)
-            add!(pb, InstCombinePass())
-        else
-            add!(pb, InstSimplifyPass())
-        end
+        add!(pb, instcombine_pass(job))
 
         run!(pb, mod)
     end

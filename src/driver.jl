@@ -295,11 +295,7 @@ const __llvm_initialized = Ref(false)
             # minimal optimization to convert the inttoptr/call into a direct call
             @dispose pb=NewPMPassBuilder() begin
                 add!(pb, NewPMFunctionPassManager()) do fpm
-                    if use_instcombine(job)
-                        add!(fpm, InstCombinePass())
-                    else
-                        add!(fpm, InstSimplifyPass())
-                    end
+                    add!(fpm, instcombine_pass(job))
                 end
                 run!(pb, ir, llvm_machine(job.config.target))
             end
@@ -390,11 +386,7 @@ const __llvm_initialized = Ref(false)
                     if has_deferred_jobs
                         @dispose pb=NewPMPassBuilder() begin
                             add!(pb, NewPMFunctionPassManager()) do fpm
-                                if use_instcombine(job)
-                                    add!(fpm, InstCombinePass())
-                                else
-                                    add!(fpm, InstSimplifyPass())
-                                end
+                                add!(fpm, instcombine_pass(job))
                             end
                             add!(pb, AlwaysInlinerPass())
                             add!(pb, NewPMFunctionPassManager()) do fpm
