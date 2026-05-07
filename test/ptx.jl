@@ -169,14 +169,6 @@ end
     @test occursin("call void @julia_", ir)
 end
 
-@testset "instcombine" begin
-    mod = @eval module $(gensym())
-        foobar(x) = x + 1
-    end
-    PTX.code_llvm(mod.foobar, Tuple{Int}; instcombine=false)
-    @test true
-end
-
 end
 
 ############################################################################################

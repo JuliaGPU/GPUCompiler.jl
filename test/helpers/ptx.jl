@@ -3,14 +3,9 @@ module PTX
 using ..GPUCompiler
 import ..TestRuntime
 
-Base.@kwdef struct CompilerParams <: AbstractCompilerParams
-    instcombine::Bool = true
-end
+struct CompilerParams <: AbstractCompilerParams end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
-
-GPUCompiler.optimization_options(@nospecialize(job::PTXCompilerJob)) =
-    (; instcombine = job.config.params.instcombine)
 
 struct PTXKernelState
     data::Int64
@@ -43,12 +38,11 @@ GPUCompiler.runtime_module(::PTXCompilerJob) = PTXTestRuntime
 function create_job(@nospecialize(func), @nospecialize(types);
                     minthreads=nothing, maxthreads=nothing,
                     blocks_per_sm=nothing, maxregs=nothing,
-                    instcombine=true,
                     kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = PTXCompilerTarget(; cap=v"7.0", minthreads, maxthreads, blocks_per_sm, maxregs)
-    params = CompilerParams(; instcombine)
+    params = CompilerParams()
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end
