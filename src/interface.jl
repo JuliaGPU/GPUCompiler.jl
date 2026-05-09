@@ -226,6 +226,18 @@ end
 # Has the runtime available and does not require special handling
 uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 
+# Optional toggles consulted by the optimization pipeline. Override this method to return
+# a `NamedTuple` with any of the following keys (defaults shown):
+#
+# - `instcombine::Bool = true`: when `false`, the pipeline substitutes `InstSimplifyPass`
+#   for `InstCombinePass`, retaining only the simplification subset of the peephole
+#   transforms (useful e.g. for downstream rewriters like Enzyme that get confused by
+#   InstCombine's more aggressive rewrites).
+#
+# Returning a `NamedTuple` keeps this single extension point lightweight: downstream
+# users add new keys without GPUCompiler having to grow an interface method per option.
+optimization_options(@nospecialize(job::CompilerJob)) = (;)
+
 # Is it legal to run vectorization passes on this target
 can_vectorize(@nospecialize(job::CompilerJob)) = false
 

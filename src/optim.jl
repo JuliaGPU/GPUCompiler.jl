@@ -1,5 +1,16 @@
 # LLVM IR optimization
 
+# Pick the peephole pass according to `optimization_options(job).instcombine`. Defaults to
+# `InstCombinePass` to match LLVM's standard pipeline; `InstSimplifyPass` is the fallback
+# for back-ends that need only the simplification subset.
+function instcombine_pass(@nospecialize(job::CompilerJob))
+    if get(optimization_options(job), :instcombine, true)
+        InstCombinePass()
+    else
+        InstSimplifyPass()
+    end
+end
+
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
     tm = llvm_machine(job.config.target)
     tti = llvm_targetinfo(job.config.target)
@@ -99,14 +110,14 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
         add!(mpm, NewPMFunctionPassManager()) do fpm
             if opt_level >= 2
                 add!(fpm, SROAPass())
-                add!(fpm, InstCombinePass())
+                add!(fpm, instcombine_pass(job))
                 add!(fpm, JumpThreadingPass())
                 add!(fpm, CorrelatedValuePropagationPass())
                 add!(fpm, ReassociatePass())
                 add!(fpm, EarlyCSEPass())
                 add!(fpm, AllocOptPass())
             else
-                add!(fpm, InstCombinePass())
+                add!(fpm, instcombine_pass(job))
                 add!(fpm, EarlyCSEPass())
             end
         end
@@ -157,7 +168,7 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
         add!(fpm, CorrelatedValuePropagationPass())
         add!(fpm, DCEPass())
         add!(fpm, IRCEPass())
-        add!(fpm, InstCombinePass())
+        add!(fpm, instcombine_pass(job))
         add!(fpm, JumpThreadingPass())
     end
     if opt_level >= 3
@@ -181,7 +192,7 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, InjectTLIMappings())
     add!(fpm, LoopVectorizePass())
     add!(fpm, LoopLoadEliminationPass())
-    add!(fpm, InstCombinePass())
+    add!(fpm, instcombine_pass(job))
     add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
     add!(fpm, SLPVectorizerPass())
     add!(fpm, VectorCombinePass())
@@ -250,7 +261,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     if opt_level >= 1
         add!(mpm, NewPMFunctionPassManager()) do fpm
-            add!(fpm, InstCombinePass())
+            add!(fpm, instcombine_pass(job))
             add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
         end
     end

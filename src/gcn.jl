@@ -68,7 +68,7 @@ function finish_ir!(
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, InferAddressSpacesPass())
                 add!(fpm, SROAPass())
-                add!(fpm, InstCombinePass())
+                add!(fpm, instcombine_pass(job))
                 add!(fpm, EarlyCSEPass())
                 add!(fpm, SimplifyCFGPass())
             end

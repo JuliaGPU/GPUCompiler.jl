@@ -164,7 +164,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             # NVPTX's target machine info enables runtime unrolling,
             # but Julia's pass sequence only invokes the simple unroller.
             add!(fpm, LoopUnrollPass(; job.config.opt_level))
-            add!(fpm, InstCombinePass())        # clean-up redundancy
+            add!(fpm, instcombine_pass(job))        # clean-up redundancy
             add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
                 add!(lpm, LICMPass())           # the inner runtime check might be
                                                 # outer loop invariant
