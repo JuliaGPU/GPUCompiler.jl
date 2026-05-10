@@ -277,11 +277,6 @@ can_throw(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 # if not, safepoints at function entry will not be emitted
 can_safepoint(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 
-# generate a string that represents the type of compilation, for selecting a compiled
-# instance of the runtime library. this slug should encode everything that affects
-# the generated code of this compiler job (with exception of the function source)
-runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
-
 # the type of the kernel state object, or Nothing if this back-end doesn't need one.
 #
 # the generated code will be rewritten to include an object of this type as the first
@@ -345,7 +340,17 @@ function cache_view(@nospecialize(job::CompilerJob))
     CompilerCaching.CacheView{K, V}(cache_owner(job), job.world)
 end
 
-public GPUCompilerCacheToken, cache_owner, NoResults, results_type, cache_view
+# Optional consumer hooks for caching post-codegen LLVM bitcode on the results struct.
+# Override these on your `results_type(job)` to opt in to cross-session bitcode caching
+# (most relevant for runtime library functions, which GPUCompiler compiles per-target and
+# would otherwise rebuild every session). The `opaque_pointers` flag tracks the LLVM
+# context's pointer mode at compile time — `bitcode` should reject mismatches by
+# returning `nothing`, since opaque- and typed-pointer IR aren't interchangeable.
+bitcode(@nospecialize(results), opaque_pointers::Bool) = nothing
+bitcode!(@nospecialize(results), bytes::Vector{UInt8}, opaque_pointers::Bool) = nothing
+
+public GPUCompilerCacheToken, cache_owner, NoResults, results_type, cache_view,
+       bitcode, bitcode!
 
 # the method table to use
 # deprecate method_table on next-breaking release

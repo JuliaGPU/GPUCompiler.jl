@@ -138,12 +138,6 @@ isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
     # libdevice's __CUDA_ARCH dispatch, are still supported by the external back-end.
     startswith(fn, "llvm.nvvm.")
 
-# XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
-runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
-    "ptx$(job.config.target.ptx.major)$(job.config.target.ptx.minor)" *
-    "-$(cpu_name(job.config.target))" *
-    "-debuginfo=$(Int(llvm_debug_info(job)))"
-
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     # tell NVVMReflect whether to flush denormals; this mirrors what Clang does
