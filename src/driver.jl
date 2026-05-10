@@ -50,34 +50,16 @@ const compile_hook = Ref{Union{Nothing,Function}}(nothing)
     compile(target::Symbol, job::CompilerJob)
 
 Compile a `job` to one of the following formats as specified by the `target` argument:
-`:julia` for Julia IR, `:llvm` for LLVM IR and `:asm` for machine code.
+`:llvm` for LLVM IR, `:asm` for assembly, or `:obj` for object code.
 """
-function compile(target::Symbol, @nospecialize(job::CompilerJob); kwargs...)
-    # XXX: remove on next major version
-    if !isempty(kwargs)
-        Base.depwarn("The GPUCompiler `compile` API does not take keyword arguments anymore. Use CompilerConfig instead.", :compile)
-        config = CompilerConfig(job.config; kwargs...)
-        job = CompilerJob(job.source, config)
-    end
-
+function compile(target::Symbol, @nospecialize(job::CompilerJob))
     if compile_hook[] !== nothing
         Base.invokelatest(compile_hook[], job)
     end
-
     return compile_unhooked(target, job)
 end
 
-# XXX: remove on next major version
-function codegen(output::Symbol, @nospecialize(job::CompilerJob); kwargs...)
-    if !isempty(kwargs)
-        Base.depwarn("The GPUCompiler `codegen` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :codegen)
-        config = CompilerConfig(job.config; kwargs...)
-        job = CompilerJob(job.source, config)
-    end
-    compile_unhooked(output, job)
-end
-
-function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob); kwargs...)
+function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob))
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
@@ -179,14 +161,7 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob); kwargs...)
-    # XXX: remove on next major version
-    if !isempty(kwargs)
-        Base.depwarn("The GPUCompiler `emit_llvm` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :emit_llvm)
-        config = CompilerConfig(job.config; kwargs...)
-        job = CompilerJob(job.source, config)
-    end
-
+@locked function emit_llvm(@nospecialize(job::CompilerJob))
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -250,7 +225,7 @@ const __llvm_initialized = Ref(false)
                 target = nest_target(dyn_job.config.target, job.config.target)
                 params = nest_params(dyn_job.config.params, job.config.params)
                 config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
-                return codegen(:llvm, CompilerJob(dyn_job; config))
+                return compile_unhooked(:llvm, CompilerJob(dyn_job; config))
             end
 
             # compile and link
@@ -314,23 +289,7 @@ const __llvm_initialized = Ref(false)
 
         @tracepoint "Library linking" begin
             # target-specific libraries
-            @tracepoint "target libraries" begin
-                if has_legacy_link_libraries(job)
-                    Base.depwarn(
-                        "3-arg `link_libraries!(job, mod, undefined_fns)` is deprecated; " *
-                        "migrate your override to the 2-arg form `link_libraries!(job, mod)`. " *
-                        "Instead of inspecting `undefined_fns` to decide what to link, " *
-                        "parse the library lazily with `parse(LLVM.Module, bytes; lazy=true)` " *
-                        "and link it with `LLVM.link!(mod, lib; only_needed=true)` — " *
-                        "the linker will then materialize only the referenced symbols.",
-                        :link_libraries!)
-                    undefined_fns = [LLVM.name(f) for f in functions(ir)
-                                     if isdeclaration(f) && !LLVM.isintrinsic(f)]
-                    link_libraries!(job, ir, undefined_fns)
-                else
-                    link_libraries!(job, ir)
-                end
-            end
+            @tracepoint "target libraries" link_libraries!(job, ir)
 
             # GPU run-time library
             if !uses_julia_runtime(job)
