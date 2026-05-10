@@ -58,11 +58,6 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 
 ## job
 
-# TODO: encode debug build or not in the compiler job
-#       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{SPIRVCompilerTarget}) =
-    "spirv-" * String(job.config.target.backend)
-
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                         entry::LLVM.Function)
     # update calling convention
