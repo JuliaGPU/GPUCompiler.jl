@@ -99,20 +99,9 @@ for level in [:debug, :info, :warn, :error]
                 # using with_logger would create a closure, which is incompatible with
                 # generated functions, so instead we reproduce its implementation here
                 safe_logstate = Base.CoreLogging.LogState(safe_logger)
-                @static if VERSION < v"1.11-"
-                    t = current_task()
-                    old_logstate = t.logstate
-                    try
-                        t.logstate = safe_logstate
-                        $(esc(macrocall))
-                    finally
-                        t.logstate = old_logstate
-                    end
-                else
-                    Base.ScopedValues.@with(
-                        Base.CoreLogging.CURRENT_LOGSTATE => safe_logstate, $(esc(macrocall))
-                    )
-                end
+                Base.ScopedValues.@with(
+                    Base.CoreLogging.CURRENT_LOGSTATE => safe_logstate, $(esc(macrocall))
+                )
             end
         end
     end

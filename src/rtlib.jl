@@ -120,12 +120,14 @@ else
     is_asserts() = false
 end
 
-@locked function load_runtime(@nospecialize(job::CompilerJob))
-    global compile_cache
-    if compile_cache === nothing    # during precompilation
-        return build_runtime(job)
-    end
+# in-memory cache of serialized runtime libraries, keyed by `runtime_slug(job)`
+# (parametrized by opaque-pointer support). Survives package precompilation by virtue
+# of being plain bitcode bytes; native modules are reparsed on demand because LLVM
+# modules are tied to a context.
+const _runtime_libs = Dict{String, Vector{UInt8}}()
+const _runtime_libs_lock = ReentrantLock()
 
+@locked function load_runtime(@nospecialize(job::CompilerJob))
     slug = runtime_slug(job)
     if !supports_typed_pointers(context())
         slug *= "-opaque"
@@ -136,28 +138,15 @@ end
         slug *= "-asserts"
     end
 
-    name = "runtime_$(slug).bc"
-    path = joinpath(compile_cache, name)
-
-    if !ispath(path)
-        @debug "Building the GPU runtime library at $path"
-        mkpath(compile_cache)
+    bytes = Base.@lock _runtime_libs_lock get!(_runtime_libs, slug) do
         lib = build_runtime(job)
-
-        # atomic write to disk
-        temp_path, io = mktemp(dirname(path); cleanup=false)
+        io = IOBuffer()
         write(io, lib)
-        close(io)
-        @static if VERSION >= v"1.12.0-DEV.1023"
-            mv(temp_path, path; force=true)
-        else
-            Base.rename(temp_path, path, force=true)
-        end
+        take!(io)
     end
 
-    return parse(LLVM.Module, MemoryBufferFile(path); lazy=true)
+    return parse(LLVM.Module, MemoryBuffer(bytes); lazy=true)
 end
 
-# remove the existing cache
-# NOTE: call this function from global scope, so any change triggers recompilation.
-reset_runtime() = rm(compile_cache; recursive=true, force=true)
+# clear the in-memory runtime library cache
+reset_runtime() = Base.@lock _runtime_libs_lock empty!(_runtime_libs)
