@@ -120,12 +120,14 @@ else
     is_asserts() = false
 end
 
-@locked function load_runtime(@nospecialize(job::CompilerJob))
-    global compile_cache
-    if compile_cache === nothing    # during precompilation
-        return build_runtime(job)
-    end
+# in-memory cache of serialized runtime libraries, keyed by `runtime_slug(job)`
+# (parametrized by opaque-pointer support). Survives package precompilation by virtue
+# of being plain bitcode bytes; native modules are reparsed on demand because LLVM
+# modules are tied to a context.
+const _runtime_libs = Dict{String, Vector{UInt8}}()
+const _runtime_libs_lock = ReentrantLock()
 
+@locked function load_runtime(@nospecialize(job::CompilerJob))
     slug = runtime_slug(job)
     if !supports_typed_pointers(context())
         slug *= "-opaque"
@@ -136,40 +138,15 @@ end
         slug *= "-asserts"
     end
 
-    name = "runtime_$(slug).bc"
-    path = joinpath(compile_cache, name)
-
-    # the cache is shared across processes and may disappear at any point
-    # (e.g. `reset_runtime()` in another process), so treat it as best-effort
-    if ispath(path)
-        try
-            return parse(LLVM.Module, MemoryBufferFile(path); lazy=true)
-        catch err
-            @debug "Failed to load cached GPU runtime library; rebuilding" exception=(err, catch_backtrace())
-        end
-    end
-
-    @debug "Building the GPU runtime library at $path"
-    lib = build_runtime(job)
-
-    try
-        # atomic write to disk
-        mkpath(compile_cache)
-        temp_path, io = mktemp(compile_cache; cleanup=false)
+    bytes = Base.@lock _runtime_libs_lock get!(_runtime_libs, slug) do
+        lib = build_runtime(job)
+        io = IOBuffer()
         write(io, lib)
-        close(io)
-        @static if VERSION >= v"1.12.0-DEV.1023"
-            mv(temp_path, path; force=true)
-        else
-            Base.rename(temp_path, path, force=true)
-        end
-    catch err
-        @warn "Failed to cache GPU runtime library" exception=(err, catch_backtrace()) maxlog=1
+        take!(io)
     end
 
-    return lib
+    return parse(LLVM.Module, MemoryBuffer(bytes); lazy=true)
 end
 
-# remove the existing cache
-# NOTE: call this function from global scope, so any change triggers recompilation.
-reset_runtime() = rm(compile_cache; recursive=true, force=true)
+# clear the in-memory runtime library cache
+reset_runtime() = Base.@lock _runtime_libs_lock empty!(_runtime_libs)

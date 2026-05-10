@@ -261,15 +261,11 @@ runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
-if VERSION >= v"1.11.0-DEV.1552"
-get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
-                   token=ci_cache_token(job), inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
-else
-get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
-                   code_cache=ci_cache(job), inf_params=inference_params(job),
+function get_interpreter(@nospecialize(job::CompilerJob))
+    GPUInterpreter(job.world;
+                   method_table_view=maybe_cached(method_table_view(job)),
+                   cache=cache_view(job),
+                   inf_params=inference_params(job),
                    opt_params=optimization_params(job))
 end
 
@@ -305,35 +301,46 @@ pass_by_ref(@nospecialize(job::CompilerJob)) = false
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
+# Cache partitioning. The owner is stored on every CodeInstance and compared via `jl_egal`,
+# so it must be immutable for cross-session matches (e.g. via package precompilation).
 # Care is required for anything that impacts:
 #   - method_table
 #   - inference_params
 #   - optimization_params
-# By default that is just always_inline
-# the cache token is compared with jl_egal
+# Default covers `always_inline` (which feeds optimization_params) and the method table.
 struct GPUCompilerCacheToken
     target_type::Type
     always_inline::Bool
     method_table::Core.MethodTable
 end
 
-ci_cache_token(@nospecialize(job::CompilerJob)) =
+cache_owner(@nospecialize(job::CompilerJob)) =
     GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
 
-# the codeinstance cache to use -- should only be used for the constructor
-if VERSION >= v"1.11.0-DEV.1552"
-    # Soft deprecated user should use `CC.code_cache(get_interpreter(job))`
-    ci_cache(@nospecialize(job::CompilerJob)) = CC.code_cache(get_interpreter(job))
-else
-function ci_cache(@nospecialize(job::CompilerJob))
-    lock(GLOBAL_CI_CACHES_LOCK) do
-        cache = get!(GLOBAL_CI_CACHES, job.config) do
-            CodeCache()
-        end
-        return cache
-    end
+"""
+    GPUCompiler.NoResults()
+
+Default results type carried on each cached `CodeInstance` when the consumer hasn't
+overridden [`results_type`](@ref). Carries no fields; useful for compiler jobs that
+don't need to memoize compiled artifacts (e.g., reflection, precompile workloads).
+"""
+mutable struct NoResults end
+
+# The consumer's results struct type, stored on each CodeInstance via `CompilerCaching`.
+# Override to attach session-portable artifacts (IR, object bytes) and session-local handles
+# (e.g., `CuModule`, `MTLComputePipelineState`) to compiled CIs. The struct must be a
+# `mutable struct` with a zero-arg constructor.
+results_type(@nospecialize(job::CompilerJob)) = NoResults
+
+# Construct a `CompilerCaching.CacheView` partitioned by `cache_owner(job)` and parametrized
+# by `results_type(job)`.
+function cache_view(@nospecialize(job::CompilerJob))
+    K = typeof(cache_owner(job))
+    V = results_type(job)
+    CompilerCaching.CacheView{K, V}(cache_owner(job), job.world)
 end
-end
+
+public GPUCompilerCacheToken, cache_owner, NoResults, results_type, cache_view
 
 # the method table to use
 # deprecate method_table on next-breaking release
@@ -401,9 +408,3 @@ finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Functi
 
 # whether an LLVM function is valid for this back-end
 validate_ir(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]
-
-# deprecated
-struct DeprecationMarker end
-process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = DeprecationMarker()
-process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
-    DeprecationMarker()
