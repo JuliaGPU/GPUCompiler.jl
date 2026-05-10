@@ -33,6 +33,5 @@ end
 
 ## job
 
-runtime_slug(job::CompilerJob{NativeCompilerTarget}) = "native_$(job.config.target.cpu)-$(hash(job.config.target.features))$(job.config.target.jlruntime ? "-jlrt" : "")"
 uses_julia_runtime(job::CompilerJob{NativeCompilerTarget}) = job.config.target.jlruntime
 can_vectorize(job::CompilerJob{NativeCompilerTarget}) = true

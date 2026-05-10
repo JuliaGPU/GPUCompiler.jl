@@ -26,8 +26,6 @@ end
 
 ## job
 
-runtime_slug(job::CompilerJob{BPFCompilerTarget}) = "bpf"
-
 const bpf_intrinsics = () # TODO
 isintrinsic(::CompilerJob{BPFCompilerTarget}, fn::String) = in(fn, bpf_intrinsics)
 
