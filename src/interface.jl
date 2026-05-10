@@ -294,20 +294,25 @@ pass_by_ref(@nospecialize(job::CompilerJob)) = false
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
 # Cache partitioning. The owner is stored on every CodeInstance and compared via `jl_egal`,
-# so it must be immutable for cross-session matches (e.g. via package precompilation).
+# so it (and every field) must be immutable for cross-session matches (e.g. via package
+# precompilation); custom `target` / `params` types must be `struct`s, not `mutable struct`s.
 # Care is required for anything that impacts:
 #   - method_table
 #   - inference_params
 #   - optimization_params
-# Default covers `always_inline` (which feeds optimization_params) and the method table.
-struct GPUCompilerCacheToken
-    target_type::Type
+# The default covers the full target+params instances (so backends with version- or
+# arch-specific knobs partition cleanly), `always_inline` (which feeds optimization_params),
+# and the method table.
+struct GPUCompilerCacheToken{T<:AbstractCompilerTarget, P<:AbstractCompilerParams}
+    target::T
+    params::P
     always_inline::Bool
     method_table::Core.MethodTable
 end
 
 cache_owner(@nospecialize(job::CompilerJob)) =
-    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
+    GPUCompilerCacheToken(job.config.target, job.config.params,
+                          job.config.always_inline, method_table(job))
 
 """
     GPUCompiler.NoResults()
