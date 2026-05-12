@@ -60,9 +60,30 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, config::CompilerConfig, f, method)
+# Compile a single runtime function and link it into `mod`. If `cache` is provided and the
+# consumer's results type opts in via `GPUCompiler.bitcode`/`bitcode!`, per-function bitcode
+# is read from / written to the cached `CodeInstance` to avoid recompilation across sessions.
+function emit_function!(mod, config::CompilerConfig, f, method,
+                        cache::Union{Nothing, CacheView}=nothing)
     tt = Base.to_tuple_type(method.types)
     source = generic_methodinstance(f, tt)
+    name = method.llvm_name
+    opaque_pointers = !supports_typed_pointers(context())
+
+    # fast path: pull renamed bitcode straight from the cached CI
+    if cache !== nothing
+        hit = CompilerCaching.lookup(cache, source)
+        if hit !== nothing
+            cached = bitcode(hit[2], opaque_pointers)
+            if cached !== nothing
+                func_mod = parse(LLVM.Module, MemoryBuffer(cached))
+                link!(mod, func_mod)
+                return
+            end
+        end
+    end
+
+    # slow path: compile, rename, optionally cache, link
     new_mod, meta = compile_unhooked(:llvm, CompilerJob(source, config))
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
@@ -73,20 +94,26 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
 
-    temp_name = LLVM.name(meta.entry)
-    link!(mod, new_mod)
-    entry = functions(mod)[temp_name]
-
-    # if a declaration already existed, replace it with the function to avoid aliasing
-    # (and getting function names like gpu_signal_exception1)
-    name = method.llvm_name
-    if haskey(functions(mod), name)
-        decl = functions(mod)[name]
-        @assert value_type(decl) == value_type(entry)
-        replace_uses!(decl, entry)
+    # rename to the final `gpu_*` name on the per-function module, so the cached bitcode is
+    # immediately link-ready (no per-session rename pass).
+    if haskey(functions(new_mod), name) && functions(new_mod)[name] !== meta.entry
+        decl = functions(new_mod)[name]
+        @assert value_type(decl) == value_type(meta.entry)
+        replace_uses!(decl, meta.entry)
         erase!(decl)
     end
-    LLVM.name!(entry, name)
+    LLVM.name!(meta.entry, name)
+
+    if cache !== nothing
+        hit = CompilerCaching.lookup(cache, source)
+        if hit !== nothing
+            io = IOBuffer()
+            write(io, new_mod)
+            bitcode!(hit[2], take!(io), opaque_pointers)
+        end
+    end
+
+    link!(mod, new_mod)
 end
 
 function build_runtime(@nospecialize(job::CompilerJob))
@@ -96,6 +123,11 @@ function build_runtime(@nospecialize(job::CompilerJob))
     # derive a job that represents the runtime itself (notably with kernel=false).
     config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false, strip=false)
 
+    # cache view shared with the runtime functions' compile_unhooked calls — owner is
+    # determined by target+params+always_inline+method_table, all preserved on `config`.
+    proto = CompilerJob(job.source, config, job.world)
+    cache = cache_view(proto)
+
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
             isdefined(runtime_module(job), method.def) || continue
@@ -103,7 +135,7 @@ function build_runtime(@nospecialize(job::CompilerJob))
         else
             method.def
         end
-        emit_function!(mod, config, typeof(def), method)
+        emit_function!(mod, config, typeof(def), method, cache)
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again
@@ -114,38 +146,25 @@ function build_runtime(@nospecialize(job::CompilerJob))
     mod
 end
 
+# session-local cache of assembled runtime libraries, keyed by
+# `(cache_owner, opaque_pointers)`. Avoids re-running `build_runtime` (which re-parses and
+# re-links per-function bitcode) on every kernel compile within a session. Cross-session
+# persistence happens at the per-function level via the `bitcode`/`bitcode!` hooks.
+const _runtime_libs = Dict{Tuple{Any, Bool}, Vector{UInt8}}()
+const _runtime_libs_lock = ReentrantLock()
+
 @locked function load_runtime(@nospecialize(job::CompilerJob))
-    global compile_cache
-    if compile_cache === nothing    # during precompilation
-        return build_runtime(job)
-    end
+    key = (cache_owner(job), !supports_typed_pointers(context()))
 
-    slug = runtime_slug(job)
-    if !supports_typed_pointers(context())
-        slug *= "-opaque"
-    end
-    name = "runtime_$(slug).bc"
-    path = joinpath(compile_cache, name)
-
-    if !ispath(path)
-        @debug "Building the GPU runtime library at $path"
-        mkpath(compile_cache)
+    bytes = Base.@lock _runtime_libs_lock get!(_runtime_libs, key) do
         lib = build_runtime(job)
-
-        # atomic write to disk
-        temp_path, io = mktemp(dirname(path); cleanup=false)
+        io = IOBuffer()
         write(io, lib)
-        close(io)
-        @static if VERSION >= v"1.12.0-DEV.1023"
-            mv(temp_path, path; force=true)
-        else
-            Base.rename(temp_path, path, force=true)
-        end
+        take!(io)
     end
 
-    return parse(LLVM.Module, MemoryBufferFile(path); lazy=true)
+    return parse(LLVM.Module, MemoryBuffer(bytes); lazy=true)
 end
 
-# remove the existing cache
-# NOTE: call this function from global scope, so any change triggers recompilation.
-reset_runtime() = rm(compile_cache; recursive=true, force=true)
+# clear the session-local runtime library cache
+reset_runtime() = Base.@lock _runtime_libs_lock empty!(_runtime_libs)

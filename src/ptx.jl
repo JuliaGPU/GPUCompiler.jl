@@ -97,12 +97,6 @@ const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
     in(fn, ptx_intrinsics)
 
-# XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
-runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
-    "ptx$(job.config.target.ptx.major)$(job.config.target.ptx.minor)" *
-    "-sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)" *
-    "-debuginfo=$(Int(llvm_debug_info(job)))"
-
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     # emit the device capability and ptx isa version as constants in the module. this makes

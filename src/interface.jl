@@ -253,15 +253,11 @@ runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
-if VERSION >= v"1.11.0-DEV.1552"
-get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
-                   token=ci_cache_token(job), inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
-else
-get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
-                   code_cache=ci_cache(job), inf_params=inference_params(job),
+function get_interpreter(@nospecialize(job::CompilerJob))
+    GPUInterpreter(job.world;
+                   method_table_view=maybe_cached(method_table_view(job)),
+                   cache=cache_view(job),
+                   inf_params=inference_params(job),
                    opt_params=optimization_params(job))
 end
 
@@ -272,11 +268,6 @@ can_throw(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 # does this target support loading from Julia safepoints?
 # if not, safepoints at function entry will not be emitted
 can_safepoint(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
-
-# generate a string that represents the type of compilation, for selecting a compiled
-# instance of the runtime library. this slug should encode everything that affects
-# the generated code of this compiler job (with exception of the function source)
-runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
 
 # the type of the kernel state object, or Nothing if this back-end doesn't need one.
 #
@@ -297,35 +288,61 @@ pass_by_ref(@nospecialize(job::CompilerJob)) = false
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
+# Cache partitioning. The owner is stored on every CodeInstance and compared via `jl_egal`,
+# so it (and every field) must be immutable for cross-session matches (e.g. via package
+# precompilation); custom `target` / `params` types must be `struct`s, not `mutable struct`s.
 # Care is required for anything that impacts:
 #   - method_table
 #   - inference_params
 #   - optimization_params
-# By default that is just always_inline
-# the cache token is compared with jl_egal
-struct GPUCompilerCacheToken
-    target_type::Type
+# The default covers the full target+params instances (so backends with version- or
+# arch-specific knobs partition cleanly), `always_inline` (which feeds optimization_params),
+# and the method table.
+struct GPUCompilerCacheToken{T<:AbstractCompilerTarget, P<:AbstractCompilerParams}
+    target::T
+    params::P
     always_inline::Bool
     method_table::Core.MethodTable
 end
 
-ci_cache_token(@nospecialize(job::CompilerJob)) =
-    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
+cache_owner(@nospecialize(job::CompilerJob)) =
+    GPUCompilerCacheToken(job.config.target, job.config.params,
+                          job.config.always_inline, method_table(job))
 
-# the codeinstance cache to use -- should only be used for the constructor
-if VERSION >= v"1.11.0-DEV.1552"
-    # Soft deprecated user should use `CC.code_cache(get_interpreter(job))`
-    ci_cache(@nospecialize(job::CompilerJob)) = CC.code_cache(get_interpreter(job))
-else
-function ci_cache(@nospecialize(job::CompilerJob))
-    lock(GLOBAL_CI_CACHES_LOCK) do
-        cache = get!(GLOBAL_CI_CACHES, job.config) do
-            CodeCache()
-        end
-        return cache
-    end
+"""
+    GPUCompiler.NoResults()
+
+Default results type carried on each cached `CodeInstance` when the consumer hasn't
+overridden [`results_type`](@ref). Carries no fields; useful for compiler jobs that
+don't need to memoize compiled artifacts (e.g., reflection, precompile workloads).
+"""
+mutable struct NoResults end
+
+# The consumer's results struct type, stored on each CodeInstance via `CompilerCaching`.
+# Override to attach session-portable artifacts (IR, object bytes) and session-local handles
+# (e.g., `CuModule`, `MTLComputePipelineState`) to compiled CIs. The struct must be a
+# `mutable struct` with a zero-arg constructor.
+results_type(@nospecialize(job::CompilerJob)) = NoResults
+
+# Construct a `CompilerCaching.CacheView` partitioned by `cache_owner(job)` and parametrized
+# by `results_type(job)`.
+function cache_view(@nospecialize(job::CompilerJob))
+    K = typeof(cache_owner(job))
+    V = results_type(job)
+    CompilerCaching.CacheView{K, V}(cache_owner(job), job.world)
 end
-end
+
+# Optional consumer hooks for caching post-codegen LLVM bitcode on the results struct.
+# Override these on your `results_type(job)` to opt in to cross-session bitcode caching
+# (most relevant for runtime library functions, which GPUCompiler compiles per-target and
+# would otherwise rebuild every session). The `opaque_pointers` flag tracks the LLVM
+# context's pointer mode at compile time — `bitcode` should reject mismatches by
+# returning `nothing`, since opaque- and typed-pointer IR aren't interchangeable.
+bitcode(@nospecialize(results), opaque_pointers::Bool) = nothing
+bitcode!(@nospecialize(results), bytes::Vector{UInt8}, opaque_pointers::Bool) = nothing
+
+public GPUCompilerCacheToken, cache_owner, NoResults, results_type, cache_view,
+       bitcode, bitcode!
 
 # the method table to use
 # deprecate method_table on next-breaking release
@@ -390,9 +407,3 @@ finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Functi
 
 # whether an LLVM function is valid for this back-end
 validate_ir(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]
-
-# deprecated
-struct DeprecationMarker end
-process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = DeprecationMarker()
-process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
-    DeprecationMarker()
