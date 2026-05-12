@@ -34,7 +34,7 @@ precompile_test_harness("Inference caching") do load_path
 
         token = let
             job, _ = PTX.create_job(identity, (Int,))
-            GPUCompiler.ci_cache_token(job)
+            GPUCompiler.cache_owner(job)
         end
         ci = isdefined(identity_mi, :cache) ? identity_mi.cache : nothing
         while ci !== nothing
