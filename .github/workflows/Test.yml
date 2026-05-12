@@ -19,27 +19,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.10', '1.11', '1.12', '1.13-nightly', 'nightly']
+        version: ['1.11', '1.12', '1.13-nightly', 'nightly']
         os: [ubuntu-24.04, ubuntu-24.04-arm, macOS-15, macOS-15-intel, windows-2025]
         llvm_args: ['']
         include:
           # starting with Julia 1.10, we can enable opaque pointers
           # from Julia 1.12 on, this is the default.
-          - version: '1.10'
-            os: 'ubuntu-24.04'
-            llvm_args: '--opaque-pointers'
-          - version: '1.10'
-            os: 'ubuntu-24.04-arm'
-            llvm_args: '--opaque-pointers'
-          - version: '1.10'
-            os: 'macOS-15'
-            llvm_args: '--opaque-pointers'
-          - version: '1.10'
-            os: 'macOS-15-intel'
-            llvm_args: '--opaque-pointers'
-          - version: '1.10'
-            os: 'windows-2025'
-            llvm_args: '--opaque-pointers'
           - version: '1.11'
             os: 'ubuntu-24.04'
             llvm_args: '--opaque-pointers'
