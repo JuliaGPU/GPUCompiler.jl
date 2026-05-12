@@ -257,12 +257,14 @@ if VERSION >= v"1.11.0-DEV.1552"
 get_interpreter(@nospecialize(job::CompilerJob)) =
     GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
                    token=ci_cache_token(job), inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
+                   opt_params=optimization_params(job),
+                   always_inline=job.config.always_inline)
 else
 get_interpreter(@nospecialize(job::CompilerJob)) =
     GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
                    code_cache=ci_cache(job), inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
+                   opt_params=optimization_params(job),
+                   always_inline=job.config.always_inline)
 end
 
 # does this target support throwing Julia exceptions with jl_throw?

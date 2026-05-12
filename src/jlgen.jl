@@ -420,6 +420,8 @@ end
 
     inf_params::CC.InferenceParams
     opt_params::CC.OptimizationParams
+
+    always_inline::Bool
 end
 
 @static if HAS_INTEGRATED_CACHE
@@ -427,14 +429,15 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         method_table_view::CC.MethodTableView,
                         token::Any,
                         inf_params::CC.InferenceParams,
-                        opt_params::CC.OptimizationParams)
+                        opt_params::CC.OptimizationParams,
+                        always_inline::Bool=false)
     @assert world <= Base.get_world_counter()
 
     inf_cache = INFERENCE_CACHE_TYPE()
 
     return GPUInterpreter(world, method_table_view,
                           token, inf_cache,
-                          inf_params, opt_params)
+                          inf_params, opt_params, always_inline)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
@@ -443,10 +446,11 @@ function GPUInterpreter(interp::GPUInterpreter;
                         token::Any=interp.token,
                         inf_cache::INFERENCE_CACHE_TYPE=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
-                        opt_params::CC.OptimizationParams=interp.opt_params)
+                        opt_params::CC.OptimizationParams=interp.opt_params,
+                        always_inline::Bool=interp.always_inline)
     return GPUInterpreter(world, method_table_view,
                           token, inf_cache,
-                          inf_params, opt_params)
+                          inf_params, opt_params, always_inline)
 end
 
 else
@@ -455,14 +459,15 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         method_table_view::CC.MethodTableView,
                         code_cache::CodeCache,
                         inf_params::CC.InferenceParams,
-                        opt_params::CC.OptimizationParams)
+                        opt_params::CC.OptimizationParams,
+                        always_inline::Bool=false)
     @assert world <= Base.get_world_counter()
 
     inf_cache = Vector{CC.InferenceResult}()
 
     return GPUInterpreter(world, method_table_view,
                           code_cache, inf_cache,
-                          inf_params, opt_params)
+                          inf_params, opt_params, always_inline)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
@@ -471,10 +476,11 @@ function GPUInterpreter(interp::GPUInterpreter;
                         code_cache::CodeCache=interp.code_cache,
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
-                        opt_params::CC.OptimizationParams=interp.opt_params)
+                        opt_params::CC.OptimizationParams=interp.opt_params,
+                        always_inline::Bool=interp.always_inline)
     return GPUInterpreter(world, method_table_view,
                           code_cache, inf_cache,
-                          inf_params, opt_params)
+                          inf_params, opt_params, always_inline)
 end
 end # HAS_INTEGRATED_CACHE
 
@@ -498,7 +504,11 @@ end
 
 CC.may_optimize(interp::GPUInterpreter) = true
 CC.may_compress(interp::GPUInterpreter) = true
-CC.may_discard_trees(interp::GPUInterpreter) = true
+# When `always_inline=true`, preserve optimized IR for every callee: otherwise
+# `transform_result_for_cache` drops sources whose `inlining_cost` saturated to
+# `MAX_INLINE_COST`, leaving nothing for our `src_inlining_policy` override to
+# inline. See JuliaGPU/GPUCompiler.jl#527.
+CC.may_discard_trees(interp::GPUInterpreter) = !interp.always_inline
 @static if VERSION <= v"1.12.0-DEV.1531"
 CC.verbose_stmt_info(interp::GPUInterpreter) = false
 end
@@ -522,6 +532,52 @@ function CC.concrete_eval_eligible(interp::GPUInterpreter,
         f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo)
     ret === false && return nothing
     return ret
+end
+
+# Force inlining of all functions with source code when `always_inline=true`.
+#
+# Julia's inliner stores per-function inlining cost in a fixed-width integer
+# field on CodeInfo, then sets `is_inlineable(src) := inlining_cost != MAX_INLINE_COST`.
+# When the body cost exceeds the storage's representable range it saturates to
+# MAX_INLINE_COST and the function becomes permanently non-inlineable, regardless
+# of the caller's `inline_cost_threshold`. The storage is UInt16 on 1.11/1.12
+# (cap ≈65535) and was narrowed to UInt8 on 1.13+ (cap ≈5000 via
+# jl_encode_inlining_cost), at which point reasonably-sized GPU kernel callees
+# routinely saturate. See JuliaGPU/GPUCompiler.jl#527 and JuliaLang/julia#51599.
+#
+# Bypassing the `is_inlineable` check here makes the inliner respect our
+# `inline_cost_threshold = MAX_INLINE_COST` setting in practice. Julia 1.12+
+# split the legacy `inlining_policy` (returns src or nothing) into
+# `src_inlining_policy` (returns Bool); we override the version-appropriate hook.
+@static if isdefined(CC, :src_inlining_policy)
+    function CC.src_inlining_policy(interp::GPUInterpreter,
+            @nospecialize(src), @nospecialize(info::CC.CallInfo), stmt_flag::UInt32)
+        if interp.always_inline
+            @static if isdefined(CC, :OptimizationState)
+                isa(src, CC.OptimizationState) && (src = src.src)
+            end
+            isa(src, CC.MaybeCompressed) && return true
+            isa(src, CC.IRCode) && return true
+        end
+        return @invoke CC.src_inlining_policy(interp::CC.AbstractInterpreter,
+            src::Any, info::CC.CallInfo, stmt_flag::UInt32)
+    end
+else
+    function CC.inlining_policy(interp::GPUInterpreter,
+            @nospecialize(src), @nospecialize(info::CC.CallInfo), stmt_flag::UInt32)
+        if interp.always_inline
+            if isa(src, CC.MaybeCompressed)
+                CC.is_source_inferred(src) || return nothing
+                return src
+            elseif isa(src, CC.IRCode)
+                return src
+            elseif isa(src, CC.SemiConcreteResult)
+                return src
+            end
+        end
+        return @invoke CC.inlining_policy(interp::CC.AbstractInterpreter,
+            src::Any, info::CC.CallInfo, stmt_flag::UInt32)
+    end
 end
 
 

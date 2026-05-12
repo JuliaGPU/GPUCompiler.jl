@@ -356,13 +356,13 @@ end
 end
 
 @testset "always_inline" begin
-    # XXX: broken by JuliaLang/julia#51599, see JuliaGPU/GPUCompiler.jl#527.
-    #      yet somehow this works on 1.12?
-    broken = VERSION >= v"1.13-"
-
+    # The body has to be big enough that the inferred `inlining_cost` field
+    # saturates to `MAX_INLINE_COST`, otherwise it gets inlined trivially.
+    # That field is UInt16 on 1.11/1.12 and UInt8 on 1.13+. See
+    # JuliaGPU/GPUCompiler.jl#527 and JuliaLang/julia#51599.
     mod = @eval module $(gensym())
         import ..sink
-        expensive(x) = $(foldl((e, _) -> :($sink($e) + $sink(x)), 1:100; init=:x))
+        expensive(x) = $(foldl((e, _) -> :($sink($e) + $sink(x)), 1:1600; init=:x))
         function g(x)
             expensive(x)
             return
@@ -378,20 +378,20 @@ end
         Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
-    @test @filecheck(begin
+    @test @filecheck begin
         @check_not "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
-    end) broken=broken
+    end
 
     @test @filecheck begin
         @check "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
-    @test @filecheck(begin
+    @test @filecheck begin
         @check_not "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
-    end) broken=broken
+    end
 end
 
 @testset "function attributes" begin
