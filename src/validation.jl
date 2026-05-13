@@ -33,7 +33,7 @@ function check_method(@nospecialize(job::CompilerJob))
     ft <: Core.Builtin && error("$(unsafe_function_from_type(ft)) is not a generic function")
 
     for sparam in job.source.sparam_vals
-        if sparam isa TypeVar
+        if sparam isa (__has_internal_julia_change(v"1.14-alpha", :svectvar) ? Core.SimpleVector : TypeVar)
             throw(KernelError(job, "method captures typevar '$sparam' (you probably use an unbound type variable)"))
         end
     end

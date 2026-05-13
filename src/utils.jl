@@ -1,3 +1,11 @@
+## julia compat
+if VERSION >= v"1.12"
+    __has_internal_julia_change(version_or::VersionNumber, feature::Symbol) =
+        Base.__has_internal_change(version_or, feature)
+else
+    __has_internal_julia_change(version_or::VersionNumber, feature::Symbol) =
+        false
+end
 ## debug verification
 
 should_verify() = ccall(:jl_is_debugbuild, Cint, ()) == 1 ||
