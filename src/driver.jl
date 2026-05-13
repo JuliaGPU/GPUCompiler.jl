@@ -171,7 +171,7 @@ function register_deferred_codegen()
 
         mu = LLVM.absolute_symbols(Ref(map))
         LLVM.define(jd, mu)
-        addr = lookup(jljit, "deferred_codegen")
+        addr = lookup(jljit, jd, "deferred_codegen")
         @assert addr != C_NULL "Failed to register deferred_codegen"
     end
     return nothing
