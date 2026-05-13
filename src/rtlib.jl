@@ -114,6 +114,12 @@ function build_runtime(@nospecialize(job::CompilerJob))
     mod
 end
 
+@static if VERSION >= v"1.11.0"
+    import Core.Compiler: is_asserts
+else
+    is_asserts() = false
+end
+
 @locked function load_runtime(@nospecialize(job::CompilerJob))
     global compile_cache
     if compile_cache === nothing    # during precompilation
@@ -124,6 +130,12 @@ end
     if !supports_typed_pointers(context())
         slug *= "-opaque"
     end
+
+    # Julia codegen changes metadata in modules when `FORCE_ASSERTIONS=1`
+    if is_asserts()
+        slug *= "-asserts"
+    end
+
     name = "runtime_$(slug).bc"
     path = joinpath(compile_cache, name)
 
