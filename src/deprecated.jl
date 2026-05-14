@@ -207,20 +207,20 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
     # NOTE: store the MethodInstance's objectid (not the MI) to avoid an expensive boxing
     # allocation. Base does this with a multi-level lookup; we use a single-level dict.
 
-    Base.@lock _cached_compilation_lock begin
+    Base.@lock cached_compilation_lock begin
         obj = get(cache, key, nothing)
     end
 
     if obj === nothing || compile_hook[] !== nothing
         obj = actual_compilation(cache, src, world, cfg, compiler, linker)::V
-        Base.@lock _cached_compilation_lock begin
+        Base.@lock cached_compilation_lock begin
             cache[key] = obj
         end
     end
     obj::V
 end
 
-const _cached_compilation_lock = ReentrantLock()
+const cached_compilation_lock = ReentrantLock()
 
 @noinline function actual_compilation(cache::AbstractDict, src::MethodInstance, world::UInt,
                                       cfg::CompilerConfig, compiler::Function,
