@@ -347,27 +347,37 @@ cache_owner(@nospecialize(job::CompilerJob)) =
 results_type(@nospecialize(job::CompilerJob)) = Nothing
 
 """
-    bitcode(results) -> Union{Nothing, Vector{UInt8}}
-    bitcode!(results, bytes::Vector{UInt8}) -> Nothing
+    cache_get(job::CompilerJob, key::Symbol) -> Union{Nothing, Vector{UInt8}}
+    cache_put!(job::CompilerJob, key::Symbol, value::Vector{UInt8}) -> Nothing
 
-Optional consumer hooks for stashing post-irgen LLVM bitcode on the results struct.
-GPUCompiler currently uses them from [`emit_function!`](@ref) to memoize each runtime
-function's bitcode on its `CodeInstance` (1.11+, via `analysis_results`); back-ends can
-populate the slot from any compile they want to memoize at the LLVM stage.
+Optional caching protocol. GPUCompiler calls these around expensive compilation
+phases to memoize byte artifacts; the back-end implements them however it likes
+(per-CI results via CompilerCaching, an in-memory `Dict`, on-disk storage, …).
 
-Override both on your [`results_type`](@ref) to opt in. The default pair (`bitcode` →
-`nothing`, `bitcode!` → no-op) means no LLVM-stage caching happens.
+`job` identifies the artifact's source — typically the back-end keys storage on
+`job.source` and `cache_owner(job)`. `key` is a `Symbol` naming the artifact
+kind. Back-ends are free to honour only the keys they care about and ignore the
+rest.
 
-The LLVM context's pointer mode (opaque vs. typed) is assumed fixed for the lifetime of
-a session — and across precompile/load pairs of the same Julia version, since pkgimages
-are invalidated when the toolchain changes. Back-ends don't need to gate caching on
-that mode.
+Keys currently used by GPUCompiler:
 
-On Julia 1.10 these hooks are never invoked (no integrated cache to stash bitcode on);
-runtime libraries fall back to the session-local `runtime_libs` cache.
+- `:llvm_ir` — post-irgen LLVM IR (serialized as bitcode bytes) for runtime
+  library functions (`gpu_malloc`, `gpu_report_exception`, …) emitted by
+  [`emit_function!`](@ref). Each runtime function is its own `job` with its
+  source MI; the bytes are session-portable (they survive precompilation when
+  the back-end stores them somewhere pkgimage-managed, e.g. on a `CodeInstance`).
+
+The LLVM context's pointer mode (opaque vs. typed) is assumed fixed for the
+lifetime of a session — and across precompile/load pairs of the same Julia
+version, since pkgimages are invalidated when the toolchain changes. Back-ends
+don't need to gate caching on that mode.
+
+Default no-op: no caching happens. Override on your `CompilerJob` type alias
+(e.g. `MetalCompilerJob = CompilerJob{MetalCompilerTarget, MetalCompilerParams}`)
+to opt in.
 """
-bitcode(@nospecialize(results)) = nothing
-bitcode!(@nospecialize(results), bytes::Vector{UInt8}) = nothing
+cache_get(@nospecialize(job::CompilerJob), key::Symbol) = nothing
+cache_put!(@nospecialize(job::CompilerJob), key::Symbol, value::Vector{UInt8}) = nothing
 
 @static if HAS_INTEGRATED_CACHE
     """
@@ -384,7 +394,7 @@ bitcode!(@nospecialize(results), bytes::Vector{UInt8}) = nothing
     end
 end
 
-@public GPUCompilerCacheToken, cache_owner, results_type, bitcode, bitcode!
+@public GPUCompilerCacheToken, cache_owner, results_type, cache_get, cache_put!
 @static if HAS_INTEGRATED_CACHE
     @public cache_view
 end
