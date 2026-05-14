@@ -766,6 +766,13 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
             gv_to_value[LLVM.name(gv)] = init
+            # Mirror what `jl_emit_native_impl` does on 1.13+ (aotcompile.cpp:865):
+            # reset the initializer to null so the IR we hand back is session-portable,
+            # then `relocate_gvs!` at the toplevel link step writes the session-current
+            # value in. On 1.13+ this is a no-op (Julia already nulled them); on 1.12,
+            # where `jl_emit_native_impl` bakes pointers via `literal_static_pointer_val`,
+            # this is what makes the bitcode we cache safe across sessions.
+            initializer!(gv, LLVM.null(value_type(initializer(gv))))
         end
     end
 
