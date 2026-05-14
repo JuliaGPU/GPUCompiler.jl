@@ -127,19 +127,22 @@ get_method_table_view(world::UInt, mt::CC.MethodTable) = CC.OverlayMethodTable(w
 const INFERENCE_CACHE_TYPE = isdefined(CC, :InferenceCache) ? CC.InferenceCache : Vector{CC.InferenceResult}
 
 """
-    GPUInterpreter{MTV, V}
+    GPUInterpreter{V, MTV}
 
 Foreign abstract interpreter that drives Julia inference for GPU compilation.
 
 The `V` type parameter is the consumer's results-struct type (default `Nothing`).
-On 1.11+ the `GPUCompiler` package extension `GPUCompilerCompilerCachingExt`
-wires `CC.finish!` so that each newly-inferred `CodeInstance` carries a fresh
-`V()` on its `analysis_results` chain; when `V === Nothing` (no consumer override
-of `results_type`) or the extension isn't loaded, nothing is attached and
-inference behaves like the default `NativeInterpreter`.
+On 1.11+ the `CC.finish!` override below — parametric on `V` — attaches a fresh
+`CachedResult{V}` to every newly-inferred `CodeInstance`'s `analysis_results`
+chain. When `V === Nothing` (no consumer override of [`results_type`](@ref))
+nothing is attached and inference behaves like the default `NativeInterpreter`.
 
 The interpreter is partitioned by an `owner` token (1.11+) or an in-process
-`CodeCache` (1.10, see [`deprecated.jl`](deprecated.jl)).
+`CodeCache` (1.10, see [`deprecated.jl`](deprecated.jl)). The owner is what
+makes per-job CIs distinct in the integrated cache; carrying it on the
+interpreter (rather than a full `CacheView`) keeps inference state lean — the
+cache view is constructed by callers (e.g. `cache_view(job)`) only when they
+actually need to look up CIs or read consumer results.
 """
 struct GPUInterpreter{V, MTV<:CC.MethodTableView} <: CC.AbstractInterpreter
     world::UInt
