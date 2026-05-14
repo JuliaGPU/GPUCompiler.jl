@@ -351,9 +351,9 @@ results_type(@nospecialize(job::CompilerJob)) = Nothing
     bitcode!(results, bytes::Vector{UInt8}) -> Nothing
 
 Optional consumer hooks for stashing post-irgen LLVM bitcode on the results struct.
-Used by [`emit_function!`](@ref) to memoize each runtime function's bitcode on its
-`CodeInstance` (1.11+, via `analysis_results`); back-ends can populate the slot from
-any compile they want to memoize at the LLVM stage.
+GPUCompiler currently uses them from [`emit_function!`](@ref) to memoize each runtime
+function's bitcode on its `CodeInstance` (1.11+, via `analysis_results`); back-ends can
+populate the slot from any compile they want to memoize at the LLVM stage.
 
 Override both on your [`results_type`](@ref) to opt in. The default pair (`bitcode` →
 `nothing`, `bitcode!` → no-op) means no LLVM-stage caching happens.

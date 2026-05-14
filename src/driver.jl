@@ -343,6 +343,8 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
+            relocate_gvs!(ir, gv_to_value)
+
             if job.config.optimize
                 @tracepoint "optimization" begin
                     optimize!(job, ir; job.config.opt_level)

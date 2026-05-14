@@ -733,12 +733,14 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
     end
 
-    # Maintain a map from global variables to their initialized Julia values.
-    # The objects pointed to are perma-rooted, during codegen.
+    # Maintain a map from global variables to their initialized Julia values. The
+    # objects pointed to are perma-rooted during codegen. We *don't* bake these
+    # addresses into the IR yet, so that we can cache it across sessions.
     gv_to_value = Dict{String, Ptr{Cvoid}}()
-
     if gvs === nothing
         # No reliable GV table on this Julia — best-effort discovery from the module.
+        # On these older versions Julia's own emit may have already baked in absolute
+        # pointer values; we recover them by reading existing initializers.
         for gv in globals(llvm_mod)
             if !haskey(metadata(gv), "julia.constgv")
                 continue
@@ -764,10 +766,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
             gv_to_value[LLVM.name(gv)] = init
-            if LLVM.isnull(initializer(gv))
-                val = const_inttoptr(ConstantInt(Int64(init)), value_type(initializer(gv)))
-                initializer!(gv, val)
-            end
         end
     end
 
@@ -886,6 +884,29 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     @assert haskey(compiled, job.source)
 
     return llvm_mod, compiled, gv_to_value
+end
+
+"""
+    relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
+
+Bake absolute pointer values into the initializers of `julia.constgv`-tagged
+global variables, matching them by name against `gv_to_value`. Only GVs whose
+initializer is currently null are touched: Preserving existing initializers
+covers the older-Julia path where Julia itself emits pointer values directly.
+
+GVs present in `mod` but missing from `gv_to_value` keep a null initializer.
+"""
+function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
+    mod_gvs = globals(mod)
+    for (name, init) in gv_to_value
+        haskey(mod_gvs, name) || continue
+        gv = mod_gvs[name]
+        if LLVM.isnull(initializer(gv))
+            val = const_inttoptr(ConstantInt(Int64(init)), value_type(initializer(gv)))
+            initializer!(gv, val)
+        end
+    end
+    return
 end
 
 # partially revert JuliaLang/julia#49391 — see #527
