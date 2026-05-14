@@ -226,31 +226,15 @@ function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
     @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
 end
 
-# Hook `CompilerCaching.CachedResult{V}` onto every CI we finish inferring, parametrically
-# over `GPUInterpreter{V}`'s consumer results-type `V`. When `V === Nothing` (default — no
-# back-end override of `results_type`) this collapses to a pass-through to the default
-# `CC.finish!`, so back-ends that don't opt in pay no inference-time cost.
-#
-# Lives here (rather than CompilerCaching's `@setup_caching`) because the interpreter
-# carries its `V` as a type parameter, not as a `cache::CacheView` field. Gated on the
-# integrated cache (1.11+); on 1.10 there's no `analysis_results` to attach to.
+# Per-CI results attachment. `results_type` reads V from the interpreter's type
+# parameter; `@setup_results` generates the `CC.finish!` hook that attaches a
+# fresh `CachedResult{V}` to every newly-inferred CodeInstance. When V === Nothing
+# (default — no consumer override) the hook short-circuits to the default
+# `CC.finish!`. Gated on the integrated cache (1.11+); on 1.10 there's no
+# `analysis_results` to attach to.
 @static if HAS_INTEGRATED_CACHE
-    @static if hasmethod(CC.finish!, Tuple{CC.AbstractInterpreter, CC.InferenceState, UInt, UInt64})
-        function CC.finish!(interp::GPUInterpreter{V, MTV}, caller::CC.InferenceState,
-                            validation_world::UInt, time_before::UInt64) where {V, MTV}
-            V === Nothing || CC.stack_analysis_result!(caller.result,
-                CompilerCaching.CachedResult{V}(V()))
-            @invoke CC.finish!(interp::CC.AbstractInterpreter, caller::CC.InferenceState,
-                               validation_world::UInt, time_before::UInt64)
-        end
-    else
-        function CC.finish!(interp::GPUInterpreter{V, MTV},
-                            caller::CC.InferenceState) where {V, MTV}
-            V === Nothing || CC.stack_analysis_result!(caller.result,
-                CompilerCaching.CachedResult{V}(V()))
-            @invoke CC.finish!(interp::CC.AbstractInterpreter, caller::CC.InferenceState)
-        end
-    end
+    CompilerCaching.results_type(::GPUInterpreter{V}) where V = V
+    CompilerCaching.@setup_results GPUInterpreter
 end
 
 CC.may_optimize(interp::GPUInterpreter) = true
@@ -282,25 +266,14 @@ end
 
 ## driving inference and walking callees
 
-# Construct a `CompilerCaching.CacheView` matching the interpreter's owner+world. `V`
-# doesn't matter for the inference machinery (typeinf! / get_codeinfos) — they only
-# use the view for `MethodInstance → CodeInstance` lookups — so we pick `Nothing`.
+# Drive type inference on `mi` using `interp`. On 1.11+ this is `CompilerCaching.typeinf!`,
+# which (on 1.12+) recursively walks callees so their CIs carry stored source for
+# `CompilerCaching.get_codeinfos` to read back into the `jl_emit_native` payload. Returns
+# the root `CodeInstance` (or `nothing` if inference failed). The 1.10 implementation
+# lives in `deprecated.jl`.
 @static if HAS_INTEGRATED_CACHE
-    @inline cache_view(interp::GPUInterpreter) =
-        CompilerCaching.CacheView{typeof(interp.owner), Nothing}(interp.owner, interp.world)
-end
-
-# Drive type inference on `mi` using `interp`. On 1.11+ this delegates to
-# `CompilerCaching.typeinf!`, which (on 1.12+) recursively walks callees so their CIs
-# carry stored source for `CompilerCaching.get_codeinfos` to read back into the
-# `jl_emit_native` payload. Returns the root `CodeInstance` (or `nothing` if inference
-# failed). The 1.10 implementation lives in `deprecated.jl`.
-@static if HAS_INTEGRATED_CACHE
-function drive_inference!(interp::GPUInterpreter, mi::MethodInstance)
-    cache = cache_view(interp)
-    CompilerCaching.typeinf!(cache, interp, mi)
-    return get(cache, mi, nothing)
-end
+    drive_inference!(interp::GPUInterpreter, mi::MethodInstance) =
+        CompilerCaching.typeinf!(interp, mi)
 end
 
 
