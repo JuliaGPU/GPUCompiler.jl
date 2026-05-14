@@ -174,6 +174,82 @@ function CC.setindex!(wvc::WorldView{CodeCache}, ci::CodeInstance, mi::MethodIns
     CC.setindex!(wvc.cache, ci, mi)
 end
 
+
+## 1.10 StackedMethodTable
+#
+# Priority-lookup method table. The 1.11+ version lives in CompilerCaching; here we keep
+# the 1.10 copy, which has to produce the older `MethodMatchResult` shape from
+# `CC.findall` / `CC.findsup`.
+struct StackedMethodTable{MTV<:CC.MethodTableView} <: CC.MethodTableView
+    world::UInt
+    mt::Core.MethodTable
+    parent::MTV
+end
+StackedMethodTable(world::UInt, mt::Core.MethodTable) =
+    StackedMethodTable(world, mt, CC.InternalMethodTable(world))
+StackedMethodTable(world::UInt, mt::Core.MethodTable, parent::Core.MethodTable) =
+    StackedMethodTable(world, mt, StackedMethodTable(world, parent))
+
+CC.isoverlayed(::StackedMethodTable) = true
+
+function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int=-1)
+    result = CC._findall(sig, table.mt, table.world, limit)
+    result === nothing && return nothing # too many matches
+    nr = CC.length(result)
+    if nr ≥ 1 && CC.getindex(result, nr).fully_covers
+        return CC.MethodMatchResult(result, true)
+    end
+
+    parent_result = CC.findall(sig, table.parent; limit)::Union{Nothing, CC.MethodMatchResult}
+    parent_result === nothing && return nothing # too many matches
+
+    overlayed = parent_result.overlayed | !CC.isempty(result)
+    parent_result = parent_result.matches::CC.MethodLookupResult
+
+    return CC.MethodMatchResult(
+        CC.MethodLookupResult(
+            CC.vcat(result.matches, parent_result.matches),
+            CC.WorldRange(
+                CC.max(result.valid_worlds.min_world, parent_result.valid_worlds.min_world),
+                CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)),
+            result.ambig | parent_result.ambig),
+        overlayed)
+end
+
+function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
+    match, valid_worlds = CC._findsup(sig, table.mt, table.world)
+    match !== nothing && return match, valid_worlds, true
+    parent_match, parent_valid_worlds, overlayed = CC.findsup(sig, table.parent)
+    return (
+        parent_match,
+        CC.WorldRange(
+            max(valid_worlds.min_world, parent_valid_worlds.min_world),
+            min(valid_worlds.max_world, parent_valid_worlds.max_world)),
+        overlayed)
+end
+
+
+## 1.10 inference driver
+#
+# On 1.11+ this is delegated to `CompilerCaching.typeinf!`; here we keep an inline copy
+# that talks to the per-interpreter `CodeCache` instead of the integrated one. Returns
+# `nothing` (no integrated CI to hand back; the caller fetches via `code_cache(interp)`).
+function drive_inference!(interp::GPUInterpreter, mi::MethodInstance)
+    src = CC.typeinf_ext_toplevel(interp, mi)
+    @assert src !== nothing "Inference of $mi failed"
+
+    # For const-return CIs the inference result wasn't recorded — set it from the
+    # returned source so callers re-using the CI don't need to re-infer.
+    wvc = WorldView(CC.code_cache(interp), interp.world, interp.world)
+    if CC.haskey(wvc, mi)
+        ci = CC.getindex(wvc, mi)
+        if ci.inferred === nothing
+            @atomic ci.inferred = src
+        end
+    end
+    return nothing
+end
+
 end # !HAS_INTEGRATED_CACHE
 
 

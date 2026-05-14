@@ -38,6 +38,12 @@ using Core: MethodInstance, CodeInstance, CodeInfo
 # disjoint shapes; everything cache-related fans on this flag.
 const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
 
+# Loads as an empty shell on 1.10; on 1.11+ provides `CacheView`, `typeinf!`,
+# `get_codeinfos`, `lookup`, `results`, etc. We `import` the module name (not its
+# exports) to avoid clashing with `LLVM.lookup`; internal call sites qualify with
+# `CompilerCaching.`.
+import CompilerCaching
+
 # Optional callback invoked from `compile(...)` / `cached_compilation(...)` before
 # compilation runs. Set by `@device_code_*` reflection macros. Defined here (early)
 # so the legacy `cached_compilation` in deprecated.jl can reference it.
