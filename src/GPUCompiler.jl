@@ -33,6 +33,16 @@ end
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
 
+# `HAS_INTEGRATED_CACHE` distinguishes 1.11+ (owner-keyed `Core.Compiler.InternalCodeCache`)
+# from 1.10 (per-interpreter `CodeCache` IdDict + invalidation callbacks). The two have
+# disjoint shapes; everything cache-related fans on this flag.
+const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
+
+# Optional callback invoked from `compile(...)` / `cached_compilation(...)` before
+# compilation runs. Set by `@device_code_*` reflection macros. Defined here (early)
+# so the legacy `cached_compilation` in deprecated.jl can reference it.
+const compile_hook = Ref{Union{Nothing,Function}}(nothing)
+
 include("utils.jl")
 include("mangling.jl")
 
@@ -49,6 +59,7 @@ include("metal.jl")
 include("runtime.jl")
 
 # compiler implementation
+include("deprecated.jl")
 include("jlgen.jl")
 include("irgen.jl")
 include("optim.jl")

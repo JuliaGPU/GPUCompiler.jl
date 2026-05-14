@@ -42,9 +42,8 @@ end
 ## compiler entrypoint
 
 export compile
-
-# (::CompilerJob)
-const compile_hook = Ref{Union{Nothing,Function}}(nothing)
+# `compile_hook` is declared in `GPUCompiler.jl` so files included earlier
+# (notably `deprecated.jl`'s `cached_compilation`) can reference it too.
 
 """
     compile(target::Symbol, job::CompilerJob)
