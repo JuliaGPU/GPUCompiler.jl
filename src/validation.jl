@@ -14,7 +14,14 @@ function method_matches(@nospecialize(tt::Type{<:Tuple}); world::Integer)
 end
 
 function typeinf_type(mi::MethodInstance; interp::CC.AbstractInterpreter)
-    something(Core.Compiler.typeinf_type(interp, mi), Any)
+    @static if hasmethod(Core.Compiler.typeinf_type, Tuple{CC.AbstractInterpreter, MethodInstance})
+        rt = Core.Compiler.typeinf_type(interp, mi)
+    else
+        # Julia 1.10: only the 4-arg form exists; reconstruct it from the MI.
+        method = mi.def::Method
+        rt = Core.Compiler.typeinf_type(interp, method, mi.specTypes, mi.sparam_vals)
+    end
+    return something(rt, Any)
 end
 
 function check_method(@nospecialize(job::CompilerJob))

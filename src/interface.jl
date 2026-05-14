@@ -261,12 +261,25 @@ runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
+@static if HAS_INTEGRATED_CACHE
 function get_interpreter(@nospecialize(job::CompilerJob))
-    GPUInterpreter(job.world;
-                   method_table_view=maybe_cached(method_table_view(job)),
-                   cache=cache_view(job),
-                   inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
+    V = results_type(job)
+    GPUInterpreter{V}(job.world;
+                     method_table_view=maybe_cached(method_table_view(job)),
+                     owner=cache_owner(job),
+                     inf_params=inference_params(job),
+                     opt_params=optimization_params(job))
+end
+else
+function get_interpreter(@nospecialize(job::CompilerJob))
+    V = results_type(job)
+    cache = get_code_cache(job)
+    GPUInterpreter{V}(job.world;
+                     method_table_view=maybe_cached(method_table_view(job)),
+                     code_cache=cache,
+                     inf_params=inference_params(job),
+                     opt_params=optimization_params(job))
+end
 end
 
 # does this target support throwing Julia exceptions with jl_throw?
@@ -296,9 +309,15 @@ pass_by_ref(@nospecialize(job::CompilerJob)) = false
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
-# Cache partitioning. The owner is stored on every CodeInstance and compared via `jl_egal`,
-# so it (and every field) must be immutable for cross-session matches (e.g. via package
-# precompilation); custom `target` / `params` types must be `struct`s, not `mutable struct`s.
+# Cache partitioning. On Julia 1.11+, the owner is stored on every `CodeInstance` and
+# compared via `jl_egal`, so it (and every field) must be immutable for cross-session
+# matches (e.g. via package precompilation); custom `target` / `params` types must be
+# `struct`s, not `mutable struct`s.
+#
+# On Julia 1.10, where there's no per-CI owner field, this token only identifies the
+# session-local cache partition (see `cached_compilation` / `GLOBAL_CI_CACHES` in
+# `deprecated.jl`); the immutability requirement is still useful for stable hashing.
+#
 # Care is required for anything that impacts:
 #   - method_table
 #   - inference_params
@@ -317,40 +336,17 @@ cache_owner(@nospecialize(job::CompilerJob)) =
     GPUCompilerCacheToken(job.config.target, job.config.params,
                           job.config.always_inline, method_table(job))
 
-"""
-    GPUCompiler.NoResults()
+# The consumer's results struct type, stored on each `CodeInstance` (1.11+) via the
+# `CompilerCaching` extension. Override to attach session-portable artifacts (e.g. IR or
+# object bytes) and session-local handles (e.g. `CuModule`, `MTLComputePipelineState`).
+# The struct must be a `mutable struct` with a zero-arg constructor.
+#
+# When the consumer hasn't overridden, the default `Nothing` opts out: no results struct
+# is attached during inference, and the `analysis_results` chain is untouched. This is the
+# right default for reflection paths, precompile workloads, and the legacy 1.10 flow.
+results_type(@nospecialize(job::CompilerJob)) = Nothing
 
-Default results type carried on each cached `CodeInstance` when the consumer hasn't
-overridden [`results_type`](@ref). Carries no fields; useful for compiler jobs that
-don't need to memoize compiled artifacts (e.g., reflection, precompile workloads).
-"""
-mutable struct NoResults end
-
-# The consumer's results struct type, stored on each CodeInstance via `CompilerCaching`.
-# Override to attach session-portable artifacts (IR, object bytes) and session-local handles
-# (e.g., `CuModule`, `MTLComputePipelineState`) to compiled CIs. The struct must be a
-# `mutable struct` with a zero-arg constructor.
-results_type(@nospecialize(job::CompilerJob)) = NoResults
-
-# Construct a `CompilerCaching.CacheView` partitioned by `cache_owner(job)` and parametrized
-# by `results_type(job)`.
-function cache_view(@nospecialize(job::CompilerJob))
-    K = typeof(cache_owner(job))
-    V = results_type(job)
-    CompilerCaching.CacheView{K, V}(cache_owner(job), job.world)
-end
-
-# Optional consumer hooks for caching post-codegen LLVM bitcode on the results struct.
-# Override these on your `results_type(job)` to opt in to cross-session bitcode caching
-# (most relevant for runtime library functions, which GPUCompiler compiles per-target and
-# would otherwise rebuild every session). The `opaque_pointers` flag tracks the LLVM
-# context's pointer mode at compile time — `bitcode` should reject mismatches by
-# returning `nothing`, since opaque- and typed-pointer IR aren't interchangeable.
-bitcode(@nospecialize(results), opaque_pointers::Bool) = nothing
-bitcode!(@nospecialize(results), bytes::Vector{UInt8}, opaque_pointers::Bool) = nothing
-
-public GPUCompilerCacheToken, cache_owner, NoResults, results_type, cache_view,
-       bitcode, bitcode!
+@public GPUCompilerCacheToken, cache_owner, results_type
 
 # the method table to use
 # deprecate method_table on next-breaking release
