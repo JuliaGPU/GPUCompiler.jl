@@ -60,33 +60,24 @@ end
 
 ## functionality to build the runtime library
 
-# Compile a single runtime function and link it into `mod`. On Julia 1.11+ each
-# runtime function's renamed bitcode is cached on its `CodeInstance`'s
-# `analysis_results` when the back-end opts in via the `bitcode` / `bitcode!`
-# trait pair — cross-session persistence rides on package precompilation. On
-# 1.10 (no integrated cache) we fall through to plain compile-and-link; the
-# session-local `runtime_libs` cache below avoids repeating that work
-# within a session.
+# Compile a single runtime function and link it into `mod`. Memoizes the renamed
+# bitcode via the back-end's `cache_get`/`cache_put!` protocol — cross-session
+# persistence is the back-end's responsibility (typically by storing on a CI's
+# `analysis_results` via CompilerCaching). The session-local `runtime_libs`
+# cache below avoids repeating the parse-and-link work within a session.
 function emit_function!(mod, config::CompilerConfig, f, method)
     tt = Base.to_tuple_type(method.types)
     source = generic_methodinstance(f, tt)
     name = method.llvm_name
+    rt_job = CompilerJob(source, config)
 
-    @static if HAS_INTEGRATED_CACHE
-        rt_job = CompilerJob(source, config)
-        cache = cache_view(rt_job)
-        hit = CompilerCaching.lookup(cache, source)
-        if hit !== nothing
-            cached = bitcode(hit[2])
-            if cached !== nothing
-                func_mod = parse(LLVM.Module, MemoryBuffer(cached))
-                link!(mod, func_mod)
-                return
-            end
-        end
+    cached = cache_get(rt_job, :llvm_ir)
+    if cached !== nothing
+        link!(mod, parse(LLVM.Module, MemoryBuffer(cached)))
+        return
     end
 
-    new_mod, meta = compile_unhooked(:llvm, CompilerJob(source, config))
+    new_mod, meta = compile_unhooked(:llvm, rt_job)
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
     if return_type(ft) != return_type(expected_ft)
@@ -106,17 +97,9 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     end
     LLVM.name!(meta.entry, name)
 
-    @static if HAS_INTEGRATED_CACHE
-        # Re-lookup: inference for this runtime function's MI may have happened
-        # inside `compile_unhooked` (callee walk or `precompile`), so the CI
-        # exists now even if the pre-compile lookup returned nothing.
-        hit = CompilerCaching.lookup(cache, source)
-        if hit !== nothing
-            io = IOBuffer()
-            write(io, new_mod)
-            bitcode!(hit[2], take!(io))
-        end
-    end
+    io = IOBuffer()
+    write(io, new_mod)
+    cache_put!(rt_job, :llvm_ir, take!(io))
 
     link!(mod, new_mod)
 end
