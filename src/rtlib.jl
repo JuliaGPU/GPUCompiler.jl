@@ -60,11 +60,31 @@ end
 
 ## functionality to build the runtime library
 
-# Compile a single runtime function and link it into `mod`.
+# Compile a single runtime function and link it into `mod`. On Julia 1.11+ each
+# runtime function's renamed bitcode is cached on its `CodeInstance`'s
+# `analysis_results` when the back-end opts in via the `bitcode` / `bitcode!`
+# trait pair — cross-session persistence rides on package precompilation. On
+# 1.10 (no integrated cache) we fall through to plain compile-and-link; the
+# session-local `runtime_libs` cache below avoids repeating that work
+# within a session.
 function emit_function!(mod, config::CompilerConfig, f, method)
     tt = Base.to_tuple_type(method.types)
     source = generic_methodinstance(f, tt)
     name = method.llvm_name
+
+    @static if HAS_INTEGRATED_CACHE
+        rt_job = CompilerJob(source, config)
+        cache = cache_view(rt_job)
+        hit = CompilerCaching.lookup(cache, source)
+        if hit !== nothing
+            cached = bitcode(hit[2])
+            if cached !== nothing
+                func_mod = parse(LLVM.Module, MemoryBuffer(cached))
+                link!(mod, func_mod)
+                return
+            end
+        end
+    end
 
     new_mod, meta = compile_unhooked(:llvm, CompilerJob(source, config))
     ft = function_type(meta.entry)
@@ -76,7 +96,8 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
 
-    # rename to the final `gpu_*` name on the per-function module so the link is direct
+    # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
+    # is immediately link-ready (no per-session rename pass on a cache hit).
     if haskey(functions(new_mod), name) && functions(new_mod)[name] !== meta.entry
         decl = functions(new_mod)[name]
         @assert value_type(decl) == value_type(meta.entry)
@@ -84,6 +105,18 @@ function emit_function!(mod, config::CompilerConfig, f, method)
         erase!(decl)
     end
     LLVM.name!(meta.entry, name)
+
+    @static if HAS_INTEGRATED_CACHE
+        # Re-lookup: inference for this runtime function's MI may have happened
+        # inside `compile_unhooked` (callee walk or `precompile`), so the CI
+        # exists now even if the pre-compile lookup returned nothing.
+        hit = CompilerCaching.lookup(cache, source)
+        if hit !== nothing
+            io = IOBuffer()
+            write(io, new_mod)
+            bitcode!(hit[2], take!(io))
+        end
+    end
 
     link!(mod, new_mod)
 end
@@ -116,13 +149,13 @@ end
 # Session-local cache of assembled runtime libraries, keyed by
 # `(cache_owner(job), opaque_pointers)`. Cross-session persistence is the back-end's
 # concern: rebuild on first use of each session, then reuse within the session.
-const _runtime_libs = Dict{Tuple{Any, Bool}, Vector{UInt8}}()
-const _runtime_libs_lock = ReentrantLock()
+const runtime_libs = Dict{Tuple{Any, Bool}, Vector{UInt8}}()
+const runtime_libs_lock = ReentrantLock()
 
 @locked function load_runtime(@nospecialize(job::CompilerJob))
     key = (cache_owner(job), !supports_typed_pointers(context()))
 
-    bytes = Base.@lock _runtime_libs_lock get!(_runtime_libs, key) do
+    bytes = Base.@lock runtime_libs_lock get!(runtime_libs, key) do
         lib = build_runtime(job)
         io = IOBuffer()
         write(io, lib)
@@ -133,4 +166,4 @@ const _runtime_libs_lock = ReentrantLock()
 end
 
 # clear the session-local runtime library cache
-reset_runtime() = Base.@lock _runtime_libs_lock empty!(_runtime_libs)
+reset_runtime() = Base.@lock runtime_libs_lock empty!(runtime_libs)

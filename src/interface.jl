@@ -346,7 +346,48 @@ cache_owner(@nospecialize(job::CompilerJob)) =
 # right default for reflection paths, precompile workloads, and the legacy 1.10 flow.
 results_type(@nospecialize(job::CompilerJob)) = Nothing
 
-@public GPUCompilerCacheToken, cache_owner, results_type
+"""
+    bitcode(results) -> Union{Nothing, Vector{UInt8}}
+    bitcode!(results, bytes::Vector{UInt8}) -> Nothing
+
+Optional consumer hooks for stashing post-irgen LLVM bitcode on the results struct.
+Used by [`emit_function!`](@ref) to memoize each runtime function's bitcode on its
+`CodeInstance` (1.11+, via `analysis_results`); back-ends can populate the slot from
+any compile they want to memoize at the LLVM stage.
+
+Override both on your [`results_type`](@ref) to opt in. The default pair (`bitcode` →
+`nothing`, `bitcode!` → no-op) means no LLVM-stage caching happens.
+
+The LLVM context's pointer mode (opaque vs. typed) is assumed fixed for the lifetime of
+a session — and across precompile/load pairs of the same Julia version, since pkgimages
+are invalidated when the toolchain changes. Back-ends don't need to gate caching on
+that mode.
+
+On Julia 1.10 these hooks are never invoked (no integrated cache to stash bitcode on);
+runtime libraries fall back to the session-local `runtime_libs` cache.
+"""
+bitcode(@nospecialize(results)) = nothing
+bitcode!(@nospecialize(results), bytes::Vector{UInt8}) = nothing
+
+@static if HAS_INTEGRATED_CACHE
+    """
+        cache_view(job::CompilerJob) -> CompilerCaching.CacheView
+
+    Construct a `CacheView{typeof(cache_owner(job)), results_type(job)}` over Julia's
+    integrated `CodeInstance` cache at `job.world`. The handle back-ends pass to
+    `CompilerCaching.lookup` / `CompilerCaching.results` when populating their own
+    per-CI artifacts.
+    """
+    function cache_view(@nospecialize(job::CompilerJob))
+        owner = cache_owner(job)
+        CompilerCaching.CacheView{typeof(owner), results_type(job)}(owner, job.world)
+    end
+end
+
+@public GPUCompilerCacheToken, cache_owner, results_type, bitcode, bitcode!
+@static if HAS_INTEGRATED_CACHE
+    @public cache_view
+end
 
 # the method table to use
 # deprecate method_table on next-breaking release
