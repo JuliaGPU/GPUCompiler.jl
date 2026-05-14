@@ -98,87 +98,10 @@ end
 
 Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
 
-# Implements a priority lookup for method tables, where the first match in the stack get's
-# returned. An alternative would be a Union with a most-specific match query.
-struct StackedMethodTable{MTV<:CC.MethodTableView} <: CC.MethodTableView
-    world::UInt
-    mt::Core.MethodTable
-    parent::MTV
-end
-StackedMethodTable(world::UInt, mt::Core.MethodTable) = StackedMethodTable(world, mt, CC.InternalMethodTable(world))
-StackedMethodTable(world::UInt, mt::Core.MethodTable, parent::Core.MethodTable) = StackedMethodTable(world, mt, StackedMethodTable(world, parent))
-
-CC.isoverlayed(::StackedMethodTable) = true
-
-@static if VERSION >= v"1.11.0-DEV.363"
-    # https://github.com/JuliaLang/julia/pull/51078
-    # same API as before but without returning isoverlayed flag
-    function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int=-1)
-        result = CC._findall(sig, table.mt, table.world, limit)
-        result === nothing && return nothing # too many matches
-        nr = CC.length(result)
-        if nr ≥ 1 && CC.getindex(result, nr).fully_covers
-            return result
-        end
-
-        parent_result = CC.findall(sig, table.parent; limit)::Union{Nothing, CC.MethodLookupResult}
-        parent_result === nothing && return nothing # too many matches
-
-        return CC.MethodLookupResult(
-            CC.vcat(result.matches, parent_result.matches),
-            CC.WorldRange(
-                CC.max(result.valid_worlds.min_world, parent_result.valid_worlds.min_world),
-                CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)),
-            result.ambig | parent_result.ambig)
-    end
-
-    function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
-        match, valid_worlds = CC._findsup(sig, table.mt, table.world)
-        match !== nothing && return match, valid_worlds
-        parent_match, parent_valid_worlds = CC.findsup(sig, table.parent)
-        return (
-            parent_match,
-            CC.WorldRange(
-                max(valid_worlds.min_world, parent_valid_worlds.min_world),
-                min(valid_worlds.max_world, parent_valid_worlds.max_world))
-            )
-    end
-else
-    function CC.findall(@nospecialize(sig::Type), table::StackedMethodTable; limit::Int=-1)
-        result = CC._findall(sig, table.mt, table.world, limit)
-        result === nothing && return nothing # too many matches
-        nr = CC.length(result)
-        if nr ≥ 1 && CC.getindex(result, nr).fully_covers
-            return CC.MethodMatchResult(result, true)
-        end
-
-        parent_result = CC.findall(sig, table.parent; limit)::Union{Nothing, CC.MethodMatchResult}
-        parent_result === nothing && return nothing # too many matches
-
-        overlayed = parent_result.overlayed | !CC.isempty(result)
-        parent_result = parent_result.matches::CC.MethodLookupResult
-
-        return CC.MethodMatchResult(
-            CC.MethodLookupResult(
-                CC.vcat(result.matches, parent_result.matches),
-                CC.WorldRange(
-                    CC.max(result.valid_worlds.min_world, parent_result.valid_worlds.min_world),
-                    CC.min(result.valid_worlds.max_world, parent_result.valid_worlds.max_world)),
-                result.ambig | parent_result.ambig),
-            overlayed)
-    end
-
-    function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
-        match, valid_worlds = CC._findsup(sig, table.mt, table.world)
-        match !== nothing && return match, valid_worlds, true
-        parent_match, parent_valid_worlds, overlayed = CC.findsup(sig, table.parent)
-        return (
-            parent_match,
-            CC.WorldRange(
-                max(valid_worlds.min_world, parent_valid_worlds.min_world),
-                min(valid_worlds.max_world, parent_valid_worlds.max_world)),
-            overlayed)
-    end
+# Priority-lookup method table. On 1.11+ we re-export CompilerCaching's; the 1.10 copy
+# (with the older `MethodMatchResult`-returning `findall` signature) lives in deprecated.jl.
+@static if HAS_INTEGRATED_CACHE
+    using CompilerCaching: StackedMethodTable
 end
 
 
@@ -300,6 +223,33 @@ function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
     @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
 end
 
+# Hook `CompilerCaching.CachedResult{V}` onto every CI we finish inferring, parametrically
+# over `GPUInterpreter{V}`'s consumer results-type `V`. When `V === Nothing` (default — no
+# back-end override of `results_type`) this collapses to a pass-through to the default
+# `CC.finish!`, so back-ends that don't opt in pay no inference-time cost.
+#
+# Lives here (rather than CompilerCaching's `@setup_caching`) because the interpreter
+# carries its `V` as a type parameter, not as a `cache::CacheView` field. Gated on the
+# integrated cache (1.11+); on 1.10 there's no `analysis_results` to attach to.
+@static if HAS_INTEGRATED_CACHE
+    @static if hasmethod(CC.finish!, Tuple{CC.AbstractInterpreter, CC.InferenceState, UInt, UInt64})
+        function CC.finish!(interp::GPUInterpreter{V, MTV}, caller::CC.InferenceState,
+                            validation_world::UInt, time_before::UInt64) where {V, MTV}
+            V === Nothing || CC.stack_analysis_result!(caller.result,
+                CompilerCaching.CachedResult{V}(V()))
+            @invoke CC.finish!(interp::CC.AbstractInterpreter, caller::CC.InferenceState,
+                               validation_world::UInt, time_before::UInt64)
+        end
+    else
+        function CC.finish!(interp::GPUInterpreter{V, MTV},
+                            caller::CC.InferenceState) where {V, MTV}
+            V === Nothing || CC.stack_analysis_result!(caller.result,
+                CompilerCaching.CachedResult{V}(V()))
+            @invoke CC.finish!(interp::CC.AbstractInterpreter, caller::CC.InferenceState)
+        end
+    end
+end
+
 CC.may_optimize(interp::GPUInterpreter) = true
 CC.may_compress(interp::GPUInterpreter) = true
 CC.may_discard_trees(interp::GPUInterpreter) = true
@@ -329,161 +279,25 @@ end
 
 ## driving inference and walking callees
 
-# Drive type inference on `mi` using `interp`. Recursively walks callees so that on 1.12+
-# their CodeInstances are populated in the integrated cache with stored source — this is
-# what `collect_codeinfos` later relies on to gather `(CI, CodeInfo)` pairs for
-# `jl_emit_native`. Returns the root `CodeInstance` on 1.11+ (or `nothing` if inference
-# failed); on 1.10, where there's no integrated cache to return into, returns `nothing`
-# and the caller fetches the CI via `code_cache(interp)`.
+# Construct a `CompilerCaching.CacheView` matching the interpreter's owner+world. `V`
+# doesn't matter for the inference machinery (typeinf! / get_codeinfos) — they only
+# use the view for `MethodInstance → CodeInstance` lookups — so we pick `Nothing`.
+@static if HAS_INTEGRATED_CACHE
+    @inline cache_view(interp::GPUInterpreter) =
+        CompilerCaching.CacheView{typeof(interp.owner), Nothing}(interp.owner, interp.world)
+end
+
+# Drive type inference on `mi` using `interp`. On 1.11+ this delegates to
+# `CompilerCaching.typeinf!`, which (on 1.12+) recursively walks callees so their CIs
+# carry stored source for `CompilerCaching.get_codeinfos` to read back into the
+# `jl_emit_native` payload. Returns the root `CodeInstance` (or `nothing` if inference
+# failed). The 1.10 implementation lives in `deprecated.jl`.
+@static if HAS_INTEGRATED_CACHE
 function drive_inference!(interp::GPUInterpreter, mi::MethodInstance)
-@static if VERSION >= v"1.12.0-DEV.1434"
-    ci = CC.typeinf_ext(interp, mi, CC.SOURCE_MODE_NOT_REQUIRED)
-    ci === nothing && return nothing
-
-    has_compilequeue = VERSION >= v"1.13.0-DEV.499" || v"1.12-beta3" <= VERSION < v"1.13-"
-    if has_compilequeue
-        workqueue = CC.CompilationQueue(; interp)
-        push!(workqueue, ci)
-    else
-        workqueue = CodeInstance[ci]
-        inspected = IdSet{CodeInstance}()
-    end
-
-    while !isempty(workqueue)
-        callee = pop!(workqueue)
-        if has_compilequeue
-            CC.isinspected(workqueue, callee) && continue
-            CC.markinspected!(workqueue, callee)
-        else
-            callee in inspected && continue
-            push!(inspected, callee)
-        end
-
-        callee_mi = CC.get_ci_mi(callee)
-        if CC.use_const_api(callee)
-            # const-return: synthesized CodeInfo later, no need to store source
-            continue
-        end
-
-        src = CC.typeinf_code(interp, callee_mi, true)
-        if src isa CodeInfo
-            # Make sure the inferred source is persisted on the CI so we can read it back
-            # in `collect_codeinfos` (separate session or not). This is what
-            # `CompilerCaching.typeinf!` does internally; we inline it here so GPUCompiler
-            # itself doesn't depend on CompilerCaching.
-            if (@atomic callee.inferred) === nothing
-                @atomic callee.inferred = src
-            end
-            if has_compilequeue
-                sptypes = CC.sptypes_from_meth_instance(callee_mi)
-                CC.collectinvokes!(workqueue, src, sptypes)
-            else
-                CC.collectinvokes!(workqueue, src)
-            end
-        end
-    end
-
-    return ci
-elseif VERSION >= v"1.12.0-DEV.15"
-    inferred_ci = CC.typeinf_ext_toplevel(interp, mi, CC.SOURCE_MODE_FORCE_SOURCE)
-    @assert inferred_ci !== nothing "Inference of $mi failed"
-
-    # `typeinf_ext_toplevel` will have populated the cache; in some const-return cases
-    # the inference result wasn't recorded — set it from the returned CI.
-    wvc = WorldView(CC.code_cache(interp), interp.world, interp.world)
-    if CC.haskey(wvc, mi)
-        ci = CC.getindex(wvc, mi)
-        if ci.inferred === nothing
-            CC.setindex!(wvc, inferred_ci, mi)
-        end
-    end
-
-    return inferred_ci
-else
-    src = CC.typeinf_ext_toplevel(interp, mi)
-    @assert src !== nothing "Inference of $mi failed"
-
-    # On 1.11/1.10 we look the CI up via the cache afterwards (no return from
-    # `typeinf_ext_toplevel` here). For const-return CIs, store the source explicitly
-    # so callers re-using the CI don't need to re-infer.
-    wvc = WorldView(CC.code_cache(interp), interp.world, interp.world)
-    if CC.haskey(wvc, mi)
-        ci = CC.getindex(wvc, mi)
-        if ci.inferred === nothing
-            @atomic ci.inferred = src
-        end
-        return ci
-    end
-
-    return nothing
+    cache = cache_view(interp)
+    CompilerCaching.typeinf!(cache, interp, mi)
+    return get(cache, mi, nothing)
 end
-end
-
-# Retrieve CodeInfo for a CI, synthesizing one for const-return CIs (which never store
-# inferred source). Returns `nothing` when no source is available — caller's choice
-# whether that's an error.
-function _ci_codeinfo(ci::CodeInstance)
-    raw = @atomic :monotonic ci.inferred
-    if raw isa CodeInfo
-        return raw
-    elseif raw isa Vector{UInt8} || raw isa String
-        mi = @static VERSION >= v"1.12-" ? CC.get_ci_mi(ci) : ci.def::MethodInstance
-        return ccall(:jl_uncompress_ir, Ref{CodeInfo}, (Any, Any, Any),
-                     mi.def, ci, raw)::CodeInfo
-    elseif raw === nothing && CC.use_const_api(ci)
-        # const-return CIs skip source storage during inference; synthesize CodeInfo
-        # from the cached `rettype_const`.
-        mi = @static VERSION >= v"1.12-" ? CC.get_ci_mi(ci) : ci.def::MethodInstance
-        @static if VERSION >= v"1.13.0-DEV.1121"
-            src = CC.codeinfo_for_const(CC.NativeInterpreter(), mi,
-                CC.WorldRange(ci.min_world, ci.max_world),
-                ci.edges, ci.rettype_const)
-        elseif VERSION >= v"1.12-"
-            src = CC.codeinfo_for_const(CC.NativeInterpreter(), mi, ci.rettype_const)
-            # Work around 1.12/1.13 not setting nargs/isva in `codeinfo_for_const`
-            @static if v"1.12-" <= VERSION < v"1.14.0-DEV.60"
-                if src.nargs == 0 && mi.def isa Method
-                    src.nargs = mi.def.nargs
-                    src.isva = mi.def.isva
-                end
-            end
-        else
-            src = CC.codeinfo_for_const(CC.NativeInterpreter(), mi, ci.rettype_const)
-        end
-        return src
-    end
-    return nothing
-end
-
-# Walk forward `:invoke` edges from `root` and collect `(CodeInstance, CodeInfo)` pairs
-# for `jl_emit_native` (1.12+ payload format). Source is read back from the CIs that
-# `drive_inference!` populated above. On 1.11 and older this is unused (those Julia
-# versions take a list of `MethodInstance`s + a lookup callback).
-function collect_codeinfos(root::CodeInstance)
-    pairs = Pair{CodeInstance, CodeInfo}[]
-    visited = IdSet{CodeInstance}()
-    queue = CodeInstance[root]
-    while !isempty(queue)
-        ci = pop!(queue)
-        ci in visited && continue
-        push!(visited, ci)
-
-        src = _ci_codeinfo(ci)
-        src === nothing && continue
-        push!(pairs, ci => src)
-
-        for stmt in src.code
-            if stmt isa Expr && stmt.head === :(=)
-                stmt = stmt.args[2]
-            end
-            if stmt isa Expr && (stmt.head === :invoke ||
-                                 (VERSION >= v"1.12-" && stmt.head === :invoke_modify))
-                callee = stmt.args[1]
-                callee isa CodeInstance && push!(queue, callee)
-            end
-        end
-    end
-    return pairs
 end
 
 
@@ -616,7 +430,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # gather (CI, CodeInfo) pairs for jl_emit_native (1.12+)
     codeinfo_pairs = if VERSION >= v"1.12.0-DEV.1823" && root_ci !== nothing
-        collect_codeinfos(root_ci)
+        CompilerCaching.get_codeinfos(root_ci)
     else
         nothing
     end
