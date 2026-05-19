@@ -1,5 +1,10 @@
 # implementation of the GPUCompiler interfaces for generating PTX code
 
+const NVPTX_LLVM_Backend_jll =
+    LazyModule("NVPTX_LLVM_Backend_jll",
+               UUID("ef6e0fe3-e6ef-59c0-bde6-4989574699e0"))
+
+
 ## target
 
 export PTXCompilerTarget
@@ -339,6 +344,44 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 
     return entry
+end
+
+@unlocked function mcgen(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                         mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
+    if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
+        error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
+    end
+
+    target = job.config.target
+    filetype = if format == LLVM.API.LLVMAssemblyFile
+        "asm"
+    elseif format == LLVM.API.LLVMObjectFile
+        "obj"
+    else
+        error("Unsupported PTX output format $format")
+    end
+
+    input  = tempname(cleanup=false) * ".bc"
+    output = tempname(cleanup=false) * (filetype == "asm" ? ".ptx" : ".cubin")
+    write(input, mod)
+
+    cmd = `$(NVPTX_LLVM_Backend_jll.llc()) $input
+              -mtriple=$(llvm_triple(target))
+              -mcpu=$(cpu_name(target))
+              -mattr=+ptx$(target.ptx.major)$(target.ptx.minor)
+              -filetype=$filetype
+              -o $output`
+    try
+        run(cmd)
+    catch
+        error("""Failed to compile to PTX with external llc.
+                 If you think this is a bug, please file an issue and attach $(input).""")
+    end
+
+    code = filetype == "asm" ? read(output, String) : String(read(output))
+    rm(input)
+    rm(output)
+    return code
 end
 
 function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
