@@ -419,5 +419,49 @@ end
     PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
 end
 
+@testset "feature_set" begin
+    # PTXCompilerTarget.feature_set controls the suffix on the LLVM CPU name, which is
+    # what the NVPTX backend uses to flip `hasArchAccelFeatures()`. Verify it makes its
+    # way into the `.target` directive that LLVM emits and into the hash.
+
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+
+    # cpu_name reflects feature_set
+    @test GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"9.0")) == "sm_90"
+    @test GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"9.0", feature_set=:baseline)) == "sm_90"
+    @test GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"9.0", feature_set=:arch)) == "sm_90a"
+    @test GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"10.0", feature_set=:family)) == "sm_100f"
+    @test_throws ErrorException GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"9.0", feature_set=:bogus))
+
+    # hash must discriminate, otherwise two configs differing only on feature_set
+    # would share the same on-disk runtime slug and collide in the compiler cache.
+    @test hash(PTXCompilerTarget(cap=v"9.0", feature_set=:baseline)) !=
+          hash(PTXCompilerTarget(cap=v"9.0", feature_set=:arch))
+
+    # LLVM picked up `sm_90a` in v18 (NVPTX.td); older releases don't know the suffix.
+    if LLVM.version() >= v"18"
+        @test @filecheck begin
+            @check ".target sm_90a"
+            PTX.code_native(mod.kernel, Tuple{}; cap=v"9.0", ptx=v"8.0",
+                            feature_set=:arch, kernel=true, dump_module=true)
+        end
+    end
+    # `sm_100f` (and the rest of the family-/arch-specific Blackwell variants) was added in LLVM 20.
+    if LLVM.version() >= v"20"
+        @test @filecheck begin
+            @check ".target sm_100f"
+            PTX.code_native(mod.kernel, Tuple{}; cap=v"10.0", ptx=v"8.8",
+                            feature_set=:family, kernel=true, dump_module=true)
+        end
+        @test @filecheck begin
+            @check ".target sm_100a"
+            PTX.code_native(mod.kernel, Tuple{}; cap=v"10.0", ptx=v"8.6",
+                            feature_set=:arch, kernel=true, dump_module=true)
+        end
+    end
+end
+
 end
 end # NVPTX in LLVM.backends()
