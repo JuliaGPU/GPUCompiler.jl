@@ -150,12 +150,21 @@ end
     end
 end
 
-# Register deferred_codegen as a global function so that it can be called with `ccall("extern deferred_codegen"`
-# Called from __init__
-# On 1.11+ this is needed due to a Julia bug that drops the pointer when code-coverage is enabled.
+# Register deferred_codegen as a global function so that it can be called with
+# `ccall("extern deferred_codegen", ...)`. Called from __init__.
+#
+# On 1.11+ this is needed due to a Julia bug that drops the pointer when code-coverage is
+# enabled. On 1.14+ (JuliaLang/julia#60988), `JITDylib(jljit)` returns a fresh private
+# dylib that JD does not search; instead, register the symbol in the `JuliaGlobals` JD,
+# which JD links to with `MatchExportedSymbolsOnly`.
 function register_deferred_codegen()
     @dispose jljit=JuliaOJIT() begin
-        jd = JITDylib(jljit)
+        jd = @static if VERSION >= v"1.14.0-DEV.2171"
+            es = ExecutionSession(jljit)
+            something(LLVM.lookup_dylib(es, "JuliaGlobals"))
+        else
+            JITDylib(jljit)
+        end
 
         address = LLVM.API.LLVMOrcJITTargetAddress(
             reinterpret(UInt, @cfunction(deferred_codegen, Ptr{Cvoid}, (Ptr{Cvoid},))))
