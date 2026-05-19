@@ -132,9 +132,15 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     # tell NVVMReflect whether to flush denormals; this mirrors what Clang does
     # for `-fcuda-flush-denormals-to-zero` and is the only `__nvvm_reflect` key
-    # LLVM's NVVMReflectPass honors besides `__CUDA_ARCH`.
-    flags(mod)["nvvm-reflect-ftz", LLVM.API.LLVMModuleFlagBehaviorOverride] =
-        Metadata(ConstantInt(Int32(job.config.target.fastmath ? 1 : 0)))
+    # LLVM's NVVMReflectPass honors besides `__CUDA_ARCH`. only emit it on the
+    # toplevel module that runs through `optimize!`, as sub-modules (the cached
+    # runtime, deferred jobs) don't need it, and the cached runtime in
+    # particular would otherwise conflict on link if it was built with a
+    # different `fastmath` setting (which isn't part of `runtime_slug`).
+    if job.config.toplevel
+        flags(mod)["nvvm-reflect-ftz", LLVM.API.LLVMModuleFlagBehaviorOverride] =
+            Metadata(ConstantInt(Int32(job.config.target.fastmath ? 1 : 0)))
+    end
 
     # emit the device capability and ptx isa version as constants in the module. this makes
     # it possible to 'query' these in device code, relying on LLVM to optimize the checks
