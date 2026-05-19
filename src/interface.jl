@@ -298,7 +298,7 @@ pass_by_ref(@nospecialize(job::CompilerJob)) = false
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
 # Care is required for anything that impacts:
-#   - method_table
+#   - method_tables
 #   - inference_params
 #   - optimization_params
 # By default that is just always_inline
@@ -306,11 +306,11 @@ valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 struct GPUCompilerCacheToken
     target_type::Type
     always_inline::Bool
-    method_table::Core.MethodTable
+    method_tables::Tuple{Vararg{Core.MethodTable}}
 end
 
 ci_cache_token(@nospecialize(job::CompilerJob)) =
-    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
+    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_tables(job))
 
 # the codeinstance cache to use -- should only be used for the constructor
 if VERSION >= v"1.11.0-DEV.1552"
@@ -327,10 +327,38 @@ function ci_cache(@nospecialize(job::CompilerJob))
 end
 end
 
-# the method table to use
-# deprecate method_table on next-breaking release
-method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
-method_table_view(@nospecialize(job::CompilerJob)) = get_method_table_view(job.world, method_table(job))
+"""
+    method_tables(job::CompilerJob) -> Tuple{Vararg{Core.MethodTable}}
+
+The back-end's method tables, in priority order. They are stacked on top of GPUCompiler's
+internal runtime-intrinsic overlay table for inference, and are used as the discriminator
+component of [`ci_cache_token`](@ref).
+
+Most back-ends only need to declare a single table:
+
+    Base.Experimental.@MethodTable(my_method_table)
+    GPUCompiler.method_tables(::MyCompilerJob) = (my_method_table,)
+
+If the back-end has overlays spread across multiple `Core.MethodTable`s (e.g. one local
+to the package plus one inherited from a shared intrinsics library), return them in
+priority order — the first match wins.
+
+For full control of the inference-side `Core.Compiler.MethodTableView`, override
+[`method_table_view`](@ref) instead; that is an internal hook and most back-ends should
+not need it.
+"""
+method_tables(@nospecialize(job::CompilerJob)) = ()
+
+# Build the inference-side view of the back-end's method tables stacked on top of
+# GPUCompiler's runtime-intrinsic overlay table. Back-ends generally shouldn't override
+# this; override `method_tables(job)` instead.
+function method_table_view(@nospecialize(job::CompilerJob))
+    parent = CC.OverlayMethodTable(job.world, GLOBAL_METHOD_TABLE)
+    for mt in reverse(method_tables(job))
+        parent = StackedMethodTable(job.world, mt, parent)
+    end
+    return parent
+end
 
 # the inference parameters to use when constructing the GPUInterpreter
 function inference_params(@nospecialize(job::CompilerJob))
