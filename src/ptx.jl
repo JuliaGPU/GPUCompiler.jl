@@ -262,8 +262,10 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
     @dispose pb=NewPMPassBuilder() begin
         register!(pb, NVVMReflectPass())
+        register!(pb, PTXFDivF64FastPass())
 
         add!(pb, NVVMReflectPass())
+        add!(pb, PTXFDivF64FastPass())
 
         add!(pb, NewPMFunctionPassManager()) do fpm
             # needed by GemmKernels.jl-like code
@@ -555,3 +557,60 @@ function nvvm_reflect!(mod::LLVM.Module)
     return changed
 end
 NVVMReflectPass() = NewPMModulePass("custom-nvvm-reflect", nvvm_reflect!)
+
+# Rewrite `afn`-flagged f64 `fdiv` to `rcp.approx.ftz.d` + one-step Newton
+# refinement, matching CUDA.jl's `FastMath.inv_fast(::Float64)`. NVPTX has no
+# fast f64 fdiv lowering of its own; f32 is left to the backend, which picks
+# `div.approx.ftz.f32` for `afn`-flagged f32 fdivs. Job-wide `fastmath=true`
+# reaches this pass through the per-instruction flags that `apply_fastmath!`
+# already stamped on every FP op in `finish_linked_module!`.
+function ptx_fdiv_f64_fast!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "ptx-fdiv-f64-fast" begin
+
+    f64 = LLVM.DoubleType()
+
+    # collect first to avoid mutation-during-iteration
+    to_replace = LLVM.FDivInst[]
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        inst isa LLVM.FDivInst || continue
+        LLVM.value_type(inst) == f64 || continue
+        LLVM.fast_math(inst).afn || continue
+        push!(to_replace, inst)
+    end
+    isempty(to_replace) && return false
+
+    # declare rcp by name so LLVM keeps the exact (non-overloaded) intrinsic name;
+    # LLVM.Intrinsic + type params would mangle to *.f64, unrecognized by NVPTX.
+    fns = functions(mod)
+    rcp_ft = LLVM.FunctionType(f64, [f64])
+    rcp_fn = haskey(fns, "llvm.nvvm.rcp.approx.ftz.d") ?
+        fns["llvm.nvvm.rcp.approx.ftz.d"] : LLVM.Function(mod, "llvm.nvvm.rcp.approx.ftz.d", rcp_ft)
+    fma_ft = LLVM.FunctionType(f64, [f64, f64, f64])
+    fma_fn = haskey(fns, "llvm.fma.f64") ?
+        fns["llvm.fma.f64"] : LLVM.Function(mod, "llvm.fma.f64", fma_ft)
+    one_f64 = ConstantFP(f64, 1.0)
+
+    @dispose builder=IRBuilder() begin
+        for inst in to_replace
+            lhs, rhs = operands(inst)[1], operands(inst)[2]
+            position!(builder, inst)
+
+            inv_y   = call!(builder, rcp_ft, rcp_fn, [rhs])
+            neg_rhs = fneg!(builder, rhs)
+            # Newton refinement matching CUDA.jl's inv_fast(::Float64)
+            e       = call!(builder, fma_ft, fma_fn, [inv_y, neg_rhs, one_f64])
+            e       = call!(builder, fma_ft, fma_fn, [e, e, e])
+            inv_ref = call!(builder, fma_ft, fma_fn, [e, inv_y, inv_y])
+            replacement = fmul!(builder, lhs, inv_ref)
+
+            replace_uses!(inst, replacement)
+            erase!(inst)
+            changed = true
+        end
+    end
+
+    end # @tracepoint
+    return changed
+end
+PTXFDivF64FastPass() = NewPMModulePass("ptx-fdiv-f64-fast", ptx_fdiv_f64_fast!)
