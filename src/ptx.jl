@@ -4,6 +4,15 @@
 
 export PTXCompilerTarget
 
+# Wire-format encoding of the feature set, stamped into the `sm_features` LLVM
+# global by `finish_module!` and read back by host-side runtime intrinsics (e.g.
+# CUDA.jl's `target_feature_set()`).
+@enum TargetFeatureSet::UInt32 begin
+    BaselineFeatures = 0
+    FamilyFeatures   = 1
+    ArchFeatures     = 2
+end
+
 Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     cap::VersionNumber
     ptx::VersionNumber = v"6.0" # for compatibility with older versions of CUDA.jl
@@ -125,10 +134,14 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     # it possible to 'query' these in device code, relying on LLVM to optimize the checks
     # away and generate static code. note that we only do so if there's actual uses of these
     # variables; unconditionally creating a gvar would result in duplicate declarations.
-    for (name, value) in ["sm_major"  => job.config.target.cap.major,
-                          "sm_minor"  => job.config.target.cap.minor,
-                          "ptx_major" => job.config.target.ptx.major,
-                          "ptx_minor" => job.config.target.ptx.minor]
+    sm_features = job.config.target.feature_set === :arch    ? ArchFeatures :
+                  job.config.target.feature_set === :family  ? FamilyFeatures :
+                                                               BaselineFeatures
+    for (name, value) in ["sm_major"    => job.config.target.cap.major,
+                          "sm_minor"    => job.config.target.cap.minor,
+                          "sm_features" => UInt32(sm_features),
+                          "ptx_major"   => job.config.target.ptx.major,
+                          "ptx_minor"   => job.config.target.ptx.minor]
         if haskey(globals(mod), name)
             gv = globals(mod)[name]
             initializer!(gv, ConstantInt(LLVM.Int32Type(), value))
