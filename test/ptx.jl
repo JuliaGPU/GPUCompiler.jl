@@ -188,10 +188,13 @@ if :NVPTX in LLVM.backends()
         end
     end
 
+    # the assembler emits `call.uni` and the callee name on the same line in
+    # LLVM 21+, but on separate lines on older releases.
     @test @filecheck begin
         @check_label ".visible .func {{(julia|j)_parent[0-9_]*}}"
         @check "call.uni"
-        @check_next "{{(julia|j)_child_}}"
+        @check_same cond=(LLVM.version() >= v"21") "{{(julia|j)_child_}}"
+        @check_next cond=(LLVM.version() < v"21")  "{{(julia|j)_child_}}"
         PTX.code_native(mod.parent, Tuple{Int64})
     end
 end
