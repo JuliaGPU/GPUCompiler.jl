@@ -8,6 +8,12 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     cap::VersionNumber
     ptx::VersionNumber = v"6.0" # for compatibility with older versions of CUDA.jl
 
+    # subtarget feature set, selecting the suffix on the LLVM CPU name (and `.target`):
+    #   :baseline (no suffix)   - forward-compatible (sm_X for any sm_Y >= X)
+    #   :family   ('f' suffix)  - same-major-family-portable; gates 'f'-tier intrinsics
+    #   :arch     ('a' suffix)  - locked to one exact CC; unlocks all arch-accel intrinsics
+    feature_set::Symbol = :baseline
+
     # codegen quirks
     ## can we emit debug info in the PTX assembly?
     debuginfo::Bool = false
@@ -28,6 +34,7 @@ end
 function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.cap, h)
     h = hash(target.ptx, h)
+    h = hash(target.feature_set, h)
 
     h = hash(target.debuginfo, h)
 
@@ -38,6 +45,15 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.fastmath, h)
 
     h
+end
+
+# format the LLVM CPU / PTX `.target` name for this target
+function cpu_name(target::PTXCompilerTarget)
+    suffix = target.feature_set === :arch    ? "a" :
+             target.feature_set === :family  ? "f" :
+             target.feature_set === :baseline ? "" :
+             error("PTXCompilerTarget.feature_set must be one of :baseline, :family, :arch; got $(repr(target.feature_set))")
+    return "sm_$(target.cap.major)$(target.cap.minor)$suffix"
 end
 
 source_code(target::PTXCompilerTarget) = "ptx"
@@ -51,7 +67,7 @@ function llvm_machine(target::PTXCompilerTarget)
     triple = llvm_triple(target)
     t = Target(triple=triple)
 
-    tm = TargetMachine(t, triple, "sm_$(target.cap.major)$(target.cap.minor)",
+    tm = TargetMachine(t, triple, cpu_name(target),
                        "+ptx$(target.ptx.major)$(target.ptx.minor)")
     asm_verbosity!(tm, true)
 
@@ -84,7 +100,7 @@ can_vectorize(job::CompilerJob{PTXCompilerTarget}) = true
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
     print(io, "PTX CompilerJob of ", job.source)
-    print(io, " for sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)")
+    print(io, " for ", cpu_name(job.config.target))
 
     job.config.target.minthreads !== nothing && print(io, ", minthreads=$(job.config.target.minthreads)")
     job.config.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.config.target.maxthreads)")
@@ -100,7 +116,7 @@ isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
 # XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
 runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
     "ptx$(job.config.target.ptx.major)$(job.config.target.ptx.minor)" *
-    "-sm_$(job.config.target.cap.major)$(job.config.target.cap.minor)" *
+    "-$(cpu_name(job.config.target))" *
     "-debuginfo=$(Int(llvm_debug_info(job)))"
 
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
