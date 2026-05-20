@@ -164,6 +164,65 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     if job.config.kernel
         # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
         entry = lower_byval(job, mod, entry)
+
+        # emit kernel property annotations into the module. these have to be in
+        # place before optimization runs: LLVM's NVPTX target machine registers a
+        # PipelineStart EP callback that schedules NVVMIntrRangePass, which calls
+        # `getMaxNTID` on every function. That populates a module-keyed
+        # `AnnotationCache` entry (empty, because `nvvm.annotations` isn't there
+        # yet), and subsequent lookups by the asm printer hit the stale empty
+        # entry instead of re-reading the metadata.
+        annotations = Metadata[entry]
+
+        ## kernel metadata
+        append!(annotations, [MDString("kernel"),
+                              ConstantInt(Int32(1))])
+
+        ## expected CTA sizes
+        if job.config.target.minthreads !== nothing
+            bounds = ntuple(i -> i <= length(job.config.target.minthreads) ?
+                                 job.config.target.minthreads[i] : 1, 3)
+            for (bound, name) in zip(bounds, (:x, :y, :z))
+                append!(annotations, [MDString("reqntid$name"),
+                                      ConstantInt(Int32(bound))])
+            end
+            if LLVM.version() >= v"21"
+                push!(function_attributes(entry),
+                      StringAttribute("nvvm.reqntid", join(bounds, ",")))
+            end
+        end
+        if job.config.target.maxthreads !== nothing
+            bounds = ntuple(i -> i <= length(job.config.target.maxthreads) ?
+                                 job.config.target.maxthreads[i] : 1, 3)
+            for (bound, name) in zip(bounds, (:x, :y, :z))
+                append!(annotations, [MDString("maxntid$name"),
+                                      ConstantInt(Int32(bound))])
+            end
+            if LLVM.version() >= v"21"
+                push!(function_attributes(entry),
+                      StringAttribute("nvvm.maxntid", join(bounds, ",")))
+            end
+        end
+
+        if job.config.target.blocks_per_sm !== nothing
+            append!(annotations, [MDString("minctasm"),
+                                  ConstantInt(Int32(job.config.target.blocks_per_sm))])
+            if LLVM.version() >= v"21"
+                push!(function_attributes(entry),
+                      StringAttribute("nvvm.minctasm", string(job.config.target.blocks_per_sm)))
+            end
+        end
+
+        if job.config.target.maxregs !== nothing
+            append!(annotations, [MDString("maxnreg"),
+                                  ConstantInt(Int32(job.config.target.maxregs))])
+            if LLVM.version() >= v"21"
+                push!(function_attributes(entry),
+                      StringAttribute("nvvm.maxnreg", string(job.config.target.maxregs)))
+            end
+        end
+
+        push!(metadata(mod)["nvvm.annotations"], MDNode(annotations))
     end
 
     # we emit properties (of the device and ptx isa) as private global constants,
@@ -225,45 +284,6 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         for f in functions(mod)
             lower_unreachable!(f)
         end
-    end
-
-    if job.config.kernel
-        # add metadata annotations for the assembler to the module
-
-        # property annotations
-        annotations = Metadata[entry]
-
-        ## kernel metadata
-        append!(annotations, [MDString("kernel"),
-                              ConstantInt(Int32(1))])
-
-        ## expected CTA sizes
-        if job.config.target.minthreads !== nothing
-            for (dim, name) in enumerate([:x, :y, :z])
-                bound = dim <= length(job.config.target.minthreads) ? job.config.target.minthreads[dim] : 1
-                append!(annotations, [MDString("reqntid$name"),
-                                      ConstantInt(Int32(bound))])
-            end
-        end
-        if job.config.target.maxthreads !== nothing
-            for (dim, name) in enumerate([:x, :y, :z])
-                bound = dim <= length(job.config.target.maxthreads) ? job.config.target.maxthreads[dim] : 1
-                append!(annotations, [MDString("maxntid$name"),
-                                      ConstantInt(Int32(bound))])
-            end
-        end
-
-        if job.config.target.blocks_per_sm !== nothing
-            append!(annotations, [MDString("minctasm"),
-                                  ConstantInt(Int32(job.config.target.blocks_per_sm))])
-        end
-
-        if job.config.target.maxregs !== nothing
-            append!(annotations, [MDString("maxnreg"),
-                                  ConstantInt(Int32(job.config.target.maxregs))])
-        end
-
-        push!(metadata(mod)["nvvm.annotations"], MDNode(annotations))
     end
 
     return entry
