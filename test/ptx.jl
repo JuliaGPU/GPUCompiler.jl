@@ -193,8 +193,7 @@ if :NVPTX in LLVM.backends()
     @test @filecheck begin
         @check_label ".visible .func {{(julia|j)_parent[0-9_]*}}"
         @check "call.uni"
-        @check_same cond=(LLVM.version() >= v"21") "{{(julia|j)_child_}}"
-        @check_next cond=(LLVM.version() < v"21")  "{{(julia|j)_child_}}"
+        @check_same "{{(julia|j)_child_}}"
         PTX.code_native(mod.parent, Tuple{Int64})
     end
 end
