@@ -236,6 +236,26 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     return entry
 end
 
+function finish_linked_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                               mod::LLVM.Module)
+    # propagate `target.fastmath` as `@fastmath`-everywhere semantics
+    # (mirrors nvcc's `--use_fast_math`). post-link so that bodies pulled in
+    # from libdevice and the runtime also get the flags.
+    if job.config.target.fastmath
+        apply_fastmath!(mod)
+        # additionally request FTZ on f32: NVPTX' `useF32FTZ` reads
+        # `denormal-fp-math-f32` to pick the FTZ variants for
+        # fdiv/fsqrt/etc.
+        for f in functions(mod)
+            isdeclaration(f) && continue
+            push!(function_attributes(f),
+                  StringAttribute("denormal-fp-math-f32",
+                                  "preserve-sign,preserve-sign"))
+        end
+    end
+    return
+end
+
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     tm = llvm_machine(job.config.target)
