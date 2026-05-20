@@ -164,6 +164,12 @@ InteractiveUtils.code_lowered(err::KernelError; kwargs...) = code_lowered(err.jo
 InteractiveUtils.code_typed(err::KernelError; kwargs...) = code_typed(err.job; kwargs...)
 InteractiveUtils.code_warntype(err::KernelError; kwargs...) = code_warntype(err.job; kwargs...)
 
+# Technically type-pirarcy
+InteractiveUtils.code_lowered(err::Base.ExceptionStack; kwargs...) = InteractiveUtils.code_lowered(only(err.stack).exception; kwargs...)
+InteractiveUtils.code_typed(err::Base.ExceptionStack; kwargs...) = InteractiveUtils.code_typed(only(err.stack).exception; kwargs...)
+InteractiveUtils.code_warntype(err::Base.ExceptionStack; kwargs...) = InteractiveUtils.code_warntype(only(err.stack).exception; kwargs...)
+
+
 struct jl_llvmf_dump
     TSM::LLVM.API.LLVMOrcThreadSafeModuleRef
     F::LLVM.API.LLVMValueRef
