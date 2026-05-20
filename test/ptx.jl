@@ -463,10 +463,11 @@ end
 end
 
 @testset "fastmath division" begin
-    # NVPTX has no fast f64 fdiv lowering, so we rewrite `afn`-flagged f64
-    # divs to `rcp.approx.ftz.d` + Newton refinement. f32 is left to the
-    # backend (`apply_fastmath!` already stamps `afn`, and NVPTX' own
-    # `getDivF32Level` then emits `div.approx.ftz.f32`).
+    # `PTXFDivFastPass` rewrites `afn`-flagged fdiv. f32 → `div.approx{,.ftz}.f32`
+    # (filling in for LLVM 18, whose `getDivF32Level` doesn't honor per-call
+    # `afn`); f64 → `rcp.approx.ftz.d` + Newton refinement (NVPTX has no fast
+    # f64 fdiv lowering). Job-wide `fastmath=true` reaches this through the
+    # per-instruction flags `apply_fastmath!` stamps in `finish_linked_module!`.
     mod_fast = @eval module $(gensym())
         kernel_f32(x::Float32, y::Float32) = @fastmath x / y
         kernel_f64(x::Float64, y::Float64) = @fastmath x / y
@@ -476,17 +477,14 @@ end
         kernel_f64(x::Float64, y::Float64) = x / y
     end
 
-    # f32 fast: backend handles `afn`-flagged fdiv natively.
     @test @filecheck begin
-        @check "div.approx.ftz.f32"
+        @check "div.approx.f32"
         PTX.code_native(mod_fast.kernel_f32, Tuple{Float32, Float32})
     end
     @test @filecheck begin
         @check_not "div.approx"
         PTX.code_native(mod_precise.kernel_f32, Tuple{Float32, Float32})
     end
-
-    # f64 fast: pass rewrites to rcp.approx.ftz + Newton refinement.
     @test @filecheck begin
         @check "rcp.approx.ftz.f64"
         PTX.code_native(mod_fast.kernel_f64, Tuple{Float64, Float64})
