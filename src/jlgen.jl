@@ -295,8 +295,6 @@ end # !HAS_INTEGRATED_CACHE
 
 ## method overrides
 
-Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
-
 # Implements a priority lookup for method tables, where the first match in the stack get's returned.
 # An alternative to this would be to use a "Union" where we would query the parent method table and
 # do a most-specific match.
@@ -402,8 +400,6 @@ else
     maybe_cached(mtv::CC.MethodTableView) = mtv
 end
 
-get_method_table_view(world::UInt, mt::CC.MethodTable) = CC.OverlayMethodTable(world, mt)
-
 # VERSION >= v"1.14.0-DEV.1691"
 const INFERENCE_CACHE_TYPE = isdefined(CC, :InferenceCache) ? CC.InferenceCache : Vector{CC.InferenceResult}
 
@@ -493,7 +489,11 @@ CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 CC.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
 function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
-    @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
+    # NOTE: deliberately a no-op. emitting any logging here pulls all the components
+    # needed to evaluate the warning into the IR for the compile job, even when the
+    # remark never fires — those ccalls into the Julia CPU runtime then poison AOT
+    # compilation. See JuliaGPU/GPUCompiler.jl#749.
+    return nothing
 end
 
 CC.may_optimize(interp::GPUInterpreter) = true

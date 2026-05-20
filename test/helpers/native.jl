@@ -19,7 +19,7 @@ module Runtime end
 NativeCompilerJob = CompilerJob{NativeCompilerTarget,CompilerParams}
 GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 
-GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
+GPUCompiler.method_tables(@nospecialize(job::NativeCompilerJob)) = (job.config.params.method_table,)
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
 function create_job(@nospecialize(func), @nospecialize(types);

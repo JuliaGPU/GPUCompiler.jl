@@ -171,3 +171,37 @@ end
     # Check that we can call this function from the CPU, to support deferred codegen for Enzyme.
     @test ccall("extern deferred_codegen", llvmcall, UInt, (UInt,), 3) == 3
 end
+
+@testset "@device_function macro" begin
+    using InteractiveUtils
+
+    # The macro should:
+    #   1. define a CPU-visible function that returns the expected type without
+    #      referencing the `extern gpu_*` symbol (so AOT compilation can link),
+    #   2. register an overlay in GPUCompiler.GLOBAL_METHOD_TABLE that GPU compilation
+    #      finds via the stacked method-table view.
+
+    test_mod = @eval module $(gensym("DeviceFunctionTest"))
+        using GPUCompiler
+
+        GPUCompiler.@device_function(Ptr{Nothing},
+            @inline test_device_ptr() = ccall("extern gpu_test", llvmcall, Ptr{Nothing}, ()))
+
+        GPUCompiler.@device_function(Nothing,
+            @inline test_device_nothing() = ccall("extern gpu_test2", llvmcall, Nothing, ()))
+    end
+
+    @test isdefined(test_mod, :test_device_ptr)
+    @test isdefined(test_mod, :test_device_nothing)
+
+    # the overlays should be findable in GLOBAL_METHOD_TABLE
+    mt_view = Core.Compiler.OverlayMethodTable(Base.get_world_counter(),
+                                               GPUCompiler.GLOBAL_METHOD_TABLE)
+    @test findsup(Tuple{typeof(test_mod.test_device_ptr)}, mt_view) !== nothing
+    @test findsup(Tuple{typeof(test_mod.test_device_nothing)}, mt_view) !== nothing
+
+    # the CPU stubs must not reference the extern gpu_* symbol — that's the whole point
+    buf = IOBuffer()
+    code_llvm(buf, test_mod.test_device_ptr, Tuple{}; debuginfo=:none)
+    @test !occursin("gpu_test", String(take!(buf)))
+end

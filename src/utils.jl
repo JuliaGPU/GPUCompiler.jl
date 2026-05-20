@@ -242,3 +242,35 @@ end
         return inits
     end
 end
+
+
+## device function definitions
+
+# GPUCompiler-owned method table holding overlays for GPU runtime intrinsics. Back-end
+# method tables (declared via `method_tables(job)`) are stacked on top of this by
+# `method_table_view`, so back-end overrides win first and these overlays remain
+# reachable underneath. This is an internal table; back-ends must not `@overlay` it.
+Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
+
+# define a CPU-visible stub plus an overlay in GLOBAL_METHOD_TABLE that holds the real
+# device body. used to keep `ccall("extern gpu_*", ...)` bodies out of the native cache
+# (so that `compile=all` sysimages / juliac don't try to resolve nonexistent symbols),
+# while still letting GPU compilation find the real body via the back-end's stacked
+# method table.
+macro device_function(rt, ex)
+    ex = macroexpand(__module__, ex)
+    def = splitdef(ex)
+
+    # replace the CPU body with a harmless constructor call returning the expected type.
+    # NOTE: Int64(1) (rather than 0) so that `Ptr(Int64(...))` doesn't get lowered to C_NULL.
+    def[:body] = quote
+        $rt(1)
+    end
+
+    return esc(quote
+        $(combinedef(def))
+
+        # NOTE: no `@consistent_overlay` because the CPU stub returns a fake value
+        Base.Experimental.@overlay($(GPUCompiler).GLOBAL_METHOD_TABLE, $ex)
+    end)
+end
