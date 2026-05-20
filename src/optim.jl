@@ -1,5 +1,34 @@
 # LLVM IR optimization
 
+"""
+    apply_fastmath!(mod::LLVM.Module)
+
+Apply fast-math semantics to every function definition in `mod` — as if every
+floating-point operation were wrapped in `@fastmath`. Sets `unsafe-fp-math="true"`
+as a function attribute and turns on all fast-math flags on eligible FP
+instructions.
+
+Back-ends should call this from `finish_linked_module!` when their target has
+fast math enabled. Set both the function attribute and the per-instruction
+flags: not every codegen hook reads both (e.g. LLVM 18's NVPTX
+`usePrecSqrtF32` only consults `TargetMachine.Options.UnsafeFPMath`, which
+isn't reachable through LLVM.jl, so flagging the instructions is the
+portable path), and flagging both leaves no path that silently keeps the
+slow lowering.
+"""
+function apply_fastmath!(mod::LLVM.Module)
+    for f in functions(mod)
+        isdeclaration(f) && continue
+        push!(function_attributes(f), StringAttribute("unsafe-fp-math", "true"))
+        for bb in blocks(f), inst in instructions(bb)
+            if Bool(LLVM.API.LLVMCanValueUseFastMathFlags(inst))
+                fast_math!(inst; all=true)
+            end
+        end
+    end
+    return
+end
+
 # Pick the peephole pass according to `optimization_options(job).instcombine`. Defaults to
 # `InstCombinePass` to match LLVM's standard pipeline; `InstSimplifyPass` is the fallback
 # for back-ends that need only the simplification subset.
