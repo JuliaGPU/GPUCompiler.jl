@@ -462,6 +462,39 @@ end
     end
 end
 
+@testset "fastmath division" begin
+    # `PTXFDivFastPass` rewrites `afn`-flagged fdiv. f32 → `div.approx{,.ftz}.f32`
+    # (filling in for LLVM 18, whose `getDivF32Level` doesn't honor per-call
+    # `afn`); f64 → `rcp.approx.ftz.d` + Newton refinement (NVPTX has no fast
+    # f64 fdiv lowering). Job-wide `fastmath=true` reaches this through the
+    # per-instruction flags `apply_fastmath!` stamps in `finish_linked_module!`.
+    mod_fast = @eval module $(gensym())
+        kernel_f32(x::Float32, y::Float32) = @fastmath x / y
+        kernel_f64(x::Float64, y::Float64) = @fastmath x / y
+    end
+    mod_precise = @eval module $(gensym())
+        kernel_f32(x::Float32, y::Float32) = x / y
+        kernel_f64(x::Float64, y::Float64) = x / y
+    end
+
+    @test @filecheck begin
+        @check "div.approx.f32"
+        PTX.code_native(mod_fast.kernel_f32, Tuple{Float32, Float32})
+    end
+    @test @filecheck begin
+        @check_not "div.approx"
+        PTX.code_native(mod_precise.kernel_f32, Tuple{Float32, Float32})
+    end
+    @test @filecheck begin
+        @check "rcp.approx.ftz.f64"
+        PTX.code_native(mod_fast.kernel_f64, Tuple{Float64, Float64})
+    end
+    @test @filecheck begin
+        @check_not "rcp.approx"
+        PTX.code_native(mod_precise.kernel_f64, Tuple{Float64, Float64})
+    end
+end
+
 @testset "feature_set" begin
     # PTXCompilerTarget.feature_set controls the suffix on the LLVM CPU name, which is
     # what the NVPTX backend uses to flip `hasArchAccelFeatures()`. Verify it makes its
