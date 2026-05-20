@@ -540,8 +540,12 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
         if bits_as_reference[i]
             # add appropriate attributes
             # TODO: other attributes (nonnull, readonly, align, dereferenceable)?
-            ## we've just emitted a load, so the pointer itself cannot be captured
-            push!(parameter_attributes(new_f, i), EnumAttribute("nocapture", 0))
+            ## we've just emitted a load, so the pointer itself cannot be captured.
+            ## `nocapture` was replaced by `captures(none)` in LLVM 21 (an
+            ## integer-valued IntAttr, value 0 == CaptureInfo::none()).
+            push!(parameter_attributes(new_f, i),
+                  LLVM.version() >= v"21" ? EnumAttribute("captures", 0)
+                                          : EnumAttribute("nocapture", 0))
             ## Metal.jl emits separate buffers for each scalar argument
             push!(parameter_attributes(new_f, i), EnumAttribute("noalias", 0))
         end

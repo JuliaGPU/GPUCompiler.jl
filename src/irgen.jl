@@ -901,8 +901,11 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
 
         # set the attributes for the state pointer parameter
         attrs = parameter_attributes(new_f, 1)
-        # the pointer itself cannot be captured since we immediately load from it
-        push!(attrs, EnumAttribute("nocapture", 0))
+        # the pointer itself cannot be captured since we immediately load from it.
+        # `nocapture` was replaced by `captures(none)` (an integer-valued IntAttr,
+        # value 0 == CaptureInfo::none()) in LLVM 21.
+        push!(attrs, LLVM.version() >= v"21" ? EnumAttribute("captures", 0)
+                                             : EnumAttribute("nocapture", 0))
         # each kernel state is separate
         push!(attrs, EnumAttribute("noalias", 0))
         # the state is read-only
