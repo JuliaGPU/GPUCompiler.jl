@@ -422,6 +422,46 @@ end
     PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
 end
 
+@testset "fastmath" begin
+    # `fastmath=true` on the target should call `apply_fastmath!` from
+    # `finish_linked_module!`, stamping `unsafe-fp-math` + fast-math flags on
+    # every FP op, and additionally setting `denormal-fp-math-f32` so NVPTX
+    # picks the FTZ variants. Verify both pieces — IR-level attributes and
+    # PTX-level instruction selection — with and without the flag.
+    mod = @eval module $(gensym())
+        kernel(x, out) = (unsafe_store!(out, sqrt(unsafe_load(x))); return)
+    end
+
+    # without fastmath, no unsafe-fp-math / f32-FTZ, and sqrt stays precise
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check_not "unsafe-fp-math"
+        @check_not "denormal-fp-math-f32"
+        @check "call float @llvm.sqrt.f32"
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Float32},Ptr{Float32}}; dump_module=true)
+    end
+    @test @filecheck begin
+        @check "sqrt.rn.f32"
+        @check_not "sqrt.approx"
+        PTX.code_native(mod.kernel, Tuple{Ptr{Float32},Ptr{Float32}})
+    end
+
+    # with fastmath, the entry function carries the attributes, the sqrt call
+    # picks up fast-math flags, and PTX selects the approx+ftz variant.
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "call fast float @llvm.sqrt.f32"
+        @check "\"denormal-fp-math-f32\"=\"preserve-sign,preserve-sign\""
+        @check "\"unsafe-fp-math\"=\"true\""
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Float32},Ptr{Float32}};
+                      dump_module=true, fastmath=true)
+    end
+    @test @filecheck begin
+        @check "sqrt.approx.ftz.f32"
+        PTX.code_native(mod.kernel, Tuple{Ptr{Float32},Ptr{Float32}}; fastmath=true)
+    end
+end
+
 @testset "feature_set" begin
     # PTXCompilerTarget.feature_set controls the suffix on the LLVM CPU name, which is
     # what the NVPTX backend uses to flip `hasArchAccelFeatures()`. Verify it makes its
