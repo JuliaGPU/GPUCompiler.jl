@@ -446,11 +446,12 @@ end
         PTX.code_native(mod.kernel, Tuple{Ptr{Float32},Ptr{Float32}})
     end
 
-    # with fastmath, the entry function carries the attributes, the sqrt call
-    # picks up fast-math flags, and PTX selects the approx+ftz variant.
+    # with fastmath, the entry function carries the attributes, and
+    # `PTXFSqrtFastPass` rewrites the `afn`-flagged `llvm.sqrt.f32` to the
+    # NVPTX approx-ftz intrinsic; PTX then selects the approx+ftz variant.
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
-        @check "call fast float @llvm.sqrt.f32"
+        @check "call float @llvm.nvvm.sqrt.approx.ftz.f"
         @check "\"denormal-fp-math-f32\"=\"preserve-sign,preserve-sign\""
         @check "\"unsafe-fp-math\"=\"true\""
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Float32},Ptr{Float32}};
@@ -462,36 +463,61 @@ end
     end
 end
 
-@testset "fastmath division" begin
-    # `PTXFDivFastPass` rewrites `afn`-flagged fdiv. f32 → `div.approx{,.ftz}.f32`
-    # (filling in for LLVM 18, whose `getDivF32Level` doesn't honor per-call
-    # `afn`); f64 → `rcp.approx.ftz.d` + Newton refinement (NVPTX has no fast
-    # f64 fdiv lowering). Job-wide `fastmath=true` reaches this through the
-    # per-instruction flags `apply_fastmath!` stamps in `finish_linked_module!`.
-    mod_fast = @eval module $(gensym())
-        kernel_f32(x::Float32, y::Float32) = @fastmath x / y
-        kernel_f64(x::Float64, y::Float64) = @fastmath x / y
-    end
-    mod_precise = @eval module $(gensym())
-        kernel_f32(x::Float32, y::Float32) = x / y
-        kernel_f64(x::Float64, y::Float64) = x / y
+@testset "fastmath fdiv/fsqrt" begin
+    # `PTXFDivFastPass` rewrites `afn`-flagged fdiv/`llvm.sqrt.*`. f32 ops →
+    # `*.approx{,.ftz}.f32` (filling in for LLVM 18, whose
+    # `getDivF32Level`/`usePrecSqrtF32` don't honor per-call `afn`). f64
+    # fdiv → `rcp.approx.ftz.d` + Newton refinement; f64 sqrt →
+    # `rcp.approx.ftz.d(rsqrt.approx.d(x))` (NVPTX has no native fast f64
+    # fdiv/sqrt). Job-wide `fastmath=true` reaches this through the per-
+    # instruction `afn` flags `apply_fastmath!` stamps in
+    # `finish_linked_module!`.
+    mod = @eval module $(gensym())
+        fdiv32_fast(x::Float32, y::Float32) = @fastmath x / y
+        fdiv32(x::Float32, y::Float32) = x / y
+        fdiv64_fast(x::Float64, y::Float64) = @fastmath x / y
+        fdiv64(x::Float64, y::Float64) = x / y
+        fsqrt32_fast(x::Float32) = @fastmath sqrt(x)
+        fsqrt32(x::Float32) = sqrt(x)
+        fsqrt64_fast(x::Float64) = @fastmath sqrt(x)
+        fsqrt64(x::Float64) = sqrt(x)
     end
 
     @test @filecheck begin
         @check "div.approx.f32"
-        PTX.code_native(mod_fast.kernel_f32, Tuple{Float32, Float32})
+        PTX.code_native(mod.fdiv32_fast, Tuple{Float32, Float32})
     end
     @test @filecheck begin
         @check_not "div.approx"
-        PTX.code_native(mod_precise.kernel_f32, Tuple{Float32, Float32})
+        PTX.code_native(mod.fdiv32, Tuple{Float32, Float32})
     end
     @test @filecheck begin
         @check "rcp.approx.ftz.f64"
-        PTX.code_native(mod_fast.kernel_f64, Tuple{Float64, Float64})
+        PTX.code_native(mod.fdiv64_fast, Tuple{Float64, Float64})
     end
     @test @filecheck begin
         @check_not "rcp.approx"
-        PTX.code_native(mod_precise.kernel_f64, Tuple{Float64, Float64})
+        PTX.code_native(mod.fdiv64, Tuple{Float64, Float64})
+    end
+
+    @test @filecheck begin
+        @check "sqrt.approx.f32"
+        PTX.code_native(mod.fsqrt32_fast, Tuple{Float32})
+    end
+    @test @filecheck begin
+        @check "sqrt.rn.f32"
+        @check_not "sqrt.approx"
+        PTX.code_native(mod.fsqrt32, Tuple{Float32})
+    end
+    @test @filecheck begin
+        @check "rsqrt.approx.f64"
+        @check "rcp.approx.ftz.f64"
+        PTX.code_native(mod.fsqrt64_fast, Tuple{Float64})
+    end
+    @test @filecheck begin
+        @check "sqrt.rn.f64"
+        @check_not "rsqrt"
+        PTX.code_native(mod.fsqrt64, Tuple{Float64})
     end
 end
 
