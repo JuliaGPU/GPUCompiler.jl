@@ -76,17 +76,81 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     end
     methods[name] = meth
 
-    # FIXME: if the function is a symbol, implying it will be specified by the target,
-    #        we won't be able to call this function here or we'll get UndefVarErrors.
-    #        work around that by generating an llvmcall stub. can we do better by
-    #        using the new nonrecursive codegen to handle function lookup ourselves?
+    # Symbolic `def` means the runtime symbol is provided by the back-end. Emit
+    # an `llvmcall` whose IR declares `gpu_<name>` as a *weak* definition with
+    # a CPU-safe no-op body, and calls it. The weak body satisfies the JIT's
+    # symbol resolution on CPU (so AOT pipelines — juliac, sysimage
+    # `compile=all`, PrecompileTools — don't fail trying to link an undefined
+    # `gpu_<name>`). The GPU runtime library, when linked in, provides the
+    # real strong definition; LLVM's linker semantics replace the weak with
+    # the strong.
     if def isa Symbol
         args = [gensym() for typ in types]
-        @eval @inline $def($(args...)) =
-            ccall($("extern $llvm_name"), llvmcall, $return_type, ($(types...),), $(args...))
+        stub = LLVM.Context() do _
+            build_runtime_stub(llvm_name, return_type, types, args)
+        end
+        @eval @inline $def($(args...)) = $stub
     end
 
     return
+end
+
+# Build an `llvmcall` expression for a back-end-provided runtime symbol:
+#
+#   define weak <rt> @gpu_<name>(<args>) { ret <fake> }
+#   define <rt> @entry(<args>) { %r = call <rt> @gpu_<name>(<args>); ret <rt> %r }
+#
+# Returns the `Base.llvmcall(...)`-shaped quote produced by `LLVM.Interop.call_function`,
+# suitable for splicing as the stub's body.
+function build_runtime_stub(llvm_name::String, @nospecialize(return_type::Type),
+                            @nospecialize(types::Tuple), args::Vector)
+    rt = convert(LLVMType, return_type; allow_boxed=true)
+    arg_tys = LLVMType[convert(LLVMType, t; allow_boxed=true) for t in types]
+
+    # entry function (`call_function` puts the module on it)
+    entry, entry_ft = create_function(rt, arg_tys)
+    mod = LLVM.parent(entry)
+
+    # weak definition of `gpu_<name>` that returns a harmless placeholder on CPU
+    extern = LLVM.Function(mod, llvm_name, LLVM.FunctionType(rt, arg_tys))
+    linkage!(extern, LLVM.API.LLVMWeakAnyLinkage)
+    @dispose builder=IRBuilder() begin
+        position!(builder, BasicBlock(extern, "entry"))
+        emit_fake_return!(builder, rt)
+    end
+
+    # entry: call the weak symbol, return its result
+    @dispose builder=IRBuilder() begin
+        position!(builder, BasicBlock(entry, "entry"))
+        result = call!(builder, LLVM.function_type(extern), extern,
+                       collect(parameters(entry)))
+        if rt isa LLVM.VoidType
+            ret!(builder)
+        else
+            ret!(builder, result)
+        end
+    end
+
+    return call_function(entry, return_type, Tuple{types...}, args...)
+end
+
+# Emit a placeholder return of the given LLVM type — a sentinel value that
+# never escapes (the stub is never meant to actually run on CPU; this only
+# satisfies materialization).
+function emit_fake_return!(builder::IRBuilder, rt::LLVMType)
+    if rt isa LLVM.VoidType
+        ret!(builder)
+    elseif rt isa LLVM.PointerType
+        # Use Int64(1), not 0, so `Ptr(Int64(...))` doesn't get lowered to C_NULL.
+        i64 = LLVM.IntType(64)
+        ret!(builder, const_inttoptr(ConstantInt(i64, 1), rt))
+    elseif rt isa LLVM.IntegerType
+        ret!(builder, ConstantInt(rt, 0))
+    elseif rt isa LLVM.LLVMFloat || rt isa LLVM.LLVMDouble
+        ret!(builder, ConstantFP(rt, 0.0))
+    else
+        error("Unsupported runtime stub return type: $rt")
+    end
 end
 
 
