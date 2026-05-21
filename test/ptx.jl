@@ -562,7 +562,8 @@ end
     # Without afn, plain `1/sqrt(x)` must NOT fold to rsqrt: it would change
     # precision. The non-fast f64 emits `sqrt.rn.f64 + div.rn.f64`.
     @test @filecheck begin
-        @check_not "rsqrt"
+        @check "sqrt.rn.f64"
+        @check_not "rsqrt.approx"
         PTX.code_native(mod.rsqrt64, Tuple{Float64})
     end
 end
