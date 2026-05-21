@@ -521,6 +521,52 @@ end
     end
 end
 
+@testset "fastmath rsqrt" begin
+    # `PTXRSqrtFastPass` pattern-matches `fdiv afn 1.0, sqrt afn(x)` and folds
+    # it to `nvvm.rsqrt.approx.{f,d}`, so high-level `@fastmath 1/sqrt(x)` and
+    # `@fastmath inv(sqrt(x))` lower to a single `rsqrt.approx` instruction
+    # rather than `sqrt.approx + div.approx` (f32) or expansion into
+    # `rcp(rsqrt(...))` and a Newton step (f64). Without afn on both operands,
+    # the pattern doesn't fire — folding would change precision.
+    mod = @eval module $(gensym())
+        rsqrt32_fast(x::Float32) = @fastmath 1f0 / sqrt(x)
+        rsqrt64_fast(x::Float64) = @fastmath 1.0 / sqrt(x)
+        rsqrt32(x::Float32) = 1f0 / sqrt(x)
+        rsqrt64(x::Float64) = 1.0 / sqrt(x)
+    end
+
+    @test @filecheck begin
+        @check "rsqrt.approx.f32"
+        @check_not "sqrt.approx"
+        @check_not "div.approx"
+        PTX.code_native(mod.rsqrt32_fast, Tuple{Float32})
+    end
+    @test @filecheck begin
+        @check "rsqrt.approx.ftz.f32"
+        @check_not "sqrt.approx"
+        @check_not "div.approx"
+        PTX.code_native(mod.rsqrt32_fast, Tuple{Float32}; fastmath=true)
+    end
+    @test @filecheck begin
+        @check "rsqrt.approx.f64"
+        @check_not "rcp.approx"
+        PTX.code_native(mod.rsqrt64_fast, Tuple{Float64})
+    end
+    @test @filecheck begin
+        # job-wide fastmath stamps afn on all FP ops, so the pattern still fires
+        @check "rsqrt.approx.f64"
+        @check_not "rcp.approx"
+        PTX.code_native(mod.rsqrt64, Tuple{Float64}; fastmath=true)
+    end
+
+    # Without afn, plain `1/sqrt(x)` must NOT fold to rsqrt: it would change
+    # precision. The non-fast f64 emits `sqrt.rn.f64 + div.rn.f64`.
+    @test @filecheck begin
+        @check_not "rsqrt"
+        PTX.code_native(mod.rsqrt64, Tuple{Float64})
+    end
+end
+
 @testset "feature_set" begin
     # PTXCompilerTarget.feature_set controls the suffix on the LLVM CPU name, which is
     # what the NVPTX backend uses to flip `hasArchAccelFeatures()`. Verify it makes its
