@@ -104,6 +104,25 @@ function irgen(@nospecialize(job::CompilerJob))
             end
         end
 
+        # back-end-provided runtime stubs (`Runtime.compile(:sym, ...)`) carry
+        # a *weak* `gpu_<name>` body so CPU-AOT pipelines (juliac, sysimage,
+        # PrecompileTools) can satisfy CPU symbol resolution. On the GPU path
+        # we want the back-end's strong definition from the runtime library to
+        # take over, but `InternalizePass` below would convert the weak body
+        # to `internal` and `link!(...; only_needed=true)` would then refuse
+        # to import the strong override (`Linker::linkIfNeeded` requires the
+        # destination to be a true declaration, not merely weak). Erase the
+        # stub bodies so each becomes a plain external declaration; the
+        # runtime library's strong def is then linked in normally.
+        for method in values(Runtime.methods)
+            method.def isa Symbol || continue
+            haskey(functions(mod), method.llvm_name) || continue
+            f = functions(mod)[method.llvm_name]
+            isdeclaration(f) && continue
+            empty!(f)
+            linkage!(f, LLVM.API.LLVMExternalLinkage)
+        end
+
         # internalize all functions and, but keep exported global variables.
         linkage!(entry, LLVM.API.LLVMExternalLinkage)
         preserved_gvs = String[LLVM.name(entry)]
