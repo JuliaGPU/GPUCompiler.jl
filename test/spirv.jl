@@ -121,8 +121,20 @@ end
         end
     end
 
+    # at the IR level, `lower_unreachable_control_flow!` must have stripped the device-side
+    # `llvm.trap` and lowered the throw's `unreachable` into a clean `ret`.
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6kernel"
+        @check_not "llvm.trap"
+        @check_not "unreachable"
+        @check "ret void"
+        SPIRV.code_llvm(mod.kernel, Tuple{Bool}; backend, kernel=true)
+    end
+
+    # and at the SPIR-V level, no `OpUnreachable` (UB if reached) should survive.
     @test @filecheck begin
         @check "%_Z6kernel4Bool = OpFunction %void None"
+        @check_not "OpUnreachable"
         SPIRV.code_native(mod.kernel, Tuple{Bool}; backend, kernel=true)
     end
 end
