@@ -311,24 +311,28 @@ function has_unreachable_control_flow(f::LLVM.Function)
     return false
 end
 
-# force-inline every function with unreachable control flow into its callers,
-# so that the rewrite in `lower_unreachable_control_flow!` is sound.
+# force-inline every function with unreachable control flow into kernels, so that
+# `lower_unreachable_control_flow!` can rewrite it into a `ret` soundly.
 #
-# this is a fixpoint iteration based on `has_unreachable_control_flow` such that
-# we only inline what's really needed.
+# this is a fixpoint iteration based on `has_unreachable_control_flow`: each round marks the
+# functions that currently contain unreachable control flow and inlines them, which exposes it
+# in their callers, until it has all been hoisted up into the kernels. this naturally handles
+# the `kernel → A → B` case where only `B` traps: `A` is marked once `B` is inlined into it,
+# without us having to reason about call-graph paths.
 function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     alwaysinline_attr = EnumAttribute("alwaysinline", 0)
     noinline_attr = EnumAttribute("noinline", 0)
+    kernel_fns = kernels(mod)
 
     @tracepoint "inline unreachable control flow" begin
     while true
         marked = false
         for f in functions(mod)
             isdeclaration(f) && continue
-            # skip functions with no call sites (notably the kernel entry itself): there is
-            # nothing to inline them into, and they are where the `ret` should end up.
-            isempty(uses(f)) && continue
+            # never inline a kernel, and don't bother marking a function with no call sites
+            # (the inliner can't inline it anyway).
+            (f in kernel_fns || isempty(uses(f))) && continue
             attrs = function_attributes(f)
             alwaysinline_attr in collect(attrs) && continue
             has_unreachable_control_flow(f) || continue
@@ -360,16 +364,42 @@ function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::L
     changed = false
     @tracepoint "lower unreachable control flow" begin
 
-    # hoist every throwing function up into the kernel first, so that each `unreachable` we rewrite
-    # below belongs to a function whose `ret` is a genuine kernel exit (see the comment above).
+    # the rewrite below only makes sense in a kernel: a function whose `ret` exits to the host rather
+    # than to a caller. kernels are the only thing we emit, and their top-level `ret` is what we rely
+    # on here; everything else is a callee that the inlining below folds into its kernel(s).
+
+    # hoist every throwing function up into its kernel(s) first, so that each `unreachable` we
+    # rewrite below belongs to a kernel whose `ret` is a genuine exit (see the comment above).
     changed |= inline_unreachable_control_flow!(job, mod)
 
-    for f in functions(mod)
-        changed |= lower_unreachable_control_flow!(f)
+    # defensively drop any dead leftovers before the back-end sees them. `AlwaysInlinerPass` already
+    # erases the throwing helpers it fully inlines (they are `internal`, hence discardable), so in
+    # practice this is a no-op; it is here only to catch dead remnants of partial inlining, since the
+    # regular `cleanup` DCE ran before `finish_ir!` and won't see anything produced above.
+    @dispose pb=NewPMPassBuilder() begin
+        add!(pb, GlobalDCEPass())
+        run!(pb, mod, llvm_machine(job.config.target))
     end
 
-    # scrub every `noreturn` attribute (functions *and* call sites), module-wide. after the
-    # rewrites above no function traps or runs off into `unreachable` anymore, but `noreturn` is a
+    # lower the unreachable control flow, but *only* in the kernels: there, turning an `unreachable`
+    # into a `ret` is a genuine exit. we deliberately do not touch any other function: one that still
+    # contains `unreachable`/`trap` after the inlining above is one we couldn't hoist into a kernel
+    # (recursive or address-taken throwing code), and rewriting its `unreachable` into a `ret` would
+    # silently resume execution in the caller instead of exiting. we leave it as-is — keeping its
+    # `trap`/`unreachable`, which the back-end may reject, but that honestly surfaces an unsupported
+    # construct instead of quietly miscompiling it — and warn.
+    kernel_fns = kernels(mod)
+    for f in functions(mod)
+        isdeclaration(f) && continue
+        if f in kernel_fns
+            changed |= lower_unreachable_control_flow!(f)
+        elseif has_unreachable_control_flow(f) && !isempty(uses(f))
+            @safe_warn "Cannot lower unreachable control flow in '$(name(f))': it has callers but could not be inlined into a kernel (it is likely recursive or address-taken). Leaving its trap/unreachable in place; this may not be supported by the back-end."
+        end
+    end
+
+    # scrub every `noreturn` attribute (functions *and* call sites), module-wide. after the rewrite
+    # above the entry points no longer trap or run off into `unreachable`, but `noreturn` is a
     # cached fact that outlives the instructions it was derived from — and a stale `noreturn` lets
     # a trusting back-end (Metal's AIR optimizer, the SPIR-V translator) re-derive an
     # `unreachable`/`OpUnreachable`/trap right after the call and undo our work. we do this here,
