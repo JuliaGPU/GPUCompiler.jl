@@ -330,6 +330,23 @@ function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::L
         changed |= lower_unreachable_control_flow!(f)
     end
 
+    # scrub every `noreturn` attribute (functions *and* call sites), module-wide. after the
+    # rewrites above no function traps or runs off into `unreachable` anymore, but `noreturn` is a
+    # cached fact that outlives the instructions it was derived from — and a stale `noreturn` lets
+    # a trusting back-end (Metal's AIR optimizer, the SPIR-V translator) re-derive an
+    # `unreachable`/`OpUnreachable`/trap right after the call and undo our work. we do this here,
+    # not per-function, to also reach functions the rewrite skipped: `noreturn` declarations the
+    # kernel calls, and genuinely-`noreturn` functions (e.g. infinite loops) we left out-of-line.
+    # dropping it is always safe — it only relaxes an optimization hint; the back-end may re-infer
+    # it on a function that really never returns, but with no trap to reconstruct that is harmless.
+    noreturn_attr = EnumAttribute("noreturn", 0)
+    for f in functions(mod)
+        delete!(function_attributes(f), noreturn_attr)
+        for bb in blocks(f), inst in instructions(bb)
+            isa(inst, LLVM.CallInst) && delete!(function_attributes(inst), noreturn_attr)
+        end
+    end
+
     # erase the now-unused `llvm.trap` declaration. guarded by `isempty(uses(...))` so we only
     # ever drop it when the calls above are gone (other backends create their own `llvm.trap`
     # and never invoke this pass, so theirs is untouched).
@@ -376,19 +393,8 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
     end
     isempty(unreachables) && return changed
 
-    # this function now has a normal return path where it previously did not, so its (and its
-    # call sites') `noreturn` attribute has become a lie. drop it: otherwise a backend that
-    # trusts `noreturn` (e.g. the SPIR-V translator) re-derives an `unreachable`/`OpUnreachable`
-    # right after the call, undoing our work. removing `noreturn` is always safe — it only
-    # relaxes an optimization hint. (Metal's `hide_noreturn!` already did this before us; this
-    # makes the pass self-sufficient for SPIR-V, which has no such prepass.)
-    noreturn_attr = EnumAttribute("noreturn", 0)
-    delete!(function_attributes(f), noreturn_attr)
-    for bb in blocks(f), inst in instructions(bb)
-        if isa(inst, LLVM.CallInst)
-            delete!(function_attributes(inst), noreturn_attr)
-        end
-    end
+    # (the now-stale `noreturn` attribute these functions carry is scrubbed module-wide by the
+    # caller, `lower_unreachable_control_flow!(mod)`, after every rewrite has run.)
 
     @dispose builder=IRBuilder() begin
         local return_block

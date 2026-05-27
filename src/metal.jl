@@ -157,41 +157,6 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     errors
 end
 
-# hide `noreturn` function attributes, which cause issues with the back-end compiler,
-# probably because of thread-divergent control flow as we've encountered with CUDA.
-# note that it isn't enough to remove the function attribute, because the Metal LLVM
-# compiler re-optimizes and will rediscover the property. to avoid this, we inline
-# all functions that are marked noreturn, i.e., until LLVM cannot rediscover it.
-function hide_noreturn!(job::CompilerJob, mod::LLVM.Module)
-    noreturn_attr = EnumAttribute("noreturn", 0)
-    noinline_attr = EnumAttribute("noinline", 0)
-    alwaysinline_attr = EnumAttribute("alwaysinline", 0)
-
-    any_noreturn = false
-    for f in functions(mod)
-        attrs = function_attributes(f)
-        if noreturn_attr in collect(attrs)
-            delete!(attrs, noreturn_attr)
-            delete!(attrs, noinline_attr)
-            push!(attrs, alwaysinline_attr)
-            any_noreturn = true
-        end
-    end
-    any_noreturn || return false
-
-    @dispose pb=NewPMPassBuilder() begin
-        LLVM.target_transform_info!(pb, MetalTTI())
-        add!(pb, AlwaysInlinerPass())
-        add!(pb, NewPMFunctionPassManager()) do fpm
-            add!(fpm, SimplifyCFGPass())
-            add!(fpm, instcombine_pass(job))
-        end
-        run!(pb, mod)
-    end
-
-    return true
-end
-
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
@@ -227,17 +192,19 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         add_module_metadata!(job, mod)
     end
 
-    # JuliaGPU/Metal.jl#113
-    hide_noreturn!(job, mod)
-
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
-    # itself force-inlines throwing functions into the kernel first so the rewrite is sound.
+    # force-inlines throwing functions into the kernel first so the rewrite is sound, then scrubs
+    # every `noreturn` attribute.
     #
-    # `hide_noreturn!` above must still run first for a different reason: it strips the `noreturn`
-    # attribute (which the back-end would otherwise rediscover and miscompile around, #113),
-    # including from `noreturn` functions that carry no `unreachable` of their own (e.g. infinite
-    # loops) and so are invisible to the pass below.
+    # this also subsumes the old `hide_noreturn!` workaround for #113 (kernel hangs from divergent
+    # `noreturn` control flow on older macOS). that bug reduced to a `noinline` helper of the shape
+    # `trap; unreachable` called divergently, and `hide_noreturn!` worked by force-inlining it;
+    # this pass inlines the same helper (keying on the `trap`/`unreachable` it contains, not the
+    # attribute), rewrites its `unreachable` into a clean branch-to-`ret`, and drops the `noreturn`,
+    # leaving nothing divergent for the back-end to choke on. (the only `noreturn` shape it doesn't
+    # inline is a genuine infinite loop — but inlining can't make that return either, so
+    # `hide_noreturn!` never fixed that case to begin with.)
     lower_unreachable_control_flow!(job, mod)
 
     # lower LLVM intrinsics that AIR doesn't support
