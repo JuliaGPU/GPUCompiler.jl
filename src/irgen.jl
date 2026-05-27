@@ -229,8 +229,73 @@ function lower_throw!(mod::LLVM.Module)
     return changed
 end
 
-# does `f`'s body contain unreachable control flow — an `unreachable` terminator or a device-side
-# `llvm.trap` call — that `lower_unreachable_control_flow!` would rewrite?
+# report an exception in a GPU-compatible manner
+#
+# the exact behavior depends on the debug level. in all cases, a `trap` is emitted. on debug
+# level 1, the exception name is printed, and on debug level 2 the individual stack frames (as
+# recovered from the LLVM debug information) are printed as well.
+#
+# the `trap` here is *not* the final lowering of the exception: some targets cannot tolerate a
+# hardware trap (on Apple M1 compute a `trap` wedges the whole GPU, JuliaGPU/Metal.jl#433; and
+# SPIR-V/PoCL have no abort), so those backends strip it post-optimization in
+# `lower_unreachable_control_flow!` and let the lane exit via a clean `ret`. the trap must
+# nonetheless survive through `optimize!`: it is `noreturn`, and that is what stops InstCombine's
+# `removeInstructionsBeforeUnreachable` (which erases instructions preceding an `unreachable`
+# while `!mayThrow() && willReturn()`) from deleting the `signal_exception` call below and
+# folding away the guarding bounds-check branch. so the trap is the optimizer-correctness guard;
+# do not move its removal earlier than post-`optimize!`.
+function emit_exception!(builder, name, inst)
+    job = current_job::CompilerJob
+    bb = position(builder)
+    fun = LLVM.parent(bb)
+    mod = LLVM.parent(fun)
+
+    # report the exception
+    if Base.JLOptions().debug_level >= 1
+        name = globalstring_ptr!(builder, name, "exception")
+        if Base.JLOptions().debug_level == 1
+            call!(builder, Runtime.get(:report_exception), [name])
+        else
+            call!(builder, Runtime.get(:report_exception_name), [name])
+        end
+    end
+
+    # report each frame
+    if Base.JLOptions().debug_level >= 2
+        rt = Runtime.get(:report_exception_frame)
+        ft = convert(LLVM.FunctionType, rt)
+        bt = backtrace(inst)
+        for (i,frame) in enumerate(bt)
+            idx = ConstantInt(parameters(ft)[1], i)
+            func = globalstring_ptr!(builder, String(frame.func), "di_func")
+            file = globalstring_ptr!(builder, String(frame.file), "di_file")
+            line = ConstantInt(parameters(ft)[4], frame.line)
+            call!(builder, rt, [idx, func, file, line])
+        end
+    end
+
+    # signal the exception to the host (backend-specific: writes a `KernelState` mailbox).
+    # the host reads this mailbox after synchronizing.
+    call!(builder, Runtime.get(:signal_exception))
+
+    emit_trap!(job, builder, mod, inst)
+end
+
+function emit_trap!(@nospecialize(job::CompilerJob), builder, mod, inst)
+    trap_ft = LLVM.FunctionType(LLVM.VoidType())
+    trap = if haskey(functions(mod), "llvm.trap")
+        functions(mod)["llvm.trap"]
+    else
+        LLVM.Function(mod, "llvm.trap", trap_ft)
+    end
+    call!(builder, trap_ft, trap)
+end
+
+
+## unreachable control flow handling
+
+# check if a function contains unreachable control flow
+# (`unreachable` terminator or `trap` call)
 function has_unreachable_control_flow(f::LLVM.Function)
     for bb in blocks(f), inst in instructions(bb)
         if isa(inst, LLVM.UnreachableInst)
@@ -246,22 +311,11 @@ function has_unreachable_control_flow(f::LLVM.Function)
     return false
 end
 
-# force-inline every function carrying unreachable control flow into its callers, so that the
-# `unreachable` -> `ret` rewrite in `lower_unreachable_control_flow!` is sound.
+# force-inline every function with unreachable control flow into its callers,
+# so that the rewrite in `lower_unreachable_control_flow!` is sound.
 #
-# that rewrite turns `unreachable` into a return from *its own function*, which only exits the
-# kernel when the throwing code lives in the kernel itself. a function that throws on one path
-# and returns on another (e.g. an out-of-line `checkbounds`) would, after the rewrite, return to
-# its caller on the throwing path too — and the caller would then run the very operation the throw
-# was guarding (an out-of-bounds load, say): a silent miscompile, not an abort. so before
-# rewriting we must guarantee no such function survives out-of-line below a kernel.
-#
-# we mark every non-entry function with unreachable control flow `alwaysinline` and run LLVM's
-# always-inliner. inlining a throwing callee gives its caller unreachable control flow in turn, so
-# we iterate to a fixpoint: throw sites are hoisted up the call graph until they land in the kernel
-# (which has no call sites and is therefore never marked). functions reached only indirectly
-# (address-taken) cannot be inlined and are left as-is — an accepted gap, as on these targets such
-# calls don't occur on throwing paths.
+# this is a fixpoint iteration based on `has_unreachable_control_flow` such that
+# we only inline what's really needed.
 function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     alwaysinline_attr = EnumAttribute("alwaysinline", 0)
@@ -296,28 +350,12 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
     return changed
 end
 
-# lower `unreachable` control flow (and any device-side `trap`) to a clean return.
+# lower `trap` to a clean return to get rid of `unreachable` and `noreturn`
 #
-# device-side exceptions are emitted (by `emit_exception!`) as `signal_exception(); trap;
-# unreachable`. the `trap` is required through `optimize!` as a `noreturn` guard (see
-# `emit_exception!`), but it cannot survive into the final code on every target: a compute
-# `trap` wedges the whole Apple GPU (no watchdog; reboot to clear, JuliaGPU/Metal.jl#433), and
-# SPIR-V has no abort at all. so the backends that hit those problems run this pass from
-# `finish_ir!` (post-`optimize!`) to strip the trap and turn the `unreachable` into a `ret`,
-# giving the faulting lane a clean exit; the host learns of the exception through the mailbox
-# `signal_exception` wrote into the `KernelState`. (this also fixes JuliaGPU/Metal.jl#370, where
-# divergent `unreachable` crashes the Metal back-end on pre-macOS 15.)
-#
-# the rewrite is per-function: `unreachable` becomes a branch to a return block — reusing an
-# existing `ret`, or synthesizing one (`ret void`, or `ret undef` for value-returning
-# functions). this returns from *this function* only, not the whole kernel, so it is a true exit
-# only when "return from this function" means "exit the kernel". `inline_unreachable_control_flow!`
-# (run first, below) guarantees exactly that by force-inlining every throwing function up into the
-# kernel; see its comment for why a surviving out-of-line throwing function would miscompile.
-#
-# barrier limitation: a throw before a `threadgroup_barrier` still has the faulting lane skip
-# the barrier and can deadlock, because these targets have no per-lane barrier-excluded exit
-# (unlike PTX `exit`). this is accepted and no worse than the trap-wedge it replaces.
+# this is for compatibility with back-ends that don't support (SPIR-V) or have
+# problems with `trap` (Metal on Apple M1 and M2). note that the rewrite is not
+# entirely correct: barriers may deadlock if a participating lane has exited.
+# however, it's generally not possible to do better without hardware support.
 function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "lower unreachable control flow" begin
@@ -365,10 +403,7 @@ end
 function lower_unreachable_control_flow!(f::LLVM.Function)
     changed = false
 
-    # Pass 1: strip every `llvm.trap` call, regardless of shape. this covers the
-    # `signal_exception(); trap; unreachable` throw site, a bare `trap; unreachable`, and a
-    # `trap` not followed by `unreachable` (e.g. UBSan / `llvmcall`). `collect` to avoid
-    # invalidating the instruction iterator while erasing.
+    # Pass 1: strip every `llvm.trap` call, regardless of shape.
     for bb in blocks(f), inst in collect(instructions(bb))
         if isa(inst, LLVM.CallInst)
             callee = called_operand(inst)
@@ -379,8 +414,8 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
         end
     end
 
-    # Pass 2: lower every `unreachable` terminator to a branch to a return block. this also
-    # covers `unreachable` not preceded by a trap (noreturn Julia calls; the #370 case).
+    # Pass 2: lower every `unreachable` terminator to a branch to a return
+    # block. this also covers `unreachable` not preceded by a trap.
     unreachables = Instruction[]
     exit_blocks = BasicBlock[]
     for bb in blocks(f), inst in instructions(bb)
@@ -392,9 +427,6 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
         end
     end
     isempty(unreachables) && return changed
-
-    # (the now-stale `noreturn` attribute these functions carry is scrubbed module-wide by the
-    # caller, `lower_unreachable_control_flow!(mod)`, after every rewrite has run.)
 
     @dispose builder=IRBuilder() begin
         local return_block
@@ -469,68 +501,6 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
     end
 
     return true
-end
-
-# report an exception in a GPU-compatible manner
-#
-# the exact behavior depends on the debug level. in all cases, a `trap` is emitted. on debug
-# level 1, the exception name is printed, and on debug level 2 the individual stack frames (as
-# recovered from the LLVM debug information) are printed as well.
-#
-# the `trap` here is *not* the final lowering of the exception: some targets cannot tolerate a
-# hardware trap (on Apple M1 compute a `trap` wedges the whole GPU, JuliaGPU/Metal.jl#433; and
-# SPIR-V/PoCL have no abort), so those backends strip it post-optimization in
-# `lower_unreachable_control_flow!` and let the lane exit via a clean `ret`. the trap must
-# nonetheless survive through `optimize!`: it is `noreturn`, and that is what stops InstCombine's
-# `removeInstructionsBeforeUnreachable` (which erases instructions preceding an `unreachable`
-# while `!mayThrow() && willReturn()`) from deleting the `signal_exception` call below and
-# folding away the guarding bounds-check branch. so the trap is the optimizer-correctness guard;
-# do not move its removal earlier than post-`optimize!`.
-function emit_exception!(builder, name, inst)
-    job = current_job::CompilerJob
-    bb = position(builder)
-    fun = LLVM.parent(bb)
-    mod = LLVM.parent(fun)
-
-    # report the exception
-    if Base.JLOptions().debug_level >= 1
-        name = globalstring_ptr!(builder, name, "exception")
-        if Base.JLOptions().debug_level == 1
-            call!(builder, Runtime.get(:report_exception), [name])
-        else
-            call!(builder, Runtime.get(:report_exception_name), [name])
-        end
-    end
-
-    # report each frame
-    if Base.JLOptions().debug_level >= 2
-        rt = Runtime.get(:report_exception_frame)
-        ft = convert(LLVM.FunctionType, rt)
-        bt = backtrace(inst)
-        for (i,frame) in enumerate(bt)
-            idx = ConstantInt(parameters(ft)[1], i)
-            func = globalstring_ptr!(builder, String(frame.func), "di_func")
-            file = globalstring_ptr!(builder, String(frame.file), "di_file")
-            line = ConstantInt(parameters(ft)[4], frame.line)
-            call!(builder, rt, [idx, func, file, line])
-        end
-    end
-
-    # signal the exception to the host (backend-specific: writes a `KernelState` mailbox).
-    # the host reads this mailbox after synchronizing.
-    call!(builder, Runtime.get(:signal_exception))
-
-    emit_trap!(job, builder, mod, inst)
-end
-
-function emit_trap!(@nospecialize(job::CompilerJob), builder, mod, inst)
-    trap_ft = LLVM.FunctionType(LLVM.VoidType())
-    trap = if haskey(functions(mod), "llvm.trap")
-        functions(mod)["llvm.trap"]
-    else
-        LLVM.Function(mod, "llvm.trap", trap_ft)
-    end
-    call!(builder, trap_ft, trap)
 end
 
 
