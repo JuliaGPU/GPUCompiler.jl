@@ -186,11 +186,16 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         # entry instead of re-reading the metadata.
         annotations = Metadata[entry]
 
-        ## kernel metadata
-        append!(annotations, [MDString("kernel"),
-                              ConstantInt(Int32(1))])
+        # kernel metadata
+        #
+        # on LLVM >= 20 the `ptx_kernel` calling convention already marks the
+        # entry; the redundant "kernel" nvvm.annotation causes miscompilations.
+        if LLVM.version() < v"20"
+            append!(annotations, [MDString("kernel"),
+                                  ConstantInt(Int32(1))])
+        end
 
-        ## expected CTA sizes
+        # expected CTA sizes
         if job.config.target.minthreads !== nothing
             bounds = ntuple(i -> i <= length(job.config.target.minthreads) ?
                                  job.config.target.minthreads[i] : 1, 3)
@@ -234,7 +239,9 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             end
         end
 
-        push!(metadata(mod)["nvvm.annotations"], MDNode(annotations))
+        if length(annotations) > 1
+            push!(metadata(mod)["nvvm.annotations"], MDNode(annotations))
+        end
     end
 
     # we emit properties (of the device and ptx isa) as private global constants,

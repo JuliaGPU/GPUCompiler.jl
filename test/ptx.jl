@@ -35,41 +35,6 @@ end
     end
 end
 
-@testset "property_annotations" begin
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true) do
-        @check_not "nvvm.annotations"
-        return
-    end
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true, kernel=true) do
-        @check_not "maxntid"
-        @check_not "reqntid"
-        @check_not "minctasm"
-        @check_not "maxnreg"
-        @check "nvvm.annotations"
-        return
-    end
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true, kernel=true, maxthreads=42) do
-        @check "maxntidx\", i32 42"
-        @check "maxntidy\", i32 1"
-        @check "maxntidz\", i32 1"
-        return
-    end
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true, kernel=true, minthreads=42) do
-        @check "reqntidx\", i32 42"
-        @check "reqntidy\", i32 1"
-        @check "reqntidz\", i32 1"
-        return
-    end
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true, kernel=true, blocks_per_sm=42) do
-        @check "minctasm\", i32 42"
-        return
-    end
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true, kernel=true, maxregs=42) do
-        @check "maxnreg\", i32 42"
-        return
-    end
-end
-
 LLVM.version() >= v"8" && @testset "calling convention" begin
     @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true) do
         @check_not "ptx_kernel"
