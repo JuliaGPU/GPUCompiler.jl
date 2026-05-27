@@ -230,13 +230,15 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # JuliaGPU/Metal.jl#113
     hide_noreturn!(job, mod)
 
-    # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370).
-    # this runs post-`optimize!` so that throw sites are already inlined into the kernel (where
-    # `ret` is the kernel exit) and the trap has finished serving as the optimizer guard.
+    # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
+    # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
+    # itself force-inlines throwing functions into the kernel first so the rewrite is sound.
     #
-    # `hide_noreturn!` above must still run first: it drops the `noreturn` attribute (which
-    # the back-end would otherwise rediscover, #113) and inlines such functions.
-    lower_unreachable_control_flow!(mod)
+    # `hide_noreturn!` above must still run first for a different reason: it strips the `noreturn`
+    # attribute (which the back-end would otherwise rediscover and miscompile around, #113),
+    # including from `noreturn` functions that carry no `unreachable` of their own (e.g. infinite
+    # loops) and so are invisible to the pass below.
+    lower_unreachable_control_flow!(job, mod)
 
     # lower LLVM intrinsics that AIR doesn't support
     changed = false

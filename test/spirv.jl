@@ -139,6 +139,33 @@ end
     end
 end
 
+@testset "inlining of throwing callees" begin
+    mod = @eval module $(gensym())
+        @noinline function guard(x)
+            x || error()
+            return
+        end
+        function kernel(x)
+            guard(x)
+            return
+        end
+    end
+
+    # `guard` throws on one path and returns on the other; rewriting its `unreachable` into a
+    # `ret` is only sound if `guard` is inlined into the kernel first (otherwise the kernel would
+    # resume after the call on the throwing path). even though `guard` is `@noinline`, the lowering
+    # must have force-inlined it: the throw's `signal_exception` now lives in the kernel's own body
+    # (it would sit in `guard` had it stayed out-of-line), with the trap/unreachable lowered away.
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6kernel"
+        @check "gpu_signal_exception"
+        @check_not "llvm.trap"
+        @check_not "unreachable"
+        @check "ret void"
+        SPIRV.code_llvm(mod.kernel, Tuple{Bool}; backend, kernel=true)
+    end
+end
+
 end
 
 @testset "replace i128 allocas" begin

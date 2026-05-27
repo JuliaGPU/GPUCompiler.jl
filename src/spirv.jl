@@ -101,7 +101,7 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # (post-`optimize!`) is the correct spot: the trap has finished serving as the optimizer
     # guard (see `emit_exception!`), and turning `unreachable` into `ret` also avoids emitting
     # OpUnreachable (UB if reached), which PoCL and friends handle poorly.
-    lower_unreachable_control_flow!(mod)
+    lower_unreachable_control_flow!(job, mod)
 
     # convert the kernel state argument to a byval reference
     if job.config.kernel

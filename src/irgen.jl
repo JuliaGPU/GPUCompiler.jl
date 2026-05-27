@@ -229,6 +229,73 @@ function lower_throw!(mod::LLVM.Module)
     return changed
 end
 
+# does `f`'s body contain unreachable control flow — an `unreachable` terminator or a device-side
+# `llvm.trap` call — that `lower_unreachable_control_flow!` would rewrite?
+function has_unreachable_control_flow(f::LLVM.Function)
+    for bb in blocks(f), inst in instructions(bb)
+        if isa(inst, LLVM.UnreachableInst)
+            return true
+        end
+        if isa(inst, LLVM.CallInst)
+            callee = called_operand(inst)
+            if isa(callee, LLVM.Function) && name(callee) == "llvm.trap"
+                return true
+            end
+        end
+    end
+    return false
+end
+
+# force-inline every function carrying unreachable control flow into its callers, so that the
+# `unreachable` -> `ret` rewrite in `lower_unreachable_control_flow!` is sound.
+#
+# that rewrite turns `unreachable` into a return from *its own function*, which only exits the
+# kernel when the throwing code lives in the kernel itself. a function that throws on one path
+# and returns on another (e.g. an out-of-line `checkbounds`) would, after the rewrite, return to
+# its caller on the throwing path too — and the caller would then run the very operation the throw
+# was guarding (an out-of-bounds load, say): a silent miscompile, not an abort. so before
+# rewriting we must guarantee no such function survives out-of-line below a kernel.
+#
+# we mark every non-entry function with unreachable control flow `alwaysinline` and run LLVM's
+# always-inliner. inlining a throwing callee gives its caller unreachable control flow in turn, so
+# we iterate to a fixpoint: throw sites are hoisted up the call graph until they land in the kernel
+# (which has no call sites and is therefore never marked). functions reached only indirectly
+# (address-taken) cannot be inlined and are left as-is — an accepted gap, as on these targets such
+# calls don't occur on throwing paths.
+function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    changed = false
+    alwaysinline_attr = EnumAttribute("alwaysinline", 0)
+    noinline_attr = EnumAttribute("noinline", 0)
+
+    @tracepoint "inline unreachable control flow" begin
+    while true
+        marked = false
+        for f in functions(mod)
+            isdeclaration(f) && continue
+            # skip functions with no call sites (notably the kernel entry itself): there is
+            # nothing to inline them into, and they are where the `ret` should end up.
+            isempty(uses(f)) && continue
+            attrs = function_attributes(f)
+            alwaysinline_attr in collect(attrs) && continue
+            has_unreachable_control_flow(f) || continue
+
+            delete!(attrs, noinline_attr)
+            push!(attrs, alwaysinline_attr)
+            marked = true
+        end
+        marked || break
+
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, AlwaysInlinerPass())
+            run!(pb, mod, llvm_machine(job.config.target))
+        end
+        changed = true
+    end
+    end
+
+    return changed
+end
+
 # lower `unreachable` control flow (and any device-side `trap`) to a clean return.
 #
 # device-side exceptions are emitted (by `emit_exception!`) as `signal_exception(); trap;
@@ -243,18 +310,21 @@ end
 #
 # the rewrite is per-function: `unreachable` becomes a branch to a return block — reusing an
 # existing `ret`, or synthesizing one (`ret void`, or `ret undef` for value-returning
-# functions). this returns from *this function* only, not the whole kernel, so it is not a true
-# abort. it is correct only because the pass runs *post-inline*: throw sites have been inlined
-# into the kernel, where `ret` is the kernel exit. a hypothetical non-inlined throwing child
-# (e.g. `checkbounds`) returning normally would let its parent fall through to the guarded
-# operation — so this pass must stay after `optimize!`/`hide_noreturn!`.
+# functions). this returns from *this function* only, not the whole kernel, so it is a true exit
+# only when "return from this function" means "exit the kernel". `inline_unreachable_control_flow!`
+# (run first, below) guarantees exactly that by force-inlining every throwing function up into the
+# kernel; see its comment for why a surviving out-of-line throwing function would miscompile.
 #
 # barrier limitation: a throw before a `threadgroup_barrier` still has the faulting lane skip
 # the barrier and can deadlock, because these targets have no per-lane barrier-excluded exit
 # (unlike PTX `exit`). this is accepted and no worse than the trap-wedge it replaces.
-function lower_unreachable_control_flow!(mod::LLVM.Module)
+function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "lower unreachable control flow" begin
+
+    # hoist every throwing function up into the kernel first, so that each `unreachable` we rewrite
+    # below belongs to a function whose `ret` is a genuine kernel exit (see the comment above).
+    changed |= inline_unreachable_control_flow!(job, mod)
 
     for f in functions(mod)
         changed |= lower_unreachable_control_flow!(f)
