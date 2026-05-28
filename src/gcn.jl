@@ -255,14 +255,4 @@ function lower_throw_extra!(mod::LLVM.Module)
     return changed
 end
 
-function emit_trap!(job::CompilerJob{GCNCompilerTarget}, builder, mod, inst)
-    trap_ft = LLVM.FunctionType(LLVM.VoidType())
-    trap = if haskey(functions(mod), "llvm.trap")
-        functions(mod)["llvm.trap"]
-    else
-        LLVM.Function(mod, "llvm.trap", trap_ft)
-    end
-    call!(builder, trap_ft, trap)
-end
-
 can_vectorize(job::CompilerJob{GCNCompilerTarget}) = true

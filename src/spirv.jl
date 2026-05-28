@@ -96,6 +96,13 @@ end
 
 function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                     entry::LLVM.Function)
+    # SPIR-V has no `trap` and no mechanism to abort a compute kernel (OpKill is fragment-only),
+    # so strip the device-side `trap` and lower `unreachable` to a clean `ret`. running this here
+    # (post-`optimize!`) is the correct spot: the trap has finished serving as the optimizer
+    # guard (see `emit_exception!`), and turning `unreachable` into `ret` also avoids emitting
+    # OpUnreachable (UB if reached), which PoCL and friends handle poorly.
+    lower_unreachable_control_flow!(job, mod)
+
     # convert the kernel state argument to a byval reference
     if job.config.kernel
         state = kernel_state_type(job)
@@ -134,10 +141,6 @@ end
                          format=LLVM.API.LLVMAssemblyFile)
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
-
-    # SPIR-V does not support trap, and has no mechanism to abort compute kernels
-    # (OpKill is only available in fragment execution mode)
-    rm_trap!(mod)
 
     # the LLVM to SPIR-V translator does not support the freeze instruction
     # (SPIRV-LLVM-Translator#1140)
@@ -243,31 +246,6 @@ end
 
 
 ## LLVM passes
-
-# remove llvm.trap and its uses from a module
-function rm_trap!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    changed = false
-    @tracepoint "remove trap" begin
-
-    if haskey(functions(mod), "llvm.trap")
-        trap = functions(mod)["llvm.trap"]
-
-        for use in uses(trap)
-            val = user(use)
-            if isa(val, LLVM.CallInst)
-                erase!(val)
-                changed = true
-            end
-        end
-
-        @compiler_assert isempty(uses(trap)) job
-        erase!(trap)
-    end
-
-    end
-    return changed
-end
 
 # remove freeze and replace uses by the original value
 # (KhronosGroup/SPIRV-LLVM-Translator#1140)
