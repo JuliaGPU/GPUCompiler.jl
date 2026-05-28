@@ -225,7 +225,13 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
     if opt_level >= 2
         add!(fpm, AllocOptPass())
         add!(fpm, SROAPass())
-        add!(fpm, VectorCombinePass())
+        # VectorCombinePass introduces vector intrinsics that back-ends
+        # without vectorization support cannot lower (e.g. SPIR-V emits
+        # forward-referenced SSA ids that fail spirv-val). Gate on the
+        # same predicate that controls buildVectorPipeline below.
+        if can_vectorize(job)
+            add!(fpm, VectorCombinePass())
+        end
         add!(fpm, MergedLoadStoreMotionPass())
         add!(fpm, GVNPass())
         add!(fpm, SCCPPass())
