@@ -171,6 +171,21 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         entry = add_parameter_address_spaces!(job, mod, entry)
         entry = add_global_address_spaces!(job, mod, entry)
 
+        # the exception-reporting runtime functions read the deduced type-name and
+        # stack-frame string globals through a generic pointer argument. inline them so the
+        # address-space inference below can trace those reads back to the constant globals
+        # and keep them in the constant space: an out-of-line generic-space load of a
+        # constant global makes Metal's shader validator crash its compiler service.
+        for f in functions(mod)
+            if startswith(LLVM.name(f), "gpu_report_exception")
+                push!(function_attributes(f), EnumAttribute("alwaysinline", 0))
+            end
+        end
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, AlwaysInlinerPass())
+            run!(pb, mod)
+        end
+
         # propagate specific address spaces through addrspacecast chains introduced
         # by the rewrites above, so that loads/stores happen in the right address
         # space (e.g. constant globals in addrspace 2 rather than via a cast to 0,
