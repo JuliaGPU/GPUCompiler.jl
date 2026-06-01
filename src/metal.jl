@@ -485,6 +485,15 @@ function propagate_argument_address_spaces!(mod::LLVM.Module)
     changed = false
     for f in collect(functions(mod))
         isempty(blocks(f)) && continue          # only functions we can rewrite (have a body)
+
+        # changing a function's signature is only sound when it has no callers we cannot
+        # see; require local (internal/private) linkage, which rules out symbols that may
+        # be called from outside the module. by the time `finish_ir!` runs this, the
+        # pipeline has already internalized everything except the kernel entrypoints (see
+        # `InternalizePass` in `driver.jl`), so the runtime helpers we target qualify while
+        # the externally-visible entry — which has no in-module callers anyway — does not.
+        linkage(f) in (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage) || continue
+
         param_types = parameters(function_type(f))
 
         # collect call sites; bail unless every use is a direct call we can update
