@@ -171,13 +171,9 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         entry = add_parameter_address_spaces!(job, mod, entry)
         entry = add_global_address_spaces!(job, mod, entry)
 
-        # `add_global_address_spaces!` puts constant globals (e.g. the deduced exception
-        # type-name and stack-frame strings) in the constant space, but a global passed to an
-        # out-of-line runtime function still reaches it through a *generic* pointer parameter,
-        # so the read is a generic-space load of constant data. Metal's shader validator
-        # crashes its compiler service on exactly that. Narrow such parameters to the address
-        # space their callers actually pass (the interprocedural complement to the
-        # `InferAddressSpaces` run below), so the read happens in the constant space directly.
+        # narrow generic pointer parameters whose callers all pass a specific-AS pointer, so
+        # the constant globals read by out-of-line runtime functions (e.g. the exception
+        # reporters) load from the constant space rather than crashing Metal's validator.
         propagate_argument_address_spaces!(mod)
 
         # propagate specific address spaces through addrspacecast chains introduced
@@ -453,25 +449,20 @@ end
 
 # interprocedural address-space narrowing
 #
-# `InferAddressSpaces` rewrites a generic (flat) memory access into the concrete address
-# space when it can trace the pointer back to an `addrspacecast` from that space — but only
-# within a single function. A pointer that crosses a call boundary as a generic parameter
-# loses that provenance: e.g. `add_global_address_spaces!` puts constant data in the
-# constant space, yet a global handed to an out-of-line runtime function (the exception
-# reporters take `Ptr` arguments) still arrives through a generic parameter, so the callee
-# reads it with a generic-space load — which makes Metal's shader validator crash.
+# `InferAddressSpaces` rewrites a generic (flat) load/store into a concrete address space
+# when it can trace the pointer back to an `addrspacecast` from that space, but only within
+# one function. A pointer crossing a call boundary as a generic parameter loses that
+# provenance: a constant global passed to an out-of-line runtime function (the exception
+# reporters take `Ptr` arguments) arrives generic and is read with a generic-space load,
+# which crashes Metal's shader validator.
 #
-# This pass is the interprocedural complement. Where every caller passes the same shape of
-# value for a generic pointer parameter — `addrspacecast(<ptr in some specific space> ->
-# generic)` — it retargets the parameter to that space and drops the casts at the call
-# sites, casting the parameter straight back to generic on entry so the callee body is left
-# untouched. That is a pure relocation of a side-effect-free cast across the boundary (the
-# source flows in as the argument and the identical pointer is recomputed inside the
-# callee), hence trivially correct; the subsequent `InferAddressSpaces` run then folds the
-# entry cast away, turning the read into a specific-space load. The source need not be a
-# constant global — any pointer whose address space is known qualifies (e.g. device data
-# threaded through a helper). No name matching, no inlining, no per-target address-space
-# table: the space is read from the IR, so any back-end can run it.
+# This pass is the interprocedural complement. When every caller passes the same kind of
+# value for a generic pointer parameter, `addrspacecast(<ptr in a specific space> ->
+# generic)`, it retargets the parameter to that space, drops the casts at the call sites,
+# and casts back to generic on entry so the body is unchanged. That only relocates a
+# side-effect-free cast across the boundary, so it is trivially correct; the following
+# `InferAddressSpaces` run folds the entry cast away. The source need not be a constant
+# global; any pointer with a known address space qualifies, so any back-end can run it.
 
 # If `v` is an `addrspacecast` (instruction or constant expression) of a pointer from a
 # specific (non-generic) address space to the generic one, return that source pointer;
@@ -491,12 +482,9 @@ function propagate_argument_address_spaces!(mod::LLVM.Module)
     for f in collect(functions(mod))
         isempty(blocks(f)) && continue          # only functions we can rewrite (have a body)
 
-        # changing a function's signature is only sound when it has no callers we cannot
-        # see; require local (internal/private) linkage, which rules out symbols that may
-        # be called from outside the module. by the time `finish_ir!` runs this, the
-        # pipeline has already internalized everything except the kernel entrypoints (see
-        # `InternalizePass` in `driver.jl`), so the runtime helpers we target qualify while
-        # the externally-visible entry — which has no in-module callers anyway — does not.
+        # rewriting a signature is only sound with no callers outside the module, so require
+        # local (internal/private) linkage. by `finish_ir!` the pipeline has internalized
+        # everything but the kernel entrypoints, so the runtime helpers we target qualify.
         linkage(f) in (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage) || continue
 
         param_types = parameters(function_type(f))
@@ -619,10 +607,9 @@ function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
         br!(builder, blocks(new_f)[2])  # fall through to the cloned entry block
     end
 
-    # `clone_into!` copies a parameter's attributes only when it maps to a new *argument*;
-    # the retargeted parameters map to the entry addrspacecast instead, so their attributes
-    # (nonnull, dereferenceable, align, ...) are dropped. Reattach them — they remain valid
-    # for the narrowed (specific-AS) pointer, and the non-retargeted ones are already copied.
+    # `clone_into!` copies a parameter's attributes only when it maps to a new argument; the
+    # retargeted ones map to the entry addrspacecast instead, so theirs are dropped. Reattach
+    # them; they stay valid on the narrowed pointer, and non-retargeted params keep theirs.
     for i in 1:length(new_addrspaces)
         new_addrspaces[i] >= 0 || continue
         for attr in collect(parameter_attributes(f, i))
@@ -630,11 +617,9 @@ function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
         end
     end
 
-    # if `f` was (directly) recursive, cloning remapped its self-calls to `new_f` but left
-    # them with the old signature; collect them from the clone so they get rewritten too.
-    # (these are distinct from the recursive call still sitting in the old `f`, which is in
-    # `callsites` and gets erased along with `f`.) collect before rewriting so the freshly
-    # built calls — which also target `new_f` — are not revisited.
+    # a (directly) recursive `f` has self-calls that cloning retargeted to `new_f` but left
+    # with the old signature; collect them from the clone for rewriting. collect first, since
+    # the rewritten calls also target `new_f` and must not be revisited.
     self_calls = LLVM.CallInst[]
     for bb in blocks(new_f), inst in instructions(bb)
         inst isa LLVM.CallInst && called_operand(inst) == new_f && push!(self_calls, inst)
