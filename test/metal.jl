@@ -334,6 +334,51 @@ end
         @test callee_param_as(mod) == 1
         @test (verify(mod); true)
     end
+
+    # a two-level delegation chain (caller -> mid -> leaf) needs the fixpoint: one sweep
+    # narrows `mid` (its caller passes a constant global), which only then exposes `leaf`,
+    # since `mid` now forwards an addrspacecast-from-constant. iterate until both narrow.
+    Context() do ctx
+        mod = LLVM.Module("test")
+        i8 = LLVM.Int8Type()
+        ft = LLVM.FunctionType(i8, LLVM.LLVMType[asptr(0)])
+        param_as(name) = addrspace(parameters(function_type(functions(mod)[name]))[1])
+
+        # leaf: loads through its generic pointer parameter
+        leaf = LLVM.Function(mod, "leaf", ft)
+        linkage!(leaf, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(leaf, "entry"))
+            ret!(builder, load!(builder, i8, parameters(leaf)[1]))
+        end
+
+        # mid: forwards its generic pointer parameter to leaf
+        mid = LLVM.Function(mod, "mid", ft)
+        linkage!(mid, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(mid, "entry"))
+            ret!(builder, call!(builder, ft, leaf, [parameters(mid)[1]]))
+        end
+
+        # caller: passes a constant global (AS 2) cast to generic into mid
+        g = GlobalVariable(mod, i8, "g", 2)
+        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
+        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(caller, "entry"))
+            ret!(builder, call!(builder, ft, mid, [const_addrspacecast(g, asptr(0))]))
+        end
+
+        # a single sweep reaches only `mid`; the fixpoint must then narrow `leaf` too
+        @test GPUCompiler.propagate_argument_address_spaces_once!(mod)
+        @test param_as("mid") == 2
+        @test param_as("leaf") == 0
+
+        @test GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test param_as("leaf") == 2
+        @test (verify(mod); true)
+    end
 end
 
 end

@@ -463,6 +463,13 @@ end
 # side-effect-free cast across the boundary, so it is trivially correct; the following
 # `InferAddressSpaces` run folds the entry cast away. The source need not be a constant
 # global; any pointer with a known address space qualifies, so any back-end can run it.
+#
+# Narrowing one function makes its body forward an `addrspacecast`-from-specific to the
+# functions it calls, exposing them in turn. We therefore iterate to a fixed point so a
+# constant reaches an arbitrarily deep callee (e.g. an exception reporter that delegates to
+# another) regardless of the order functions are visited in. This terminates: each sweep
+# that changes anything strictly reduces the number of generic pointer parameters in the
+# module, and narrowing never introduces a new one.
 
 # If `v` is an `addrspacecast` (instruction or constant expression) of a pointer from a
 # specific (non-generic) address space to the generic one, return that source pointer;
@@ -478,6 +485,15 @@ function addrspacecast_to_generic_source(@nospecialize(v))
 end
 
 function propagate_argument_address_spaces!(mod::LLVM.Module)
+    changed = false
+    while propagate_argument_address_spaces_once!(mod)
+        changed = true
+    end
+    return changed
+end
+
+# a single narrowing sweep over the module; returns whether anything changed.
+function propagate_argument_address_spaces_once!(mod::LLVM.Module)
     changed = false
     for f in collect(functions(mod))
         isempty(blocks(f)) && continue          # only functions we can rewrite (have a body)
