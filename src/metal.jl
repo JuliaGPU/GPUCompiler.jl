@@ -533,6 +533,23 @@ function propagate_argument_address_spaces!(mod::LLVM.Module)
     return changed
 end
 
+# copy the call-site attributes (function/return/per-argument) from `src` onto `dst`. the
+# narrowing keeps argument positions unchanged, so they map across one-to-one.
+function copy_callsite_attributes!(dst::LLVM.CallInst, src::LLVM.CallInst)
+    for attr in collect(function_attributes(src))
+        push!(function_attributes(dst), attr)
+    end
+    for attr in collect(return_attributes(src))
+        push!(return_attributes(dst), attr)
+    end
+    for i in 1:length(arguments(src))
+        for attr in collect(argument_attributes(src, i))
+            push!(argument_attributes(dst, i), attr)
+        end
+    end
+    return dst
+end
+
 # Clone `f` with the pointer parameters listed in `new_addrspaces` (index => address space,
 # `-1` to leave alone) retargeted to those address spaces, casting each retargeted parameter
 # back to generic on entry so the cloned body is unchanged. Rewrite `callsites` to pass the
@@ -579,6 +596,17 @@ function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
         br!(builder, blocks(new_f)[2])  # fall through to the cloned entry block
     end
 
+    # `clone_into!` copies a parameter's attributes only when it maps to a new *argument*;
+    # the retargeted parameters map to the entry addrspacecast instead, so their attributes
+    # (nonnull, dereferenceable, align, ...) are dropped. Reattach them — they remain valid
+    # for the narrowed (specific-AS) pointer, and the non-retargeted ones are already copied.
+    for i in 1:length(new_addrspaces)
+        new_addrspaces[i] >= 0 || continue
+        for attr in collect(parameter_attributes(f, i))
+            push!(parameter_attributes(new_f, i), attr)
+        end
+    end
+
     # rewrite call sites to pass the un-casted source value for each retargeted argument
     @dispose builder=IRBuilder() begin
         for cs in callsites
@@ -588,6 +616,7 @@ function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
                                   for (i, arg) in enumerate(arguments(cs))]
             new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
             callconv!(new_call, callconv(cs))
+            copy_callsite_attributes!(new_call, cs)
             replace_uses!(cs, new_call)
             erase!(cs)
         end
