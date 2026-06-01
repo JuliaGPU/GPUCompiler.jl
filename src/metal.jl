@@ -431,7 +431,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
 
         add_argument_metadata!(job, mod, entry)
 
-        add_globals_metadata!(job, mod, entry)
+        add_globals_metadata!(job, mod)
 
         add_module_metadata!(job, mod)
     end
@@ -1233,8 +1233,7 @@ end
 # global metadata generation
 #
 # module metadata is used to identify global buffers that are used as kernel arguments.
-function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                entry::LLVM.Function)
+function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     # Iterate through arguments and create metadata for them
     globs = globals(mod)
 
