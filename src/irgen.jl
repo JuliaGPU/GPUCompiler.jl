@@ -1154,6 +1154,13 @@ function kernel_debug_level_value()
     end
 end
 
+# device-facing accessor: the compiling job's debug level as an `Int32` compile-time constant.
+# exported for back-end device runtimes (e.g. to gate exception reporting); it takes no
+# back-end-specific argument, so unlike `kernel_state` there's no need for a per-back-end
+# definition. not intended for user code.
+@inline @generated kernel_debug_level() = kernel_debug_level_value()
+export kernel_debug_level
+
 # replace every `julia.gpu.debug_level` call with the job's configured level
 function lower_debug_level!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     haskey(functions(mod), "julia.gpu.debug_level") || return false
