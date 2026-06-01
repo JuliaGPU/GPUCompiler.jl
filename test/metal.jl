@@ -208,4 +208,177 @@ end
 
 end
 
+@testset "argument address-space narrowing" begin
+    # pointer type in address space `as`, typed- and opaque-pointer compatible
+    asptr(as) = supports_typed_pointers() ? LLVM.PointerType(LLVM.Int8Type(), as) :
+                                            LLVM.PointerType(as)
+
+    # build a module with an internal `callee` that loads through a generic (AS 0) pointer
+    # parameter, reached from one `caller` per entry in `caller_src_as`, each passing a
+    # constant global in that address space cast to generic.
+    function narrowing_module(caller_src_as::Vector{Int};
+                              callee_linkage=LLVM.API.LLVMInternalLinkage,
+                              recursive=false, address_taken=false)
+        mod = LLVM.Module("test")
+        i8 = LLVM.Int8Type()
+        callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[asptr(0)])
+        callee = LLVM.Function(mod, "callee", callee_ft)
+        linkage!(callee, callee_linkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(callee, "entry"))
+            v = load!(builder, i8, parameters(callee)[1])
+            if recursive
+                # a (would-be infinite) self-call passing a constant global, only to
+                # exercise the recursion path; not meant to run.
+                g = GlobalVariable(mod, i8, "gself", caller_src_as[1])
+                initializer!(g, ConstantInt(i8, 7)); constant!(g, true)
+                call!(builder, callee_ft, callee, [const_addrspacecast(g, asptr(0))])
+            end
+            ret!(builder, v)
+        end
+        for (n, as) in enumerate(caller_src_as)
+            g = GlobalVariable(mod, i8, "g$n", as)
+            initializer!(g, ConstantInt(i8, n)); constant!(g, true)
+            caller = LLVM.Function(mod, "caller$n", LLVM.FunctionType(i8, LLVM.LLVMType[]))
+            linkage!(caller, LLVM.API.LLVMInternalLinkage)
+            @dispose builder=IRBuilder() begin
+                position!(builder, BasicBlock(caller, "entry"))
+                ret!(builder, call!(builder, callee_ft, callee,
+                                    [const_addrspacecast(g, asptr(0))]))
+            end
+        end
+        if address_taken
+            # a non-call use of the callee: stash its address in a global
+            initializer!(GlobalVariable(mod, value_type(callee), "fp"), callee)
+        end
+        return mod
+    end
+
+    callee_param_as(mod) = addrspace(parameters(function_type(functions(mod)["callee"]))[1])
+    function calls_to(mod, fname)
+        f = functions(mod)[fname]
+        [inst for g in functions(mod) for bb in blocks(g) for inst in instructions(bb)
+              if inst isa LLVM.CallInst && called_operand(inst) == f]
+    end
+
+    # all callers agree -> the parameter is narrowed; attributes survive; IR stays valid
+    Context() do ctx
+        mod = narrowing_module([2, 2])
+        callee = functions(mod)["callee"]
+        push!(parameter_attributes(callee, 1), EnumAttribute("nonnull", 0))
+        push!(function_attributes(callee), EnumAttribute("nounwind", 0))
+
+        @test GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test callee_param_as(mod) == 2
+        @test all(c -> addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "callee"))
+
+        callee = functions(mod)["callee"]
+        @test kind(EnumAttribute("nonnull", 0)) in kind.(collect(parameter_attributes(callee, 1)))
+        @test kind(EnumAttribute("nounwind", 0)) in kind.(collect(function_attributes(callee)))
+        @test (verify(mod); true)
+    end
+
+    # callers disagree on the source address space -> left alone
+    Context() do ctx
+        mod = narrowing_module([2, 1])
+        @test !GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test callee_param_as(mod) == 0
+    end
+
+    # the callee's address is taken (a non-call use) -> left alone
+    Context() do ctx
+        mod = narrowing_module([2]; address_taken=true)
+        @test !GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test callee_param_as(mod) == 0
+    end
+
+    # externally-visible callee -> left alone (its signature may be observed elsewhere)
+    Context() do ctx
+        mod = narrowing_module([2]; callee_linkage=LLVM.API.LLVMExternalLinkage)
+        @test !GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test callee_param_as(mod) == 0
+    end
+
+    # a self-recursive callee is narrowed and the self-call rewritten to stay well-typed:
+    # every call to it (recursive included) must now pass the constant-space pointer
+    Context() do ctx
+        mod = narrowing_module([2]; recursive=true)
+        @test GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test callee_param_as(mod) == 2
+        @test length(calls_to(mod, "callee")) == 2
+        @test all(c -> addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "callee"))
+        @test (verify(mod); true)
+    end
+
+    # the source need not be a global: a device pointer (AS 1) threaded through a helper
+    # as a generic pointer is narrowed to AS 1 just the same
+    Context() do ctx
+        mod = LLVM.Module("test")
+        i8 = LLVM.Int8Type()
+        callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[asptr(0)])
+        callee = LLVM.Function(mod, "callee", callee_ft)
+        linkage!(callee, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(callee, "entry"))
+            ret!(builder, load!(builder, i8, parameters(callee)[1]))
+        end
+        caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[asptr(1)]))
+        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(caller, "entry"))
+            gen = addrspacecast!(builder, parameters(caller)[1], asptr(0))
+            ret!(builder, call!(builder, callee_ft, callee, [gen]))
+        end
+
+        @test GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test callee_param_as(mod) == 1
+        @test (verify(mod); true)
+    end
+
+    # a two-level delegation chain (caller -> mid -> leaf) needs the fixpoint: one sweep
+    # narrows `mid` (its caller passes a constant global), which only then exposes `leaf`,
+    # since `mid` now forwards an addrspacecast-from-constant. iterate until both narrow.
+    Context() do ctx
+        mod = LLVM.Module("test")
+        i8 = LLVM.Int8Type()
+        ft = LLVM.FunctionType(i8, LLVM.LLVMType[asptr(0)])
+        param_as(name) = addrspace(parameters(function_type(functions(mod)[name]))[1])
+
+        # leaf: loads through its generic pointer parameter
+        leaf = LLVM.Function(mod, "leaf", ft)
+        linkage!(leaf, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(leaf, "entry"))
+            ret!(builder, load!(builder, i8, parameters(leaf)[1]))
+        end
+
+        # mid: forwards its generic pointer parameter to leaf
+        mid = LLVM.Function(mod, "mid", ft)
+        linkage!(mid, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(mid, "entry"))
+            ret!(builder, call!(builder, ft, leaf, [parameters(mid)[1]]))
+        end
+
+        # caller: passes a constant global (AS 2) cast to generic into mid
+        g = GlobalVariable(mod, i8, "g", 2)
+        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
+        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(caller, "entry"))
+            ret!(builder, call!(builder, ft, mid, [const_addrspacecast(g, asptr(0))]))
+        end
+
+        # a single sweep reaches only `mid`; the fixpoint must then narrow `leaf` too
+        @test GPUCompiler.propagate_argument_address_spaces_once!(mod)
+        @test param_as("mid") == 2
+        @test param_as("leaf") == 0
+
+        @test GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test param_as("leaf") == 2
+        @test (verify(mod); true)
+    end
+end
+
 end
