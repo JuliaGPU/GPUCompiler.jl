@@ -550,10 +550,28 @@ function copy_callsite_attributes!(dst::LLVM.CallInst, src::LLVM.CallInst)
     return dst
 end
 
+# rewrite a single call so it targets `new_f`/`new_ft`, passing the un-casted source value
+# for each retargeted argument (and the original argument otherwise). Preserves calling
+# convention, operand bundles and attributes; replaces and erases the old call.
+function rewrite_narrowed_call!(builder::IRBuilder, cs::LLVM.CallInst,
+                                new_f::LLVM.Function, new_ft::LLVM.FunctionType,
+                                new_addrspaces::Vector{Int})
+    position!(builder, cs)
+    new_args = LLVM.Value[new_addrspaces[i] >= 0 ?
+                          constant_global_addrspacecast_source(arg) : arg
+                          for (i, arg) in enumerate(arguments(cs))]
+    new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
+    callconv!(new_call, callconv(cs))
+    copy_callsite_attributes!(new_call, cs)
+    replace_uses!(cs, new_call)
+    erase!(cs)
+    return new_call
+end
+
 # Clone `f` with the pointer parameters listed in `new_addrspaces` (index => address space,
 # `-1` to leave alone) retargeted to those address spaces, casting each retargeted parameter
 # back to generic on entry so the cloned body is unchanged. Rewrite `callsites` to pass the
-# un-casted source value for each retargeted argument.
+# un-casted source value for each retargeted argument; recursive self-calls are handled too.
 function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
                                     new_addrspaces::Vector{Int}, callsites)
     ft = function_type(f)
@@ -607,18 +625,23 @@ function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
         end
     end
 
+    # if `f` was (directly) recursive, cloning remapped its self-calls to `new_f` but left
+    # them with the old signature; collect them from the clone so they get rewritten too.
+    # (these are distinct from the recursive call still sitting in the old `f`, which is in
+    # `callsites` and gets erased along with `f`.) collect before rewriting so the freshly
+    # built calls — which also target `new_f` — are not revisited.
+    self_calls = LLVM.CallInst[]
+    for bb in blocks(new_f), inst in instructions(bb)
+        inst isa LLVM.CallInst && called_operand(inst) == new_f && push!(self_calls, inst)
+    end
+
     # rewrite call sites to pass the un-casted source value for each retargeted argument
     @dispose builder=IRBuilder() begin
         for cs in callsites
-            position!(builder, cs)
-            new_args = LLVM.Value[new_addrspaces[i] >= 0 ?
-                                  constant_global_addrspacecast_source(arg) : arg
-                                  for (i, arg) in enumerate(arguments(cs))]
-            new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
-            callconv!(new_call, callconv(cs))
-            copy_callsite_attributes!(new_call, cs)
-            replace_uses!(cs, new_call)
-            erase!(cs)
+            rewrite_narrowed_call!(builder, cs, new_f, new_ft, new_addrspaces)
+        end
+        for cs in self_calls
+            rewrite_narrowed_call!(builder, cs, new_f, new_ft, new_addrspaces)
         end
     end
 
