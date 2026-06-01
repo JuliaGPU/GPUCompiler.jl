@@ -1126,7 +1126,7 @@ function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module
     i = 1
     for gv in globs
         gv_typ = global_value_type(gv)
-        (isconstant(gv) && addrspace(gv_typ) == 3) || continue
+        (isconstant(gv) && gv_typ isa LLVM.PointerType && addrspace(gv_typ) == 3) || continue
         # if job.config.optimize
         #     @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
         # else
