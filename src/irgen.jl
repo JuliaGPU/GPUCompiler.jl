@@ -146,6 +146,11 @@ function irgen(@nospecialize(job::CompilerJob))
         global current_job
         current_job = job
         can_throw(job) || lower_throw!(mod)
+
+        # resolve the `julia.gpu.debug_level` intrinsic (see `kernel_debug_level_value`) to
+        # the job's configured level, so device code can branch on it as a compile-time
+        # constant that is part of the cache key (unlike reading the `-g` global directly).
+        lower_debug_level!(job, mod)
     end
 
     return mod, compiled, gv_to_value
@@ -251,9 +256,9 @@ function emit_exception!(builder, name, inst)
     mod = LLVM.parent(fun)
 
     # report the exception
-    if Base.JLOptions().debug_level >= 1
+    if job.config.debug_level >= 1
         name = globalstring_ptr!(builder, name, "exception")
-        if Base.JLOptions().debug_level == 1
+        if job.config.debug_level == 1
             call!(builder, Runtime.get(:report_exception), [name])
         else
             call!(builder, Runtime.get(:report_exception_name), [name])
@@ -261,7 +266,7 @@ function emit_exception!(builder, name, inst)
     end
 
     # report each frame
-    if Base.JLOptions().debug_level >= 2
+    if job.config.debug_level >= 2
         rt = Runtime.get(:report_exception_frame)
         ft = convert(LLVM.FunctionType, rt)
         bt = backtrace(inst)
@@ -1099,6 +1104,72 @@ function kernel_state_value(state)
 
         call_function(llvm_f, state)
     end
+end
+
+
+## debug level
+
+# device code can query the job's configured debug level as a compile-time constant via
+# `kernel_debug_level()`, which emits the `julia.gpu.debug_level` intrinsic; `lower_debug_level!`
+# (run from `irgen`, with `current_job` in scope) replaces it with the constant. this keeps
+# the level part of the cache key (it lives in `CompilerConfig`), unlike reading the `-g`
+# global at parse time (which would bake the wrong level under pkgimage reuse across `-g`).
+
+function debug_level_intr(mod::LLVM.Module)
+    intr = if haskey(functions(mod), "julia.gpu.debug_level")
+        functions(mod)["julia.gpu.debug_level"]
+    else
+        LLVM.Function(mod, "julia.gpu.debug_level", LLVM.FunctionType(LLVM.Int32Type()))
+    end
+    push!(function_attributes(intr), EnumAttribute("readnone", 0))
+
+    return intr
+end
+
+# run-time equivalent: emits a call to the debug-level intrinsic, returning the job's
+# configured `debug_level` as an `Int32` (lowered to a constant by `lower_debug_level!`).
+function kernel_debug_level_value()
+    @dispose ctx=Context() begin
+        T_int32 = LLVM.Int32Type()
+
+        # create function
+        llvm_f, _ = create_function(T_int32)
+        mod = LLVM.parent(llvm_f)
+
+        # get intrinsic
+        intr = debug_level_intr(mod)
+        intr_ft = function_type(intr)
+
+        # generate IR
+        @dispose builder=IRBuilder() begin
+            entry = BasicBlock(llvm_f, "entry")
+            position!(builder, entry)
+
+            val = call!(builder, intr_ft, intr, Value[], "debug_level")
+
+            ret!(builder, val)
+        end
+
+        call_function(llvm_f, Int32)
+    end
+end
+
+# replace every `julia.gpu.debug_level` call with the job's configured level
+function lower_debug_level!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    haskey(functions(mod), "julia.gpu.debug_level") || return false
+
+    intr = functions(mod)["julia.gpu.debug_level"]
+    level = ConstantInt(LLVM.Int32Type(), job.config.debug_level)
+    for use in collect(uses(intr))
+        inst = user(use)
+        @assert inst isa LLVM.CallInst
+        replace_uses!(inst, level)
+        erase!(inst)
+    end
+    @assert isempty(uses(intr))
+    erase!(intr)
+
+    return true
 end
 
 # convert kernel state argument from pass-by-value to pass-by-reference
