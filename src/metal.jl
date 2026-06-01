@@ -171,20 +171,14 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         entry = add_parameter_address_spaces!(job, mod, entry)
         entry = add_global_address_spaces!(job, mod, entry)
 
-        # the exception-reporting runtime functions read the deduced type-name and
-        # stack-frame string globals through a generic pointer argument. inline them so the
-        # address-space inference below can trace those reads back to the constant globals
-        # and keep them in the constant space: an out-of-line generic-space load of a
-        # constant global makes Metal's shader validator crash its compiler service.
-        for f in functions(mod)
-            if startswith(LLVM.name(f), "gpu_report_exception")
-                push!(function_attributes(f), EnumAttribute("alwaysinline", 0))
-            end
-        end
-        @dispose pb=NewPMPassBuilder() begin
-            add!(pb, AlwaysInlinerPass())
-            run!(pb, mod)
-        end
+        # `add_global_address_spaces!` puts constant globals (e.g. the deduced exception
+        # type-name and stack-frame strings) in the constant space, but a global passed to an
+        # out-of-line runtime function still reaches it through a *generic* pointer parameter,
+        # so the read is a generic-space load of constant data. Metal's shader validator
+        # crashes its compiler service on exactly that. Narrow such parameters to the address
+        # space their callers actually pass (the interprocedural complement to the
+        # `InferAddressSpaces` run below), so the read happens in the constant space directly.
+        propagate_argument_address_spaces!(mod)
 
         # propagate specific address spaces through addrspacecast chains introduced
         # by the rewrites above, so that loads/stores happen in the right address
@@ -454,6 +448,148 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
     end
 
     return entry
+end
+
+
+# interprocedural address-space narrowing
+#
+# `add_global_address_spaces!` places constant data in the constant address space, but a
+# global handed to an out-of-line function still reaches it through a *generic* pointer
+# parameter (GPUCompiler's runtime functions, e.g. the exception reporters, take `Ptr`
+# arguments). The callee then reads constant data with a generic-space load — which makes
+# Metal's shader validator crash its compiler service.
+#
+# `InferAddressSpaces` rewrites such generic accesses into the concrete space, but only
+# within a function; it cannot cross the call boundary. This pass is its interprocedural
+# complement: where every caller passes a constant global for a pointer parameter (as
+# `addrspacecast(<global> -> generic)`), it retargets that parameter to the global's address
+# space and drops the casts at the call sites. The callee body is left untouched — the
+# narrowed parameter is cast straight back to generic on entry — so the rewrite is trivially
+# correct; the subsequent `InferAddressSpaces` run then folds that intra-function cast away,
+# turning the read into a constant-space load. No name matching, no inlining, no per-target
+# address-space table: the space is read from the IR, so any back-end can run it.
+
+# If `v` is an `addrspacecast` (instruction or constant expression) of a constant global from
+# a non-generic address space to the generic one, return the global; otherwise `nothing`.
+function constant_global_addrspacecast_source(@nospecialize(v))
+    (v isa LLVM.Instruction || v isa LLVM.ConstantExpr) || return nothing
+    opcode(v) == LLVM.API.LLVMAddrSpaceCast || return nothing
+    addrspace(value_type(v)) == 0 || return nothing
+    src = operands(v)[1]
+    (src isa LLVM.GlobalVariable && isconstant(src) && addrspace(value_type(src)) != 0) ||
+        return nothing
+    return src
+end
+
+function propagate_argument_address_spaces!(mod::LLVM.Module)
+    changed = false
+    for f in collect(functions(mod))
+        isempty(blocks(f)) && continue          # only functions we can rewrite (have a body)
+        param_types = parameters(function_type(f))
+
+        # collect call sites; bail unless every use is a direct call we can update
+        callsites = LLVM.CallInst[]
+        only_calls = true
+        for use in uses(f)
+            v = user(use)
+            if v isa LLVM.CallInst && called_operand(v) == f
+                push!(callsites, v)
+            else
+                only_calls = false
+                break
+            end
+        end
+        (only_calls && !isempty(callsites)) || continue
+
+        # for each generic pointer parameter, find the address space its callers agree on
+        new_addrspaces = fill(-1, length(param_types))
+        for (i, pty) in enumerate(param_types)
+            (pty isa LLVM.PointerType && addrspace(pty) == 0) || continue
+            as = -1
+            for cs in callsites
+                src = constant_global_addrspacecast_source(arguments(cs)[i])
+                if src === nothing
+                    as = -1; break
+                end
+                src_as = addrspace(value_type(src))
+                as == -1 ? (as = src_as) : (as == src_as || (as = -1; break))
+            end
+            as > 0 && (new_addrspaces[i] = as)
+        end
+        any(>=(0), new_addrspaces) || continue
+
+        narrow_pointer_parameters!(mod, f, new_addrspaces, callsites)
+        changed = true
+    end
+    return changed
+end
+
+# Clone `f` with the pointer parameters listed in `new_addrspaces` (index => address space,
+# `-1` to leave alone) retargeted to those address spaces, casting each retargeted parameter
+# back to generic on entry so the cloned body is unchanged. Rewrite `callsites` to pass the
+# un-casted source value for each retargeted argument.
+function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
+                                    new_addrspaces::Vector{Int}, callsites)
+    ft = function_type(f)
+    retarget(pty::LLVM.PointerType, as::Integer) =
+        supports_typed_pointers(context()) ? LLVM.PointerType(eltype(pty), as) :
+                                             LLVM.PointerType(as)
+    new_types = LLVM.LLVMType[new_addrspaces[i] >= 0 ?
+                              retarget(param_typ::LLVM.PointerType, new_addrspaces[i]) :
+                              param_typ
+                              for (i, param_typ) in enumerate(parameters(ft))]
+    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+
+    new_f = LLVM.Function(mod, "", new_ft)
+    linkage!(new_f, linkage(f))
+    callconv!(new_f, callconv(f))
+    for (old_arg, new_arg) in zip(parameters(f), parameters(new_f))
+        LLVM.name!(new_arg, LLVM.name(old_arg))
+    end
+
+    # cast each retargeted parameter back to generic so the cloned body keeps using it
+    # unchanged (InferAddressSpaces folds the cast away afterwards)
+    @dispose builder=IRBuilder() begin
+        entry = BasicBlock(new_f, "conversion")
+        position!(builder, entry)
+        new_args = LLVM.Value[]
+        for (i, param_typ) in enumerate(parameters(ft))
+            if new_addrspaces[i] >= 0
+                push!(new_args, addrspacecast!(builder, parameters(new_f)[i], param_typ))
+            else
+                push!(new_args, parameters(new_f)[i])
+            end
+        end
+
+        value_map = Dict{LLVM.Value, LLVM.Value}(
+            param => new_args[i] for (i, param) in enumerate(parameters(f)))
+        value_map[f] = new_f
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+
+        br!(builder, blocks(new_f)[2])  # fall through to the cloned entry block
+    end
+
+    # rewrite call sites to pass the un-casted source value for each retargeted argument
+    @dispose builder=IRBuilder() begin
+        for cs in callsites
+            position!(builder, cs)
+            new_args = LLVM.Value[new_addrspaces[i] >= 0 ?
+                                  constant_global_addrspacecast_source(arg) : arg
+                                  for (i, arg) in enumerate(arguments(cs))]
+            new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
+            callconv!(new_call, callconv(cs))
+            replace_uses!(cs, new_call)
+            erase!(cs)
+        end
+    end
+
+    fn = LLVM.name(f)
+    @assert isempty(uses(f))   # every use was a call site we just rewrote
+    replace_metadata_uses!(f, new_f)
+    erase!(f)
+    LLVM.name!(new_f, fn)
+    return new_f
 end
 
 
