@@ -453,30 +453,35 @@ end
 
 # interprocedural address-space narrowing
 #
-# `add_global_address_spaces!` places constant data in the constant address space, but a
-# global handed to an out-of-line function still reaches it through a *generic* pointer
-# parameter (GPUCompiler's runtime functions, e.g. the exception reporters, take `Ptr`
-# arguments). The callee then reads constant data with a generic-space load — which makes
-# Metal's shader validator crash its compiler service.
+# `InferAddressSpaces` rewrites a generic (flat) memory access into the concrete address
+# space when it can trace the pointer back to an `addrspacecast` from that space — but only
+# within a single function. A pointer that crosses a call boundary as a generic parameter
+# loses that provenance: e.g. `add_global_address_spaces!` puts constant data in the
+# constant space, yet a global handed to an out-of-line runtime function (the exception
+# reporters take `Ptr` arguments) still arrives through a generic parameter, so the callee
+# reads it with a generic-space load — which makes Metal's shader validator crash.
 #
-# `InferAddressSpaces` rewrites such generic accesses into the concrete space, but only
-# within a function; it cannot cross the call boundary. This pass is its interprocedural
-# complement: where every caller passes a constant global for a pointer parameter (as
-# `addrspacecast(<global> -> generic)`), it retargets that parameter to the global's address
-# space and drops the casts at the call sites. The callee body is left untouched — the
-# narrowed parameter is cast straight back to generic on entry — so the rewrite is trivially
-# correct; the subsequent `InferAddressSpaces` run then folds that intra-function cast away,
-# turning the read into a constant-space load. No name matching, no inlining, no per-target
-# address-space table: the space is read from the IR, so any back-end can run it.
+# This pass is the interprocedural complement. Where every caller passes the same shape of
+# value for a generic pointer parameter — `addrspacecast(<ptr in some specific space> ->
+# generic)` — it retargets the parameter to that space and drops the casts at the call
+# sites, casting the parameter straight back to generic on entry so the callee body is left
+# untouched. That is a pure relocation of a side-effect-free cast across the boundary (the
+# source flows in as the argument and the identical pointer is recomputed inside the
+# callee), hence trivially correct; the subsequent `InferAddressSpaces` run then folds the
+# entry cast away, turning the read into a specific-space load. The source need not be a
+# constant global — any pointer whose address space is known qualifies (e.g. device data
+# threaded through a helper). No name matching, no inlining, no per-target address-space
+# table: the space is read from the IR, so any back-end can run it.
 
-# If `v` is an `addrspacecast` (instruction or constant expression) of a constant global from
-# a non-generic address space to the generic one, return the global; otherwise `nothing`.
-function constant_global_addrspacecast_source(@nospecialize(v))
+# If `v` is an `addrspacecast` (instruction or constant expression) of a pointer from a
+# specific (non-generic) address space to the generic one, return that source pointer;
+# otherwise `nothing`.
+function addrspacecast_to_generic_source(@nospecialize(v))
     (v isa LLVM.Instruction || v isa LLVM.ConstantExpr) || return nothing
     opcode(v) == LLVM.API.LLVMAddrSpaceCast || return nothing
     addrspace(value_type(v)) == 0 || return nothing
     src = operands(v)[1]
-    (src isa LLVM.GlobalVariable && isconstant(src) && addrspace(value_type(src)) != 0) ||
+    (value_type(src) isa LLVM.PointerType && addrspace(value_type(src)) != 0) ||
         return nothing
     return src
 end
@@ -516,7 +521,7 @@ function propagate_argument_address_spaces!(mod::LLVM.Module)
             (pty isa LLVM.PointerType && addrspace(pty) == 0) || continue
             as = -1
             for cs in callsites
-                src = constant_global_addrspacecast_source(arguments(cs)[i])
+                src = addrspacecast_to_generic_source(arguments(cs)[i])
                 if src === nothing
                     as = -1; break
                 end
@@ -558,7 +563,7 @@ function rewrite_narrowed_call!(builder::IRBuilder, cs::LLVM.CallInst,
                                 new_addrspaces::Vector{Int})
     position!(builder, cs)
     new_args = LLVM.Value[new_addrspaces[i] >= 0 ?
-                          constant_global_addrspacecast_source(arg) : arg
+                          addrspacecast_to_generic_source(arg) : arg
                           for (i, arg) in enumerate(arguments(cs))]
     new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
     callconv!(new_call, callconv(cs))
