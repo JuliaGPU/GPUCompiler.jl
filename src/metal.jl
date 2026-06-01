@@ -1121,18 +1121,11 @@ end
 # module metadata is used to identify global buffers that are used as kernel arguments.
 function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 entry::LLVM.Function)
-    entry_ft = function_type(entry)
-
-    ## argument info
-    arg_infos = Metadata[]
-
-
     # Iterate through arguments and create metadata for them
     globs = globals(mod)
-    @show globs
+
     i = 1
     for gv in globs
-        @show gv
         gv_typ = global_value_type(gv)
         (isconstant(gv) && addrspace(gv_typ) == 3) || continue
         # if job.config.optimize
@@ -1169,15 +1162,15 @@ function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module
         push!(md, MDString("air.address_space"))
         push!(md, Metadata(ConstantInt(Int32(addrspace(global_value_type(gv))))))
 
-        val_type = global_value_type(gv)
+        # val_type = global_value_type(gv)
         # val_type = if value_type(gv) <: Core.LLVMPtr
         #     arg.typ.parameters[1]
         # else
         #     arg.typ
         # end
 
-        @show gv_typ
-        @show isconstant(gv)
+        # @show gv_typ
+        # @show isconstant(gv)
         # @show isconstant(gv_typ)
         # @show Int32(alignment(gv))
 
@@ -1188,20 +1181,19 @@ function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module
         push!(md, Metadata(ConstantInt(Int32(alignment(gv)))))
 
         push!(md, MDString("air.arg_type_name"))
+        # XXX: Figure out how to get type
+        push!(md, MDString("float"))
         # push!(md, MDString(repr(arg.typ)))
 
         push!(md, MDString("air.arg_name"))
         push!(md, MDString(String(LLVM.name(gv))))
 
-        push!(arg_infos, MDNode(md))
+        push!(global_infos, MDNode(md))
+
+        push!(metadata(mod)["air.global_bindings"], MDNode(global_infos))
 
         i += 1
     end
-
-    println()
-    arg_infos = MDNode(arg_infos)
-
-    push!(metadata(mod)["air.global_bindings"], arg_infos)
 
     return
 end
