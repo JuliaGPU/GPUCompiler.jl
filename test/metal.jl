@@ -512,4 +512,92 @@ end
     end
 end
 
+@testset "math intrinsic lowering" begin
+    # Front-ends emit plain LLVM math intrinsics; the back-end lowers them to AIR device
+    # functions. Precise `air.<op>` by default; the relaxed, f32-only `air.fast_<op>` when the
+    # call is `afn`-flagged (set per-op by @fastmath or module-wide by apply_fastmath!). This
+    # lets Metal.jl drop its hand-written air.* overrides for these ops. `round` is included
+    # via llvm.rint (Julia lowers round-to-even to it).
+    function called_names(f)
+        names = String[]
+        for bb in blocks(f), i in instructions(bb)
+            i isa LLVM.CallBase || continue
+            c = called_operand(i)
+            c isa LLVM.Function && push!(names, LLVM.name(c))
+        end
+        names
+    end
+
+    Context() do ctx
+        ir = """
+        declare float @llvm.sqrt.f32(float)
+        declare half  @llvm.sqrt.f16(half)
+        declare float @llvm.floor.f32(float)
+        declare float @llvm.ceil.f32(float)
+        declare float @llvm.trunc.f32(float)
+        declare float @llvm.rint.f32(float)
+        declare float @llvm.fma.f32(float, float, float)
+        declare half  @llvm.fma.f16(half, half, half)
+        declare <4 x float> @llvm.sqrt.v4f32(<4 x float>)
+        define void @f(float %x, half %h, <4 x float> %v) {
+          %a = call float @llvm.sqrt.f32(float %x)
+          %b = call afn float @llvm.sqrt.f32(float %x)
+          %c = call afn half @llvm.sqrt.f16(half %h)
+          %d = call float @llvm.floor.f32(float %x)
+          %d2 = call afn float @llvm.floor.f32(float %x)
+          %e = call float @llvm.ceil.f32(float %x)
+          %g = call float @llvm.trunc.f32(float %x)
+          %i = call float @llvm.rint.f32(float %x)
+          %j = call float @llvm.fma.f32(float %x, float %x, float %x)
+          %l = call half @llvm.fma.f16(half %h, half %h, half %h)
+          %k = call <4 x float> @llvm.sqrt.v4f32(<4 x float> %v)
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f = functions(mod)["f"]
+        @test GPUCompiler.lower_math_intrinsics!(f)
+        names = called_names(f)
+
+        # precise by default; relaxed only for the f32 afn-flagged sqrt
+        @test "air.sqrt.f32" in names
+        @test "air.fast_sqrt.f32" in names
+        # f16 has no fast variant, so afn still maps to the precise op
+        @test "air.sqrt.f16" in names
+        @test !("air.fast_sqrt.f16" in names)
+        # rounding ops have fast f32 variants too (selected for the afn floor)
+        @test "air.floor.f32" in names
+        @test "air.fast_floor.f32" in names
+        @test "air.ceil.f32" in names
+        @test "air.trunc.f32" in names
+        @test "air.rint.f32" in names      # Julia's round arrives as llvm.rint
+        # fma has both f16 and f32 precise forms, and no fast variant
+        @test "air.fma.f32" in names
+        @test "air.fma.f16" in names
+        @test !("air.fast_fma.f32" in names)
+        # no scalar llvm.* math intrinsics survive; the vector one is left (no air.<op>.v4f32)
+        @test !any(n -> startswith(n, "llvm.") && !endswith(n, "v4f32"), names)
+        @test "llvm.sqrt.v4f32" in names
+        @test (verify(mod); true)
+    end
+
+    # apply_fastmath! flags every FP op `afn` (target.fastmath path), so even calls written
+    # without @fastmath lower to the relaxed variant.
+    Context() do ctx
+        ir = """
+        declare float @llvm.sqrt.f32(float)
+        define float @f(float %x) {
+          %a = call float @llvm.sqrt.f32(float %x)
+          ret float %a
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        GPUCompiler.apply_fastmath!(mod)
+        f = functions(mod)["f"]
+        @test GPUCompiler.lower_math_intrinsics!(f)
+        @test "air.fast_sqrt.f32" in called_names(f)
+        @test (verify(mod); true)
+    end
+end
+
 end

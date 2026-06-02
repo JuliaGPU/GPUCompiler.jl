@@ -45,6 +45,12 @@ Base.@kwdef struct MetalCompilerTarget <: AbstractCompilerTarget
     macos::VersionNumber
     air::VersionNumber
     metal::VersionNumber
+
+    # whether to use fast math; defaults to the process-wide `--math-mode=fast`. mirrors the
+    # PTX target: when set, `apply_fastmath!` flags every floating-point op `afn`, which the
+    # intrinsic lowering reads to pick the relaxed `air.fast_*` device functions over the
+    # precise `air.*` ones (e.g. `air.fast_sqrt` instead of `air.sqrt`).
+    fastmath::Bool = Base.JLOptions().fast_math == 1
 end
 
 # for backwards compatibility
@@ -55,6 +61,7 @@ function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.macos, h)
     h = hash(target.air, h)
     h = hash(target.metal, h)
+    h = hash(target.fastmath, h)
 end
 
 source_code(target::MetalCompilerTarget) = "text"
@@ -88,6 +95,14 @@ isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
 
 function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
+    # propagate `target.fastmath` as `@fastmath`-everywhere semantics, so the math-intrinsic
+    # lowering in `finish_ir!` picks the relaxed `air.fast_*` functions. done here (post-link,
+    # pre-optimize) so bodies pulled in from the runtime library get the flags too, mirroring
+    # the PTX target.
+    if job.config.target.fastmath
+        apply_fastmath!(mod)
+    end
+
     for f in kernels(mod)
         # update calling conventions
         f = pass_by_reference!(job, mod, f)
@@ -1112,17 +1127,79 @@ function scalarize_vector_minmax!(fun::LLVM.Function)
     return true
 end
 
+# floating-point math intrinsics that Julia emits as plain `llvm.*` and that Metal exposes as
+# AIR device functions. Each has a precise `air.<op>` for f16/f32; some additionally have a
+# relaxed, f32-only `air.fast_<op>` that we select when the call is `afn`-flagged — set per-op
+# by `@fastmath` or module-wide by `apply_fastmath!` when `target.fastmath` is on.
+#
+# This is the back-end half of the "front-end emits LLVM, back-end lowers" design (cf. the PTX
+# target's fast-math passes): it lets Metal.jl drop its hand-written `air.*`/`air.fast_*`
+# overrides for these ops and rely on the LLVM intrinsics Julia already generates. `round` is
+# covered too — Julia lowers it to `llvm.rint` (round-to-even).
+function lower_math_intrinsics!(fun::LLVM.Function)
+    # llvm intrinsic => (precise air op, relaxed f32 air op or `nothing`)
+    # Verified against Apple's frontend (`xcrun metal -S -emit-llvm`, precise vs -ffast-math):
+    # every op has an `air.<op>.f16` and `air.<op>.f32`; all but `fma` also have an f32-only
+    # `air.fast_<op>` that Apple selects under fast math. Half always stays precise, and `fma`
+    # is exact so even fast math keeps `air.fma.{f16,f32}`.
+    math_intrinsics = Dict(
+        LLVM.Intrinsic("llvm.sqrt")  => ("air.sqrt",  "air.fast_sqrt"),
+        LLVM.Intrinsic("llvm.fma")   => ("air.fma",   nothing),
+        LLVM.Intrinsic("llvm.floor") => ("air.floor", "air.fast_floor"),
+        LLVM.Intrinsic("llvm.ceil")  => ("air.ceil",  "air.fast_ceil"),
+        LLVM.Intrinsic("llvm.trunc") => ("air.trunc", "air.fast_trunc"),
+        LLVM.Intrinsic("llvm.rint")  => ("air.rint",  "air.fast_rint"),
+    )
+
+    worklist = Tuple{LLVM.CallBase, String, Union{String,Nothing}}[]
+    for bb in blocks(fun), inst in instructions(bb)
+        inst isa LLVM.CallBase || continue
+        callee = called_operand(inst)
+        (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
+        mapping = get(math_intrinsics, LLVM.Intrinsic(callee), nothing)
+        mapping === nothing && continue
+        # Metal floats are f16/f32 only; skip f64 (rejected by validate_ir) and vector types
+        # (these ops have no `air.<op>.v4f32`) rather than synthesize a nonexistent intrinsic.
+        typ = value_type(inst)
+        (typ == LLVM.HalfType() || typ == LLVM.FloatType()) || continue
+        push!(worklist, (inst, mapping[1], mapping[2]))
+    end
+    isempty(worklist) && return false
+
+    mod = LLVM.parent(fun)
+    fns = functions(mod)
+    for (call, precise, fast) in worklist
+        typ = value_type(call)
+        # the relaxed variant exists for f32 only; f16 always uses the precise op
+        use_fast = fast !== nothing && typ == LLVM.FloatType() && LLVM.fast_math(call).afn
+        suffix = typ == LLVM.HalfType() ? "f16" : "f32"
+        fn = "$(use_fast ? fast : precise).$suffix"
+        ft = function_type(called_operand(call))
+        air = haskey(fns, fn) ? fns[fn] : LLVM.Function(mod, fn, ft)
+        @dispose builder=IRBuilder() begin
+            position!(builder, call)
+            debuglocation!(builder, call)
+            new_value = call!(builder, ft, air, arguments(call))
+            replace_uses!(call, new_value)
+            erase!(call)
+        end
+    end
+    return true
+end
+
 # replace LLVM intrinsics with AIR equivalents
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
-
-    # TODO: fastmath
 
     mod = LLVM.parent(fun)
     changed = false
 
     # AIR lacks vector min/max intrinsics; scalarize so the per-call lowering below applies.
     changed |= scalarize_vector_minmax!(fun)
+
+    # lower the floating-point math intrinsics Julia emits (sqrt, fma, floor, ...) to their
+    # AIR device functions, picking the relaxed `air.fast_*` variant for `afn`-flagged calls.
+    changed |= lower_math_intrinsics!(fun)
 
     # determine worklist
     worklist = LLVM.CallBase[]
