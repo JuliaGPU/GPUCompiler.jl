@@ -1191,6 +1191,62 @@ function lower_math_intrinsics!(fun::LLVM.Function)
     return true
 end
 
+# Fuse chained integer min/max into AIR's native 3-way builtins: a 2-way
+# `air.{min,max}.{s,u}.iN` whose operand is a single-use call to the same builtin becomes
+# `air.{min,max}3.{s,u}.iN(a, b, c)`. AGX has 3-way min/max, but neither Julia (which reduces
+# `min(a,b,c)` to nested 2-arg calls) nor Apple's own frontend emits it. Done in the back-end so
+# every chained min/max benefits, not just literal 3-argument calls. Integer only: float min/max
+# go through the NaN-propagating wrapper, which `air.f{min,max}3` would not preserve.
+function fuse_minmax3!(fun::LLVM.Function)
+    mod = LLVM.parent(fun)
+    pat = r"^air\.(min|max)\.(s|u)\.i(8|16|32|64)$"
+    changed = false
+
+    # fold one pair then rescan: each fold removes a call, so this terminates, and rescanning
+    # avoids mutating the instruction stream while iterating it.
+    while true
+        fold = nothing  # (outer, inner, other_operand)
+        for bb in blocks(fun), outer in instructions(bb)
+            outer isa LLVM.CallInst || continue
+            oc = called_operand(outer)
+            (oc isa LLVM.Function && match(pat, LLVM.name(oc)) !== nothing) || continue
+            oargs = arguments(outer)
+            length(oargs) == 2 || continue
+            for i in 1:2
+                inner = oargs[i]
+                inner isa LLVM.CallInst || continue
+                ic = called_operand(inner)
+                # same builtin (name pins down min/max, signedness and width)
+                (ic isa LLVM.Function && LLVM.name(ic) == LLVM.name(oc)) || continue
+                # inner must feed only this outer, else folding it would drop a live value
+                length(collect(uses(inner))) == 1 || continue
+                fold = (outer, inner, oargs[i == 1 ? 2 : 1])
+                break
+            end
+            fold === nothing || break
+        end
+        fold === nothing && break
+
+        outer, inner, other = fold
+        m = match(pat, LLVM.name(called_operand(outer)))
+        fn3 = "air.$(m[1])3.$(m[2]).i$(m[3])"
+        T = value_type(outer)
+        ft3 = LLVM.FunctionType(T, LLVMType[T, T, T])
+        f3 = haskey(functions(mod), fn3) ? functions(mod)[fn3] : LLVM.Function(mod, fn3, ft3)
+        iargs = arguments(inner)
+        @dispose builder=IRBuilder() begin
+            position!(builder, outer)
+            debuglocation!(builder, outer)
+            v = call!(builder, ft3, f3, LLVM.Value[iargs[1], iargs[2], other])
+            replace_uses!(outer, v)
+            erase!(outer)
+            erase!(inner)   # now dead (its only use was `outer`)
+        end
+        changed = true
+    end
+    return changed
+end
+
 # replace LLVM intrinsics with AIR equivalents
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
@@ -1495,6 +1551,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             end
         end
     end
+
+    # fuse chained integer min/max (now lowered to air.min/max) into AIR's 3-way builtins
+    changed |= fuse_minmax3!(fun)
 
     return changed
 end

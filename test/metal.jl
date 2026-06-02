@@ -693,4 +693,49 @@ end
     end
 end
 
+@testset "integer min/max fusion" begin
+    # chained integer min/max (e.g. min(a,b,c) reduced to nested 2-arg calls) is fused to AGX's
+    # 3-way air.{min,max}3 builtin, but only when the inner result feeds just the outer and both
+    # are the same builtin.
+    names(f) = [LLVM.name(called_operand(i)) for bb in blocks(f) for i in instructions(bb)
+                if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
+    Context() do ctx
+        ir = """
+        declare i32 @air.min.s.i32(i32, i32)
+        declare i32 @air.max.u.i32(i32, i32)
+        define i32 @fold(i32 %a, i32 %b, i32 %c) {
+          %i = call i32 @air.min.s.i32(i32 %a, i32 %b)
+          %o = call i32 @air.min.s.i32(i32 %i, i32 %c)
+          ret i32 %o
+        }
+        define i32 @fold_arg2(i32 %a, i32 %b, i32 %c) {
+          %i = call i32 @air.max.u.i32(i32 %a, i32 %b)
+          %o = call i32 @air.max.u.i32(i32 %c, i32 %i)
+          ret i32 %o
+        }
+        define i32 @multiuse(i32 %a, i32 %b, i32 %c, i32* %p) {
+          %i = call i32 @air.min.s.i32(i32 %a, i32 %b)
+          %o = call i32 @air.min.s.i32(i32 %i, i32 %c)
+          store i32 %i, i32* %p
+          ret i32 %o
+        }
+        define i32 @mixed(i32 %a, i32 %b, i32 %c) {
+          %i = call i32 @air.max.u.i32(i32 %a, i32 %b)
+          %o = call i32 @air.min.s.i32(i32 %i, i32 %c)
+          ret i32 %o
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        @test GPUCompiler.fuse_minmax3!(functions(mod)["fold"])
+        @test names(functions(mod)["fold"]) == ["air.min3.s.i32"]
+        @test GPUCompiler.fuse_minmax3!(functions(mod)["fold_arg2"])
+        @test names(functions(mod)["fold_arg2"]) == ["air.max3.u.i32"]
+        # inner feeds a store too -> not fused
+        @test !GPUCompiler.fuse_minmax3!(functions(mod)["multiuse"])
+        # min of a max -> not the same builtin, not fused
+        @test !GPUCompiler.fuse_minmax3!(functions(mod)["mixed"])
+        @test (verify(mod); true)
+    end
+end
+
 end
