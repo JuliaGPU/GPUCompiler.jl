@@ -335,6 +335,75 @@ end
         @test (verify(mod); true)
     end
 
+    # typed-pointer form: a `Ptr` argument crosses the boundary as an integer, so the callee
+    # takes an integer it `inttoptr`s and the callers pass `ptrtoint(addrspacecast(<global> ->
+    # generic))`. the integer parameter is narrowed to a constant-space pointer just the same,
+    # and the call sites pass the bare global. (regression: the pass used to skip integer
+    # parameters, leaving a `ptrtoint(addrspacecast(...))` constant that the LLVM-16 Metal
+    # bitcode downgrade miscompiles -- device exceptions crashed on Julia 1.11.)
+    Context() do ctx
+        i8 = LLVM.Int8Type()
+        i64 = LLVM.Int64Type()
+        mod = LLVM.Module("test")
+        callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
+        callee = LLVM.Function(mod, "callee", callee_ft)
+        linkage!(callee, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(callee, "entry"))
+            p = inttoptr!(builder, parameters(callee)[1], asptr(0))
+            ret!(builder, load!(builder, i8, p))
+        end
+        for n in 1:2
+            g = GlobalVariable(mod, i8, "g$n", 2)
+            initializer!(g, ConstantInt(i8, n)); constant!(g, true)
+            caller = LLVM.Function(mod, "caller$n", LLVM.FunctionType(i8, LLVM.LLVMType[]))
+            linkage!(caller, LLVM.API.LLVMInternalLinkage)
+            @dispose builder=IRBuilder() begin
+                position!(builder, BasicBlock(caller, "entry"))
+                arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
+                ret!(builder, call!(builder, callee_ft, callee, [arg]))
+            end
+        end
+
+        @test GPUCompiler.propagate_argument_address_spaces!(mod)
+        param = parameters(function_type(functions(mod)["callee"]))[1]
+        @test param isa LLVM.PointerType && addrspace(param) == 2
+        @test all(c -> value_type(arguments(c)[1]) isa LLVM.PointerType &&
+                       addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "callee"))
+        @test (verify(mod); true)
+    end
+
+    # an integer parameter used as more than a pointer image (here also in arithmetic) is
+    # left alone: narrowing it would lose the integer's other uses
+    Context() do ctx
+        i8 = LLVM.Int8Type()
+        i64 = LLVM.Int64Type()
+        mod = LLVM.Module("test")
+        callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
+        callee = LLVM.Function(mod, "callee", callee_ft)
+        linkage!(callee, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(callee, "entry"))
+            p = inttoptr!(builder, parameters(callee)[1], asptr(0))
+            v = load!(builder, i8, p)
+            # a second, non-`inttoptr` use of the integer parameter
+            extra = trunc!(builder, add!(builder, parameters(callee)[1], parameters(callee)[1]), i8)
+            ret!(builder, add!(builder, v, extra))
+        end
+        g = GlobalVariable(mod, i8, "g", 2)
+        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
+        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(caller, "entry"))
+            arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
+            ret!(builder, call!(builder, callee_ft, callee, [arg]))
+        end
+
+        @test !GPUCompiler.propagate_argument_address_spaces!(mod)
+        @test parameters(function_type(functions(mod)["callee"]))[1] == i64
+    end
+
     # a two-level delegation chain (caller -> mid -> leaf) needs the fixpoint: one sweep
     # narrows `mid` (its caller passes a constant global), which only then exposes `leaf`,
     # since `mid` now forwards an addrspacecast-from-constant. iterate until both narrow.
