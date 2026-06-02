@@ -101,8 +101,7 @@ Several keyword arguments can be used to customize the compilation process:
    possible.
 - `opt_level`: the optimization level to use (default: 2)
 - `debug_level`: the amount of debug information to emit and the verbosity of device-side
-   exception reporting (default: the running session's `-g` level). Part of the cache key,
-   so kernels compiled at different levels don't alias.
+   exception reporting (0, 1 or 2; default: the running session's `-g` level).
 - `libraries`: link the GPU runtime and `libdevice` libraries (default: true)
 - `optimize`: optimize the code (default: true)
 - `cleanup`: run cleanup passes on the code (default: true)
