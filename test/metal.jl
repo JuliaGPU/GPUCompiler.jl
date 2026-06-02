@@ -659,4 +659,38 @@ end
     end
 end
 
+@testset "fast-math min/max lowering" begin
+    # Base min/max -> llvm.minimum/maximum lower to a NaN-propagating wrapper (air.minimum/
+    # maximum, which falls back to air.fmin/fmax). @fastmath/fastmath set `nnan`, so the relaxed
+    # air.fast_fmin/fmax (f32) — or bare air.fmin/fmax for f16, which has no fast form — are used.
+    km = @eval module $(gensym())
+        f() = return
+    end
+    job, _ = Metal.create_job(km.f, Tuple{})
+    names(f) = [LLVM.name(called_operand(i)) for bb in blocks(f) for i in instructions(bb)
+                if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
+
+    Context() do ctx
+        ir = """
+        declare float @llvm.minimum.f32(float, float)
+        declare half  @llvm.maximum.f16(half, half)
+        define void @f(float %x, float %y, half %a, half %b) {
+          %p = call float @llvm.minimum.f32(float %x, float %y)        ; precise -> wrapper
+          %q = call nnan float @llvm.minimum.f32(float %x, float %y)   ; fast -> air.fast_fmin
+          %r = call nnan half @llvm.maximum.f16(half %a, half %b)      ; fast f16 -> air.fmax (no fast)
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir); f = functions(mod)["f"]
+        GPUCompiler.lower_llvm_intrinsics!(job, f)
+        ns = names(f)
+        @test "air.minimum.f32" in ns          # precise: NaN-propagating wrapper
+        @test "air.fast_fmin.f32" in ns        # @fastmath f32: relaxed
+        @test "air.fmax.f16" in ns             # @fastmath f16: no fast form, bare builtin
+        @test !("air.fast_fmax.f16" in ns)
+        @test !any(startswith(n, "llvm.") for n in ns)
+        @test (verify(mod); true)
+    end
+end
+
 end

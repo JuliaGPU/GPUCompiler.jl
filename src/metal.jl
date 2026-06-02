@@ -82,6 +82,10 @@ llvm_targetinfo(::MetalCompilerTarget) = MetalTTI()
 
 pass_by_value(job::CompilerJob{MetalCompilerTarget}) = false
 
+# Apple GPUs have fused multiply-add, so `fma` should use the hardware instruction (lowered
+# from `llvm.fma` to `air.fma`) rather than Julia's Float64-based `fma_emulated` fallback.
+have_fma(@nospecialize(target::MetalCompilerTarget), T::Type) = true
+
 
 ## job
 
@@ -1379,16 +1383,27 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 error("Unsupported maximum/minimum type: $typ")
             end
 
-            # create a function that performs the IEEE-compliant operation.
-            # normally we'd do this inline, but LLVM.jl doesn't have BB split functionality.
-            new_intr_fn = if is_minimum
-                "air.minimum.f$(8*sizeof(jltyp))"
+            # @fastmath / fastmath=true set `nnan` (assume no NaNs), so we can skip the
+            # NaN-propagating wrapper and call the relaxed AIR builtin directly, matching Apple's
+            # -ffast-math: f32 has air.fast_f{min,max}; f16 has no fast form, so use air.f{min,max}.
+            fast_fn = if !LLVM.fast_math(call).nnan
+                nothing
+            elseif typ == LLVM.FloatType()
+                is_minimum ? "air.fast_fmin.f32" : "air.fast_fmax.f32"
             else
-                "air.maximum.f$(8*sizeof(jltyp))"
+                is_minimum ? "air.fmin.f$(8*sizeof(jltyp))" : "air.fmax.f$(8*sizeof(jltyp))"
             end
+
+            # otherwise create a function that performs the IEEE-compliant operation. normally
+            # we'd do this inline, but LLVM.jl doesn't have BB split functionality.
+            new_intr_fn = something(fast_fn, is_minimum ? "air.minimum.f$(8*sizeof(jltyp))" :
+                                                          "air.maximum.f$(8*sizeof(jltyp))")
 
             if haskey(functions(mod), new_intr_fn)
                 new_intr = functions(mod)[new_intr_fn]
+            elseif fast_fn !== nothing
+                # relaxed builtin: just declare it, no wrapper needed
+                new_intr = LLVM.Function(mod, new_intr_fn, call_ft)
             else
                 new_intr = LLVM.Function(mod, new_intr_fn, call_ft)
                 push!(function_attributes(new_intr), EnumAttribute("alwaysinline"))
