@@ -1274,6 +1274,41 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 fn *= "." * type_suffix(typ)
             end
 
+            # AIR's value intrinsics take only the value operands. `llvm.abs` carries an extra
+            # `i1 is_int_min_poison` flag that `air.abs` does not, so drop any operand whose
+            # type isn't the result type before building the call. (For the others every
+            # operand is the result type, so this is a no-op.)
+            air_args = LLVM.Value[a for a in arguments(call) if value_type(a) == typ]
+            air_ft = LLVM.FunctionType(typ, LLVMType[typ for _ in air_args])
+            new_intr = if haskey(functions(mod), fn)
+                functions(mod)[fn]
+            else
+                LLVM.Function(mod, fn, air_ft)
+            end
+            @dispose builder=IRBuilder() begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                new_value = call!(builder, air_ft, new_intr, air_args)
+                replace_uses!(call, new_value)
+                erase!(call)
+                changed = true
+            end
+        end
+
+        # integer bit intrinsics: pure renames to AIR's builtin names (same signature, including
+        # the `i1` on clz/ctz). Apple's frontend emits these `air.*` rather than the `llvm.*`
+        # forms, so we rename rather than rely on the metallib loader accepting `llvm.*`.
+        bit_renames = Dict(
+            LLVM.Intrinsic("llvm.ctlz")       => ("llvm.ctlz",       "air.clz"),
+            LLVM.Intrinsic("llvm.cttz")       => ("llvm.cttz",       "air.ctz"),
+            LLVM.Intrinsic("llvm.ctpop")      => ("llvm.ctpop",      "air.popcount"),
+            LLVM.Intrinsic("llvm.bitreverse") => ("llvm.bitreverse", "air.reverse_bits"),
+        )
+        if haskey(bit_renames, intr)
+            llvm_base, air_base = bit_renames[intr]
+            # keep the mangled type suffix, e.g. llvm.ctlz.i32 -> air.clz.i32
+            fn = air_base * LLVM.name(call_fun)[length(llvm_base)+1:end]
             new_intr = if haskey(functions(mod), fn)
                 functions(mod)[fn]
             else

@@ -600,4 +600,63 @@ end
     end
 end
 
+@testset "integer intrinsic lowering" begin
+    # The integer ops Julia emits as llvm.* are lowered to their AIR builtins, so Metal.jl need
+    # not wrap them. Names/signatures verified against Apple's frontend:
+    #   llvm.abs (value,i1)  -> air.abs.{s,u}.iN(value)   (the i1 poison flag is dropped)
+    #   llvm.{s,u}{min,max}  -> air.{min,max}.{s,u}.iN
+    #   llvm.ctlz (v,i1)     -> air.clz.iN(v,i1)          (pure renames, i1 kept)
+    #   llvm.cttz (v,i1)     -> air.ctz.iN(v,i1)
+    #   llvm.ctpop           -> air.popcount.iN
+    #   llvm.bitreverse      -> air.reverse_bits.iN
+    km = @eval module $(gensym())
+        f() = return
+    end
+    job, _ = Metal.create_job(km.f, Tuple{})
+
+    Context() do ctx
+        ir = """
+        declare i32 @llvm.abs.i32(i32, i1)
+        declare i32 @llvm.smin.i32(i32, i32)
+        declare i32 @llvm.umax.i32(i32, i32)
+        declare i32 @llvm.ctlz.i32(i32, i1)
+        declare i32 @llvm.cttz.i32(i32, i1)
+        declare i32 @llvm.ctpop.i32(i32)
+        declare i32 @llvm.bitreverse.i32(i32)
+        define void @f(i32 %x, i32 %y) {
+          %a = call i32 @llvm.abs.i32(i32 %x, i1 true)
+          %b = call i32 @llvm.smin.i32(i32 %x, i32 %y)
+          %c = call i32 @llvm.umax.i32(i32 %x, i32 %y)
+          %d = call i32 @llvm.ctlz.i32(i32 %x, i1 false)
+          %e = call i32 @llvm.cttz.i32(i32 %x, i1 false)
+          %g = call i32 @llvm.ctpop.i32(i32 %x)
+          %h = call i32 @llvm.bitreverse.i32(i32 %x)
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f = functions(mod)["f"]
+        GPUCompiler.lower_llvm_intrinsics!(job, f)
+
+        sigs = Dict{String,String}()
+        for bb in blocks(f), i in instructions(bb)
+            i isa LLVM.CallBase || continue
+            c = called_operand(i)
+            c isa LLVM.Function && (sigs[LLVM.name(c)] = string(LLVM.function_type(c)))
+        end
+        # abs drops the i1 poison operand
+        @test haskey(sigs, "air.abs.s.i32") && sigs["air.abs.s.i32"] == "i32 (i32)"
+        @test haskey(sigs, "air.min.s.i32") && sigs["air.min.s.i32"] == "i32 (i32, i32)"
+        @test haskey(sigs, "air.max.u.i32")
+        # clz/ctz keep the i1; popcount/reverse_bits are single-operand
+        @test haskey(sigs, "air.clz.i32") && sigs["air.clz.i32"] == "i32 (i32, i1)"
+        @test haskey(sigs, "air.ctz.i32") && sigs["air.ctz.i32"] == "i32 (i32, i1)"
+        @test haskey(sigs, "air.popcount.i32") && sigs["air.popcount.i32"] == "i32 (i32)"
+        @test haskey(sigs, "air.reverse_bits.i32")
+        # no llvm.* intrinsics survive
+        @test !any(startswith(n, "llvm.") for n in keys(sigs))
+        @test (verify(mod); true)
+    end
+end
+
 end
