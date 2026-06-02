@@ -335,12 +335,14 @@ end
         @test (verify(mod); true)
     end
 
-    # typed-pointer form: a `Ptr` argument crosses the boundary as an integer, so the callee
-    # takes an integer it `inttoptr`s and the callers pass `ptrtoint(addrspacecast(<global> ->
-    # generic))`. the integer parameter is narrowed to a constant-space pointer just the same,
-    # and the call sites pass the bare global. (regression: the pass used to skip integer
-    # parameters, leaving a `ptrtoint(addrspacecast(...))` constant that the LLVM-16 Metal
-    # bitcode downgrade miscompiles -- device exceptions crashed on Julia 1.11.)
+    # typed-pointer shim form: a `Ptr` argument crosses the boundary as an integer, so the
+    # callee takes an integer it `inttoptr`s and the callers pass `ptrtoint(addrspacecast(
+    # <global> -> generic))`. the integer parameter is narrowed to a constant-space pointer just
+    # the same, and the call sites pass the bare global. (regression: the pass used to skip
+    # integer parameters, leaving a `ptrtoint(addrspacecast(...))` constant that the LLVM-16
+    # Metal bitcode downgrade miscompiles -- device exceptions crashed on Julia 1.11.) the shim
+    # only applies under typed pointers; under opaque pointers a `Ptr` stays a generic pointer
+    # (Case A), so an integer parameter is deliberately left alone.
     Context() do ctx
         i8 = LLVM.Int8Type()
         i64 = LLVM.Int64Type()
@@ -365,16 +367,22 @@ end
             end
         end
 
-        @test GPUCompiler.propagate_argument_address_spaces!(mod)
-        param = parameters(function_type(functions(mod)["callee"]))[1]
-        @test param isa LLVM.PointerType && addrspace(param) == 2
-        @test all(c -> value_type(arguments(c)[1]) isa LLVM.PointerType &&
-                       addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "callee"))
+        if supports_typed_pointers()
+            @test GPUCompiler.propagate_argument_address_spaces!(mod)
+            param = parameters(function_type(functions(mod)["callee"]))[1]
+            @test param isa LLVM.PointerType && addrspace(param) == 2
+            @test all(c -> value_type(arguments(c)[1]) isa LLVM.PointerType &&
+                           addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "callee"))
+        else
+            @test !GPUCompiler.propagate_argument_address_spaces!(mod)
+            @test parameters(function_type(functions(mod)["callee"]))[1] == i64
+        end
         @test (verify(mod); true)
     end
 
     # an integer parameter used as more than a pointer image (here also in arithmetic) is
-    # left alone: narrowing it would lose the integer's other uses
+    # left alone: narrowing it would lose the integer's other uses (and under opaque pointers
+    # the typed-pointer shim is off, so it is left alone regardless)
     Context() do ctx
         i8 = LLVM.Int8Type()
         i64 = LLVM.Int64Type()
@@ -446,6 +454,68 @@ end
 
         @test GPUCompiler.propagate_argument_address_spaces!(mod)
         @test param_as("leaf") == 2
+        @test (verify(mod); true)
+    end
+
+    # typed-pointer shim: the delegation chain in its integer form (caller -> mid -> leaf, all
+    # taking a `Ptr` lowered to an integer). `mid` only *forwards* its integer to `leaf`, so the
+    # leaf-shaped "all uses are inttoptr" test rejects it; recognizing a forwarded integer as a
+    # pointer image lets the fixpoint narrow `mid` first (its caller passes the recognizable
+    # `ptrtoint(addrspacecast(<global> -> generic))`), which re-exposes that shape at the call to
+    # `leaf` so the next sweep narrows it too. (regression: with only the leaf form, `mid` never
+    # narrowed and the deduced-name read stayed a generic-space load -- device exceptions crashed
+    # on Julia 1.11 even though it worked under opaque pointers.)
+    Context() do ctx
+        i8 = LLVM.Int8Type()
+        i64 = LLVM.Int64Type()
+        mod = LLVM.Module("test")
+        int_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
+        param_ty(name) = parameters(function_type(functions(mod)[name]))[1]
+
+        # leaf: inttoptrs its integer parameter and loads through it
+        leaf = LLVM.Function(mod, "leaf", int_ft)
+        linkage!(leaf, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(leaf, "entry"))
+            p = inttoptr!(builder, parameters(leaf)[1], asptr(0))
+            ret!(builder, load!(builder, i8, p))
+        end
+
+        # mid: forwards its integer parameter on to leaf (no inttoptr of its own)
+        mid = LLVM.Function(mod, "mid", int_ft)
+        linkage!(mid, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(mid, "entry"))
+            ret!(builder, call!(builder, int_ft, leaf, [parameters(mid)[1]]))
+        end
+
+        # caller: passes a constant global (AS 2) as ptrtoint(addrspacecast(... -> generic))
+        g = GlobalVariable(mod, i8, "g", 2)
+        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
+        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(caller, "entry"))
+            arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
+            ret!(builder, call!(builder, int_ft, mid, [arg]))
+        end
+
+        if supports_typed_pointers()
+            # a single sweep narrows only the forwarding `mid`; the fixpoint must reach `leaf`
+            @test GPUCompiler.propagate_argument_address_spaces_once!(mod)
+            @test param_ty("mid") isa LLVM.PointerType && addrspace(param_ty("mid")) == 2
+            @test param_ty("leaf") == i64
+
+            @test GPUCompiler.propagate_argument_address_spaces!(mod)
+            @test param_ty("leaf") isa LLVM.PointerType && addrspace(param_ty("leaf")) == 2
+            # callers end up passing the bare global, not a ptrtoint(addrspacecast(...))
+            @test all(c -> value_type(arguments(c)[1]) isa LLVM.PointerType &&
+                           addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "mid"))
+        else
+            # shim off under opaque pointers: both stay integers, nothing narrows
+            @test !GPUCompiler.propagate_argument_address_spaces!(mod)
+            @test param_ty("mid") == i64 && param_ty("leaf") == i64
+        end
         @test (verify(mod); true)
     end
 end
