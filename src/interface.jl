@@ -100,6 +100,8 @@ Several keyword arguments can be used to customize the compilation process:
 - `always_inline` specifies if the Julia front-end should inline all functions into one if
    possible.
 - `opt_level`: the optimization level to use (default: 2)
+- `debug_level`: the amount of debug information to emit and the verbosity of device-side
+   exception reporting (0, 1 or 2; default: the running session's `-g` level).
 - `libraries`: link the GPU runtime and `libdevice` libraries (default: true)
 - `optimize`: optimize the code (default: true)
 - `cleanup`: run cleanup passes on the code (default: true)
@@ -115,6 +117,7 @@ struct CompilerConfig{T,P}
     entry_abi::Symbol
     always_inline::Bool
     opt_level::Int
+    debug_level::Int
     libraries::Bool
     optimize::Bool
     cleanup::Bool
@@ -127,15 +130,17 @@ struct CompilerConfig{T,P}
 
     function CompilerConfig(target::AbstractCompilerTarget, params::AbstractCompilerParams;
                             kernel=true, name=nothing, entry_abi=:specfunc, toplevel=true,
-                            always_inline=false, opt_level=2, optimize=toplevel,
+                            always_inline=false, opt_level=2,
+                            debug_level=Base.JLOptions().debug_level, optimize=toplevel,
                             libraries=toplevel, cleanup=toplevel, validate=toplevel,
                             strip=false, only_entry=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
         new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
-                                            always_inline, opt_level, libraries, optimize,
-                                            cleanup, validate, strip, toplevel, only_entry)
+                                            always_inline, opt_level, debug_level, libraries,
+                                            optimize, cleanup, validate, strip, toplevel,
+                                            only_entry)
     end
 end
 
@@ -143,7 +148,8 @@ end
 function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.params,
                         kernel=cfg.kernel, name=cfg.name, entry_abi=cfg.entry_abi,
                         always_inline=cfg.always_inline, opt_level=cfg.opt_level,
-                        libraries=cfg.libraries, optimize=cfg.optimize, cleanup=cfg.cleanup,
+                        debug_level=cfg.debug_level, libraries=cfg.libraries,
+                        optimize=cfg.optimize, cleanup=cfg.cleanup,
                         validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
                         only_entry=cfg.only_entry)
     # deriving a non-toplevel job disables certain features
@@ -156,7 +162,8 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
         validate = false
     end
     CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
-                   libraries, optimize, cleanup, validate, strip, toplevel, only_entry)
+                   debug_level, libraries, optimize, cleanup, validate, strip, toplevel,
+                   only_entry)
 end
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
@@ -172,6 +179,7 @@ function Base.hash(cfg::CompilerConfig, h::UInt)
     h = hash(cfg.entry_abi, h)
     h = hash(cfg.always_inline, h)
     h = hash(cfg.opt_level, h)
+    h = hash(cfg.debug_level, h)
     h = hash(cfg.libraries, h)
     h = hash(cfg.optimize, h)
     h = hash(cfg.cleanup, h)
@@ -354,11 +362,11 @@ end
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))
-    if Base.JLOptions().debug_level == 0
+    if job.config.debug_level == 0
         LLVM.API.LLVMDebugEmissionKindNoDebug
-    elseif Base.JLOptions().debug_level == 1
+    elseif job.config.debug_level == 1
         LLVM.API.LLVMDebugEmissionKindLineTablesOnly
-    elseif Base.JLOptions().debug_level >= 2
+    elseif job.config.debug_level >= 2
         LLVM.API.LLVMDebugEmissionKindFullDebug
     end
 end
