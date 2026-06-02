@@ -1063,6 +1063,55 @@ end
 #
 # we don't have a proper back-end, so we're missing out on intrinsics-related functionality.
 
+# AIR has no vector floating-point min/max intrinsic; only the scalar `air.fmin`/`air.fmax`
+# exist. Julia's NaN-propagating `min`/`max` lower to `llvm.minimum`/`llvm.maximum` (and the
+# non-propagating `llvm.minnum`/`llvm.maxnum`), which LLVM's vectorizers can widen to vector
+# intrinsics. Lowering those directly would emit a nonexistent `air.fmin.v4f32`-style call, or
+# hit the "Unsupported maximum/minimum type" error in the minimum/maximum handler below. So we
+# scalarize each vector min/max into element-wise scalar intrinsic calls first and let the
+# scalar lowering handle them — the same lowering LLVM itself uses on targets lacking a vector
+# form, and semantically exact.
+function scalarize_vector_minmax!(fun::LLVM.Function)
+    minmax = LLVM.Intrinsic.(["llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum"])
+
+    worklist = LLVM.CallBase[]
+    for bb in blocks(fun), inst in instructions(bb)
+        inst isa LLVM.CallBase || continue
+        callee = called_operand(inst)
+        (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
+        LLVM.Intrinsic(callee) in minmax || continue
+        value_type(inst) isa LLVM.VectorType || continue
+        push!(worklist, inst)
+    end
+    isempty(worklist) && return false
+
+    mod = LLVM.parent(fun)
+    for call in worklist
+        vecty = value_type(call)::LLVM.VectorType
+        elty = eltype(vecty)
+        # the scalar overload of the same intrinsic, e.g. llvm.minimum.v4f32 -> llvm.minimum.f32
+        intr = LLVM.Intrinsic(called_operand(call))
+        scalar_f = LLVM.Function(mod, intr, LLVMType[elty])
+        scalar_ft = function_type(scalar_f)
+        arg0, arg1 = arguments(call)
+        @dispose builder=IRBuilder() begin
+            position!(builder, call)
+            debuglocation!(builder, call)
+            res = PoisonValue(vecty)
+            for i in 0:Int(length(vecty))-1
+                idx = ConstantInt(LLVM.Int32Type(), i)
+                a = extract_element!(builder, arg0, idx)
+                b = extract_element!(builder, arg1, idx)
+                s = call!(builder, scalar_ft, scalar_f, LLVM.Value[a, b])
+                res = insert_element!(builder, res, s, idx)
+            end
+            replace_uses!(call, res)
+            erase!(call)
+        end
+    end
+    return true
+end
+
 # replace LLVM intrinsics with AIR equivalents
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
@@ -1071,6 +1120,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
     mod = LLVM.parent(fun)
     changed = false
+
+    # AIR lacks vector min/max intrinsics; scalarize so the per-call lowering below applies.
+    changed |= scalarize_vector_minmax!(fun)
 
     # determine worklist
     worklist = LLVM.CallBase[]

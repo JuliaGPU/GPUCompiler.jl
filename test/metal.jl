@@ -450,4 +450,66 @@ end
     end
 end
 
+@testset "vector min/max scalarization" begin
+    # AIR has no vector floating-point min/max intrinsic, only scalar air.fmin/air.fmax. Julia's
+    # NaN-propagating min/max lower to llvm.minimum/llvm.maximum (and llvm.minnum/llvm.maxnum),
+    # which LLVM's vectorizers can widen to vector form. Lowering a vector intrinsic directly
+    # would emit a nonexistent air.fmin.v4f32-style call (minnum/maxnum) or hit an unsupported-
+    # type error (minimum/maximum), so we scalarize into element-wise scalar intrinsic calls.
+    is_vec_minmax(i) = i isa LLVM.CallBase && value_type(i) isa LLVM.VectorType &&
+        called_operand(i) isa LLVM.Function &&
+        LLVM.isintrinsic(called_operand(i)) &&
+        LLVM.Intrinsic(called_operand(i)) in
+            LLVM.Intrinsic.(["llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum"])
+
+    Context() do ctx
+        ir = """
+        declare <4 x float> @llvm.minimum.v4f32(<4 x float>, <4 x float>)
+        declare <2 x float> @llvm.maxnum.v2f32(<2 x float>, <2 x float>)
+        define <4 x float> @f(<4 x float> %a, <4 x float> %b, <2 x float> %c, <2 x float> %d) {
+        entry:
+          %mn = call <4 x float> @llvm.minimum.v4f32(<4 x float> %a, <4 x float> %b)
+          %mx = call <2 x float> @llvm.maxnum.v2f32(<2 x float> %c, <2 x float> %d)
+          %e0 = extractelement <2 x float> %mx, i32 0
+          %r = insertelement <4 x float> %mn, float %e0, i32 0
+          ret <4 x float> %r
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f = functions(mod)["f"]
+        insts() = [i for bb in blocks(f) for i in instructions(bb)]
+
+        # precondition: a vector minimum (width 4) and a vector maxnum (width 2)
+        @test count(is_vec_minmax, insts()) == 2
+
+        @test GPUCompiler.scalarize_vector_minmax!(f)
+
+        # no vector min/max calls survive; each is replaced by per-lane scalar intrinsic calls
+        @test count(is_vec_minmax, insts()) == 0
+        scalar_calls = filter(insts()) do i
+            i isa LLVM.CallBase && value_type(i) == LLVM.FloatType() &&
+                called_operand(i) isa LLVM.Function &&
+                LLVM.isintrinsic(called_operand(i))
+        end
+        @test length(scalar_calls) == 6   # 4 from the v4f32 + 2 from the v2f32
+        @test Set(LLVM.name(called_operand(c)) for c in scalar_calls) ==
+            Set(["llvm.minimum.f32", "llvm.maxnum.f32"])
+        @test (verify(mod); true)
+    end
+
+    # a scalar min/max is already lowerable and must be left untouched
+    Context() do ctx
+        ir = """
+        declare float @llvm.minimum.f32(float, float)
+        define float @g(float %a, float %b) {
+          %r = call float @llvm.minimum.f32(float %a, float %b)
+          ret float %r
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        @test !GPUCompiler.scalarize_vector_minmax!(functions(mod)["g"])
+        @test (verify(mod); true)
+    end
+end
+
 end
