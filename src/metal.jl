@@ -784,40 +784,12 @@ end
 # rewritten; `f` is replaced by the clone and erased.
 function rewrite_parameters!(mod::LLVM.Module, f::LLVM.Function, callsites;
                              new_types::Vector, rebuild_entry, rewrite_arg, keep_attrs::Bool)
-    ft = function_type(f)
-    param_types = parameters(ft)
-    new_ptypes = LLVM.LLVMType[something(new_types[i], pty)
-                               for (i, pty) in enumerate(param_types)]
-    new_ft = LLVM.FunctionType(return_type(ft), new_ptypes)
-
-    new_f = LLVM.Function(mod, "", new_ft)
-    linkage!(new_f, linkage(f))
-    callconv!(new_f, callconv(f))
-    for (old_arg, new_arg) in zip(parameters(f), parameters(new_f))
-        LLVM.name!(new_arg, LLVM.name(old_arg))
-    end
-
-    # rebuild each retargeted parameter into its original type on entry, so the cloned body is
-    # unchanged
-    @dispose builder=IRBuilder() begin
-        entry = BasicBlock(new_f, "conversion")
-        position!(builder, entry)
-        body_values = LLVM.Value[
-            new_types[i] === nothing ? parameters(new_f)[i] :
-                                       rebuild_entry(builder, parameters(new_f)[i], i)
-            for i in 1:length(param_types)]
-        value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => body_values[i] for (i, param) in enumerate(parameters(f)))
-        value_map[f] = new_f
-        clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
-        br!(builder, blocks(new_f)[2])  # fall through to the cloned entry block
-    end
+    new_f = clone_with_converted_args!(mod, f, new_types, rebuild_entry)
 
     # `clone_into!` copies a parameter's attributes only when it maps to a new argument; the
     # retargeted ones map to the entry rebuild instead, so theirs are dropped. Reattach them where
     # the caller keeps them (still valid on a narrowed pointer); drop them otherwise.
-    for i in 1:length(param_types)
+    for i in 1:length(new_types)
         (new_types[i] !== nothing && keep_attrs) || continue
         for attr in collect(parameter_attributes(f, i))
             push!(parameter_attributes(new_f, i), attr)
@@ -832,21 +804,14 @@ function rewrite_parameters!(mod::LLVM.Module, f::LLVM.Function, callsites;
         inst isa LLVM.CallInst && called_operand(inst) == new_f && push!(self_calls, inst)
     end
 
+    new_ft = function_type(new_f)
     @dispose builder=IRBuilder() begin
         for cs in Iterators.flatten((callsites, self_calls))
             rewrite_retargeted_call!(builder, cs, new_f, new_ft, new_types, rewrite_arg, keep_attrs)
         end
     end
 
-    fn = LLVM.name(f)
-    @assert isempty(uses(f))   # every use was a call site we just rewrote
-    replace_metadata_uses!(f, new_f)
-    erase!(f)
-    LLVM.name!(new_f, fn)
-    # changing the signature leaves `clone_into!`'s dead `bitcast(new_f -> old fn type)` behind;
-    # drop it so a later phase re-examining `new_f` sees only its (live) direct call sites
-    prune_constexpr_uses!(new_f)
-    return new_f
+    return replace_function!(f, new_f)
 end
 
 # rewrite a single call to target `new_f`/`new_ft`: each retargeted argument `i` becomes

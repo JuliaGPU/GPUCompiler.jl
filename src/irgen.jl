@@ -1202,52 +1202,12 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
     end
 
     @tracepoint "kernel state to reference" begin
-        # generate the new function type & definition
-        new_types = LLVM.LLVMType[]
-        # convert the first parameter (kernel state) to a pointer
-        push!(new_types, LLVM.PointerType(T_state))
-        # keep all other parameters as-is
-        for i in 2:length(parameters(ft))
-            push!(new_types, parameters(ft)[i])
-        end
-
-        new_ft = LLVM.FunctionType(return_type(ft), new_types)
-        new_f = LLVM.Function(mod, "", new_ft)
-        linkage!(new_f, linkage(f))
-
-        # name the parameters
+        # turn the leading kernel-state value parameter into a pointer the body loads from
+        new_types = Union{Nothing,LLVM.LLVMType}[
+            i == 1 ? LLVM.PointerType(T_state) : nothing for i in 1:length(parameters(ft))]
+        new_f = clone_with_converted_args!(mod, f, new_types,
+            (builder, param, i) -> load!(builder, T_state, param, "state"))
         LLVM.name!(parameters(new_f)[1], "state_ptr")
-        for (i, (arg, new_arg)) in enumerate(zip(parameters(f)[2:end], parameters(new_f)[2:end]))
-            LLVM.name!(new_arg, LLVM.name(arg))
-        end
-
-        # emit IR performing the "conversions"
-        new_args = LLVM.Value[]
-        @dispose builder=IRBuilder() begin
-            entry = BasicBlock(new_f, "conversion")
-            position!(builder, entry)
-
-            # load the kernel state value from the pointer
-            state_val = load!(builder, T_state, parameters(new_f)[1], "state")
-            push!(new_args, state_val)
-
-            # all other arguments are passed through directly
-            for i in 2:length(parameters(new_f))
-                push!(new_args, parameters(new_f)[i])
-            end
-
-            # map the arguments
-            value_map = Dict{LLVM.Value, LLVM.Value}(
-                param => new_args[i] for (i,param) in enumerate(parameters(f))
-            )
-            value_map[f] = new_f
-
-            clone_into!(new_f, f; value_map,
-                        changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
-
-            # fall through
-            br!(builder, blocks(new_f)[2])
-        end
 
         # set the attributes for the state pointer parameter
         attrs = parameter_attributes(new_f, 1)
@@ -1262,11 +1222,7 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
         push!(attrs, EnumAttribute("readonly", 0))
 
         # remove the old function
-        fn = LLVM.name(f)
-        @assert isempty(uses(f))
-        replace_metadata_uses!(f, new_f)
-        erase!(f)
-        LLVM.name!(new_f, fn)
+        replace_function!(f, new_f)
 
         # minimal optimization
         @dispose pb=NewPMPassBuilder() begin

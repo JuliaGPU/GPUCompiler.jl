@@ -161,6 +161,68 @@ function prune_constexpr_uses!(root::LLVM.Value)
 end
 
 
+## function-signature rewriting
+
+# Several passes need to change a function's signature, which LLVM can't do in place: you create a
+# new function, move the body over, and fix up the callers (the same shape as LLVM's
+# ArgumentPromotion). These two helpers capture the mechanical scaffolding shared by those passes;
+# the parts that genuinely differ between them -- which parameters change, how each is reconstructed
+# on entry, attribute handling, and rewriting call sites -- stay in the caller.
+
+# Clone `f` into a new function whose parameter types come from `new_types` (one entry per
+# parameter of `f`; `nothing` leaves that parameter's type unchanged). For each changed parameter a
+# fresh entry block reconstructs the value the body expects -- of the *original* type -- via
+# `reconstruct(builder, new_param, i)`, and the body is cloned to use it, so the body is unchanged.
+# The old function is left in place; the caller fixes up attributes and call sites and then drops it
+# with `replace_function!`. `changes` is forwarded to `clone_into!`.
+function clone_with_converted_args!(mod::LLVM.Module, f::LLVM.Function, new_types::Vector, reconstruct;
+                                    changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+    ft = function_type(f)
+    param_types = parameters(ft)
+    @assert length(new_types) == length(param_types)
+    new_ptypes = LLVM.LLVMType[something(new_types[i], pty) for (i, pty) in enumerate(param_types)]
+    new_ft = LLVM.FunctionType(return_type(ft), new_ptypes)
+
+    new_f = LLVM.Function(mod, "", new_ft)
+    linkage!(new_f, linkage(f))
+    callconv!(new_f, callconv(f))
+    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
+        LLVM.name!(new_arg, LLVM.name(arg))
+    end
+
+    @dispose builder=IRBuilder() begin
+        entry = BasicBlock(new_f, "conversion")
+        position!(builder, entry)
+        body_values = LLVM.Value[
+            new_types[i] === nothing ? parameters(new_f)[i] :
+                                       reconstruct(builder, parameters(new_f)[i], i)
+            for i in 1:length(param_types)]
+        value_map = Dict{LLVM.Value, LLVM.Value}(
+            param => body_values[i] for (i, param) in enumerate(parameters(f)))
+        value_map[f] = new_f
+        clone_into!(new_f, f; value_map, changes)
+        br!(builder, blocks(new_f)[2])  # fall through to the cloned entry block
+    end
+
+    return new_f
+end
+
+# Replace `f` with `new_f` once every value use of `f` has been rewritten away. Drops dead
+# constant-expression uses on both sides -- including the dead `bitcast(new_f -> old type)` that
+# `clone_into!` leaves behind when the signature changes -- hands the name and metadata to `new_f`,
+# and erases `f`.
+function replace_function!(f::LLVM.Function, new_f::LLVM.Function)
+    fn = LLVM.name(f)
+    prune_constexpr_uses!(f)
+    @assert isempty(uses(f))
+    replace_metadata_uses!(f, new_f)
+    erase!(f)
+    LLVM.name!(new_f, fn)
+    prune_constexpr_uses!(new_f)
+    return new_f
+end
+
+
 ## kernel metadata handling
 
 # kernels are encoded in the IR using the julia.kernel metadata.
