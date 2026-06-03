@@ -115,74 +115,32 @@ function add_kernarg_address_spaces!(
     end
     needs_rewrite || return f
 
-    # generate the new function type with constant address space on byref params
-    new_types = LLVMType[]
-    for (i, param) in enumerate(parameters(ft))
-        if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
-            if supports_typed_pointers(context())
-                push!(new_types, LLVM.PointerType(eltype(param), #=constant=# 4))
-            else
-                push!(new_types, LLVM.PointerType(#=constant=# 4))
-            end
-        else
-            push!(new_types, param)
-        end
-    end
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
-    new_f = LLVM.Function(mod, "", new_ft)
-    linkage!(new_f, linkage(f))
-    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
-        LLVM.name!(new_arg, LLVM.name(arg))
-    end
+    # generate the new function type with constant address space on byref flat-pointer params
+    param_types = parameters(ft)
+    flat_byref(i) = byref_mask[i] && param_types[i] isa LLVM.PointerType && addrspace(param_types[i]) == 0
+    new_types = Union{Nothing,LLVMType}[
+        flat_byref(i) ? (supports_typed_pointers(context()) ?
+                            LLVM.PointerType(eltype(param_types[i]), #=constant=# 4) :
+                            LLVM.PointerType(#=constant=# 4)) :
+                        nothing
+        for i in 1:length(param_types)]
 
-    # insert addrspacecasts from kernarg (4) back to flat (0) so that the cloned IR
-    # (which expects flat pointers) continues to work. The AMDGPU backend's
-    # AMDGPULowerKernelArguments traces these casts and produces s_load.
-    new_args = LLVM.Value[]
-    @dispose builder=IRBuilder() begin
-        entry_bb = BasicBlock(new_f, "conversion")
-        position!(builder, entry_bb)
+    # insert addrspacecasts from kernarg (4) back to flat (0) so that the cloned IR (which expects
+    # flat pointers) continues to work; the AMDGPU backend's AMDGPULowerKernelArguments traces these
+    # casts and produces s_load.
+    new_f = clone_with_converted_args!(mod, f, new_types,
+        (builder, param, i) -> addrspacecast!(builder, param, param_types[i]))
 
-        for (i, param) in enumerate(parameters(ft))
-            if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
-                cast = addrspacecast!(builder, parameters(new_f)[i], param)
-                push!(new_args, cast)
-            else
-                push!(new_args, parameters(new_f)[i])
-            end
-        end
-
-        # clone the original function body
-        value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => new_args[i] for (i, param) in enumerate(parameters(f))
-        )
-        value_map[f] = new_f
-        clone_into!(
-            new_f, f; value_map,
-            changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges
-        )
-
-        # fall through from conversion block to cloned entry
-        br!(builder, blocks(new_f)[2])
-    end
-
-    # copy parameter attributes AFTER clone_into!, because CloneFunctionInto
-    # overwrites all attributes via setAttributes. For byref params, the VMap
-    # maps old args to addrspacecast instructions (not Arguments), so LLVM's
-    # attribute remapping silently drops them. We must re-add them here.
-    for i in 1:length(parameters(ft))
+    # copy parameter attributes AFTER clone_into!, because CloneFunctionInto overwrites all
+    # attributes via setAttributes. For byref params, the VMap maps old args to addrspacecast
+    # instructions (not Arguments), so LLVM's attribute remapping silently drops them.
+    for i in 1:length(param_types)
         for attr in collect(parameter_attributes(f, i))
             push!(parameter_attributes(new_f, i), attr)
         end
     end
 
-    # replace the old function
-    fn = LLVM.name(f)
-    prune_constexpr_uses!(f)
-    @assert isempty(uses(f))
-    replace_metadata_uses!(f, new_f)
-    erase!(f)
-    LLVM.name!(new_f, fn)
+    replace_function!(f, new_f)
 
     # clean up the extra conversion block
     @dispose pb=NewPMPassBuilder() begin
@@ -192,7 +150,7 @@ function add_kernarg_address_spaces!(
         run!(pb, mod)
     end
 
-    return functions(mod)[fn]
+    return new_f
 end
 
 

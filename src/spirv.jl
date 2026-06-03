@@ -341,72 +341,22 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         end
     end
 
-    # generate the wrapper function type & definition
-    new_types = LLVM.LLVMType[]
-    for (i, param) in enumerate(parameters(ft))
-        typ = if byval[i]
-            llvm_typ = convert(LLVMType, types[i])
-            st = LLVM.StructType([llvm_typ])
-            LLVM.PointerType(st, addrspace(param))
-        else
-            param
-        end
-        push!(new_types, typ)
-    end
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
-    new_f = LLVM.Function(mod, "", new_ft)
-    linkage!(new_f, linkage(f))
-    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
-        LLVM.name!(new_arg, LLVM.name(arg))
-    end
+    # generate the wrapper function type & definition: byval params become pointers to a struct
+    # wrapping the value, and the body GEPs into that struct to recover the original pointer.
+    wrapper(i) = LLVM.StructType([convert(LLVMType, types[i])])
+    new_types = Union{Nothing,LLVM.LLVMType}[
+        byval[i] ? LLVM.PointerType(wrapper(i), addrspace(parameters(ft)[i])) : nothing
+        for i in 1:length(parameters(ft))]
+    new_f = clone_with_converted_args!(mod, f, new_types,
+        (builder, param, i) -> struct_gep!(builder, wrapper(i), param, 0))
 
-    # emit IR performing the "conversions"
-    new_args = Vector{LLVM.Value}()
-    @dispose builder=IRBuilder() begin
-        entry = BasicBlock(new_f, "conversion")
-        position!(builder, entry)
-
-        # perform argument conversions
-        for (i, param) in enumerate(parameters(new_f))
-            if byval[i]
-                llvm_typ = convert(LLVMType, types[i])
-                ptr = struct_gep!(builder, LLVM.StructType([llvm_typ]), param, 0)
-                push!(new_args, ptr)
-            else
-                push!(new_args, param)
-            end
-        end
-
-        # map the arguments
-        value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => new_args[i] for (i,param) in enumerate(parameters(f))
-        )
-
-        value_map[f] = new_f
-        clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
-
-        # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
-        for i in 1:length(byval)
-            attrs = parameter_attributes(new_f, i)
-            if byval[i]
-                llvm_typ = convert(LLVMType, types[i])
-                push!(attrs, TypeAttribute("byval", LLVM.StructType([llvm_typ])))
-            end
-        end
-
-        # fall through
-        br!(builder, collect(blocks(new_f))[2])
+    # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
+    for i in 1:length(byval)
+        byval[i] && push!(parameter_attributes(new_f, i), TypeAttribute("byval", wrapper(i)))
     end
 
     # remove the old function
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
-    fn = LLVM.name(f)
-    prune_constexpr_uses!(f)
-    @assert isempty(uses(f))
-    replace_metadata_uses!(f, new_f)
-    erase!(f)
-    LLVM.name!(new_f, fn)
-
+    replace_function!(f, new_f)
     return new_f
 end
