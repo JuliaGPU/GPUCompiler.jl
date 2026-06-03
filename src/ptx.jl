@@ -295,10 +295,11 @@ function optimize_module!(@nospecialize(job::CompilerJob{<:PTXCompilerTarget}),
             register!(pb, NVVMReflectPass())
             add!(pb, NVVMReflectPass())
         end
-        add!(pb, PTXRSqrtFastPass())
-        add!(pb, PTXFDivFastPass())
-        add!(pb, PTXFSqrtFastPass())
-
+        if get(optimization_options(job), :ptxfastmath, true)
+            add!(pb, PTXRSqrtFastPass())
+            add!(pb, PTXFDivFastPass())
+            add!(pb, PTXFSqrtFastPass())
+        end
         add!(pb, NewPMFunctionPassManager()) do fpm
             # needed by GemmKernels.jl-like code
             add!(fpm, SpeculativeExecutionPass())

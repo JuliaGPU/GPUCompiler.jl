@@ -43,7 +43,7 @@ function create_job(@nospecialize(func), @nospecialize(types);
                     kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = PTXCompilerTarget(; cap, ptx, feature_set,
+    target = PTXCompilerTarget{Nothing}(; cap, ptx, feature_set,
                                  minthreads, maxthreads, blocks_per_sm, maxregs,
                                  fastmath)
     params = CompilerParams()
