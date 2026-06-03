@@ -39,7 +39,7 @@ Base.@kwdef struct PTXCompilerTarget{BackendInfo} <: AbstractCompilerTarget
     exitable::Union{Nothing,Bool} = nothing
     unreachable::Union{Nothing,Bool} = nothing
 
-    backendinfo::BackendInfo
+    backendinfo::BackendInfo = nothing
 end
 
 function Base.hash(target::PTXCompilerTarget, h::UInt)
@@ -107,7 +107,7 @@ have_fma(@nospecialize(target::PTXCompilerTarget), T::Type) = true
 
 dwarf_version(target::PTXCompilerTarget) = Int32(2) # Cuda only supports dwarfv2
 
-can_vectorize(job::CompilerJob{PTXCompilerTarget}) = true
+can_vectorize(job::CompilerJob{<:PTXCompilerTarget}) = true
 
 ## job
 
