@@ -291,7 +291,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             register!(pb, NVVMReflectPass())
             add!(pb, NVVMReflectPass())
         end
-        if get(optimization_options(job), :ptxfastmath, true)
+        if get(optimization_options(job), :fastmath, true)
             add!(pb, PTXRSqrtFastPass())
             add!(pb, PTXFDivFastPass())
             add!(pb, PTXFSqrtFastPass())
