@@ -45,6 +45,12 @@ Base.@kwdef struct MetalCompilerTarget <: AbstractCompilerTarget
     macos::VersionNumber
     air::VersionNumber
     metal::VersionNumber
+
+    # whether to use fast math; defaults to the process-wide `--math-mode=fast`. mirrors the
+    # PTX target: when set, `apply_fastmath!` flags every floating-point op `afn`, which the
+    # intrinsic lowering reads to pick the relaxed `air.fast_*` device functions over the
+    # precise `air.*` ones (e.g. `air.fast_sqrt` instead of `air.sqrt`).
+    fastmath::Bool = Base.JLOptions().fast_math == 1
 end
 
 # for backwards compatibility
@@ -55,6 +61,7 @@ function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.macos, h)
     h = hash(target.air, h)
     h = hash(target.metal, h)
+    h = hash(target.fastmath, h)
 end
 
 source_code(target::MetalCompilerTarget) = "text"
@@ -75,6 +82,10 @@ llvm_targetinfo(::MetalCompilerTarget) = MetalTTI()
 
 pass_by_value(job::CompilerJob{MetalCompilerTarget}) = false
 
+# Apple GPUs have fused multiply-add, so `fma` should use the hardware instruction (lowered
+# from `llvm.fma` to `air.fma`) rather than Julia's Float64-based `fma_emulated` fallback.
+have_fma(@nospecialize(target::MetalCompilerTarget), T::Type) = true
+
 
 ## job
 
@@ -88,6 +99,14 @@ isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
 
 function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
+    # propagate `target.fastmath` as `@fastmath`-everywhere semantics, so the math-intrinsic
+    # lowering in `finish_ir!` picks the relaxed `air.fast_*` functions. done here (post-link,
+    # pre-optimize) so bodies pulled in from the runtime library get the flags too, mirroring
+    # the PTX target.
+    if job.config.target.fastmath
+        apply_fastmath!(mod)
+    end
+
     for f in kernels(mod)
         # update calling conventions
         f = pass_by_reference!(job, mod, f)
@@ -1097,14 +1116,184 @@ end
 #
 # we don't have a proper back-end, so we're missing out on intrinsics-related functionality.
 
+# AIR has no vector floating-point min/max intrinsic; only the scalar `air.fmin`/`air.fmax`
+# exist. Julia's NaN-propagating `min`/`max` lower to `llvm.minimum`/`llvm.maximum` (and the
+# non-propagating `llvm.minnum`/`llvm.maxnum`), which LLVM's vectorizers can widen to vector
+# intrinsics. Lowering those directly would emit a nonexistent `air.fmin.v4f32`-style call, or
+# hit the "Unsupported maximum/minimum type" error in the minimum/maximum handler below. So we
+# scalarize each vector min/max into element-wise scalar intrinsic calls first and let the
+# scalar lowering handle them — the same lowering LLVM itself uses on targets lacking a vector
+# form, and semantically exact.
+function scalarize_vector_minmax!(fun::LLVM.Function)
+    minmax = LLVM.Intrinsic.(["llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum"])
+
+    worklist = LLVM.CallBase[]
+    for bb in blocks(fun), inst in instructions(bb)
+        inst isa LLVM.CallBase || continue
+        callee = called_operand(inst)
+        (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
+        LLVM.Intrinsic(callee) in minmax || continue
+        value_type(inst) isa LLVM.VectorType || continue
+        push!(worklist, inst)
+    end
+    isempty(worklist) && return false
+
+    mod = LLVM.parent(fun)
+    for call in worklist
+        vecty = value_type(call)::LLVM.VectorType
+        elty = eltype(vecty)
+        # the scalar overload of the same intrinsic, e.g. llvm.minimum.v4f32 -> llvm.minimum.f32
+        intr = LLVM.Intrinsic(called_operand(call))
+        scalar_f = LLVM.Function(mod, intr, LLVMType[elty])
+        scalar_ft = function_type(scalar_f)
+        arg0, arg1 = arguments(call)
+        @dispose builder=IRBuilder() begin
+            position!(builder, call)
+            debuglocation!(builder, call)
+            res = PoisonValue(vecty)
+            for i in 0:Int(length(vecty))-1
+                idx = ConstantInt(LLVM.Int32Type(), i)
+                a = extract_element!(builder, arg0, idx)
+                b = extract_element!(builder, arg1, idx)
+                s = call!(builder, scalar_ft, scalar_f, LLVM.Value[a, b])
+                res = insert_element!(builder, res, s, idx)
+            end
+            replace_uses!(call, res)
+            erase!(call)
+        end
+    end
+    return true
+end
+
+# floating-point math intrinsics that Julia emits as plain `llvm.*` and that Metal exposes as
+# AIR device functions. Each has a precise `air.<op>` for f16/f32; some additionally have a
+# relaxed, f32-only `air.fast_<op>` that we select when the call is `afn`-flagged — set per-op
+# by `@fastmath` or module-wide by `apply_fastmath!` when `target.fastmath` is on.
+#
+# This is the back-end half of the "front-end emits LLVM, back-end lowers" design (cf. the PTX
+# target's fast-math passes): it lets Metal.jl drop its hand-written `air.*`/`air.fast_*`
+# overrides for these ops and rely on the LLVM intrinsics Julia already generates. `round` is
+# covered too — Julia lowers it to `llvm.rint` (round-to-even).
+function lower_math_intrinsics!(fun::LLVM.Function)
+    # llvm intrinsic => (precise air op, relaxed f32 air op or `nothing`)
+    # Verified against Apple's frontend (`xcrun metal -S -emit-llvm`, precise vs -ffast-math):
+    # every op has an `air.<op>.f16` and `air.<op>.f32`; all but `fma` also have an f32-only
+    # `air.fast_<op>` that Apple selects under fast math. Half always stays precise, and `fma`
+    # is exact so even fast math keeps `air.fma.{f16,f32}`.
+    math_intrinsics = Dict(
+        LLVM.Intrinsic("llvm.sqrt")  => ("air.sqrt",  "air.fast_sqrt"),
+        LLVM.Intrinsic("llvm.fma")   => ("air.fma",   nothing),
+        LLVM.Intrinsic("llvm.floor") => ("air.floor", "air.fast_floor"),
+        LLVM.Intrinsic("llvm.ceil")  => ("air.ceil",  "air.fast_ceil"),
+        LLVM.Intrinsic("llvm.trunc") => ("air.trunc", "air.fast_trunc"),
+        LLVM.Intrinsic("llvm.rint")  => ("air.rint",  "air.fast_rint"),
+    )
+
+    worklist = Tuple{LLVM.CallBase, String, Union{String,Nothing}}[]
+    for bb in blocks(fun), inst in instructions(bb)
+        inst isa LLVM.CallBase || continue
+        callee = called_operand(inst)
+        (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
+        mapping = get(math_intrinsics, LLVM.Intrinsic(callee), nothing)
+        mapping === nothing && continue
+        # Metal floats are f16/f32 only; skip f64 (rejected by validate_ir) and vector types
+        # (these ops have no `air.<op>.v4f32`) rather than synthesize a nonexistent intrinsic.
+        typ = value_type(inst)
+        (typ == LLVM.HalfType() || typ == LLVM.FloatType()) || continue
+        push!(worklist, (inst, mapping[1], mapping[2]))
+    end
+    isempty(worklist) && return false
+
+    mod = LLVM.parent(fun)
+    fns = functions(mod)
+    for (call, precise, fast) in worklist
+        typ = value_type(call)
+        # the relaxed variant exists for f32 only; f16 always uses the precise op
+        use_fast = fast !== nothing && typ == LLVM.FloatType() && LLVM.fast_math(call).afn
+        suffix = typ == LLVM.HalfType() ? "f16" : "f32"
+        fn = "$(use_fast ? fast : precise).$suffix"
+        ft = function_type(called_operand(call))
+        air = haskey(fns, fn) ? fns[fn] : LLVM.Function(mod, fn, ft)
+        @dispose builder=IRBuilder() begin
+            position!(builder, call)
+            debuglocation!(builder, call)
+            new_value = call!(builder, ft, air, arguments(call))
+            replace_uses!(call, new_value)
+            erase!(call)
+        end
+    end
+    return true
+end
+
+# Fuse chained integer min/max into AIR's native 3-way builtins: a 2-way
+# `air.{min,max}.{s,u}.iN` whose operand is a single-use call to the same builtin becomes
+# `air.{min,max}3.{s,u}.iN(a, b, c)`. AGX has 3-way min/max, but neither Julia (which reduces
+# `min(a,b,c)` to nested 2-arg calls) nor Apple's own frontend emits it. Done in the back-end so
+# every chained min/max benefits, not just literal 3-argument calls. Integer only: float min/max
+# go through the NaN-propagating wrapper, which `air.f{min,max}3` would not preserve.
+function fuse_minmax3!(fun::LLVM.Function)
+    mod = LLVM.parent(fun)
+    pat = r"^air\.(min|max)\.(s|u)\.i(8|16|32|64)$"
+    changed = false
+
+    # fold one pair then rescan: each fold removes a call, so this terminates, and rescanning
+    # avoids mutating the instruction stream while iterating it.
+    while true
+        fold = nothing  # (outer, inner, other_operand)
+        for bb in blocks(fun), outer in instructions(bb)
+            outer isa LLVM.CallInst || continue
+            oc = called_operand(outer)
+            (oc isa LLVM.Function && match(pat, LLVM.name(oc)) !== nothing) || continue
+            oargs = arguments(outer)
+            length(oargs) == 2 || continue
+            for i in 1:2
+                inner = oargs[i]
+                inner isa LLVM.CallInst || continue
+                ic = called_operand(inner)
+                # same builtin (name pins down min/max, signedness and width)
+                (ic isa LLVM.Function && LLVM.name(ic) == LLVM.name(oc)) || continue
+                # inner must feed only this outer, else folding it would drop a live value
+                length(collect(uses(inner))) == 1 || continue
+                fold = (outer, inner, oargs[i == 1 ? 2 : 1])
+                break
+            end
+            fold === nothing || break
+        end
+        fold === nothing && break
+
+        outer, inner, other = fold
+        m = match(pat, LLVM.name(called_operand(outer)))
+        fn3 = "air.$(m[1])3.$(m[2]).i$(m[3])"
+        T = value_type(outer)
+        ft3 = LLVM.FunctionType(T, LLVMType[T, T, T])
+        f3 = haskey(functions(mod), fn3) ? functions(mod)[fn3] : LLVM.Function(mod, fn3, ft3)
+        iargs = arguments(inner)
+        @dispose builder=IRBuilder() begin
+            position!(builder, outer)
+            debuglocation!(builder, outer)
+            v = call!(builder, ft3, f3, LLVM.Value[iargs[1], iargs[2], other])
+            replace_uses!(outer, v)
+            erase!(outer)
+            erase!(inner)   # now dead (its only use was `outer`)
+        end
+        changed = true
+    end
+    return changed
+end
+
 # replace LLVM intrinsics with AIR equivalents
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
 
-    # TODO: fastmath
-
     mod = LLVM.parent(fun)
     changed = false
+
+    # AIR lacks vector min/max intrinsics; scalarize so the per-call lowering below applies.
+    changed |= scalarize_vector_minmax!(fun)
+
+    # lower the floating-point math intrinsics Julia emits (sqrt, fma, floor, ...) to their
+    # AIR device functions, picking the relaxed `air.fast_*` variant for `afn`-flagged calls.
+    changed |= lower_math_intrinsics!(fun)
 
     # determine worklist
     worklist = LLVM.CallBase[]
@@ -1179,6 +1368,41 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 fn *= "." * type_suffix(typ)
             end
 
+            # AIR's value intrinsics take only the value operands. `llvm.abs` carries an extra
+            # `i1 is_int_min_poison` flag that `air.abs` does not, so drop any operand whose
+            # type isn't the result type before building the call. (For the others every
+            # operand is the result type, so this is a no-op.)
+            air_args = LLVM.Value[a for a in arguments(call) if value_type(a) == typ]
+            air_ft = LLVM.FunctionType(typ, LLVMType[typ for _ in air_args])
+            new_intr = if haskey(functions(mod), fn)
+                functions(mod)[fn]
+            else
+                LLVM.Function(mod, fn, air_ft)
+            end
+            @dispose builder=IRBuilder() begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                new_value = call!(builder, air_ft, new_intr, air_args)
+                replace_uses!(call, new_value)
+                erase!(call)
+                changed = true
+            end
+        end
+
+        # integer bit intrinsics: pure renames to AIR's builtin names (same signature, including
+        # the `i1` on clz/ctz). Apple's frontend emits these `air.*` rather than the `llvm.*`
+        # forms, so we rename rather than rely on the metallib loader accepting `llvm.*`.
+        bit_renames = Dict(
+            LLVM.Intrinsic("llvm.ctlz")       => ("llvm.ctlz",       "air.clz"),
+            LLVM.Intrinsic("llvm.cttz")       => ("llvm.cttz",       "air.ctz"),
+            LLVM.Intrinsic("llvm.ctpop")      => ("llvm.ctpop",      "air.popcount"),
+            LLVM.Intrinsic("llvm.bitreverse") => ("llvm.bitreverse", "air.reverse_bits"),
+        )
+        if haskey(bit_renames, intr)
+            llvm_base, air_base = bit_renames[intr]
+            # keep the mangled type suffix, e.g. llvm.ctlz.i32 -> air.clz.i32
+            fn = air_base * LLVM.name(call_fun)[length(llvm_base)+1:end]
             new_intr = if haskey(functions(mod), fn)
                 functions(mod)[fn]
             else
@@ -1249,16 +1473,27 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 error("Unsupported maximum/minimum type: $typ")
             end
 
-            # create a function that performs the IEEE-compliant operation.
-            # normally we'd do this inline, but LLVM.jl doesn't have BB split functionality.
-            new_intr_fn = if is_minimum
-                "air.minimum.f$(8*sizeof(jltyp))"
+            # @fastmath / fastmath=true set `nnan` (assume no NaNs), so we can skip the
+            # NaN-propagating wrapper and call the relaxed AIR builtin directly, matching Apple's
+            # -ffast-math: f32 has air.fast_f{min,max}; f16 has no fast form, so use air.f{min,max}.
+            fast_fn = if !LLVM.fast_math(call).nnan
+                nothing
+            elseif typ == LLVM.FloatType()
+                is_minimum ? "air.fast_fmin.f32" : "air.fast_fmax.f32"
             else
-                "air.maximum.f$(8*sizeof(jltyp))"
+                is_minimum ? "air.fmin.f$(8*sizeof(jltyp))" : "air.fmax.f$(8*sizeof(jltyp))"
             end
+
+            # otherwise create a function that performs the IEEE-compliant operation. normally
+            # we'd do this inline, but LLVM.jl doesn't have BB split functionality.
+            new_intr_fn = something(fast_fn, is_minimum ? "air.minimum.f$(8*sizeof(jltyp))" :
+                                                          "air.maximum.f$(8*sizeof(jltyp))")
 
             if haskey(functions(mod), new_intr_fn)
                 new_intr = functions(mod)[new_intr_fn]
+            elseif fast_fn !== nothing
+                # relaxed builtin: just declare it, no wrapper needed
+                new_intr = LLVM.Function(mod, new_intr_fn, call_ft)
             else
                 new_intr = LLVM.Function(mod, new_intr_fn, call_ft)
                 push!(function_attributes(new_intr), EnumAttribute("alwaysinline"))
@@ -1350,6 +1585,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             end
         end
     end
+
+    # fuse chained integer min/max (now lowered to air.min/max) into AIR's 3-way builtins
+    changed |= fuse_minmax3!(fun)
 
     return changed
 end

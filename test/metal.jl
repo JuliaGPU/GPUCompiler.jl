@@ -520,4 +520,292 @@ end
     end
 end
 
+@testset "vector min/max scalarization" begin
+    # AIR has no vector floating-point min/max intrinsic, only scalar air.fmin/air.fmax. Julia's
+    # NaN-propagating min/max lower to llvm.minimum/llvm.maximum (and llvm.minnum/llvm.maxnum),
+    # which LLVM's vectorizers can widen to vector form. Lowering a vector intrinsic directly
+    # would emit a nonexistent air.fmin.v4f32-style call (minnum/maxnum) or hit an unsupported-
+    # type error (minimum/maximum), so we scalarize into element-wise scalar intrinsic calls.
+    is_vec_minmax(i) = i isa LLVM.CallBase && value_type(i) isa LLVM.VectorType &&
+        called_operand(i) isa LLVM.Function &&
+        LLVM.isintrinsic(called_operand(i)) &&
+        LLVM.Intrinsic(called_operand(i)) in
+            LLVM.Intrinsic.(["llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum"])
+
+    Context() do ctx
+        ir = """
+        declare <4 x float> @llvm.minimum.v4f32(<4 x float>, <4 x float>)
+        declare <2 x float> @llvm.maxnum.v2f32(<2 x float>, <2 x float>)
+        define <4 x float> @f(<4 x float> %a, <4 x float> %b, <2 x float> %c, <2 x float> %d) {
+        entry:
+          %mn = call <4 x float> @llvm.minimum.v4f32(<4 x float> %a, <4 x float> %b)
+          %mx = call <2 x float> @llvm.maxnum.v2f32(<2 x float> %c, <2 x float> %d)
+          %e0 = extractelement <2 x float> %mx, i32 0
+          %r = insertelement <4 x float> %mn, float %e0, i32 0
+          ret <4 x float> %r
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f = functions(mod)["f"]
+        insts() = [i for bb in blocks(f) for i in instructions(bb)]
+
+        # precondition: a vector minimum (width 4) and a vector maxnum (width 2)
+        @test count(is_vec_minmax, insts()) == 2
+
+        @test GPUCompiler.scalarize_vector_minmax!(f)
+
+        # no vector min/max calls survive; each is replaced by per-lane scalar intrinsic calls
+        @test count(is_vec_minmax, insts()) == 0
+        scalar_calls = filter(insts()) do i
+            i isa LLVM.CallBase && value_type(i) == LLVM.FloatType() &&
+                called_operand(i) isa LLVM.Function &&
+                LLVM.isintrinsic(called_operand(i))
+        end
+        @test length(scalar_calls) == 6   # 4 from the v4f32 + 2 from the v2f32
+        @test Set(LLVM.name(called_operand(c)) for c in scalar_calls) ==
+            Set(["llvm.minimum.f32", "llvm.maxnum.f32"])
+        @test (verify(mod); true)
+    end
+
+    # a scalar min/max is already lowerable and must be left untouched
+    Context() do ctx
+        ir = """
+        declare float @llvm.minimum.f32(float, float)
+        define float @g(float %a, float %b) {
+          %r = call float @llvm.minimum.f32(float %a, float %b)
+          ret float %r
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        @test !GPUCompiler.scalarize_vector_minmax!(functions(mod)["g"])
+        @test (verify(mod); true)
+    end
+end
+
+@testset "math intrinsic lowering" begin
+    # Front-ends emit plain LLVM math intrinsics; the back-end lowers them to AIR device
+    # functions. Precise `air.<op>` by default; the relaxed, f32-only `air.fast_<op>` when the
+    # call is `afn`-flagged (set per-op by @fastmath or module-wide by apply_fastmath!). This
+    # lets Metal.jl drop its hand-written air.* overrides for these ops. `round` is included
+    # via llvm.rint (Julia lowers round-to-even to it).
+    function called_names(f)
+        names = String[]
+        for bb in blocks(f), i in instructions(bb)
+            i isa LLVM.CallBase || continue
+            c = called_operand(i)
+            c isa LLVM.Function && push!(names, LLVM.name(c))
+        end
+        names
+    end
+
+    Context() do ctx
+        ir = """
+        declare float @llvm.sqrt.f32(float)
+        declare half  @llvm.sqrt.f16(half)
+        declare float @llvm.floor.f32(float)
+        declare float @llvm.ceil.f32(float)
+        declare float @llvm.trunc.f32(float)
+        declare float @llvm.rint.f32(float)
+        declare float @llvm.fma.f32(float, float, float)
+        declare half  @llvm.fma.f16(half, half, half)
+        declare <4 x float> @llvm.sqrt.v4f32(<4 x float>)
+        define void @f(float %x, half %h, <4 x float> %v) {
+          %a = call float @llvm.sqrt.f32(float %x)
+          %b = call afn float @llvm.sqrt.f32(float %x)
+          %c = call afn half @llvm.sqrt.f16(half %h)
+          %d = call float @llvm.floor.f32(float %x)
+          %d2 = call afn float @llvm.floor.f32(float %x)
+          %e = call float @llvm.ceil.f32(float %x)
+          %g = call float @llvm.trunc.f32(float %x)
+          %i = call float @llvm.rint.f32(float %x)
+          %j = call float @llvm.fma.f32(float %x, float %x, float %x)
+          %l = call half @llvm.fma.f16(half %h, half %h, half %h)
+          %k = call <4 x float> @llvm.sqrt.v4f32(<4 x float> %v)
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f = functions(mod)["f"]
+        @test GPUCompiler.lower_math_intrinsics!(f)
+        names = called_names(f)
+
+        # precise by default; relaxed only for the f32 afn-flagged sqrt
+        @test "air.sqrt.f32" in names
+        @test "air.fast_sqrt.f32" in names
+        # f16 has no fast variant, so afn still maps to the precise op
+        @test "air.sqrt.f16" in names
+        @test !("air.fast_sqrt.f16" in names)
+        # rounding ops have fast f32 variants too (selected for the afn floor)
+        @test "air.floor.f32" in names
+        @test "air.fast_floor.f32" in names
+        @test "air.ceil.f32" in names
+        @test "air.trunc.f32" in names
+        @test "air.rint.f32" in names      # Julia's round arrives as llvm.rint
+        # fma has both f16 and f32 precise forms, and no fast variant
+        @test "air.fma.f32" in names
+        @test "air.fma.f16" in names
+        @test !("air.fast_fma.f32" in names)
+        # no scalar llvm.* math intrinsics survive; the vector one is left (no air.<op>.v4f32)
+        @test !any(n -> startswith(n, "llvm.") && !endswith(n, "v4f32"), names)
+        @test "llvm.sqrt.v4f32" in names
+        @test (verify(mod); true)
+    end
+
+    # apply_fastmath! flags every FP op `afn` (target.fastmath path), so even calls written
+    # without @fastmath lower to the relaxed variant.
+    Context() do ctx
+        ir = """
+        declare float @llvm.sqrt.f32(float)
+        define float @f(float %x) {
+          %a = call float @llvm.sqrt.f32(float %x)
+          ret float %a
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        GPUCompiler.apply_fastmath!(mod)
+        f = functions(mod)["f"]
+        @test GPUCompiler.lower_math_intrinsics!(f)
+        @test "air.fast_sqrt.f32" in called_names(f)
+        @test (verify(mod); true)
+    end
+end
+
+@testset "integer intrinsic lowering" begin
+    # The integer ops Julia emits as llvm.* are lowered to their AIR builtins, so Metal.jl need
+    # not wrap them. Names/signatures verified against Apple's frontend:
+    #   llvm.abs (value,i1)  -> air.abs.{s,u}.iN(value)   (the i1 poison flag is dropped)
+    #   llvm.{s,u}{min,max}  -> air.{min,max}.{s,u}.iN
+    #   llvm.ctlz (v,i1)     -> air.clz.iN(v,i1)          (pure renames, i1 kept)
+    #   llvm.cttz (v,i1)     -> air.ctz.iN(v,i1)
+    #   llvm.ctpop           -> air.popcount.iN
+    #   llvm.bitreverse      -> air.reverse_bits.iN
+    km = @eval module $(gensym())
+        f() = return
+    end
+    job, _ = Metal.create_job(km.f, Tuple{})
+
+    Context() do ctx
+        ir = """
+        declare i32 @llvm.abs.i32(i32, i1)
+        declare i32 @llvm.smin.i32(i32, i32)
+        declare i32 @llvm.umax.i32(i32, i32)
+        declare i32 @llvm.ctlz.i32(i32, i1)
+        declare i32 @llvm.cttz.i32(i32, i1)
+        declare i32 @llvm.ctpop.i32(i32)
+        declare i32 @llvm.bitreverse.i32(i32)
+        define void @f(i32 %x, i32 %y) {
+          %a = call i32 @llvm.abs.i32(i32 %x, i1 true)
+          %b = call i32 @llvm.smin.i32(i32 %x, i32 %y)
+          %c = call i32 @llvm.umax.i32(i32 %x, i32 %y)
+          %d = call i32 @llvm.ctlz.i32(i32 %x, i1 false)
+          %e = call i32 @llvm.cttz.i32(i32 %x, i1 false)
+          %g = call i32 @llvm.ctpop.i32(i32 %x)
+          %h = call i32 @llvm.bitreverse.i32(i32 %x)
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f = functions(mod)["f"]
+        GPUCompiler.lower_llvm_intrinsics!(job, f)
+
+        sigs = Dict{String,String}()
+        for bb in blocks(f), i in instructions(bb)
+            i isa LLVM.CallBase || continue
+            c = called_operand(i)
+            c isa LLVM.Function && (sigs[LLVM.name(c)] = string(LLVM.function_type(c)))
+        end
+        # abs drops the i1 poison operand
+        @test haskey(sigs, "air.abs.s.i32") && sigs["air.abs.s.i32"] == "i32 (i32)"
+        @test haskey(sigs, "air.min.s.i32") && sigs["air.min.s.i32"] == "i32 (i32, i32)"
+        @test haskey(sigs, "air.max.u.i32")
+        # clz/ctz keep the i1; popcount/reverse_bits are single-operand
+        @test haskey(sigs, "air.clz.i32") && sigs["air.clz.i32"] == "i32 (i32, i1)"
+        @test haskey(sigs, "air.ctz.i32") && sigs["air.ctz.i32"] == "i32 (i32, i1)"
+        @test haskey(sigs, "air.popcount.i32") && sigs["air.popcount.i32"] == "i32 (i32)"
+        @test haskey(sigs, "air.reverse_bits.i32")
+        # no llvm.* intrinsics survive
+        @test !any(startswith(n, "llvm.") for n in keys(sigs))
+        @test (verify(mod); true)
+    end
+end
+
+@testset "fast-math min/max lowering" begin
+    # Base min/max -> llvm.minimum/maximum lower to a NaN-propagating wrapper (air.minimum/
+    # maximum, which falls back to air.fmin/fmax). @fastmath/fastmath set `nnan`, so the relaxed
+    # air.fast_fmin/fmax (f32) — or bare air.fmin/fmax for f16, which has no fast form — are used.
+    km = @eval module $(gensym())
+        f() = return
+    end
+    job, _ = Metal.create_job(km.f, Tuple{})
+    names(f) = [LLVM.name(called_operand(i)) for bb in blocks(f) for i in instructions(bb)
+                if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
+
+    Context() do ctx
+        ir = """
+        declare float @llvm.minimum.f32(float, float)
+        declare half  @llvm.maximum.f16(half, half)
+        define void @f(float %x, float %y, half %a, half %b) {
+          %p = call float @llvm.minimum.f32(float %x, float %y)        ; precise -> wrapper
+          %q = call nnan float @llvm.minimum.f32(float %x, float %y)   ; fast -> air.fast_fmin
+          %r = call nnan half @llvm.maximum.f16(half %a, half %b)      ; fast f16 -> air.fmax (no fast)
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir); f = functions(mod)["f"]
+        GPUCompiler.lower_llvm_intrinsics!(job, f)
+        ns = names(f)
+        @test "air.minimum.f32" in ns          # precise: NaN-propagating wrapper
+        @test "air.fast_fmin.f32" in ns        # @fastmath f32: relaxed
+        @test "air.fmax.f16" in ns             # @fastmath f16: no fast form, bare builtin
+        @test !("air.fast_fmax.f16" in ns)
+        @test !any(startswith(n, "llvm.") for n in ns)
+        @test (verify(mod); true)
+    end
+end
+
+@testset "integer min/max fusion" begin
+    # chained integer min/max (e.g. min(a,b,c) reduced to nested 2-arg calls) is fused to AGX's
+    # 3-way air.{min,max}3 builtin, but only when the inner result feeds just the outer and both
+    # are the same builtin.
+    names(f) = [LLVM.name(called_operand(i)) for bb in blocks(f) for i in instructions(bb)
+                if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
+    Context() do ctx
+        ir = """
+        declare i32 @air.min.s.i32(i32, i32)
+        declare i32 @air.max.u.i32(i32, i32)
+        define i32 @fold(i32 %a, i32 %b, i32 %c) {
+          %i = call i32 @air.min.s.i32(i32 %a, i32 %b)
+          %o = call i32 @air.min.s.i32(i32 %i, i32 %c)
+          ret i32 %o
+        }
+        define i32 @fold_arg2(i32 %a, i32 %b, i32 %c) {
+          %i = call i32 @air.max.u.i32(i32 %a, i32 %b)
+          %o = call i32 @air.max.u.i32(i32 %c, i32 %i)
+          ret i32 %o
+        }
+        define i32 @multiuse(i32 %a, i32 %b, i32 %c, i32* %p) {
+          %i = call i32 @air.min.s.i32(i32 %a, i32 %b)
+          %o = call i32 @air.min.s.i32(i32 %i, i32 %c)
+          store i32 %i, i32* %p
+          ret i32 %o
+        }
+        define i32 @mixed(i32 %a, i32 %b, i32 %c) {
+          %i = call i32 @air.max.u.i32(i32 %a, i32 %b)
+          %o = call i32 @air.min.s.i32(i32 %i, i32 %c)
+          ret i32 %o
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        @test GPUCompiler.fuse_minmax3!(functions(mod)["fold"])
+        @test names(functions(mod)["fold"]) == ["air.min3.s.i32"]
+        @test GPUCompiler.fuse_minmax3!(functions(mod)["fold_arg2"])
+        @test names(functions(mod)["fold_arg2"]) == ["air.max3.u.i32"]
+        # inner feeds a store too -> not fused
+        @test !GPUCompiler.fuse_minmax3!(functions(mod)["multiuse"])
+        # min of a max -> not the same builtin, not fused
+        @test !GPUCompiler.fuse_minmax3!(functions(mod)["mixed"])
+        @test (verify(mod); true)
+    end
+end
+
 end
