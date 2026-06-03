@@ -808,4 +808,68 @@ end
     end
 end
 
+@testset "aggregate load splitting" begin
+    # JuliaGPU/Metal.jl#792: Julia emits a single by-value `load` of a large, deeply-nested
+    # aggregate (an Oceananigans `RectilinearGrid` passed by reference) feeding several
+    # `extractvalue`s, and Apple's AGX back-end crashes lowering that wide load. The pass
+    # rewrites each `extractvalue (load p), idxs` into a narrow field load
+    # `load (inbounds_gep p, 0, idxs)` and deletes the wide load. InstCombine does the same
+    # fold but only for single-use loads, so a multiply-used aggregate load reaches the
+    # back-end intact. (The typed-pointer syntax below parses to opaque pointers too, so this
+    # covers both pointer regimes.)
+    is_aggregate_load(i) = i isa LLVM.LoadInst &&
+        (value_type(i) isa LLVM.StructType || value_type(i) isa LLVM.ArrayType)
+
+    # a multiply-used load, with both a top-level (`,0`) and a nested (`,2,0`) index
+    Context() do ctx
+        ir = """
+        define void @f({ i64, float, { float, i64 } }* %p, i64* %o1, float* %o2) {
+        entry:
+          %agg = load { i64, float, { float, i64 } }, { i64, float, { float, i64 } }* %p, align 8
+          %a = extractvalue { i64, float, { float, i64 } } %agg, 0
+          %b = extractvalue { i64, float, { float, i64 } } %agg, 2, 0
+          store i64 %a, i64* %o1, align 8
+          store float %b, float* %o2, align 4
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
+
+        # precondition: exactly one aggregate-typed load (used by the two extractvalues)
+        @test count(is_aggregate_load, insts()) == 1
+
+        @test GPUCompiler.split_aggregate_loads!(mod)
+
+        # the wide aggregate load and every extractvalue are gone, replaced by narrow loads
+        @test count(is_aggregate_load, insts()) == 0
+        @test !any(i -> i isa LLVM.ExtractValueInst, insts())
+        loads = filter(i -> i isa LLVM.LoadInst, insts())
+        @test length(loads) == 2
+        @test Set(string(value_type(l)) for l in loads) == Set(["i64", "float"])
+        # each field load is fed by an inbounds GEP off the original pointer
+        @test all(l -> operands(l)[1] isa LLVM.GetElementPtrInst, loads)
+        @test (verify(mod); true)
+    end
+
+    # a load with a non-extractvalue use can't be fully eliminated, so it is left alone
+    Context() do ctx
+        ir = """
+        define void @g({ i64, i64 }* %p, { i64, i64 }* %q, i64* %o) {
+        entry:
+          %agg = load { i64, i64 }, { i64, i64 }* %p, align 8
+          %a = extractvalue { i64, i64 } %agg, 0
+          store { i64, i64 } %agg, { i64, i64 }* %q, align 8
+          store i64 %a, i64* %o, align 8
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
+        @test !GPUCompiler.split_aggregate_loads!(mod)
+        @test count(is_aggregate_load, insts()) == 1
+        @test (verify(mod); true)
+    end
+end
+
 end

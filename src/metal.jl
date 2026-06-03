@@ -178,6 +178,79 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     errors
 end
 
+# aggregate load splitting (JuliaGPU/Metal.jl#792)
+#
+# Julia can emit a single by-value `load` of a large, deeply-nested aggregate (e.g. an
+# Oceananigans `RectilinearGrid` passed by reference) that feeds several `extractvalue`s.
+# Apple's AGX back-end crashes during native-code generation when lowering such a wide
+# aggregate load. We rewrite each `extractvalue (load p), idxs` into a narrow field load
+# `load (inbounds_gep p, 0, idxs)` and delete the now-dead wide load, so only per-field
+# loads reach the back-end.
+#
+# This is exactly LLVM's own `extractvalue (load)` -> `load (gep)` fold in InstCombine
+# (visitExtractValueInst), with one difference: InstCombine guards it on the load having a
+# single use, declining multiply-used loads as "a struct with padding [where] we don't want
+# to do the transformation as it loses padding knowledge". That guard is a codegen
+# heuristic (one wide load can be cheaper than N field loads), not a correctness condition,
+# so dropping it is sound — and necessary here, since the crashing pattern is precisely a
+# multiply-used aggregate load that InstCombine therefore leaves intact.
+#
+# Restricted to simple (non-volatile, non-atomic) loads all of whose users are
+# `extractvalue` — the by-value-aggregate-argument pattern — so the wide load can be fully
+# eliminated. Like LLVM's fold, the field loads take their type's natural (ABI) alignment,
+# valid because the aggregate base load is at least that aligned, and AA metadata is copied
+# from the wide load (sound for the narrower field loads it subsumes).
+function split_aggregate_loads!(mod::LLVM.Module)
+    aa_kinds = (LLVM.MD_tbaa, LLVM.MD_tbaa_struct, LLVM.MD_alias_scope, LLVM.MD_noalias)
+    changed = false
+    for f in functions(mod)
+        isdeclaration(f) && continue
+        worklist = LLVM.LoadInst[]
+        for bb in blocks(f), inst in instructions(bb)
+            inst isa LLVM.LoadInst || continue
+            T = value_type(inst)
+            (T isa LLVM.StructType || T isa LLVM.ArrayType) || continue
+            iszero(LLVM.API.LLVMGetVolatile(inst)) || continue
+            LLVM.API.LLVMGetOrdering(inst) == LLVM.API.LLVMAtomicOrderingNotAtomic || continue
+            uselist = collect(uses(inst))
+            isempty(uselist) && continue
+            all(u -> user(u) isa LLVM.ExtractValueInst, uselist) || continue
+            push!(worklist, inst)
+        end
+        for ld in worklist
+            ptr = operands(ld)[1]
+            aggty = value_type(ld)
+            md = metadata(ld)
+            i32 = LLVM.Int32Type()
+            @dispose builder=IRBuilder() begin
+                # build the field loads at the wide load's location, not the extractvalue's
+                position!(builder, ld)
+                for u in collect(uses(ld))
+                    ev = user(u)::LLVM.ExtractValueInst
+                    n = LLVM.API.LLVMGetNumIndices(ev)
+                    idxptr = LLVM.API.LLVMGetIndices(ev)
+                    # extractvalue has integer indices; getelementptr takes Values, prefixed
+                    # with an i32 0 to step through the pointer to the aggregate's first element.
+                    gepidx = LLVM.Value[ConstantInt(i32, 0)]
+                    for k in 1:n
+                        push!(gepidx, ConstantInt(i32, unsafe_load(idxptr, k)))
+                    end
+                    gep = inbounds_gep!(builder, aggty, ptr, gepidx)
+                    fieldload = load!(builder, value_type(ev), gep)
+                    for kind in aa_kinds
+                        haskey(md, kind) && (metadata(fieldload)[kind] = md[kind])
+                    end
+                    replace_uses!(ev, fieldload)
+                    erase!(ev)
+                end
+            end
+            erase!(ld)
+            changed = true
+        end
+    end
+    return changed
+end
+
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
@@ -196,6 +269,10 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         # the constant globals read by out-of-line runtime functions (e.g. the exception
         # reporters) load from the constant space rather than crashing Metal's validator.
         propagate_argument_address_spaces!(mod)
+
+        # split multiply-used by-value aggregate loads into narrow per-field loads; the AGX
+        # back-end crashes during native codegen on wide aggregate loads (#792).
+        split_aggregate_loads!(mod)
 
         # propagate specific address spaces through addrspacecast chains introduced
         # by the rewrites above, so that loads/stores happen in the right address
