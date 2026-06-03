@@ -13,7 +13,7 @@ export PTXCompilerTarget
     ArchFeatures     = 2
 end
 
-Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
+Base.@kwdef struct PTXCompilerTarget{BackendInfo} <: AbstractCompilerTarget
     cap::VersionNumber
     ptx::VersionNumber = v"6.0" # for compatibility with older versions of CUDA.jl
 
@@ -38,6 +38,8 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     # deprecated; remove with next major version
     exitable::Union{Nothing,Bool} = nothing
     unreachable::Union{Nothing,Bool} = nothing
+
+    backendinfo::BackendInfo
 end
 
 function Base.hash(target::PTXCompilerTarget, h::UInt)
@@ -52,6 +54,8 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.blocks_per_sm, h)
     h = hash(target.maxregs, h)
     h = hash(target.fastmath, h)
+
+    h = hash(target.backendinfo, h)
 
     h
 end
@@ -107,7 +111,7 @@ can_vectorize(job::CompilerJob{PTXCompilerTarget}) = true
 
 ## job
 
-function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
+function Base.show(io::IO, @nospecialize(job::CompilerJob{<:PTXCompilerTarget}))
     print(io, "PTX CompilerJob of ", job.source)
     print(io, " for ", cpu_name(job.config.target))
 
@@ -119,16 +123,16 @@ function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
 end
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
-isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
+isintrinsic(@nospecialize(job::CompilerJob{<:PTXCompilerTarget}), fn::String) =
     in(fn, ptx_intrinsics)
 
 # XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
-runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
+runtime_slug(@nospecialize(job::CompilerJob{<:PTXCompilerTarget})) =
     "ptx$(job.config.target.ptx.major)$(job.config.target.ptx.minor)" *
     "-$(cpu_name(job.config.target))" *
     "-debuginfo=$(Int(llvm_debug_info(job)))"
 
-function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+function finish_module!(@nospecialize(job::CompilerJob{<:PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     # tell NVVMReflect whether to flush denormals; this mirrors what Clang does
     # for `-fcuda-flush-denormals-to-zero` and is the only `__nvvm_reflect` key
@@ -255,7 +259,7 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     return entry
 end
 
-function finish_linked_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+function finish_linked_module!(@nospecialize(job::CompilerJob{<:PTXCompilerTarget}),
                                mod::LLVM.Module)
     # propagate `target.fastmath` as `@fastmath`-everywhere semantics
     # (mirrors nvcc's `--use_fast_math`). post-link so that bodies pulled in
@@ -275,7 +279,7 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}
     return
 end
 
-function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+function optimize_module!(@nospecialize(job::CompilerJob{<:PTXCompilerTarget}),
                           mod::LLVM.Module)
     tm = llvm_machine(job.config.target)
     # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
@@ -328,7 +332,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 end
 
-function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+function finish_ir!(@nospecialize(job::CompilerJob{<:PTXCompilerTarget}),
                     mod::LLVM.Module, entry::LLVM.Function)
     if LLVM.version() < v"17"
         for f in functions(mod)
@@ -339,7 +343,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     return entry
 end
 
-function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
+function llvm_debug_info(@nospecialize(job::CompilerJob{<:PTXCompilerTarget}))
     # allow overriding the debug info from CUDA.jl
     if job.config.target.debuginfo
         invoke(llvm_debug_info, Tuple{CompilerJob}, job)
