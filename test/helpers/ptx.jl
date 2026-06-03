@@ -5,7 +5,7 @@ import ..TestRuntime
 
 struct CompilerParams <: AbstractCompilerParams end
 
-PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
+PTXCompilerJob = CompilerJob{<:PTXCompilerTarget,CompilerParams}
 
 struct PTXKernelState
     data::Int64
