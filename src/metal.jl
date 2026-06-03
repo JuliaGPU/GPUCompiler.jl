@@ -725,7 +725,8 @@ end
 
 # copy the call-site attributes (function/return/per-argument) from `src` onto `dst`. the
 # narrowing keeps argument positions unchanged, so they map across one-to-one.
-function copy_callsite_attributes!(dst::LLVM.CallInst, src::LLVM.CallInst)
+function copy_callsite_attributes!(dst::LLVM.CallInst, src::LLVM.CallInst,
+                                   int_ptr_types::Vector{Any})
     for attr in collect(function_attributes(src))
         push!(function_attributes(dst), attr)
     end
@@ -733,6 +734,11 @@ function copy_callsite_attributes!(dst::LLVM.CallInst, src::LLVM.CallInst)
         push!(return_attributes(dst), attr)
     end
     for i in 1:length(arguments(src))
+        # Skip Case B (typed-pointer shim) arguments: `src` passed an integer (the `ptrtoint`
+        # image of a specific-space pointer) whose attributes (e.g. `zeroext`) are invalid on
+        # the retargeted pointer argument. Mirrors the parameter-side handling in
+        # `narrow_pointer_parameters!`, which likewise drops Case B attributes.
+        int_ptr_types[i] !== nothing && continue
         for attr in collect(argument_attributes(src, i))
             push!(argument_attributes(dst, i), attr)
         end
@@ -763,7 +769,7 @@ function rewrite_narrowed_call!(builder::IRBuilder, cs::LLVM.CallInst,
     end
     new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
     callconv!(new_call, callconv(cs))
-    copy_callsite_attributes!(new_call, cs)
+    copy_callsite_attributes!(new_call, cs, int_ptr_types)
     replace_uses!(cs, new_call)
     erase!(cs)
     return new_call

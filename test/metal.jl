@@ -380,6 +380,52 @@ end
         @test (verify(mod); true)
     end
 
+    # typed-pointer shim with an integer-ABI attribute on the boundary: Julia tags the
+    # `ptrtoint` image with `zeroext`, which is invalid once the parameter/argument is
+    # retargeted to a pointer. the pass must drop it on the parameter *and* the call site, or
+    # the module fails verification. (regression: the parameter side was cleaned but the call
+    # site kept its `zeroext`, leaving `i8 addrspace(2)* zeroext` and crashing LLVM
+    # verification of throwing kernels on Julia 1.10/1.11 -- JuliaGPU/Metal.jl device exceptions.)
+    Context() do ctx
+        i8 = LLVM.Int8Type()
+        i64 = LLVM.Int64Type()
+        mod = LLVM.Module("test")
+        callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
+        callee = LLVM.Function(mod, "callee", callee_ft)
+        linkage!(callee, LLVM.API.LLVMInternalLinkage)
+        push!(parameter_attributes(callee, 1), EnumAttribute("zeroext", 0))
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(callee, "entry"))
+            p = inttoptr!(builder, parameters(callee)[1], asptr(0))
+            ret!(builder, load!(builder, i8, p))
+        end
+        g = GlobalVariable(mod, i8, "g", 2)
+        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
+        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        @dispose builder=IRBuilder() begin
+            position!(builder, BasicBlock(caller, "entry"))
+            arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
+            cs = call!(builder, callee_ft, callee, [arg])
+            push!(argument_attributes(cs, 1), EnumAttribute("zeroext", 0))
+            ret!(builder, cs)
+        end
+        @test (verify(mod); true)  # `zeroext` on the i64 boundary is valid pre-narrowing
+
+        if supports_typed_pointers()
+            @test GPUCompiler.propagate_argument_address_spaces!(mod)
+            # the retargeted pointer must not keep the integer's `zeroext`, on either side
+            callee = functions(mod)["callee"]
+            @test !(kind(EnumAttribute("zeroext", 0)) in
+                    kind.(collect(parameter_attributes(callee, 1))))
+            @test all(c -> !(kind(EnumAttribute("zeroext", 0)) in
+                             kind.(collect(argument_attributes(c, 1)))), calls_to(mod, "callee"))
+        else
+            @test !GPUCompiler.propagate_argument_address_spaces!(mod)
+        end
+        @test (verify(mod); true)
+    end
+
     # an integer parameter used as more than a pointer image (here also in arithmetic) is
     # left alone: narrowing it would lose the integer's other uses (and under opaque pointers
     # the typed-pointer shim is off, so it is left alone regardless)
