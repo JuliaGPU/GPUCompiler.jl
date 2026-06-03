@@ -554,40 +554,38 @@ end
 # reporters take `Ptr` arguments) arrives generic and is read with a generic-space load,
 # which crashes Metal's shader validator.
 #
-# This pass is the interprocedural complement. When every caller passes the same kind of
-# value for a generic pointer parameter, `addrspacecast(<ptr in a specific space> ->
-# generic)`, it retargets the parameter to that space, drops the casts at the call sites,
-# and casts back to generic on entry so the body is unchanged. That only relocates a
-# side-effect-free cast across the boundary, so it is trivially correct; the following
-# `InferAddressSpaces` run folds the entry cast away. The source need not be a constant
+# This pass is the interprocedural complement (Phase 2, `propagate_argument_address_spaces_once!`).
+# When every caller passes the same kind of value for a generic pointer parameter,
+# `addrspacecast(<ptr in a specific space> -> generic)`, it retargets the parameter to that space,
+# drops the casts at the call sites, and casts back to generic on entry so the body is unchanged.
+# That only relocates a side-effect-free cast across the boundary, so it is trivially correct; the
+# following `InferAddressSpaces` run folds the entry cast away. The source need not be a constant
 # global; any pointer with a known address space qualifies, so any back-end can run it.
 #
-# TYPED-POINTER SHIM (Julia <= 1.11) -- gated on `supports_typed_pointers(context())` and
-# removable, along with everything else tagged "typed-pointer shim", once 1.12 is the minimum.
-# With typed pointers a `Ptr` argument is lowered to an integer rather than a pointer, so the
-# same boundary crossing arrives as `ptrtoint(addrspacecast(<specific> -> generic))` at the call
-# site, and the body either `inttoptr`s the integer (a leaf reporter that dereferences it) or
-# forwards it on to a further call (a reporter that delegates, e.g. `report_exception_name` ->
-# `report_exception`). Either way the integer is the image of a specific-space pointer, and is
-# retargeted the same way as a generic pointer parameter: it becomes a pointer in the agreed
-# space, the call sites pass the bare source pointer, and entry rebuilds the original integer as
-# `ptrtoint(addrspacecast(param -> generic))`. This is sound for the same reason as the pointer
-# case -- it only relocates a value-preserving cast/round-trip across the boundary, so every use
-# (deref or forward) sees the bit-identical integer. A leaf's cloned `inttoptr` then composes
-# with the rebuilt integer and `InferAddressSpaces` folds the chain to a specific-space load; a
-# delegating function instead re-exposes the `ptrtoint(addrspacecast(...))` shape at its
-# forwarded call, which the next sweep narrows in turn (see the fixed point below). (Without
-# this the leftover `ptrtoint(addrspacecast(...))` feeds a generic-space load that, e.g., the
-# LLVM-16 Metal bitcode downgrade miscompiles into an invalid metallib — JuliaGPU/Metal.jl
-# device exceptions on Julia 1.11.)
+# Narrowing one function makes its body forward an `addrspacecast`-from-specific to the functions
+# it calls, exposing them in turn, so we iterate to a fixed point; a constant thus reaches an
+# arbitrarily deep callee (e.g. an exception reporter that delegates to another) regardless of the
+# order functions are visited in. This terminates: each sweep that changes anything strictly
+# reduces the number of narrowable generic-pointer parameters, and narrowing never introduces one.
 #
-# Narrowing one function makes its body forward an `addrspacecast`-from-specific (Case A) or, in
-# the shim, a `ptrtoint(addrspacecast(...))` (Case B) to the functions it calls, exposing them
-# in turn. We therefore iterate to a fixed point so a constant reaches an arbitrarily deep callee
-# (e.g. an exception reporter that delegates to another) regardless of the order functions are
-# visited in. This terminates: each sweep that changes anything strictly reduces the number of
-# narrowable (generic-pointer or, in the shim, integer-image) parameters in the module, and
-# narrowing never introduces a new one.
+# TYPED-POINTER SHIM (Julia <= 1.11) -- delete `convert_intptr_args!` and its call in
+# `propagate_argument_address_spaces!`, along with everything else tagged "typed-pointer shim",
+# once 1.12 is the minimum. Before JuliaLang/julia#53687 (`v"1.12.0-DEV.225"`) a `Ptr` argument is
+# lowered to an integer rather than a pointer -- a separate switch from LLVM's typed/opaque
+# pointers (so the gate keys off the version, not `supports_typed_pointers`; see the gate below).
+# The boundary crossing then arrives as `ptrtoint(addrspacecast(<specific> ->
+# generic))` and the parameter is an `iN` the body either `inttoptr`s (a leaf reporter that
+# dereferences it) or forwards on (a delegator, e.g. `report_exception_name` -> `report_exception`).
+# Rather than teach the narrowing above about integers, a separate first phase (Phase 1,
+# `convert_intptr_args!`) canonicalizes these back to generic pointers: it rewrites each such
+# integer parameter to a generic pointer and strips the `ptrtoint` at the call sites (entry
+# rebuilds the original integer as `ptrtoint(param)`; the cloned `inttoptr` then composes with it
+# and folds away). It is iterated to a fixed point too, so a forwarder is de-integerized before the
+# leaf it feeds re-exposes the `ptrtoint(<generic pointer>)` shape. After Phase 1 every `Ptr`
+# parameter is an ordinary generic pointer -- the same shape as under opaque pointers -- so Phase 2
+# is identical for both. (Without this the leftover generic-space load is miscompiled by the
+# LLVM-16 Metal bitcode downgrade into an invalid metallib -- JuliaGPU/Metal.jl device exceptions
+# on Julia 1.11.)
 
 # If `v` is an `addrspacecast` (instruction or constant expression) of a pointer from a
 # specific (non-generic) address space to the generic one, return that source pointer;
@@ -602,15 +600,17 @@ function addrspacecast_to_generic_source(@nospecialize(v))
     return src
 end
 
-# Typed-pointer shim (Julia <= 1.11) -- remove once 1.12 is the minimum. The typed-pointer
-# counterpart of `addrspacecast_to_generic_source`: with typed pointers a `Ptr` argument is
-# lowered to an integer, so a specific-space pointer crossing a call boundary arrives as
-# `ptrtoint(addrspacecast(<ptr in a specific space> -> generic))` rather than the bare cast. If
-# `v` is that shape, return the specific-space source pointer; otherwise `nothing`.
-function ptrtoint_of_generic_source(@nospecialize(v))
+# Typed-pointer shim (Julia <= 1.11) -- delete with the rest of the shim once 1.12 is the minimum.
+# If `v` is `ptrtoint` of a generic (address space 0) pointer, return that pointer; otherwise
+# `nothing`. This is the integer image of a `Ptr` argument at a call site: `ptrtoint(addrspacecast(
+# <specific> -> generic))` from a direct caller, or `ptrtoint(<the caller's own retargeted generic
+# pointer>)` once a forwarder upstream has been de-integerized.
+function generic_ptr_behind_ptrtoint(@nospecialize(v))
     (v isa LLVM.Instruction || v isa LLVM.ConstantExpr) || return nothing
     opcode(v) == LLVM.API.LLVMPtrToInt || return nothing
-    return addrspacecast_to_generic_source(operands(v)[1])
+    p = operands(v)[1]
+    (value_type(p) isa LLVM.PointerType && addrspace(value_type(p)) == 0) || return nothing
+    return p
 end
 
 # Typed-pointer shim (Julia <= 1.11) -- remove once 1.12 is the minimum. Classify integer
@@ -622,7 +622,7 @@ end
 #     such uses must agree on the result type, which pins the reconstructed pointee); or
 #   * a call argument -- the delegation shape, where the body forwards it on unchanged.
 # A purely-forwarding parameter has no `inttoptr` to pin the pointee, so a canonical generic
-# `i8*` is used: every boundary is a `bitcast`/`ptrtoint`, so the choice only affects the
+# pointer is used: every boundary is a `bitcast`/`ptrtoint`, so the choice only affects the
 # bridging casts, not the reconstructed value. Any other use (arithmetic, comparison, storing
 # the integer, ...) means it is genuinely an integer, so it is left alone -- narrowing it would
 # be value-preserving but pointless, and we have no pointee to reconstruct to.
@@ -642,163 +642,153 @@ function integer_param_pointer_image_type(arg::LLVM.Argument)
         end
     end
     ptrty !== nothing && return ptrty
-    forwarded && return LLVM.PointerType(LLVM.Int8Type())
+    # a pure forwarder has no `inttoptr` to pin the pointee, so use a canonical generic pointer
+    # (opaque `ptr`, or `i8*` under typed pointers)
+    forwarded && return supports_typed_pointers(context()) ? LLVM.PointerType(LLVM.Int8Type()) :
+                                                             LLVM.PointerType()
     return nothing
 end
 
+# the direct call sites of `f`, or `nothing` if any use is not a direct call we can rewrite.
+# rewriting a signature is only sound with no callers outside the module; by `finish_ir!` the
+# pipeline has internalized everything but the kernel entrypoints, so the runtime helpers qualify.
+function direct_callsites(f::LLVM.Function)
+    callsites = LLVM.CallInst[]
+    for use in uses(f)
+        v = user(use)
+        (v isa LLVM.CallInst && called_operand(v) == f) || return nothing
+        push!(callsites, v)
+    end
+    return isempty(callsites) ? nothing : callsites
+end
+
+# a function whose signature we may rewrite: it has a body and local (internal/private) linkage.
+retargetable(f::LLVM.Function) =
+    !isempty(blocks(f)) &&
+    linkage(f) in (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage)
+
+# retarget a pointer type to address space `as`, taking its pointee from `srcptr` (only needed for
+# typed pointers; `eltype` is invalid on opaque ones, so keep it lazy)
+retarget_pointer(as::Integer, srcptr::LLVM.PointerType) =
+    supports_typed_pointers(context()) ? LLVM.PointerType(eltype(srcptr), as) :
+                                         LLVM.PointerType(as)
+
+# the single source address space every call site's argument `i` is reached from via `extract`,
+# or `-1` if they disagree or any does not have the expected shape.
+function agreed_source_addrspace(callsites, i, extract)
+    as = -1
+    for cs in callsites
+        src = extract(arguments(cs)[i])
+        src === nothing && return -1
+        src_as = addrspace(value_type(src))
+        as == -1 ? (as = src_as) : (as == src_as || return -1)
+    end
+    return as
+end
+
+# typed-pointer shim (Julia <= 1.11): bridge a pointee-type mismatch when unwrapping the integer
+bitcast_if_needed(builder, v, t) = value_type(v) == t ? v : bitcast!(builder, v, t)
+
+# Phase 1 (typed-pointer shim, Julia <= 1.11): a single de-integerization sweep. With typed
+# pointers a `Ptr` argument is lowered to an integer; rewrite every internal parameter that is the
+# integer image of a pointer (used only via `inttoptr` or forwarded on) back to a generic pointer,
+# stripping the `ptrtoint` at the call sites. Iterated to a fixed point in `convert_intptr_args!`
+# so a forwarder is de-integerized before the leaf it feeds. Returns whether anything changed.
+function convert_intptr_args_once!(mod::LLVM.Module)
+    changed = false
+    for f in collect(functions(mod))
+        retargetable(f) || continue
+        callsites = direct_callsites(f)
+        callsites === nothing && continue
+        param_types = parameters(function_type(f))
+        new_types = Vector{Any}(nothing, length(param_types))
+        for (i, pty) in enumerate(param_types)
+            pty isa LLVM.IntegerType || continue
+            ptrty = integer_param_pointer_image_type(parameters(f)[i])
+            ptrty === nothing && continue
+            # only when every caller already passes `ptrtoint(<generic pointer>)` we can unwrap
+            all(cs -> generic_ptr_behind_ptrtoint(arguments(cs)[i]) !== nothing, callsites) || continue
+            new_types[i] = ptrty
+        end
+        any(!isnothing, new_types) || continue
+        rewrite_parameters!(mod, f, callsites; new_types,
+            rebuild_entry = (b, p, i) -> ptrtoint!(b, p, param_types[i]),
+            rewrite_arg   = (b, a, i) -> bitcast_if_needed(b, generic_ptr_behind_ptrtoint(a), new_types[i]),
+            keep_attrs    = false)
+        changed = true
+    end
+    return changed
+end
+
+# typed-pointer shim (Julia <= 1.11) -- delete with the rest of the shim once 1.12 is the minimum.
+function convert_intptr_args!(mod::LLVM.Module)
+    changed = false
+    while convert_intptr_args_once!(mod)
+        changed = true
+    end
+    return changed
+end
+
+# Phase 2: a single address-space narrowing sweep. Retarget every generic pointer parameter that
+# all callers feed `addrspacecast(<specific> -> generic)` from the same space, to that space.
+# Returns whether anything changed.
+function propagate_argument_address_spaces_once!(mod::LLVM.Module)
+    changed = false
+    for f in collect(functions(mod))
+        retargetable(f) || continue
+        callsites = direct_callsites(f)
+        callsites === nothing && continue
+        param_types = parameters(function_type(f))
+        new_types = Vector{Any}(nothing, length(param_types))
+        for (i, pty) in enumerate(param_types)
+            (pty isa LLVM.PointerType && addrspace(pty) == 0) || continue
+            as = agreed_source_addrspace(callsites, i, addrspacecast_to_generic_source)
+            as > 0 && (new_types[i] = retarget_pointer(as, pty))
+        end
+        any(!isnothing, new_types) || continue
+        rewrite_parameters!(mod, f, callsites; new_types,
+            rebuild_entry = (b, p, i) -> addrspacecast!(b, p, param_types[i]),
+            rewrite_arg   = (b, a, i) -> addrspacecast_to_generic_source(a),
+            keep_attrs    = true)
+        changed = true
+    end
+    return changed
+end
+
+# interprocedural address-space narrowing (see the comment above). Under typed pointers, first
+# canonicalize integer-image `Ptr` parameters to generic pointers (Phase 1) so the narrowing
+# (Phase 2) needs no integer handling; both run to a fixed point. Returns whether anything changed.
 function propagate_argument_address_spaces!(mod::LLVM.Module)
     changed = false
+    # the shim is needed exactly when Julia lowers `Ptr` arguments to integers: before
+    # JuliaLang/julia#53687 (`v"1.12.0-DEV.225"`). that is a separate switch from LLVM's
+    # typed/opaque pointers, so gate on the version, not `supports_typed_pointers` -- they agree
+    # on releases but can diverge (opaque pointers could be enabled while `Ptr` is still an integer).
+    if VERSION < v"1.12.0-DEV.225"
+        changed |= convert_intptr_args!(mod)
+    end
     while propagate_argument_address_spaces_once!(mod)
         changed = true
     end
     return changed
 end
 
-# a single narrowing sweep over the module; returns whether anything changed.
-function propagate_argument_address_spaces_once!(mod::LLVM.Module)
-    changed = false
-    for f in collect(functions(mod))
-        isempty(blocks(f)) && continue          # only functions we can rewrite (have a body)
-
-        # rewriting a signature is only sound with no callers outside the module, so require
-        # local (internal/private) linkage. by `finish_ir!` the pipeline has internalized
-        # everything but the kernel entrypoints, so the runtime helpers we target qualify.
-        linkage(f) in (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage) || continue
-
-        param_types = parameters(function_type(f))
-
-        # collect call sites; bail unless every use is a direct call we can update
-        callsites = LLVM.CallInst[]
-        only_calls = true
-        for use in uses(f)
-            v = user(use)
-            if v isa LLVM.CallInst && called_operand(v) == f
-                push!(callsites, v)
-            else
-                only_calls = false
-                break
-            end
-        end
-        (only_calls && !isempty(callsites)) || continue
-
-        # for each narrowable parameter, find the address space its callers agree on. a
-        # generic pointer parameter is passed as `addrspacecast(<specific> -> generic)`; with
-        # typed pointers a `Ptr` argument is instead an integer passed as `ptrtoint` of that
-        # cast (`int_ptr_types[i]` records the pointer it is reconstructed to, marking Case B).
-        new_addrspaces = fill(-1, length(param_types))
-        int_ptr_types = Vector{Any}(nothing, length(param_types))
-        for (i, pty) in enumerate(param_types)
-            extract = if pty isa LLVM.PointerType && addrspace(pty) == 0
-                addrspacecast_to_generic_source
-            # typed-pointer shim (Julia <= 1.11) -- remove once 1.12 is the minimum. under opaque
-            # pointers a `Ptr` stays a generic pointer (Case A above), so this only matters here.
-            elseif supports_typed_pointers(context()) && pty isa LLVM.IntegerType &&
-                   integer_param_pointer_image_type(parameters(f)[i]) !== nothing
-                ptrtoint_of_generic_source
-            else
-                continue
-            end
-            as = -1
-            for cs in callsites
-                src = extract(arguments(cs)[i])
-                if src === nothing
-                    as = -1; break
-                end
-                src_as = addrspace(value_type(src))
-                as == -1 ? (as = src_as) : (as == src_as || (as = -1; break))
-            end
-            if as > 0
-                new_addrspaces[i] = as
-                # typed-pointer shim (Julia <= 1.11): an integer candidate only gets here under
-                # `supports_typed_pointers`, so record the pointer it reconstructs to (Case B).
-                pty isa LLVM.IntegerType &&
-                    (int_ptr_types[i] = integer_param_pointer_image_type(parameters(f)[i]))
-            end
-        end
-        any(>=(0), new_addrspaces) || continue
-
-        narrow_pointer_parameters!(mod, f, new_addrspaces, int_ptr_types, callsites)
-        changed = true
-    end
-    return changed
-end
-
-# copy the call-site attributes (function/return/per-argument) from `src` onto `dst`. the
-# narrowing keeps argument positions unchanged, so they map across one-to-one.
-function copy_callsite_attributes!(dst::LLVM.CallInst, src::LLVM.CallInst,
-                                   int_ptr_types::Vector{Any})
-    for attr in collect(function_attributes(src))
-        push!(function_attributes(dst), attr)
-    end
-    for attr in collect(return_attributes(src))
-        push!(return_attributes(dst), attr)
-    end
-    for i in 1:length(arguments(src))
-        # Skip Case B (typed-pointer shim) arguments: `src` passed an integer (the `ptrtoint`
-        # image of a specific-space pointer) whose attributes (e.g. `zeroext`) are invalid on
-        # the retargeted pointer argument. Mirrors the parameter-side handling in
-        # `narrow_pointer_parameters!`, which likewise drops Case B attributes.
-        int_ptr_types[i] !== nothing && continue
-        for attr in collect(argument_attributes(src, i))
-            push!(argument_attributes(dst, i), attr)
-        end
-    end
-    return dst
-end
-
-# rewrite a single call so it targets `new_f`/`new_ft`, passing the un-casted source value
-# for each retargeted argument (and the original argument otherwise). Preserves calling
-# convention, operand bundles and attributes; replaces and erases the old call.
-function rewrite_narrowed_call!(builder::IRBuilder, cs::LLVM.CallInst,
-                                new_f::LLVM.Function, new_ft::LLVM.FunctionType,
-                                new_addrspaces::Vector{Int}, int_ptr_types::Vector{Any})
-    position!(builder, cs)
-    new_param_types = parameters(new_ft)
-    new_args = LLVM.Value[]
-    for (i, arg) in enumerate(arguments(cs))
-        if new_addrspaces[i] < 0
-            push!(new_args, arg)
-        elseif int_ptr_types[i] !== nothing
-            # Case B (typed-pointer shim): strip the `ptrtoint` then the cast, and bitcast the
-            # bare specific-space pointer to the retargeted parameter's pointer type
-            src = addrspacecast_to_generic_source(operands(arg)[1])
-            push!(new_args, bitcast!(builder, src, new_param_types[i]))
-        else
-            push!(new_args, addrspacecast_to_generic_source(arg))
-        end
-    end
-    new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
-    callconv!(new_call, callconv(cs))
-    copy_callsite_attributes!(new_call, cs, int_ptr_types)
-    replace_uses!(cs, new_call)
-    erase!(cs)
-    return new_call
-end
-
-# Clone `f` with the pointer parameters listed in `new_addrspaces` (index => address space,
-# `-1` to leave alone) retargeted to those address spaces, casting each retargeted parameter
-# back to generic on entry so the cloned body is unchanged. Rewrite `callsites` to pass the
-# un-casted source value for each retargeted argument; recursive self-calls are handled too.
-function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
-                                    new_addrspaces::Vector{Int}, int_ptr_types::Vector{Any},
-                                    callsites)
+# Clone `f`, retargeting each parameter `i` for which `new_types[i] !== nothing` to that type. A
+# retargeted parameter's cloned body must keep seeing a value of the original type, so a fresh
+# entry block rebuilds it via `rebuild_entry(builder, new_param, i)` -- only a value-preserving
+# cast or round-trip relocated across the boundary -- and the body is cloned to use that (a later
+# `InferAddressSpaces`/instcombine folds it away). Each call site's argument `i` is replaced by
+# `rewrite_arg(builder, old_arg, i)`. Parameter and call-site argument attributes survive only
+# where `keep_attrs`; dropping them lets the typed-pointer shim shed integer attributes (e.g.
+# `zeroext`) that are invalid once the parameter is a pointer. Direct and self-recursive calls are
+# rewritten; `f` is replaced by the clone and erased.
+function rewrite_parameters!(mod::LLVM.Module, f::LLVM.Function, callsites;
+                             new_types::Vector, rebuild_entry, rewrite_arg, keep_attrs::Bool)
     ft = function_type(f)
-    # retarget a pointer to address space `as`, taking its pointee from `srcptr` (only needed
-    # for typed pointers; `eltype` is invalid on opaque ones, so keep it lazy)
-    retarget(as::Integer, srcptr::LLVM.PointerType) =
-        supports_typed_pointers(context()) ? LLVM.PointerType(eltype(srcptr), as) :
-                                             LLVM.PointerType(as)
-    # the retargeted parameter type: for a pointer parameter (Case A) keep its pointee; for an
-    # integer parameter (Case B, typed-pointer shim) use the pointee of the pointer its body
-    # reconstructs (or the canonical `i8*` when it only forwards).
-    new_param_type(i, param_typ) =
-        new_addrspaces[i] < 0 ? param_typ :
-        int_ptr_types[i] !== nothing ?
-            retarget(new_addrspaces[i], int_ptr_types[i]::LLVM.PointerType) :
-            retarget(new_addrspaces[i], param_typ::LLVM.PointerType)
-    new_types = LLVM.LLVMType[new_param_type(i, param_typ)
-                              for (i, param_typ) in enumerate(parameters(ft))]
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    param_types = parameters(ft)
+    new_ptypes = LLVM.LLVMType[something(new_types[i], pty)
+                               for (i, pty) in enumerate(param_types)]
+    new_ft = LLVM.FunctionType(return_type(ft), new_ptypes)
 
     new_f = LLVM.Function(mod, "", new_ft)
     linkage!(new_f, linkage(f))
@@ -807,63 +797,44 @@ function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
         LLVM.name!(new_arg, LLVM.name(old_arg))
     end
 
-    # cast each retargeted parameter back to generic so the cloned body keeps using it
-    # unchanged (InferAddressSpaces folds the cast away afterwards)
+    # rebuild each retargeted parameter into its original type on entry, so the cloned body is
+    # unchanged
     @dispose builder=IRBuilder() begin
         entry = BasicBlock(new_f, "conversion")
         position!(builder, entry)
-        new_args = LLVM.Value[]
-        for (i, param_typ) in enumerate(parameters(ft))
-            if new_addrspaces[i] < 0
-                push!(new_args, parameters(new_f)[i])
-            elseif int_ptr_types[i] !== nothing
-                # Case B (typed-pointer shim): rebuild the original integer as `ptrtoint(
-                # addrspacecast(param -> generic))`. the cloned body either `inttoptr`s it (a
-                # leaf -- InferAddressSpaces then folds the whole chain to a specific-space load)
-                # or forwards it on (a delegator -- the next sweep narrows the callee in turn).
-                gen = addrspacecast!(builder, parameters(new_f)[i],
-                                     int_ptr_types[i]::LLVM.PointerType)
-                push!(new_args, ptrtoint!(builder, gen, param_typ))
-            else
-                push!(new_args, addrspacecast!(builder, parameters(new_f)[i], param_typ))
-            end
-        end
-
+        body_values = LLVM.Value[
+            new_types[i] === nothing ? parameters(new_f)[i] :
+                                       rebuild_entry(builder, parameters(new_f)[i], i)
+            for i in 1:length(param_types)]
         value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => new_args[i] for (i, param) in enumerate(parameters(f)))
+            param => body_values[i] for (i, param) in enumerate(parameters(f)))
         value_map[f] = new_f
         clone_into!(new_f, f; value_map,
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
-
         br!(builder, blocks(new_f)[2])  # fall through to the cloned entry block
     end
 
     # `clone_into!` copies a parameter's attributes only when it maps to a new argument; the
-    # retargeted ones map to the entry cast instead, so theirs are dropped. Reattach them for
-    # Case A (still valid on the narrowed pointer). Skip Case B (typed-pointer shim): those were
-    # integer attributes (e.g. `zeroext`) that are invalid on the now-pointer parameter.
-    for i in 1:length(new_addrspaces)
-        (new_addrspaces[i] >= 0 && int_ptr_types[i] === nothing) || continue
+    # retargeted ones map to the entry rebuild instead, so theirs are dropped. Reattach them where
+    # the caller keeps them (still valid on a narrowed pointer); drop them otherwise.
+    for i in 1:length(param_types)
+        (new_types[i] !== nothing && keep_attrs) || continue
         for attr in collect(parameter_attributes(f, i))
             push!(parameter_attributes(new_f, i), attr)
         end
     end
 
-    # a (directly) recursive `f` has self-calls that cloning retargeted to `new_f` but left
-    # with the old signature; collect them from the clone for rewriting. collect first, since
-    # the rewritten calls also target `new_f` and must not be revisited.
+    # a (directly) recursive `f` has self-calls that cloning retargeted to `new_f` but left with
+    # the old signature; collect them from the clone first, since the rewritten calls also target
+    # `new_f` and must not be revisited.
     self_calls = LLVM.CallInst[]
     for bb in blocks(new_f), inst in instructions(bb)
         inst isa LLVM.CallInst && called_operand(inst) == new_f && push!(self_calls, inst)
     end
 
-    # rewrite call sites to pass the un-casted source value for each retargeted argument
     @dispose builder=IRBuilder() begin
-        for cs in callsites
-            rewrite_narrowed_call!(builder, cs, new_f, new_ft, new_addrspaces, int_ptr_types)
-        end
-        for cs in self_calls
-            rewrite_narrowed_call!(builder, cs, new_f, new_ft, new_addrspaces, int_ptr_types)
+        for cs in Iterators.flatten((callsites, self_calls))
+            rewrite_retargeted_call!(builder, cs, new_f, new_ft, new_types, rewrite_arg, keep_attrs)
         end
     end
 
@@ -872,7 +843,38 @@ function narrow_pointer_parameters!(mod::LLVM.Module, f::LLVM.Function,
     replace_metadata_uses!(f, new_f)
     erase!(f)
     LLVM.name!(new_f, fn)
+    # changing the signature leaves `clone_into!`'s dead `bitcast(new_f -> old fn type)` behind;
+    # drop it so a later phase re-examining `new_f` sees only its (live) direct call sites
+    prune_constexpr_uses!(new_f)
     return new_f
+end
+
+# rewrite a single call to target `new_f`/`new_ft`: each retargeted argument `i` becomes
+# `rewrite_arg(builder, old_arg, i)`, others pass through. Preserves calling convention, operand
+# bundles and attributes, except retargeted arguments drop their attributes where `!keep_attrs`.
+function rewrite_retargeted_call!(builder::IRBuilder, cs::LLVM.CallInst, new_f::LLVM.Function,
+                                  new_ft::LLVM.FunctionType, new_types::Vector, rewrite_arg,
+                                  keep_attrs::Bool)
+    position!(builder, cs)
+    new_args = LLVM.Value[new_types[i] === nothing ? arg : rewrite_arg(builder, arg, i)
+                          for (i, arg) in enumerate(arguments(cs))]
+    new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
+    callconv!(new_call, callconv(cs))
+    for attr in collect(function_attributes(cs))
+        push!(function_attributes(new_call), attr)
+    end
+    for attr in collect(return_attributes(cs))
+        push!(return_attributes(new_call), attr)
+    end
+    for i in 1:length(arguments(cs))
+        (new_types[i] === nothing || keep_attrs) || continue
+        for attr in collect(argument_attributes(cs, i))
+            push!(argument_attributes(new_call, i), attr)
+        end
+    end
+    replace_uses!(cs, new_call)
+    erase!(cs)
+    return new_call
 end
 
 

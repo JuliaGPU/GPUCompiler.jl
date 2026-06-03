@@ -504,13 +504,14 @@ end
     end
 
     # typed-pointer shim: the delegation chain in its integer form (caller -> mid -> leaf, all
-    # taking a `Ptr` lowered to an integer). `mid` only *forwards* its integer to `leaf`, so the
-    # leaf-shaped "all uses are inttoptr" test rejects it; recognizing a forwarded integer as a
-    # pointer image lets the fixpoint narrow `mid` first (its caller passes the recognizable
-    # `ptrtoint(addrspacecast(<global> -> generic))`), which re-exposes that shape at the call to
-    # `leaf` so the next sweep narrows it too. (regression: with only the leaf form, `mid` never
-    # narrowed and the deduced-name read stayed a generic-space load -- device exceptions crashed
-    # on Julia 1.11 even though it worked under opaque pointers.)
+    # taking a `Ptr` lowered to an integer). Phase 1 (`convert_intptr_args!`) de-integerizes
+    # these back to generic pointers; `mid` only *forwards* its integer to `leaf`, so recognizing a
+    # forwarded integer as a pointer image lets the fixpoint de-integerize `mid` first (its caller
+    # passes the recognizable `ptrtoint(addrspacecast(<global> -> generic))`), which re-exposes that
+    # shape at the call to `leaf` so the next sweep reaches it too. Phase 2 then narrows both to the
+    # global's space, exactly as in the all-pointer case above. (regression: with only the leaf
+    # form, `mid` never de-integerized and the deduced-name read stayed a generic-space load --
+    # device exceptions crashed on Julia 1.11 even though it worked under opaque pointers.)
     Context() do ctx
         i8 = LLVM.Int8Type()
         i64 = LLVM.Int64Type()
@@ -547,11 +548,14 @@ end
         end
 
         if supports_typed_pointers()
-            # a single sweep narrows only the forwarding `mid`; the fixpoint must reach `leaf`
-            @test GPUCompiler.propagate_argument_address_spaces_once!(mod)
-            @test param_ty("mid") isa LLVM.PointerType && addrspace(param_ty("mid")) == 2
+            # Phase 1: a single sweep de-integerizes only the forwarding `mid` (to a generic
+            # pointer); the fixpoint is needed before `leaf` is exposed
+            @test GPUCompiler.convert_intptr_args_once!(mod)
+            @test param_ty("mid") isa LLVM.PointerType && addrspace(param_ty("mid")) == 0
             @test param_ty("leaf") == i64
 
+            # the full pass de-integerizes the rest (Phase 1) and narrows everything to the
+            # global's space (Phase 2)
             @test GPUCompiler.propagate_argument_address_spaces!(mod)
             @test param_ty("leaf") isa LLVM.PointerType && addrspace(param_ty("leaf")) == 2
             # callers end up passing the bare global, not a ptrtoint(addrspacecast(...))
