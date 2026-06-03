@@ -213,6 +213,8 @@ end
     asptr(as) = supports_typed_pointers() ? LLVM.PointerType(LLVM.Int8Type(), as) :
                                             LLVM.PointerType(as)
 
+    ptr_args_lowered_to_int = VERSION < v"1.12.0-DEV.225"
+
     # build a module with an internal `callee` that loads through a generic (AS 0) pointer
     # parameter, reached from one `caller` per entry in `caller_src_as`, each passing a
     # constant global in that address space cast to generic.
@@ -341,8 +343,8 @@ end
     # the same, and the call sites pass the bare global. (regression: the pass used to skip
     # integer parameters, leaving a `ptrtoint(addrspacecast(...))` constant that the LLVM-16
     # Metal bitcode downgrade miscompiles -- device exceptions crashed on Julia 1.11.) the shim
-    # only applies under typed pointers; under opaque pointers a `Ptr` stays a generic pointer
-    # (Case A), so an integer parameter is deliberately left alone.
+    # applies whenever Julia lowers a `Ptr` to an integer (< 1.12.0-DEV.225), independent of
+    # LLVM's typed/opaque pointers; once `Ptr` is a pointer the integer parameter is left alone.
     Context() do ctx
         i8 = LLVM.Int8Type()
         i64 = LLVM.Int64Type()
@@ -367,7 +369,7 @@ end
             end
         end
 
-        if supports_typed_pointers()
+        if ptr_args_lowered_to_int
             @test GPUCompiler.propagate_argument_address_spaces!(mod)
             param = parameters(function_type(functions(mod)["callee"]))[1]
             @test param isa LLVM.PointerType && addrspace(param) == 2
@@ -412,7 +414,7 @@ end
         end
         @test (verify(mod); true)  # `zeroext` on the i64 boundary is valid pre-narrowing
 
-        if supports_typed_pointers()
+        if ptr_args_lowered_to_int
             @test GPUCompiler.propagate_argument_address_spaces!(mod)
             # the retargeted pointer must not keep the integer's `zeroext`, on either side
             callee = functions(mod)["callee"]
@@ -511,7 +513,8 @@ end
     # shape at the call to `leaf` so the next sweep reaches it too. Phase 2 then narrows both to the
     # global's space, exactly as in the all-pointer case above. (regression: with only the leaf
     # form, `mid` never de-integerized and the deduced-name read stayed a generic-space load --
-    # device exceptions crashed on Julia 1.11 even though it worked under opaque pointers.)
+    # device exceptions crashed on Julia 1.11 even though it worked on 1.12, where `Ptr` is
+    # already a pointer.)
     Context() do ctx
         i8 = LLVM.Int8Type()
         i64 = LLVM.Int64Type()
@@ -547,7 +550,7 @@ end
             ret!(builder, call!(builder, int_ft, mid, [arg]))
         end
 
-        if supports_typed_pointers()
+        if ptr_args_lowered_to_int
             # Phase 1: a single sweep de-integerizes only the forwarding `mid` (to a generic
             # pointer); the fixpoint is needed before `leaf` is exposed
             @test GPUCompiler.convert_intptr_args_once!(mod)
@@ -562,7 +565,7 @@ end
             @test all(c -> value_type(arguments(c)[1]) isa LLVM.PointerType &&
                            addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "mid"))
         else
-            # shim off under opaque pointers: both stay integers, nothing narrows
+            # shim off once `Ptr` is a pointer (>= 1.12.0-DEV.225): both stay integers, nothing narrows
             @test !GPUCompiler.propagate_argument_address_spaces!(mod)
             @test param_ty("mid") == i64 && param_ty("leaf") == i64
         end
