@@ -37,6 +37,37 @@ function Base.getproperty(lazy_mod::LazyModule, sym::Symbol)
 end
 
 
+## external tools
+
+# run an external tool (e.g. from a JLL package), feeding `input` to its standard input
+# and returning its standard output. throws on failure, including the tool's standard
+# error output in the exception. for tools that instead communicate through files, e.g.,
+# because the inputs should be preserved for error reporting, use `run` directly.
+function run_tool(cmd::Cmd, input)
+    stdin_pipe = Pipe()
+    stdout_pipe = Pipe()
+    stderr_pipe = Pipe()
+
+    proc = run(pipeline(cmd; stdin=stdin_pipe, stdout=stdout_pipe, stderr=stderr_pipe);
+               wait=false)
+    close(stdout_pipe.in)
+    close(stderr_pipe.in)
+
+    writer = @async begin
+        write(stdin_pipe, input)
+        close(stdin_pipe)
+    end
+    reader = @async read(stdout_pipe)
+    logger = @async read(stderr_pipe, String)
+
+    wait(proc)
+    if !success(proc)
+        error("Failed to run $(basename(cmd.exec[1])):\n" * fetch(logger))
+    end
+    fetch(reader)
+end
+
+
 ## safe logging
 
 using Logging
