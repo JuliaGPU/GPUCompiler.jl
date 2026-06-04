@@ -42,6 +42,20 @@ end
     end
 end
 
+@testset "versioned triple" begin
+    # Apple encodes the AIR version in the triple's architecture as air64_v<major><minor>;
+    # tools derive the expected AIR version from it. Old toolchains used the plain air64.
+    @test GPUCompiler.llvm_triple(MetalCompilerTarget(; macos=v"14", air=v"2.6", metal=v"3.1")) ==
+        "air64_v26-apple-macosx14.0.0"
+    @test GPUCompiler.llvm_triple(MetalCompilerTarget(; macos=v"15", air=v"2.7", metal=v"3.2")) ==
+        "air64_v27-apple-macosx15.0.0"
+    @test GPUCompiler.llvm_triple(MetalCompilerTarget(; macos=v"26", air=v"2.8", metal=v"4.0")) ==
+        "air64_v28-apple-macosx26.0.0"
+    # pre-2.6 targets keep the unversioned architecture
+    @test GPUCompiler.llvm_triple(MetalCompilerTarget(; macos=v"13", air=v"2.5", metal=v"3.0")) ==
+        "air64-apple-macosx13.0.0"
+end
+
 @testset "module metadata" begin
     mod = @eval module $(gensym())
         kernel() = return
