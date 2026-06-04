@@ -45,7 +45,7 @@ function irgen(@nospecialize(job::CompilerJob))
 
     deprecation_marker = process_module!(job, mod)
     if deprecation_marker != DeprecationMarker()
-        Base.depwarn("GPUCompiler.process_module! is deprecated; implement GPUCompiler.finish_module! instead", :process_module)
+        safe_depwarn("GPUCompiler.process_module! is deprecated; implement GPUCompiler.finish_module! instead", :process_module)
     end
 
     # sanitize global values (Julia doesn't when using the external codegen policy)
@@ -71,7 +71,7 @@ function irgen(@nospecialize(job::CompilerJob))
     end
     deprecation_marker = process_entry!(job, mod, entry)
     if deprecation_marker != DeprecationMarker()
-        Base.depwarn("GPUCompiler.process_entry! is deprecated; implement GPUCompiler.finish_module! instead", :process_entry)
+        safe_depwarn("GPUCompiler.process_entry! is deprecated; implement GPUCompiler.finish_module! instead", :process_entry)
         entry = deprecation_marker
     end
     if job.config.entry_abi === :specfunc

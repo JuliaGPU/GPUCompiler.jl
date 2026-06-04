@@ -7,6 +7,39 @@
     @test groups[3] == [:(d=4)]
 end
 
+@noinline old_api() = GPUCompiler.safe_depwarn("`old_api` is deprecated.", :old_api; force=true)
+# @noinline so that both invocations below share a single `old_api` call site,
+# which is what the warning gets deduplicated on (like `Base.depwarn`)
+@noinline use_old_api() = old_api()
+
+@testset "safe_depwarn" begin
+    if VERSION >= v"1.12.0-DEV.769"
+        # forwards to Base.depwarn, which logs through the active logger
+        logs, _ = Test.collect_test_logs() do
+            use_old_api()
+        end
+        @test any(logs) do record
+            record.group === :depwarn && occursin("old_api", string(record.message))
+        end
+    else
+        # emits synchronously to Core.stderr
+        output = mktemp() do path, io
+            redirect_stderr(io) do
+                for _ in 1:2
+                    use_old_api()
+                end
+            end
+            flush(io)
+            read(path, String)
+        end
+        @test occursin("`old_api` is deprecated.", output)
+        # attributed to the caller of the deprecated function
+        @test occursin("use_old_api", output)
+        # repeated calls from the same call site only warn once
+        @test length(findall("is deprecated", output)) == 1
+    end
+end
+
 @testset "mangling" begin
     using demumble_jll
 
