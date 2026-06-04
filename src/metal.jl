@@ -1,5 +1,9 @@
 # implementation of the GPUCompiler interfaces for generating Metal code
 
+const LLVMDowngrader_jll =
+    LazyModule("LLVMDowngrader_jll",
+               UUID("f52de702-fb25-5922-94ba-81dd59b07444"))
+
 
 ## target info
 
@@ -64,7 +68,8 @@ function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.fastmath, h)
 end
 
-source_code(target::MetalCompilerTarget) = "text"
+# the canonical text representation is AIR assembly, i.e., LLVM 5 era textual IR
+source_code(target::MetalCompilerTarget) = "llvm"
 
 # Metal is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::MetalCompilerTarget) = nothing
@@ -295,6 +300,17 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         add_module_metadata!(job, mod)
     end
 
+    return functions(mod)[entry_fn]
+end
+
+# lowering of LLVM IR to AIR-compatible IR
+#
+# Metal does not have an LLVM back-end, so the lowering of target-independent LLVM IR into
+# target-specific constructs -- something that normally happens during instruction
+# selection -- is implemented here as IR-to-IR rewrites, run at the start of `mcgen`.
+# this keeps the `:llvm` output (e.g. `code_llvm`) close to what Julia generated, using
+# generic LLVM intrinsics, while the `:asm`/`:obj` outputs contain AIR intrinsics.
+function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
     # force-inlines throwing functions into the kernel first so the rewrite is sound, then scrubs
@@ -316,13 +332,15 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         changed |= lower_llvm_intrinsics!(job, f)
     end
     if changed
-        # lowering may have introduced additional functions marked `alwaysinline`
+        # lowering may have introduced additional functions marked `alwaysinline`,
+        # and left dead declarations of the replaced LLVM intrinsics behind
         @dispose pb=NewPMPassBuilder() begin
             add!(pb, AlwaysInlinerPass())
             add!(pb, NewPMFunctionPassManager()) do fpm
                 add!(fpm, SimplifyCFGPass())
                 add!(fpm, instcombine_pass(job))
             end
+            add!(pb, StripDeadPrototypesPass())
             run!(pb, mod)
         end
     end
@@ -336,13 +354,28 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         end
     end
 
-    return functions(mod)[entry_fn]
+    return
 end
 
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMObjectFile)
-    # our LLVM version does not support emitting Metal libraries
-    return nothing
+    # lower LLVM constructs that the AIR back-end does not support; this takes the place
+    # of instruction selection, as our LLVM does not have a Metal target machine.
+    lower_air!(job, mod)
+
+    if !isavailable(LLVMDowngrader_jll)
+        error("Metal machine-code generation requires the LLVMDowngrader_jll package, which should be installed and loaded first.")
+    end
+
+    # assemble to AIR, i.e., LLVM 5 era bitcode, as consumed by the metallib loader
+    air = run_tool(`$(LLVMDowngrader_jll.llvm_as()) --bitcode-version=5.0 -o -`, string(mod))
+
+    if format == LLVM.API.LLVMAssemblyFile
+        # disassemble the bitcode again to AIR assembly, i.e., LLVM 5 era textual IR
+        String(run_tool(`$(LLVMDowngrader_jll.llvm_dis_5()) -o -`, air))
+    else
+        air
+    end
 end
 
 

@@ -102,10 +102,17 @@ end
                           (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}), x, y)
     end
 
+    # intrinsics survive the `:llvm` stage as-is; they are only lowered to AIR during mcgen
+    @test @filecheck begin
+        @check_label "define <2 x i64> @{{(julia|j)_foo_[0-9]+}}"
+        @check "llvm.smax.v2i64"
+        Metal.code_llvm(mod.foo, (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}))
+    end
+
     @test @filecheck begin
         @check_label "define <2 x i64> @{{(julia|j)_foo_[0-9]+}}"
         @check "air.max.s.v2i64"
-        Metal.code_llvm(mod.foo, (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}))
+        Metal.code_native(mod.foo, (NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}))
     end
 end
 
