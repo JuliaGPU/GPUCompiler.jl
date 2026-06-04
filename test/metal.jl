@@ -69,6 +69,35 @@ end
     end
 end
 
+@testset "compile options" begin
+    # Apple's frontend emits an air.compile_options named metadata node. denorms and
+    # framebuffer fetch match its defaults; fast math tracks the target's `fastmath`.
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+
+    function dump_with_fastmath(io, fastmath)
+        source = methodinstance(typeof(mod.kernel), Tuple{}, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0", fastmath)
+        config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
+        GPUCompiler.code_llvm(io, CompilerJob(source, config); dump_module=true)
+    end
+
+    @test @filecheck begin
+        @check "air.compile.denorms_disable"
+        @check "air.compile.fast_math_enable"
+        @check "air.compile.framebuffer_fetch_enable"
+        dump_with_fastmath(stdout, true)
+    end
+
+    @test @filecheck begin
+        @check "air.compile.denorms_disable"
+        @check "air.compile.fast_math_disable"
+        @check "air.compile.framebuffer_fetch_enable"
+        dump_with_fastmath(stdout, false)
+    end
+end
+
 @testset "argument metadata" begin
     mod = @eval module $(gensym())
         kernel(x) = return

@@ -1200,6 +1200,17 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     air_lang_md = MDNode(air_lang_md)
     push!(metadata(mod)["air.language_version"], air_lang_md)
 
+    # record the compile options Apple's frontend emits. each option is a single-string node
+    # under the `air.compile_options` named metadata. denorms and framebuffer fetch match
+    # Apple's defaults; fast math tracks `target.fastmath`, which also drives whether the math
+    # intrinsics lower to the relaxed `air.fast_*` device functions.
+    for option in ["air.compile.denorms_disable",
+                   job.config.target.fastmath ? "air.compile.fast_math_enable" :
+                                                "air.compile.fast_math_disable",
+                   "air.compile.framebuffer_fetch_enable"]
+        push!(metadata(mod)["air.compile_options"], MDNode([MDString(option)]))
+    end
+
     # set sdk version
     sdk_version!(mod, job.config.target.macos)
 
