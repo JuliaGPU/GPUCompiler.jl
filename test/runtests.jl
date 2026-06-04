@@ -1,10 +1,14 @@
 using ParallelTestRunner
 import GPUCompiler, LLVM
+using GPUCompiler, LLVM
+using SPIRV_LLVM_Backend_jll, SPIRV_LLVM_Translator_jll, SPIRV_Tools_jll
+using NVPTX_LLVM_Backend_jll
 
 const init_code = quote
     using GPUCompiler, LLVM
     using SPIRV_LLVM_Backend_jll, SPIRV_LLVM_Translator_jll, SPIRV_Tools_jll
     using LLVMDowngrader_jll
+    using NVPTX_LLVM_Backend_jll
 
     # include all helpers
     include(joinpath(@__DIR__, "helpers", "runtime.jl"))
@@ -29,11 +33,25 @@ if filter_tests!(testsuite, args)
     end
 
     if LLVM.is_asserts()
+        @warn "LLVM with assertions; skipping GCN tests"
         delete!(testsuite, "gcn")
     end
     if VERSION < v"1.11"
+        @warn "Julia 1.11+ required for precompile tests; skipping"
         delete!(testsuite, "ptx/precompile")
         delete!(testsuite, "native/precompile")
+    end
+    if !SPIRV_LLVM_Backend_jll.is_available() || !SPIRV_LLVM_Translator_jll.is_available() || !SPIRV_Tools_jll.is_available()
+        @warn "SPIRV back-end not available; skipping SPIRV tests"
+        for key in collect(keys(testsuite))
+            startswith(key, "spirv") && delete!(testsuite, key)
+        end
+    end
+    if !NVPTX_LLVM_Backend_jll.is_available()
+        @warn "NVPTX back-end not available; skipping PTX tests"
+        for key in collect(keys(testsuite))
+            startswith(key, "ptx") && delete!(testsuite, key)
+        end
     end
 end
 
