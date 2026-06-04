@@ -22,6 +22,7 @@ UUIDs = "cf7118a7-6976-5b1a-9a39-7adc72f591a4"
 
 [weakdeps]
 LLVMDowngrader_jll = "f52de702-fb25-5922-94ba-81dd59b07444"
+NVPTX_LLVM_Backend_jll = "ef6e0fe3-e6ef-59c0-bde6-4989574699e0"
 
 [compat]
 ExprTools = "0.1"
@@ -30,6 +31,7 @@ LLVM = "9.8.1"
 LLVMDowngrader_jll = "0.7"
 Libdl = "1"
 Logging = "1"
+NVPTX_LLVM_Backend_jll = "22"
 PrecompileTools = "1"
 Preferences = "1"
 Scratch = "1"
