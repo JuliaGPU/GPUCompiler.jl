@@ -325,14 +325,14 @@ const __llvm_initialized = Ref(false)
             # target-specific libraries
             @tracepoint "target libraries" begin
                 if has_legacy_link_libraries(job)
-                    Base.depwarn(
-                        "3-arg `link_libraries!(job, mod, undefined_fns)` is deprecated; " *
-                        "migrate your override to the 2-arg form `link_libraries!(job, mod)`. " *
-                        "Instead of inspecting `undefined_fns` to decide what to link, " *
-                        "parse the library lazily with `parse(LLVM.Module, bytes; lazy=true)` " *
-                        "and link it with `LLVM.link!(mod, lib; only_needed=true)` — " *
-                        "the linker will then materialize only the referenced symbols.",
-                        :link_libraries!)
+                    #Base.depwarn(
+                    #    "3-arg `link_libraries!(job, mod, undefined_fns)` is deprecated; " *
+                    #    "migrate your override to the 2-arg form `link_libraries!(job, mod)`. " *
+                    #    "Instead of inspecting `undefined_fns` to decide what to link, " *
+                    #    "parse the library lazily with `parse(LLVM.Module, bytes; lazy=true)` " *
+                    #    "and link it with `LLVM.link!(mod, lib; only_needed=true)` — " *
+                    #    "the linker will then materialize only the referenced symbols.",
+                    #    :link_libraries!)
                     undefined_fns = [LLVM.name(f) for f in functions(ir)
                                      if isdeclaration(f) && !LLVM.isintrinsic(f)]
                     link_libraries!(job, ir, undefined_fns)
