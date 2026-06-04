@@ -1473,9 +1473,11 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             end
         end
 
-        # integer bit intrinsics: pure renames to AIR's builtin names (same signature, including
-        # the `i1` on clz/ctz). Apple's frontend emits these `air.*` rather than the `llvm.*`
-        # forms, so we rename rather than rely on the metallib loader accepting `llvm.*`.
+        # integer bit intrinsics: rename to AIR's builtin names. ctpop/bitreverse keep their
+        # single value operand; clz/ctz must drop LLVM's trailing `i1 is_zero_undef`, since
+        # AIR's air.clz/air.ctz take only the value operand. Apple's frontend emits these
+        # `air.*` rather than the `llvm.*` forms, so we rename rather than rely on the metallib
+        # loader accepting `llvm.*`.
         bit_renames = Dict(
             LLVM.Intrinsic("llvm.ctlz")       => ("llvm.ctlz",       "air.clz"),
             LLVM.Intrinsic("llvm.cttz")       => ("llvm.cttz",       "air.ctz"),
@@ -1486,16 +1488,21 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             llvm_base, air_base = bit_renames[intr]
             # keep the mangled type suffix, e.g. llvm.ctlz.i32 -> air.clz.i32
             fn = air_base * LLVM.name(call_fun)[length(llvm_base)+1:end]
+            # drop any operand whose type isn't the result type (the `i1` on clz/ctz),
+            # mirroring the air.abs handling above; no-op for popcount/bitreverse.
+            typ = value_type(call)
+            air_args = LLVM.Value[a for a in arguments(call) if value_type(a) == typ]
+            air_ft = LLVM.FunctionType(typ, LLVMType[typ for _ in air_args])
             new_intr = if haskey(functions(mod), fn)
                 functions(mod)[fn]
             else
-                LLVM.Function(mod, fn, call_ft)
+                LLVM.Function(mod, fn, air_ft)
             end
             @dispose builder=IRBuilder() begin
                 position!(builder, call)
                 debuglocation!(builder, call)
 
-                new_value = call!(builder, call_ft, new_intr, arguments(call))
+                new_value = call!(builder, air_ft, new_intr, air_args)
                 replace_uses!(call, new_value)
                 erase!(call)
                 changed = true
