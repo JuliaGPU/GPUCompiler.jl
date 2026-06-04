@@ -1122,22 +1122,13 @@ end
 function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     # Iterate through arguments and create metadata for them
     globs = globals(mod)
+    dl = datalayout(mod)
 
     i = 1
     for gv in globs
         gv_typ = global_value_type(gv)
         (isconstant(gv) && gv_typ isa LLVM.PointerType && addrspace(gv_typ) == 3) || continue
-        # if job.config.optimize
-        #     @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
-        # else
-        #     parameters(entry_ft)[arg.idx] isa LLVM.PointerType || continue
-        # end
 
-        # # NOTE: we emit the bare minimum of argument metadata to support
-        # #       bindless argument encoding. Actually using the argument encoder
-        # #       APIs (deprecated in Metal 3) turned out too difficult, given the
-        # #       undocumented nature of the argument metadata, and the complex
-        # #       arguments we encounter with typical Julia kernels.
         global_infos = Metadata[]
 
         push!(global_infos, MDString("air.global_binding"))
@@ -1161,28 +1152,20 @@ function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module
         push!(md, MDString("air.address_space"))
         push!(md, Metadata(ConstantInt(Int32(addrspace(global_value_type(gv))))))
 
-        # val_type = global_value_type(gv)
-        # val_type = if value_type(gv) <: Core.LLVMPtr
-        #     arg.typ.parameters[1]
-        # else
-        #     arg.typ
-        # end
-
-        # @show gv_typ
-        # @show isconstant(gv)
-        # @show isconstant(gv_typ)
-        # @show Int32(alignment(gv))
+        arg_type_name, arg_type_size = if !is_opaque(gv_typ)
+            string(eltype(gv_typ)), Int(sizeof(dl, eltype(gv_typ)))
+        else
+            string(gv_typ), Int(sizeof(dl, gv_typ))
+        end
 
         push!(md, MDString("air.arg_type_size"))
-        push!(md, Metadata(ConstantInt(Int32(4))))
+        push!(md, Metadata(ConstantInt(Int32(arg_type_size))))
 
         push!(md, MDString("air.arg_type_align_size"))
         push!(md, Metadata(ConstantInt(Int32(alignment(gv)))))
 
         push!(md, MDString("air.arg_type_name"))
-        # XXX: Figure out how to get type
-        push!(md, MDString("float"))
-        # push!(md, MDString(repr(arg.typ)))
+        push!(md, MDString(arg_type_name))
 
         push!(md, MDString("air.arg_name"))
         push!(md, MDString(String(LLVM.name(gv))))
