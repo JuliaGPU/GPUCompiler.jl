@@ -1765,7 +1765,7 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
             add_fn_attributes("convergent", "mustprogress", "nounwind", "willreturn", "writeonly")
 
         # simd permute
-        elseif match(r"air.simd_(ballot|all|vote_all|any|vote_any|shuffle|shuffle_xor|shuffle_down|\
+        elseif match(r"air.(simd|quad)_(ballot|all|vote_all|any|vote_any|shuffle|shuffle_xor|shuffle_down|\
             shuffle_up|shuffle_and_fill_down|shuffle_and_fill_up)", fn) !== nothing
             add_fn_attributes("convergent", "mustprogress", "nounwind", "willreturn")
         end
