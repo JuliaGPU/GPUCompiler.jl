@@ -74,7 +74,19 @@ source_code(target::MetalCompilerTarget) = "llvm"
 # Metal is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::MetalCompilerTarget) = nothing
 
-llvm_triple(target::MetalCompilerTarget) = "air64-apple-macosx$(target.macos)"
+# Apple's toolchain encodes the AIR version in the architecture component of the triple, as
+# `air64_v<major><minor>` (e.g. `air64_v26` for AIR 2.6). Tools like metal-opt derive the
+# expected AIR version from the triple and complain when the `air.version` module metadata
+# disagrees, so match the metadata's version here. Older Xcode toolchains used the plain,
+# unversioned `air64`, so fall back to that for pre-2.6 targets.
+function llvm_triple(target::MetalCompilerTarget)
+    arch = if target.air >= v"2.6"
+        "air64_v$(target.air.major)$(target.air.minor)"
+    else
+        "air64"
+    end
+    return "$arch-apple-macosx$(target.macos)"
+end
 
 llvm_datalayout(target::MetalCompilerTarget) =
     "e-p:64:64:64"*
@@ -1187,6 +1199,17 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(air_lang_md, Metadata(ConstantInt(Int32(job.config.target.metal.patch))))
     air_lang_md = MDNode(air_lang_md)
     push!(metadata(mod)["air.language_version"], air_lang_md)
+
+    # record the compile options Apple's frontend emits. each option is a single-string node
+    # under the `air.compile_options` named metadata. denorms and framebuffer fetch match
+    # Apple's defaults; fast math tracks `target.fastmath`, which also drives whether the math
+    # intrinsics lower to the relaxed `air.fast_*` device functions.
+    for option in ["air.compile.denorms_disable",
+                   job.config.target.fastmath ? "air.compile.fast_math_enable" :
+                                                "air.compile.fast_math_disable",
+                   "air.compile.framebuffer_fetch_enable"]
+        push!(metadata(mod)["air.compile_options"], MDNode([MDString(option)]))
+    end
 
     # set sdk version
     sdk_version!(mod, job.config.target.macos)
