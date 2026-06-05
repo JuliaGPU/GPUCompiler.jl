@@ -133,7 +133,9 @@ end
 ## safe deprecation warnings
 
 const depwarn_lock = Threads.SpinLock()
-const depwarn_seen = Set{Tuple{Ptr{Cvoid},Symbol}}()
+# the frame is a `Ptr{Cvoid}` for compiled frames, or a `Base.InterpreterIP` for
+# interpreted ones (e.g., when the deprecated function is called from top level)
+const depwarn_seen = Set{Tuple{Union{Ptr{Cvoid},Base.InterpreterIP},Symbol}}()
 
 """
     safe_depwarn(msg, funcsym; force=false)

@@ -36,7 +36,19 @@ end
         # attributed to the caller of the deprecated function
         @test occursin("use_old_api", output)
         # repeated calls from the same call site only warn once
-        @test length(findall("is deprecated", output)) == 1
+        # (using `count` as `findall` is imported from Core.Compiler below)
+        @test count("is deprecated", output) == 1
+
+        # interpreted call sites are identified by a `Base.InterpreterIP` instead of a
+        # plain instruction pointer; make sure the call-site tracking can handle that
+        output = mktemp() do path, io
+            redirect_stderr(io) do
+                eval(:(old_api()))
+            end
+            flush(io)
+            read(path, String)
+        end
+        @test occursin("`old_api` is deprecated.", output)
     end
 end
 
