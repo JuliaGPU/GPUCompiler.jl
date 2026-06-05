@@ -1723,7 +1723,13 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
         function add_param_attributes(idx, names...)
             param_attrs = parameter_attributes(f, idx)
             for name in names
-                push!(param_attrs, EnumAttribute(name, 0))
+                if name == "nocapture" && LLVM.version() >= v"21"
+                    # `nocapture` was replaced by `captures(none)` in LLVM 21 (an
+                    # integer-valued IntAttr, value 0 == CaptureInfo::none()).
+                    push!(param_attrs, EnumAttribute("captures", 0))
+                else
+                    push!(param_attrs, EnumAttribute(name, 0))
+                end
             end
             changed = true
         end
@@ -1733,7 +1739,7 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
             add_fn_attributes("nounwind", "mustprogress", "convergent", "willreturn")
 
         # sincos
-        elseif match(r"^air.sincos", fn) !== nothing
+        elseif match(r"^air.(fast_)?sincos", fn) !== nothing
             add_param_attributes(2, "nocapture", "writeonly")
 
         # atomics
