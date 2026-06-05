@@ -55,7 +55,7 @@ Compile a `job` to one of the following formats as specified by the `target` arg
 function compile(target::Symbol, @nospecialize(job::CompilerJob); kwargs...)
     # XXX: remove on next major version
     if !isempty(kwargs)
-        Base.depwarn("The GPUCompiler `compile` API does not take keyword arguments anymore. Use CompilerConfig instead.", :compile)
+        safe_depwarn("The GPUCompiler `compile` API does not take keyword arguments anymore. Use CompilerConfig instead.", :compile)
         config = CompilerConfig(job.config; kwargs...)
         job = CompilerJob(job.source, config)
     end
@@ -70,7 +70,7 @@ end
 # XXX: remove on next major version
 function codegen(output::Symbol, @nospecialize(job::CompilerJob); kwargs...)
     if !isempty(kwargs)
-        Base.depwarn("The GPUCompiler `codegen` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :codegen)
+        safe_depwarn("The GPUCompiler `codegen` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :codegen)
         config = CompilerConfig(job.config; kwargs...)
         job = CompilerJob(job.source, config)
     end
@@ -191,7 +191,7 @@ const __llvm_initialized = Ref(false)
 @locked function emit_llvm(@nospecialize(job::CompilerJob); kwargs...)
     # XXX: remove on next major version
     if !isempty(kwargs)
-        Base.depwarn("The GPUCompiler `emit_llvm` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :emit_llvm)
+        safe_depwarn("The GPUCompiler `emit_llvm` function is an internal API. Use `GPUCompiler.compile` (with any kwargs passed to `CompilerConfig`) instead.", :emit_llvm)
         config = CompilerConfig(job.config; kwargs...)
         job = CompilerJob(job.source, config)
     end
@@ -325,7 +325,7 @@ const __llvm_initialized = Ref(false)
             # target-specific libraries
             @tracepoint "target libraries" begin
                 if has_legacy_link_libraries(job)
-                    Base.depwarn(
+                    safe_depwarn(
                         "3-arg `link_libraries!(job, mod, undefined_fns)` is deprecated; " *
                         "migrate your override to the 2-arg form `link_libraries!(job, mod)`. " *
                         "Instead of inspecting `undefined_fns` to decide what to link, " *
