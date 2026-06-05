@@ -362,11 +362,22 @@ end
               -mattr=+ptx$(target.ptx.major)$(target.ptx.minor)
               -filetype=$filetype
               -o $output`
-    try
-        run(cmd)
-    catch
-        error("""Failed to compile to PTX with external llc.
-                 If you think this is a bug, please file an issue and attach $(input).""")
+    out = Pipe()
+    proc = run(pipeline(ignorestatus(cmd); stdout=out, stderr=out); wait=false)
+    close(out.in)
+    log = strip(read(out, String))
+    wait(proc)
+    if !success(proc)
+        # keep the input around for debugging
+        msg = "Failed to compile to PTX with external llc"
+        isempty(log) || (msg *= ":\n" * log)
+        msg *= "\nIf you think this is a bug, please file an issue and attach $(input)."
+        isfile(output) && rm(output)
+        error(msg)
+    elseif !isempty(log)
+        # llc only diagnoses on stderr; even successful compilation may e.g. have
+        # ignored an unrecognized CPU or feature, so make sure this surfaces.
+        @warn "External llc reported:\n$log"
     end
 
     code = filetype == "asm" ? read(output, String) : String(read(output))
