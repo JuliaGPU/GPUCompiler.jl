@@ -264,6 +264,14 @@ end
 
 function finish_linked_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                                mod::LLVM.Module)
+    # fold `__nvvm_reflect` calls, now that libdevice has been linked. we do this
+    # ourselves, and not from the in-process LLVM's NVVMReflectPass (scheduled by the
+    # NVPTX TargetMachine's pipeline start callbacks since LLVM 17), because that pass
+    # derives `__CUDA_ARCH` from the middle-end subtarget, which cannot represent
+    # devices newer than the in-process LLVM. by folding before optimization, at the
+    # true target, the built-in pass is left with nothing to do.
+    nvvm_reflect!(job, mod)
+
     # propagate `target.fastmath` as `@fastmath`-everywhere semantics
     # (mirrors nvcc's `--use_fast_math`). post-link so that bodies pulled in
     # from libdevice and the runtime also get the flags.
@@ -290,14 +298,6 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         register!(pb, PTXRSqrtFastPass())
         register!(pb, PTXFDivFastPass())
         register!(pb, PTXFSqrtFastPass())
-        if LLVM.version() < v"17"
-            # Pre-17 LLVM has no way to invoke EP callbacks from the string
-            # API, so fall back to our own nvvm_reflect! implementation.
-            # LLVM 17+ picks up NVPTX's built-in NVVMReflectPass through the
-            # PipelineStart EP invocations woven into `buildNewPMPipeline!`.
-            register!(pb, NVVMReflectPass())
-            add!(pb, NVVMReflectPass())
-        end
         if get(optimization_options(job), :fastmath, true)
             add!(pb, PTXRSqrtFastPass())
             add!(pb, PTXFDivFastPass())
@@ -400,15 +400,12 @@ end
 
 # Replace occurrences of __nvvm_reflect("foo") and llvm.nvvm.reflect with an integer.
 #
-# This is a back-port of LLVM's NVVMReflectPass for LLVM < 17, where the
-# built-in pass cannot be invoked via the string-API PipelineStart EP callback.
-# Semantics match LLVM's: `__CUDA_ARCH` is derived from the target capability,
-# `__CUDA_FTZ` is read from the `nvvm-reflect-ftz` module flag, and every other
-# key folds to 0. Knobs like denormal flushing or FMAD contraction must be
+# This matches LLVM's NVVMReflectPass: `__CUDA_ARCH` is derived from the target
+# capability, `__CUDA_FTZ` is read from the `nvvm-reflect-ftz` module flag, and every
+# other key folds to 0. Knobs like denormal flushing or FMAD contraction must be
 # configured through module flags or LLVM fast-math flags, not here.
 const NVVM_REFLECT_FUNCTION = "__nvvm_reflect"
-function nvvm_reflect!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+function nvvm_reflect!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "nvvmreflect" begin
 
@@ -487,6 +484,7 @@ function nvvm_reflect!(mod::LLVM.Module)
 
         replace_uses!(call, reflect_val)
         push!(to_remove, call)
+        changed = true
     end
 
     # remove the calls to the function
@@ -503,7 +501,6 @@ function nvvm_reflect!(mod::LLVM.Module)
     end
     return changed
 end
-NVVMReflectPass() = NewPMModulePass("custom-nvvm-reflect", nvvm_reflect!)
 
 # The passes below rewrite `afn`-flagged f64 operations to NVPTX' fast lowerings.
 # `apply_fastmath!` propagates job-wide `target.fastmath=true` as per-instruction
