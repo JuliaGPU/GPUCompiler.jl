@@ -196,14 +196,9 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         # entry instead of re-reading the metadata.
         annotations = Metadata[entry]
 
-        # kernel metadata
-        #
-        # on LLVM >= 20 the `ptx_kernel` calling convention already marks the
-        # entry; the redundant "kernel" nvvm.annotation causes miscompilations.
-        if LLVM.version() < v"20"
-            append!(annotations, [MDString("kernel"),
-                                  ConstantInt(Int32(1))])
-        end
+        # note that the entry is only marked as a kernel through its ptx_kernel calling
+        # convention; the "kernel" nvvm.annotation is redundant (the back-end upgrades
+        # it to the calling convention), and on LLVM >= 20 even causes miscompilations.
 
         # expected CTA sizes
         if job.config.target.minthreads !== nothing
