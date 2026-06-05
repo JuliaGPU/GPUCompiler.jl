@@ -200,6 +200,10 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         # convention; the "kernel" nvvm.annotation is redundant (the back-end upgrades
         # it to the calling convention), and on LLVM >= 20 even causes miscompilations.
 
+        # launch bounds are emitted in two forms: as nvvm.annotations metadata, consumed
+        # by the in-process LLVM's passes (and auto-upgraded by the back-end), and as
+        # function attributes, the form modern LLVM consumes directly.
+
         # expected CTA sizes
         if job.config.target.minthreads !== nothing
             bounds = ntuple(i -> i <= length(job.config.target.minthreads) ?
@@ -208,10 +212,8 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                 append!(annotations, [MDString("reqntid$name"),
                                       ConstantInt(Int32(bound))])
             end
-            if LLVM.version() >= v"21"
-                push!(function_attributes(entry),
-                      StringAttribute("nvvm.reqntid", join(bounds, ",")))
-            end
+            push!(function_attributes(entry),
+                  StringAttribute("nvvm.reqntid", join(bounds, ",")))
         end
         if job.config.target.maxthreads !== nothing
             bounds = ntuple(i -> i <= length(job.config.target.maxthreads) ?
@@ -220,28 +222,22 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                 append!(annotations, [MDString("maxntid$name"),
                                       ConstantInt(Int32(bound))])
             end
-            if LLVM.version() >= v"21"
-                push!(function_attributes(entry),
-                      StringAttribute("nvvm.maxntid", join(bounds, ",")))
-            end
+            push!(function_attributes(entry),
+                  StringAttribute("nvvm.maxntid", join(bounds, ",")))
         end
 
         if job.config.target.blocks_per_sm !== nothing
             append!(annotations, [MDString("minctasm"),
                                   ConstantInt(Int32(job.config.target.blocks_per_sm))])
-            if LLVM.version() >= v"21"
-                push!(function_attributes(entry),
-                      StringAttribute("nvvm.minctasm", string(job.config.target.blocks_per_sm)))
-            end
+            push!(function_attributes(entry),
+                  StringAttribute("nvvm.minctasm", string(job.config.target.blocks_per_sm)))
         end
 
         if job.config.target.maxregs !== nothing
             append!(annotations, [MDString("maxnreg"),
                                   ConstantInt(Int32(job.config.target.maxregs))])
-            if LLVM.version() >= v"21"
-                push!(function_attributes(entry),
-                      StringAttribute("nvvm.maxnreg", string(job.config.target.maxregs)))
-            end
+            push!(function_attributes(entry),
+                  StringAttribute("nvvm.maxnreg", string(job.config.target.maxregs)))
         end
 
         if length(annotations) > 1
