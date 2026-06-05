@@ -488,73 +488,35 @@ function nvvm_reflect!(mod::LLVM.Module)
 end
 NVVMReflectPass() = NewPMModulePass("custom-nvvm-reflect", nvvm_reflect!)
 
-# Same source NVPTX' `useF32FTZ` reads — `apply_fastmath!` sets it when
-# `target.fastmath=true`. Used here to pick FTZ variants for the f32 rewrite.
-function f32_ftz(f::LLVM.Function)
-    for attr in collect(LLVM.function_attributes(f))
-        attr isa LLVM.StringAttribute || continue
-        LLVM.kind(attr) == "denormal-fp-math-f32" || continue
-        return startswith(LLVM.value(attr), "preserve-sign")
-    end
-    return false
-end
-
-# All three passes below rewrite `afn`-flagged ops to NVPTX' fast lowerings.
-# `apply_fastmath!` propagates job-wide `target.fastmath=true` as per-
-# instruction `afn`, so a single flag check covers both per-call `@fastmath`
-# and the job toggle. We emit NVPTX intrinsics by name (rather than libdevice
-# `__nv_*`) so this doesn't depend on which libdevice symbols got linked in.
+# The passes below rewrite `afn`-flagged f64 operations to NVPTX' fast lowerings.
+# `apply_fastmath!` propagates job-wide `target.fastmath=true` as per-instruction
+# `afn`, so a single flag check covers both per-call `@fastmath` and the job toggle.
+# We emit NVPTX intrinsics by name (rather than libdevice `__nv_*`) so this doesn't
+# depend on which libdevice symbols got linked in.
 #
-# `PTXRSqrtFastPass` runs first: the rsqrt pattern (`fdiv afn 1.0, sqrt afn x`)
+# Only f64 needs this: the back-end natively honors `afn` for f32 fdiv/sqrt/rsqrt
+# (selecting the FTZ variants based on the `denormal-fp-math-f32` attribute), but
+# lacks fast f64 lowerings. There is no hardware fast f64 div/sqrt, and the f64
+# `rsqrt.approx.d` instruction is not selected for `1/sqrt(x)` upstream (NVPTX'
+# `getSqrtEstimate` does not consult per-instruction `afn`, only the
+# "reciprocal-estimates" function attribute).
+#
+# `PTXRSqrtFastPass` must run first: the rsqrt pattern (`fdiv afn 1.0, sqrt afn x`)
 # spans an fdiv and a sqrt, so it has to claim both operands before the per-op
-# passes below eat them. NVPTX has native `rsqrt.approx.{f,d}` for both f32 and
-# f64, so this is a single-instruction lowering for both types.
-#
-# `PTXFDivFastPass` / `PTXFSqrtFastPass` are temporary backports for LLVM 18:
-# - `PTXFSqrtFastPass`: on LLVM 21+ `usePrecSqrtF32` honors per-instruction
-#   `afn` + the `unsafe-fp-math` attribute, so `DAGCombiner::visitFSQRT` →
-#   `NVPTXTargetLowering::getSqrtEstimate` emits the f32 `sqrt.approx{,.ftz}`
-#   and f64 `rcp(rsqrt(x))` sequences itself. LLVM 18's `usePrecSqrtF32` only
-#   consults `TargetMachine.Options.UnsafeFPMath`, which is unreachable
-#   through LLVM.jl.
-# - `PTXFDivFastPass`'s f32 path is similarly fixed on LLVM 21+;
-#   `getDivF32Level` there honors `afn` + the function attribute. The f64
-#   path stays needed until NVPTX gains a `getRecipEstimate` hook (filed
-#   upstream).
-# On LLVM 21+ both passes (and the f32 path of `PTXRSqrtFastPass`) can be
-# dropped together — they have to leave the pipeline as a set, because as
-# long as `PTXFDivFastPass` runs and rewrites `fdiv afn 1.0, sqrt(x)` into
-# `nvvm.div.approx.f(1.0, ...)`, the rsqrt tablegen pattern can't match.
+# passes below eat them.
 
-# Rewrite `fdiv afn 1.0, sqrt afn(x)` to `nvvm.rsqrt.approx.{f,d}(x)`. Must run
-# before `PTXFDivFastPass` (which would rewrite the fdiv to `nvvm.div.approx.f`,
-# defeating ISel pattern-matching) and `PTXFSqrtFastPass` (which for f64
-# expands sqrt into `rcp(rsqrt(...))`, hiding the pattern entirely).
-#
-# Why we can't rely on LLVM upstream:
-# - f32: NVPTX has tablegen patterns (`NVPTXIntrinsics.td`, `doRsqrtOpt`) that
-#   match `fdiv 1.0, sqrt_approx(x)` → `rsqrt.approx.f32` — but they landed in
-#   LLVM 19 (so absent on our LLVM 18 floor), and even on LLVM 21+ they only
-#   fire if the fdiv is still a generic `fdiv`. PTXFDivFastPass kills that.
-# - f64: no upstream fold exists at all. NVPTX doesn't override
-#   `getRecipEstimateSqrtEnabled`, so the DAGCombiner's generic rsqrt path is
-#   disabled, and there's no f64 equivalent of the f32 tablegen patterns.
-#   `rsqrt.approx.f64` is a real instruction; it just isn't selected for
-#   `1/sqrt(x)` upstream.
+# Rewrite `fdiv afn 1.0, sqrt afn(x)` on f64 to `nvvm.rsqrt.approx.d(x)`.
 function ptx_rsqrt_fast!(mod::LLVM.Module)
     changed = false
     @tracepoint "ptx-rsqrt-fast" begin
 
-    f32 = LLVM.FloatType()
     f64 = LLVM.DoubleType()
 
     # collect first to avoid mutation-during-iteration
-    to_replace = Tuple{LLVM.FDivInst, LLVM.CallInst, Bool}[]
+    to_replace = Tuple{LLVM.FDivInst, LLVM.CallInst}[]
     for f in functions(mod), bb in blocks(f), inst in instructions(bb)
         inst isa LLVM.FDivInst || continue
-        is_f32 = LLVM.value_type(inst) == f32
-        is_f64 = LLVM.value_type(inst) == f64
-        (is_f32 || is_f64) || continue
+        LLVM.value_type(inst) == f64 || continue
         LLVM.fast_math(inst).afn || continue
 
         # numerator must be the constant 1.0
@@ -562,39 +524,31 @@ function ptx_rsqrt_fast!(mod::LLVM.Module)
         lhs isa LLVM.ConstantFP || continue
         convert(Float64, lhs) == 1.0 || continue
 
-        # denominator must be an `afn`-flagged `llvm.sqrt.f{32,64}` call
+        # denominator must be an `afn`-flagged `llvm.sqrt.f64` call
         rhs = operands(inst)[2]
         rhs isa LLVM.CallInst || continue
         callee = LLVM.called_operand(rhs)
         callee isa LLVM.Function || continue
-        name = LLVM.name(callee)
-        expected = is_f32 ? "llvm.sqrt.f32" : "llvm.sqrt.f64"
-        name == expected || continue
+        LLVM.name(callee) == "llvm.sqrt.f64" || continue
         LLVM.fast_math(rhs).afn || continue
 
-        push!(to_replace, (inst, rhs, is_f32))
+        push!(to_replace, (inst, rhs))
     end
     isempty(to_replace) && return false
 
+    # declare intrinsics by name so LLVM keeps the exact non-overloaded names;
+    # LLVM.Intrinsic + type params would mangle to *.f64, unrecognized by NVPTX.
     fns = functions(mod)
     declare(name, ft) = haskey(fns, name) ? fns[name] : LLVM.Function(mod, name, ft)
-    f32_ft = LLVM.FunctionType(f32, [f32])
-    rsqrt_f32     = declare("llvm.nvvm.rsqrt.approx.f",     f32_ft)
-    rsqrt_f32_ftz = declare("llvm.nvvm.rsqrt.approx.ftz.f", f32_ft)
     f64_ft = LLVM.FunctionType(f64, [f64])
     rsqrt_f64 = declare("llvm.nvvm.rsqrt.approx.d", f64_ft)
 
     @dispose builder=IRBuilder() begin
-        for (fdiv, sqrt_call, is_f32) in to_replace
+        for (fdiv, sqrt_call) in to_replace
             x = operands(sqrt_call)[1]
             position!(builder, fdiv)
 
-            replacement = if is_f32
-                f = LLVM.parent(LLVM.parent(fdiv))
-                call!(builder, f32_ft, f32_ftz(f) ? rsqrt_f32_ftz : rsqrt_f32, [x])
-            else
-                call!(builder, f64_ft, rsqrt_f64, [x])
-            end
+            replacement = call!(builder, f64_ft, rsqrt_f64, [x])
 
             replace_uses!(fdiv, replacement)
             erase!(fdiv)
@@ -611,35 +565,26 @@ function ptx_rsqrt_fast!(mod::LLVM.Module)
 end
 PTXRSqrtFastPass() = NewPMModulePass("ptx-rsqrt-fast", ptx_rsqrt_fast!)
 
-# Rewrite `afn`-flagged `fdiv`:
-# - f32 → `llvm.nvvm.div.approx{,.ftz}.f`.
-# - f64 → `rcp.approx.ftz.d` + one Newton step (no native fast f64 fdiv).
+# Rewrite `afn`-flagged f64 `fdiv` to `rcp.approx.ftz.d` + one Newton step
+# (there is no native fast f64 fdiv).
 function ptx_fdiv_fast!(mod::LLVM.Module)
     changed = false
     @tracepoint "ptx-fdiv-fast" begin
 
-    f32 = LLVM.FloatType()
     f64 = LLVM.DoubleType()
 
     # collect first to avoid mutation-during-iteration
-    to_replace = Tuple{LLVM.FDivInst, Bool}[]
+    to_replace = LLVM.FDivInst[]
     for f in functions(mod), bb in blocks(f), inst in instructions(bb)
         inst isa LLVM.FDivInst || continue
-        is_f32 = LLVM.value_type(inst) == f32
-        is_f64 = LLVM.value_type(inst) == f64
-        (is_f32 || is_f64) || continue
+        LLVM.value_type(inst) == f64 || continue
         LLVM.fast_math(inst).afn || continue
-        push!(to_replace, (inst, is_f32))
+        push!(to_replace, inst)
     end
     isempty(to_replace) && return false
 
-    # declare intrinsics by name so LLVM keeps the exact non-overloaded names;
-    # LLVM.Intrinsic + type params would mangle to *.f64, unrecognized by NVPTX.
     fns = functions(mod)
     declare(name, ft) = haskey(fns, name) ? fns[name] : LLVM.Function(mod, name, ft)
-    f32_ft = LLVM.FunctionType(f32, [f32, f32])
-    div_f32     = declare("llvm.nvvm.div.approx.f",     f32_ft)
-    div_f32_ftz = declare("llvm.nvvm.div.approx.ftz.f", f32_ft)
     f64_ft1 = LLVM.FunctionType(f64, [f64])
     rcp_f64 = declare("llvm.nvvm.rcp.approx.ftz.d", f64_ft1)
     fma_ft  = LLVM.FunctionType(f64, [f64, f64, f64])
@@ -647,22 +592,17 @@ function ptx_fdiv_fast!(mod::LLVM.Module)
     one_f64 = ConstantFP(f64, 1.0)
 
     @dispose builder=IRBuilder() begin
-        for (inst, is_f32) in to_replace
+        for inst in to_replace
             lhs, rhs = operands(inst)[1], operands(inst)[2]
             position!(builder, inst)
 
-            replacement = if is_f32
-                f = LLVM.parent(LLVM.parent(inst))
-                call!(builder, f32_ft, f32_ftz(f) ? div_f32_ftz : div_f32, [lhs, rhs])
-            else
-                inv_y   = call!(builder, f64_ft1, rcp_f64, [rhs])
-                neg_rhs = fneg!(builder, rhs)
-                # Newton refinement, matching CUDA.jl's `FastMath.inv_fast(::Float64)`
-                e       = call!(builder, fma_ft, fma_f64, [inv_y, neg_rhs, one_f64])
-                e       = call!(builder, fma_ft, fma_f64, [e, e, e])
-                inv_ref = call!(builder, fma_ft, fma_f64, [e, inv_y, inv_y])
-                fmul!(builder, lhs, inv_ref)
-            end
+            inv_y   = call!(builder, f64_ft1, rcp_f64, [rhs])
+            neg_rhs = fneg!(builder, rhs)
+            # Newton refinement, matching CUDA.jl's `FastMath.inv_fast(::Float64)`
+            e       = call!(builder, fma_ft, fma_f64, [inv_y, neg_rhs, one_f64])
+            e       = call!(builder, fma_ft, fma_f64, [e, e, e])
+            inv_ref = call!(builder, fma_ft, fma_f64, [e, inv_y, inv_y])
+            replacement = fmul!(builder, lhs, inv_ref)
 
             replace_uses!(inst, replacement)
             erase!(inst)
@@ -675,53 +615,38 @@ function ptx_fdiv_fast!(mod::LLVM.Module)
 end
 PTXFDivFastPass() = NewPMModulePass("ptx-fdiv-fast", ptx_fdiv_fast!)
 
-# Rewrite `afn`-flagged `llvm.sqrt.f{32,64}`:
-# - f32 → `llvm.nvvm.sqrt.approx{,.ftz}.f`.
-# - f64 → `rcp.approx.ftz.d(rsqrt.approx.d(x))` (no native fast f64 sqrt).
+# Rewrite `afn`-flagged `llvm.sqrt.f64` to `rcp.approx.ftz.d(rsqrt.approx.d(x))`
+# (there is no native fast f64 sqrt; this matches NVPTX' `getSqrtEstimate`).
 function ptx_fsqrt_fast!(mod::LLVM.Module)
     changed = false
     @tracepoint "ptx-fsqrt-fast" begin
 
-    f32 = LLVM.FloatType()
     f64 = LLVM.DoubleType()
 
-    to_replace = Tuple{LLVM.CallInst, Bool}[]
+    to_replace = LLVM.CallInst[]
     for f in functions(mod), bb in blocks(f), inst in instructions(bb)
         inst isa LLVM.CallInst || continue
         callee = LLVM.called_operand(inst)
         callee isa LLVM.Function || continue
-        name = LLVM.name(callee)
-        is_f32 = name == "llvm.sqrt.f32"
-        is_f64 = name == "llvm.sqrt.f64"
-        (is_f32 || is_f64) || continue
+        LLVM.name(callee) == "llvm.sqrt.f64" || continue
         LLVM.fast_math(inst).afn || continue
-        push!(to_replace, (inst, is_f32))
+        push!(to_replace, inst)
     end
     isempty(to_replace) && return false
 
     fns = functions(mod)
     declare(name, ft) = haskey(fns, name) ? fns[name] : LLVM.Function(mod, name, ft)
-    f32_ft = LLVM.FunctionType(f32, [f32])
-    sqrt_f32     = declare("llvm.nvvm.sqrt.approx.f",     f32_ft)
-    sqrt_f32_ftz = declare("llvm.nvvm.sqrt.approx.ftz.f", f32_ft)
     f64_ft = LLVM.FunctionType(f64, [f64])
     rcp_f64   = declare("llvm.nvvm.rcp.approx.ftz.d", f64_ft)
     rsqrt_f64 = declare("llvm.nvvm.rsqrt.approx.d",   f64_ft)
 
     @dispose builder=IRBuilder() begin
-        for (inst, is_f32) in to_replace
+        for inst in to_replace
             x = operands(inst)[1]
             position!(builder, inst)
 
-            replacement = if is_f32
-                f = LLVM.parent(LLVM.parent(inst))
-                call!(builder, f32_ft, f32_ftz(f) ? sqrt_f32_ftz : sqrt_f32, [x])
-            else
-                # No native fast f64 sqrt; emit the same `rcp(rsqrt(x))`
-                # sequence NVPTX' `getSqrtEstimate` would have used.
-                rsqrt = call!(builder, f64_ft, rsqrt_f64, [x])
-                call!(builder, f64_ft, rcp_f64, [rsqrt])
-            end
+            rsqrt = call!(builder, f64_ft, rsqrt_f64, [x])
+            replacement = call!(builder, f64_ft, rcp_f64, [rsqrt])
 
             replace_uses!(inst, replacement)
             erase!(inst)

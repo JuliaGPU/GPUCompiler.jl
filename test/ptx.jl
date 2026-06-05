@@ -374,13 +374,13 @@ end
     # variants. Sweep both axes (IR attributes + PTX selection) across the
     # flag.
     for fastmath in (false, true)
-        # IR attributes + sqrt rewrite by PTXFSqrtFastPass when fastmath.
+        # IR attributes; the back-end selects approximate instructions from these.
         @test @filecheck PTX.code_llvm(Tuple{Ptr{Float32},Ptr{Float32}};
                                        dump_module=true, fastmath) do x, out
             @check_not cond=!fastmath "unsafe-fp-math"
             @check_not cond=!fastmath "denormal-fp-math-f32"
             @check     cond=!fastmath "call float @llvm.sqrt.f32"
-            @check     cond=fastmath  "call float @llvm.nvvm.sqrt.approx.ftz.f"
+            @check     cond=fastmath  "call fast float @llvm.sqrt.f32"
             @check     cond=fastmath  "\"denormal-fp-math-f32\"=\"preserve-sign,preserve-sign\""
             @check     cond=fastmath  "\"unsafe-fp-math\"=\"true\""
             unsafe_store!(out, sqrt(unsafe_load(x)))
@@ -398,13 +398,12 @@ end
 end
 
 @testset "fastmath fdiv/fsqrt" begin
-    # `PTXFDivFastPass` and `PTXFSqrtFastPass` rewrite `afn`-flagged fdiv /
-    # `llvm.sqrt.*`. f32 ops → `*.approx{,.ftz}.f32` (filling in for LLVM 18,
-    # whose `getDivF32Level`/`usePrecSqrtF32` don't honor per-call `afn`).
-    # f64 fdiv → `rcp.approx.ftz.d` + Newton refinement; f64 sqrt →
-    # `rcp.approx.ftz.d(rsqrt.approx.d(x))` (NVPTX has no native fast f64).
-    # Per-call `@fastmath` is what we test here; the job-wide path is
-    # covered by the testset above.
+    # `afn`-flagged f32 fdiv / `llvm.sqrt.f32` are selected as
+    # `*.approx{,.ftz}.f32` by the back-end. For f64, `PTXFDivFastPass` and
+    # `PTXFSqrtFastPass` rewrite fdiv → `rcp.approx.ftz.d` + Newton refinement
+    # and sqrt → `rcp.approx.ftz.d(rsqrt.approx.d(x))` (NVPTX has no native
+    # fast f64). Per-call `@fastmath` is what we test here; the job-wide path
+    # is covered by the testset above.
 
     @test @filecheck PTX.code_native(Tuple{Float32, Float32}) do x, y
         @check "div.approx.f32"
@@ -445,12 +444,11 @@ end
 end
 
 @testset "fastmath rsqrt" begin
-    # `PTXRSqrtFastPass` pattern-matches `fdiv afn 1.0, sqrt afn(x)` and folds
-    # it to `nvvm.rsqrt.approx.{f,d}`, so high-level `@fastmath 1/sqrt(x)` and
-    # `@fastmath inv(sqrt(x))` lower to a single `rsqrt.approx` instruction
-    # rather than `sqrt.approx + div.approx` (f32) or expansion into
-    # `rcp(rsqrt(...))` and a Newton step (f64). Without afn on both operands,
-    # the pattern doesn't fire — folding would change precision.
+    # `fdiv afn 1.0, sqrt afn(x)` folds to a single `rsqrt.approx`
+    # instruction: for f32 by the back-end's ISel patterns, for f64 by
+    # `PTXRSqrtFastPass` (which must claim the pattern before the per-op f64
+    # rewrites expand it into `rcp(rsqrt(...))` and a Newton step). Without
+    # afn on both operands, the fold doesn't fire — it would change precision.
     mod = @eval module $(gensym())
         rsqrt32_fast(x::Float32) = @fastmath 1f0 / sqrt(x)
         rsqrt64_fast(x::Float64) = @fastmath 1.0 / sqrt(x)
