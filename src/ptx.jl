@@ -90,19 +90,25 @@ function llvm_machine(target::PTXCompilerTarget)
     return TargetMachine(t, triple)
 end
 
-# the default datalayout does not match the one in the NVPTX user guide
+# match the layout computed by the NVPTX back-end (computeNVPTXDataLayout); components
+# that match LLVM's defaults (small integers, floats, common vectors) are left implicit.
+# note that the external back-end ignores the module datalayout and recomputes it from
+# the target, so the middle end needs to match it exactly, or offsets folded early would
+# disagree with the final layout. this notably affects i128, which Julia did not even
+# align to 16 bytes before 1.12 (users may have to reject affected types, as kernel
+# argument layouts will differ between such hosts and the device).
 llvm_datalayout(target::PTXCompilerTarget) =
     # little endian
     "e-" *
-    # on 32-bit systems, use 32-bit pointers.
-    # on 64-bit systems, use 64-bit pointers.
-    (Int === Int64 ? "p:64:64:64-" :  "p:32:32:32-") *
+    # on 32-bit systems, use 32-bit pointers, including for distributed shared
+    # memory (addrspace 7). on 64-bit systems, use 64-bit pointers (the default).
+    (Int === Int64 ? "" :  "p:32:32-p7:32:32-") *
+    # tensor memory (addrspace 6) always uses 32-bit pointers
+    "p6:32:32-" *
     # alignment of integer types
-    "i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-" *
-    # alignment of floating point types
-    "f32:32:32-f64:64:64-" *
+    "i64:64-i128:128-i256:256-" *
     # alignment of vector types
-    "v16:16:16-v32:32:32-v64:64:64-v128:128:128-" *
+    "v16:16-v32:32-" *
     # native integer widths
     "n16:32:64"
 
