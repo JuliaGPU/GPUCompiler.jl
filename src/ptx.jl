@@ -127,7 +127,10 @@ end
 
 const ptx_intrinsics = ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
-    in(fn, ptx_intrinsics)
+    in(fn, ptx_intrinsics) ||
+    # NVVM intrinsics that the in-process LLVM does not know about, e.g. selected by
+    # libdevice's __CUDA_ARCH dispatch, are still supported by the external back-end.
+    startswith(fn, "llvm.nvvm.")
 
 # XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
 runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
