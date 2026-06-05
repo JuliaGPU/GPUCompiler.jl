@@ -159,6 +159,44 @@ end
     end
 end
 
+@testset "sincos intrinsics" begin
+    mod = @eval module $(gensym())
+        using LLVM.Interop
+
+        function kernel(x)
+            c = Ref{Float32}()
+            s = @typed_ccall("air.sincos.f32", llvmcall, Float32,
+                             (Float32, Ptr{Float32}), x, c)
+            return s + c[]
+        end
+
+        function kernel_fast(x)
+            c = Ref{Float32}()
+            s = @typed_ccall("air.fast_sincos.f32", llvmcall, Float32,
+                             (Float32, Ptr{Float32}), x, c)
+            return s + c[]
+        end
+    end
+
+    # the output argument of sincos should be annotated `nocapture writeonly`
+    # (`nocapture` having been replaced by `captures(none)` in LLVM 21)
+    @test @filecheck begin
+        @check "declare float @air.sincos.f32"
+        @check_same cond=typed_ptrs "(float, float* nocapture writeonly)"
+        @check_same cond=(opaque_ptrs && LLVM.version() < v"21") "(float, ptr nocapture writeonly)"
+        @check_same cond=(LLVM.version() >= v"21") "(float, ptr writeonly captures(none))"
+        Metal.code_llvm(mod.kernel, Tuple{Float32}; dump_module=true)
+    end
+
+    @test @filecheck begin
+        @check "declare float @air.fast_sincos.f32"
+        @check_same cond=typed_ptrs "(float, float* nocapture writeonly)"
+        @check_same cond=(opaque_ptrs && LLVM.version() < v"21") "(float, ptr nocapture writeonly)"
+        @check_same cond=(LLVM.version() >= v"21") "(float, ptr writeonly captures(none))"
+        Metal.code_llvm(mod.kernel_fast, Tuple{Float32}; dump_module=true)
+    end
+end
+
 @testset "unsupported type detection" begin
     mod = @eval module $(gensym())
         function kernel(ptr)
