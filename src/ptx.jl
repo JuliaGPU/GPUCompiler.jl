@@ -190,7 +190,7 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 
     if job.config.kernel
-        # materialize byval arguments the back-end would otherwise copy to local memory
+        # work around bad byval codegen (JuliaGPU/GPUCompiler.jl#92)
         entry = lower_byval(job, mod, entry)
 
         # emit kernel property annotations into the module. these have to be in

@@ -660,53 +660,24 @@ end
 
 # byval lowering
 #
-# the NVPTX back-end accesses byval kernel arguments directly in parameter space when all
-# uses are simple loads (possibly via GEPs), but otherwise falls back to copying the
-# argument to local memory during machine-code generation, too late for the optimizer to
-# clean up. eagerly materialize such arguments ourselves instead, leaving the directly-
-# accessible ones to the back-end. (we historically lowered all byval arguments, working
-# around bad codegen in old back-ends; see #92 and https://reviews.llvm.org/D79744.)
-
-# can the back-end service all uses of this argument straight from parameter space?
-function loads_parameter_directly(param::LLVM.Argument)
-    worklist = LLVM.Value[param]
-    while !isempty(worklist)
-        value = popfirst!(worklist)
-        for use in uses(value)
-            inst = user(use)
-            if inst isa LLVM.LoadInst
-                # serviced by ld.param
-            elseif inst isa LLVM.GetElementPtrInst ||
-                   inst isa LLVM.BitCastInst ||
-                   inst isa LLVM.AddrSpaceCastInst
-                push!(worklist, inst)
-            else
-                # phis, selects, stores, calls (e.g. memcpy), etc. make the back-end
-                # fall back to a local copy
-                return false
-            end
-        end
-    end
-    return true
-end
-
+# some back-ends don't support byval, or support it badly, so lower it eagerly ourselves
+# https://reviews.llvm.org/D79744
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
     ft = function_type(f)
     @tracepoint "lower byval" begin
 
-    # find the byval parameters that need lowering
+    # find the byval parameters
     byval = BitVector(undef, length(parameters(ft)))
     types = Vector{LLVMType}(undef, length(parameters(ft)))
-    for (i, param) in enumerate(parameters(f))
+    for i in 1:length(byval)
         byval[i] = false
         for attr in collect(parameter_attributes(f, i))
             if kind(attr) == kind(TypeAttribute("byval", LLVM.VoidType()))
-                byval[i] = !loads_parameter_directly(param)
+                byval[i] = true
                 types[i] = value(attr)
             end
         end
     end
-    any(byval) || return f
 
     # fixup metadata
     #
@@ -805,7 +776,6 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 
     end
 end
-
 
 
 # kernel state arguments
@@ -1213,7 +1183,7 @@ end
 #
 # the kernel state argument is always passed by value to avoid codegen issues with byval.
 # some back-ends however do not support passing kernel arguments by value, so this pass
-# serves to convert that argument.
+# serves to convert that argument (and is conceptually the inverse of `lower_byval`).
 function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                     f::LLVM.Function)
     ft = function_type(f)
