@@ -28,9 +28,9 @@ end
     end
 
     @test @filecheck begin
-        # aggregates are passed `byval`; the back-end loads them from parameter space
         @check_label "define ptx_kernel void @_Z6kernel9Aggregate"
-        @check_same "byval({{({ i64 }|\\[1 x i64\\])}})"
+        @check_not cond=typed_ptrs "*"
+        @check_not cond=opaque_ptrs "ptr"
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; kernel=true)
     end
 end
