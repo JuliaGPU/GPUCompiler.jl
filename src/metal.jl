@@ -68,7 +68,7 @@ function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.fastmath, h)
 end
 
-# the canonical text representation is AIR assembly, i.e., LLVM 5 era textual IR
+# the canonical text representation is AIR assembly, i.e. LLVM 14 era textual IR
 source_code(target::MetalCompilerTarget) = "llvm"
 
 # Metal is not supported by our LLVM builds, so we can't get a target machine
@@ -379,12 +379,20 @@ end
         error("Metal machine-code generation requires the LLVMDowngrader_jll package, which should be installed and loaded first.")
     end
 
-    # assemble to AIR, i.e., LLVM 5 era bitcode, as consumed by the metallib loader
-    air = run_tool(`$(LLVMDowngrader_jll.llvm_as()) --bitcode-version=5.0 -o -`, string(mod))
+    # downgrade to AIR. Metal's metallib loader is a backward-compatible reader that accepts
+    # real LLVM <= 15 bitcode; target LLVM 14 (typed pointers, but with native `bfloat` —
+    # unlike the 5.0/7.0 targets) so BFloat16 kernels compile on Julia 1.13+, where Julia
+    # emits the native `bfloat` IR type (JuliaGPU/Metal.jl#817). `llvm-downgrade` reads
+    # bitcode, so hand it the module's bitcode rather than its textual form.
+    bitcode = let io = IOBuffer()
+        write(io, mod)
+        take!(io)
+    end
+    air = run_tool(`$(LLVMDowngrader_jll.llvm_downgrade()) --bitcode-version=14.0 -o - -`, bitcode)
 
     if format == LLVM.API.LLVMAssemblyFile
-        # disassemble the bitcode again to AIR assembly, i.e., LLVM 5 era textual IR
-        String(run_tool(`$(LLVMDowngrader_jll.llvm_dis_5()) -o -`, air))
+        # disassemble the bitcode again to AIR assembly, i.e. LLVM 14 era textual IR
+        String(run_tool(`$(LLVMDowngrader_jll.llvm_dis_14()) -o - -`, air))
     else
         air
     end
