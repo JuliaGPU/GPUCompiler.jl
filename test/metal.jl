@@ -904,6 +904,87 @@ end
     end
 end
 
+@testset "bfloat intrinsic promotion" begin
+    # AIR has no native bfloat fabs/min/max. JuliaGPU/Metal.jl#298: on Julia 1.13+, where
+    # `bfloat` is the native IR type, LLVM folds BFloat16s' f32-promoted definitions back into
+    # bfloat intrinsics, so the lowering promotes them to float -- fpext the operands, call the
+    # f32 AIR builtin, fptrunc the result. (Parses bfloat IR directly, so it is version-agnostic.)
+    km = @eval module $(gensym())
+        f() = return
+    end
+    job, _ = Metal.create_job(km.f, Tuple{})
+    names(f) = [LLVM.name(called_operand(i)) for bb in blocks(f) for i in instructions(bb)
+                if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
+    air_calls(f) = [i for bb in blocks(f) for i in instructions(bb)
+                    if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function &&
+                       startswith(LLVM.name(called_operand(i)), "air.")]
+    has(f, T) = any(i -> i isa T, (i for bb in blocks(f) for i in instructions(bb)))
+
+    # the value intrinsics (fabs/minnum/maxnum) map to air.*.f32 around fpext/fptrunc
+    Context() do ctx
+        ir = """
+        declare bfloat @llvm.fabs.bf16(bfloat)
+        declare bfloat @llvm.minnum.bf16(bfloat, bfloat)
+        declare bfloat @llvm.maxnum.bf16(bfloat, bfloat)
+        define bfloat @f(bfloat %a, bfloat %b) {
+          %x = call bfloat @llvm.fabs.bf16(bfloat %a)
+          %y = call bfloat @llvm.minnum.bf16(bfloat %x, bfloat %b)
+          %z = call bfloat @llvm.maxnum.bf16(bfloat %y, bfloat %b)
+          ret bfloat %z
+        }
+        """
+        mod = parse(LLVM.Module, ir); f = functions(mod)["f"]
+        GPUCompiler.lower_llvm_intrinsics!(job, f)
+        ns = names(f)
+        @test "air.fabs.f32" in ns
+        @test "air.fmin.f32" in ns
+        @test "air.fmax.f32" in ns
+        @test !any(startswith(n, "llvm.") for n in ns)
+        # the AIR calls operate on float; the bfloat lives only in the fpext/fptrunc bridges
+        @test all(c -> value_type(c) == LLVM.FloatType(), air_calls(f))
+        @test has(f, LLVM.FPExtInst) && has(f, LLVM.FPTruncInst)
+        @test (verify(mod); true)
+    end
+
+    # the NaN-propagating min/max (llvm.minimum/maximum, what Base.min/max emit) go through the
+    # f32 wrapper, also via fpext/fptrunc -- not the f16 wrapper bfloat's 16-bit width would pick
+    Context() do ctx
+        ir = """
+        declare bfloat @llvm.minimum.bf16(bfloat, bfloat)
+        declare bfloat @llvm.maximum.bf16(bfloat, bfloat)
+        define bfloat @g(bfloat %a, bfloat %b) {
+          %y = call bfloat @llvm.minimum.bf16(bfloat %a, bfloat %b)
+          %z = call bfloat @llvm.maximum.bf16(bfloat %y, bfloat %b)
+          ret bfloat %z
+        }
+        """
+        mod = parse(LLVM.Module, ir); f = functions(mod)["g"]
+        GPUCompiler.lower_llvm_intrinsics!(job, f)
+        ns = names(f)
+        @test "air.minimum.f32" in ns
+        @test "air.maximum.f32" in ns
+        @test !("air.minimum.f16" in ns)
+        @test all(c -> value_type(c) == LLVM.FloatType(), air_calls(f))
+        @test has(f, LLVM.FPExtInst) && has(f, LLVM.FPTruncInst)
+        @test (verify(mod); true)
+    end
+
+    # @fastmath bfloat min (nnan) skips the wrapper for the relaxed f32 builtin
+    Context() do ctx
+        ir = """
+        declare bfloat @llvm.minimum.bf16(bfloat, bfloat)
+        define bfloat @h(bfloat %a, bfloat %b) {
+          %y = call nnan bfloat @llvm.minimum.bf16(bfloat %a, bfloat %b)
+          ret bfloat %y
+        }
+        """
+        mod = parse(LLVM.Module, ir); f = functions(mod)["h"]
+        GPUCompiler.lower_llvm_intrinsics!(job, f)
+        @test "air.fast_fmin.f32" in names(f)
+        @test (verify(mod); true)
+    end
+end
+
 @testset "integer min/max fusion" begin
     # chained integer min/max (e.g. min(a,b,c) reduced to nested 2-arg calls) is fused to AGX's
     # 3-way air.{min,max}3 builtin, but only when the inner result feeds just the outer and both

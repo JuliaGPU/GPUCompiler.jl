@@ -68,7 +68,7 @@ function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.fastmath, h)
 end
 
-# the canonical text representation is AIR assembly, i.e., LLVM 5 era textual IR
+# the canonical text representation is AIR assembly, i.e. LLVM 14 era textual IR
 source_code(target::MetalCompilerTarget) = "llvm"
 
 # Metal is not supported by our LLVM builds, so we can't get a target machine
@@ -379,12 +379,20 @@ end
         error("Metal machine-code generation requires the LLVMDowngrader_jll package, which should be installed and loaded first.")
     end
 
-    # assemble to AIR, i.e., LLVM 5 era bitcode, as consumed by the metallib loader
-    air = run_tool(`$(LLVMDowngrader_jll.llvm_as()) --bitcode-version=5.0 -o -`, string(mod))
+    # downgrade to AIR. Metal's metallib loader is a backward-compatible reader that accepts
+    # real LLVM <= 15 bitcode; target LLVM 14 (typed pointers, but with native `bfloat` —
+    # unlike the 5.0/7.0 targets) so BFloat16 kernels compile on Julia 1.13+, where Julia
+    # emits the native `bfloat` IR type (JuliaGPU/Metal.jl#817). `llvm-downgrade` reads
+    # bitcode, so hand it the module's bitcode rather than its textual form.
+    bitcode = let io = IOBuffer()
+        write(io, mod)
+        take!(io)
+    end
+    air = run_tool(`$(LLVMDowngrader_jll.llvm_downgrade()) --bitcode-version=14.0 -o - -`, bitcode)
 
     if format == LLVM.API.LLVMAssemblyFile
-        # disassemble the bitcode again to AIR assembly, i.e., LLVM 5 era textual IR
-        String(run_tool(`$(LLVMDowngrader_jll.llvm_dis_5()) -o -`, air))
+        # disassemble the bitcode again to AIR assembly, i.e. LLVM 14 era textual IR
+        String(run_tool(`$(LLVMDowngrader_jll.llvm_dis_14()) -o - -`, air))
     else
         air
     end
@@ -1451,6 +1459,19 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
             # determine type of the intrinsic
             typ = value_type(call)
+
+            # AIR has no native bfloat fabs/fmin/fmax (MSL promotes bfloat to float for
+            # them), so do the same: call the float intrinsic on fpext'd operands and
+            # fptrunc the result back. `optyp` is the type the AIR call actually uses.
+            bf = LLVM.BFloatType()
+            promote_bf = typ == bf || (typ isa LLVM.VectorType && eltype(typ) == bf)
+            optyp = if typ == bf
+                LLVM.FloatType()
+            elseif promote_bf
+                LLVM.VectorType(LLVM.FloatType(), Int(length(typ)))
+            else
+                typ
+            end
             function type_suffix(typ)
                 # XXX: can't we use LLVM to do this kind of mangling?
                 if typ isa LLVM.IntegerType
@@ -1468,10 +1489,10 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 end
             end
 
-            if typ isa LLVM.IntegerType || (typ isa LLVM.VectorType && eltype(typ) isa LLVM.IntegerType)
-                fn *= "." * (signed::Bool ? "s" : "u") * "." * type_suffix(typ)
+            if optyp isa LLVM.IntegerType || (optyp isa LLVM.VectorType && eltype(optyp) isa LLVM.IntegerType)
+                fn *= "." * (signed::Bool ? "s" : "u") * "." * type_suffix(optyp)
             else
-                fn *= "." * type_suffix(typ)
+                fn *= "." * type_suffix(optyp)
             end
 
             # AIR's value intrinsics take only the value operands. `llvm.abs` carries an extra
@@ -1479,7 +1500,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             # type isn't the result type before building the call. (For the others every
             # operand is the result type, so this is a no-op.)
             air_args = LLVM.Value[a for a in arguments(call) if value_type(a) == typ]
-            air_ft = LLVM.FunctionType(typ, LLVMType[typ for _ in air_args])
+            air_ft = LLVM.FunctionType(optyp, LLVMType[optyp for _ in air_args])
             new_intr = if haskey(functions(mod), fn)
                 functions(mod)[fn]
             else
@@ -1489,7 +1510,12 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 position!(builder, call)
                 debuglocation!(builder, call)
 
-                new_value = call!(builder, air_ft, new_intr, air_args)
+                call_args = promote_bf ?
+                    LLVM.Value[fpext!(builder, a, optyp) for a in air_args] : air_args
+                new_value = call!(builder, air_ft, new_intr, call_args)
+                if promote_bf
+                    new_value = fptrunc!(builder, new_value, typ)
+                end
                 replace_uses!(call, new_value)
                 erase!(call)
                 changed = true
@@ -1568,12 +1594,18 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             typ = value_type(call)
             is_minimum = intr == LLVM.Intrinsic("llvm.minimum")
 
+            # AIR has no bfloat min/max, so promote to float as MSL does: build the wrapper
+            # in float and fpext/fptrunc around it. `optyp` is the type it operates on.
+            promote_bf = typ == LLVM.BFloatType()
+            optyp = promote_bf ? LLVM.FloatType() : typ
+            op_ft = LLVM.FunctionType(optyp, LLVMType[optyp, optyp])
+
             # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
-            jltyp = if typ == LLVM.HalfType()
+            jltyp = if optyp == LLVM.HalfType()
                 Float16
-            elseif typ == LLVM.FloatType()
+            elseif optyp == LLVM.FloatType()
                 Float32
-            elseif typ == LLVM.DoubleType()
+            elseif optyp == LLVM.DoubleType()
                 Float64
             else
                 error("Unsupported maximum/minimum type: $typ")
@@ -1584,7 +1616,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             # -ffast-math: f32 has air.fast_f{min,max}; f16 has no fast form, so use air.f{min,max}.
             fast_fn = if !LLVM.fast_math(call).nnan
                 nothing
-            elseif typ == LLVM.FloatType()
+            elseif optyp == LLVM.FloatType()
                 is_minimum ? "air.fast_fmin.f32" : "air.fast_fmax.f32"
             else
                 is_minimum ? "air.fmin.f$(8*sizeof(jltyp))" : "air.fmax.f$(8*sizeof(jltyp))"
@@ -1599,9 +1631,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 new_intr = functions(mod)[new_intr_fn]
             elseif fast_fn !== nothing
                 # relaxed builtin: just declare it, no wrapper needed
-                new_intr = LLVM.Function(mod, new_intr_fn, call_ft)
+                new_intr = LLVM.Function(mod, new_intr_fn, op_ft)
             else
-                new_intr = LLVM.Function(mod, new_intr_fn, call_ft)
+                new_intr = LLVM.Function(mod, new_intr_fn, op_ft)
                 push!(function_attributes(new_intr), EnumAttribute("alwaysinline"))
 
                 arg0, arg1 = parameters(new_intr)
@@ -1642,9 +1674,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     arg1′ = bitcast!(builder, arg1, typ′)
 
                     arg0_zero = fcmp!(builder, LLVM.API.LLVMRealUEQ, arg0,
-                                      LLVM.ConstantFP(typ, zero(jltyp)))
+                                      LLVM.ConstantFP(optyp, zero(jltyp)))
                     arg1_zero = fcmp!(builder, LLVM.API.LLVMRealUEQ, arg1,
-                                      LLVM.ConstantFP(typ, zero(jltyp)))
+                                      LLVM.ConstantFP(optyp, zero(jltyp)))
                     args_zero = and!(builder, arg0_zero, arg1_zero)
                     arg0_sign = and!(builder, arg0′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
                     arg1_sign = and!(builder, arg1′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
@@ -1673,9 +1705,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     fallback_intr = if haskey(functions(mod), fallback_intr_fn)
                         functions(mod)[fallback_intr_fn]
                     else
-                        LLVM.Function(mod, fallback_intr_fn, call_ft)
+                        LLVM.Function(mod, fallback_intr_fn, op_ft)
                     end
-                    val = call!(builder, call_ft, fallback_intr, collect(parameters(new_intr)))
+                    val = call!(builder, op_ft, fallback_intr, collect(parameters(new_intr)))
                     ret!(builder, val)
                 end
             end
@@ -1684,7 +1716,13 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 position!(builder, call)
                 debuglocation!(builder, call)
 
-                new_value = call!(builder, call_ft, new_intr, arguments(call))
+                call_args = promote_bf ?
+                    LLVM.Value[fpext!(builder, a, optyp) for a in arguments(call)] :
+                    collect(arguments(call))
+                new_value = call!(builder, op_ft, new_intr, call_args)
+                if promote_bf
+                    new_value = fptrunc!(builder, new_value, typ)
+                end
                 replace_uses!(call, new_value)
                 erase!(call)
                 changed = true
