@@ -40,6 +40,15 @@ function instcombine_pass(@nospecialize(job::CompilerJob))
     end
 end
 
+# Pick the peephole pass according to `optimization_options(job).aggressiveinstcombine`.
+function aggressiveinstcombine_pass(@nospecialize(job::CompilerJob))
+    if get(optimization_options(job), :aggressiveinstcombine, true)
+        AggressiveInstCombinePass()
+    else
+        InstSimplifyPass()
+    end
+end
+
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
     tm = llvm_machine(job.config.target)
     tti = llvm_targetinfo(job.config.target)
@@ -163,7 +172,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
                 add!(fpm, SROAPass())
                 add!(fpm, EarlyCSEPass(; memssa=true))
                 add!(fpm, instcombine_pass(job))
-                add!(fpm, AggressiveInstCombinePass())
+                add!(fpm, aggressiveinstcombine_pass(job))
                 add!(fpm, JumpThreadingPass())
                 add!(fpm, CorrelatedValuePropagationPass())
                 add!(fpm, LibCallsShrinkWrapPass())
