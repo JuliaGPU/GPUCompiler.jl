@@ -223,6 +223,51 @@ end
         # this also applies to Symbols
         Native.code_execution(Returns(nothing), (Symbol,))
     end
+
+    @testset "code coverage" begin
+        mod = @eval module $(gensym())
+            @inline inlined_callee(x) = x + one(x)
+            @noinline noinline_callee(x) = x * 2
+            entry(x) = noinline_callee(inlined_callee(x))
+        end
+
+        # whether any line in `lo:hi` of `file` has a nonzero execution count in an
+        # lcov tracefile
+        function lcov_any_covered(tracefile, file, lo, hi)
+            in_block = false
+            for l in eachline(tracefile)
+                if startswith(l, "SF:")
+                    in_block = (l == "SF:" * file)
+                elseif l == "end_of_record"
+                    in_block = false
+                elseif in_block && startswith(l, "DA:")
+                    ln, cnt = parse.(Int, split(l[4:end], ","))
+                    lo <= ln <= hi && cnt >= 1 && return true
+                end
+            end
+            return false
+        end
+
+        if Base.JLOptions().code_coverage == 0
+            @test_skip "requires --code-coverage"
+        else
+            job, _ = Native.create_job(mod.entry, (Int,))
+            JuliaContext() do ctx
+                GPUCompiler.compile(:asm, job)
+            end
+
+            # flush coverage data in-process; the device functions must show covered
+            # lines even though they were never executed by the host.
+            mktempdir() do dir
+                tracefile = joinpath(dir, "coverage.info")
+                ccall(:jl_write_coverage_data, Cvoid, (Cstring,), tracefile)
+                for f in (mod.inlined_callee, mod.noinline_callee, mod.entry)
+                    m = only(methods(f))
+                    @test lcov_any_covered(tracefile, string(m.file), m.line, m.line + 1)
+                end
+            end
+        end
+    end
 end
 
 ############################################################################################
