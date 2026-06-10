@@ -707,6 +707,37 @@ function Base.precompile(@nospecialize(job::CompilerJob))
 end
 
 
+## code coverage
+
+# When the host process runs with `--code-coverage`, lowered code contains
+# `:code_coverage_effect` expressions, which the compiler only inserts for code that is
+# actually being tracked. Device code cannot count executions, as it cannot call into the
+# Julia runtime, so instead we mark those lines as visited when compiling them: Coverage of
+# device code thus means "this code was compiled", with counts reflecting the number of
+# compilations rather than executions.
+function record_coverage(src::CodeInfo)
+    for (pc, stmt) in enumerate(src.code)
+        (stmt isa Expr && stmt.head === :code_coverage_effect) || continue
+        @static if VERSION >= v"1.12-"
+            scopes = Base.IRShow.buildLineInfoNode(src.debuginfo, nothing, pc)
+            isempty(scopes) && continue
+            loc = scopes[end]   # innermost scope, i.e., the inlined callee
+            file, line = loc.file, loc.line
+        else
+            lineidx = src.codelocs[pc]
+            lineidx == 0 && continue
+            loc = src.linetable[lineidx]::Core.LineInfoNode
+            file, line = loc.file, loc.line
+        end
+        file isa Symbol || continue
+        filename = String(file)
+        (isempty(filename) || line <= 0) && continue
+        ccall(:jl_coverage_visit_line, Cvoid, (Cstring, Csize_t, Cint),
+              filename, ncodeunits(filename), line)
+    end
+    return
+end
+
 const HAS_LLVM_GET_CIS = (
     VERSION >= v"1.13.0-DEV.1120" || (
         Libdl.dlsym(
@@ -724,6 +755,14 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     interp = get_interpreter(job)
     cache = CC.code_cache(interp)
     populated = ci_cache_populate(interp, cache, job.source, job.world, job.world)
+
+    # record line coverage of all compiled code (on older versions of Julia, where
+    # `ci_cache_populate` does not return sources, this happens after codegen instead)
+    if Base.JLOptions().code_coverage != 0
+        for (ci, src) in populated
+            record_coverage(src)
+        end
+    end
 
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
@@ -961,6 +1000,20 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # Avoid redundant code_instances. This is necessary to avoid false positives trying to add the same key'd mi to the compiled Dict.
     unique!(code_instances)
+
+    # record line coverage of all compiled code (on newer versions of Julia, this happens
+    # based on the sources returned by `ci_cache_populate` instead)
+    if Base.JLOptions().code_coverage != 0 && isempty(populated)
+        for ci in code_instances
+            src = ci.inferred
+            if src isa String
+                src = Base._uncompressed_ir(ci, src)
+            end
+            if src isa CodeInfo
+                record_coverage(src)
+            end
+        end
+    end
 
     resize!(method_instances, length(code_instances))
     for (i, ci) in enumerate(code_instances)
