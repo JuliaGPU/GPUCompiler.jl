@@ -60,20 +60,29 @@ end
 
 ## functionality to build the runtime library
 
-# Compile a single runtime function and link it into `mod`. Memoizes the renamed
-# bitcode via the back-end's `cache_get`/`cache_put!` protocol — cross-session
-# persistence is the back-end's responsibility (typically by storing on a CI's
-# `analysis_results` via CompilerCaching). The session-local `runtime_libs`
-# cache below avoids repeating the parse-and-link work within a session.
+# Per-function compilation results for the GPU runtime library, cached through the
+# same `cached_results` mechanism back-ends use for kernels. On 1.11+ the bitcode
+# thus lives on the runtime function's `CodeInstance` — possibly alongside a
+# back-end's own results struct — and persists through precompilation, so sessions
+# loading a back-end that compiled its runtime during precompile skip codegen
+# entirely. On 1.10 it is cached for the duration of the session.
+mutable struct RuntimeFunctionResults
+    bitcode::Union{Nothing,Vector{UInt8}}
+    RuntimeFunctionResults() = new(nothing)
+end
+
+# Compile a single runtime function and link it into `mod`. The renamed bitcode is
+# memoized through `RuntimeFunctionResults`; the session-local `runtime_libs` cache
+# below additionally avoids repeating the parse-and-link work within a session.
 function emit_function!(mod, config::CompilerConfig, f, method)
     tt = Base.to_tuple_type(method.types)
     source = generic_methodinstance(f, tt)
     name = method.llvm_name
     rt_job = CompilerJob(source, config)
 
-    cached = cache_get(rt_job, :llvm_ir)
-    if cached !== nothing
-        link!(mod, parse(LLVM.Module, MemoryBuffer(cached)))
+    res = cached_results(RuntimeFunctionResults, rt_job)
+    if res.bitcode !== nothing
+        link!(mod, parse(LLVM.Module, MemoryBuffer(res.bitcode)))
         return
     end
 
@@ -99,7 +108,7 @@ function emit_function!(mod, config::CompilerConfig, f, method)
 
     io = IOBuffer()
     write(io, new_mod)
-    cache_put!(rt_job, :llvm_ir, take!(io))
+    res.bitcode = take!(io)
 
     link!(mod, new_mod)
 end

@@ -263,22 +263,19 @@ isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 # provide a specific interpreter to use.
 @static if HAS_INTEGRATED_CACHE
 function get_interpreter(@nospecialize(job::CompilerJob))
-    V = results_type(job)
-    GPUInterpreter{V}(job.world;
-                     method_table_view=maybe_cached(method_table_view(job)),
-                     owner=cache_owner(job),
-                     inf_params=inference_params(job),
-                     opt_params=optimization_params(job))
+    GPUInterpreter(job.world;
+                   method_table_view=maybe_cached(method_table_view(job)),
+                   owner=cache_owner(job),
+                   inf_params=inference_params(job),
+                   opt_params=optimization_params(job))
 end
 else
 function get_interpreter(@nospecialize(job::CompilerJob))
-    V = results_type(job)
-    cache = get_code_cache(job)
-    GPUInterpreter{V}(job.world;
-                     method_table_view=maybe_cached(method_table_view(job)),
-                     code_cache=cache,
-                     inf_params=inference_params(job),
-                     opt_params=optimization_params(job))
+    GPUInterpreter(job.world;
+                   method_table_view=maybe_cached(method_table_view(job)),
+                   code_cache=get_code_cache(job),
+                   inf_params=inference_params(job),
+                   opt_params=optimization_params(job))
 end
 end
 
@@ -336,67 +333,100 @@ cache_owner(@nospecialize(job::CompilerJob)) =
     GPUCompilerCacheToken(job.config.target, job.config.params,
                           job.config.always_inline, method_table(job))
 
-# The consumer's results struct type, stored on each `CodeInstance` (1.11+) via the
-# `CompilerCaching` extension. Override to attach session-portable artifacts (e.g. IR or
-# object bytes) and session-local handles (e.g. `CuModule`, `MTLComputePipelineState`).
-# The struct must be a `mutable struct` with a zero-arg constructor.
-#
-# When the consumer hasn't overridden, the default `Nothing` opts out: no results struct
-# is attached during inference, and the `analysis_results` chain is untouched. This is the
-# right default for reflection paths, precompile workloads, and the legacy 1.10 flow.
-results_type(@nospecialize(job::CompilerJob)) = Nothing
-
 """
-    cache_get(job::CompilerJob, key::Symbol) -> Union{Nothing, Vector{UInt8}}
-    cache_put!(job::CompilerJob, key::Symbol, value::Vector{UInt8}) -> Nothing
+    cached_results(::Type{V}, job::CompilerJob) -> V
 
-Optional caching protocol. GPUCompiler calls these around expensive compilation
-phases to memoize byte artifacts; the back-end implements them however it likes
-(per-CI results via CompilerCaching, an in-memory `Dict`, on-disk storage, …).
+Retrieve the compilation-results struct of type `V` for `job`, creating an empty one on
+first access. `V` must be a `mutable struct` with a zero-arg constructor; back-ends
+define one such struct holding the artifacts of each compilation stage, check whether
+the relevant fields are populated, and fill them in (running the compiler) when not:
 
-`job` identifies the artifact's source — typically the back-end keys storage on
-`job.source` and `cache_owner(job)`. `key` is a `Symbol` naming the artifact
-kind. Back-ends are free to honour only the keys they care about and ignore the
-rest.
+```julia
+mutable struct MetalResults
+    metallib::Union{Nothing,Vector{UInt8}}
+    entry::Union{Nothing,String}
+    pipelines::Vector{Tuple{MTLDevice,MTLComputePipelineState}}  # session-local
+    MetalResults() = new(nothing, nothing, [])
+end
 
-Keys currently used by GPUCompiler:
+res = GPUCompiler.cached_results(MetalResults, job)
+if res.metallib === nothing || GPUCompiler.compile_hook[] !== nothing
+    ...compile, populate res...
+end
+```
 
-- `:llvm_ir` — post-irgen LLVM IR (serialized as bitcode bytes) for runtime
-  library functions (`gpu_malloc`, `gpu_report_exception`, …) emitted by
-  [`emit_function!`](@ref). Each runtime function is its own `job` with its
-  source MI; the bytes are session-portable (they survive precompilation when
-  the back-end stores them somewhere pkgimage-managed, e.g. on a `CodeInstance`).
+Results are keyed by the *full* compiler job: its method instance, world age, and entire
+`CompilerConfig` (two jobs differing only in, say, the kernel `name` get distinct
+structs). Storage differs per Julia version, transparently to the back-end:
 
-The LLVM context's pointer mode (opaque vs. typed) is assumed fixed for the
-lifetime of a session — and across precompile/load pairs of the same Julia
-version, since pkgimages are invalidated when the toolchain changes. Back-ends
-don't need to gate caching on that mode.
+- On Julia 1.11+, the struct lives on the `CodeInstance`'s `analysis_results` chain in
+  Julia's integrated code cache, partitioned by [`cache_owner`](@ref) and keyed by
+  config within the per-CI [`JobResults`](@ref) container. Method redefinition
+  invalidates the CI — and with it the attached results. When no CI exists yet,
+  inference is run to create one. Artifacts stored during precompilation are serialized
+  into the package image along with the CI: populate only session-portable values
+  (bytes, strings) during precompile workloads, and keep session-local handles (device
+  modules, pipeline objects) in fields that remain empty until first use at run time.
 
-Default no-op: no caching happens. Override on your `CompilerJob` type alias
-(e.g. `MetalCompilerJob = CompilerJob{MetalCompilerTarget, MetalCompilerParams}`)
-to opt in.
+- On Julia 1.10, the struct lives in a session-local Dict; redefinition protection
+  comes from the world age in the key, and nothing persists across sessions.
+
+Thread safety: concurrent calls for the same job return the same struct, but
+GPUCompiler does not serialize back-end *compilation*; take a back-end lock around
+the check-and-compile sequence (all back-ends already do, e.g. `mtlfunction_lock`).
 """
-cache_get(@nospecialize(job::CompilerJob), key::Symbol) = nothing
-cache_put!(@nospecialize(job::CompilerJob), key::Symbol, value::Vector{UInt8}) = nothing
+function cached_results end
 
 @static if HAS_INTEGRATED_CACHE
-    """
-        cache_view(job::CompilerJob) -> CompilerCaching.CacheView
 
-    Construct a `CacheView{typeof(cache_owner(job)), results_type(job)}` over Julia's
-    integrated `CodeInstance` cache at `job.world`. The handle back-ends pass to
-    `CompilerCaching.lookup` / `CompilerCaching.results` when populating their own
-    per-CI artifacts.
-    """
-    function cache_view(@nospecialize(job::CompilerJob))
-        owner = cache_owner(job)
-        CompilerCaching.CacheView{typeof(owner), results_type(job)}(owner, job.world)
+"""
+    JobResults
+
+Per-CodeInstance container mapping a `CompilerConfig` to the back-end's results struct.
+
+A `CodeInstance` is shared by every job whose [`cache_owner`](@ref) matches — the owner
+token only covers what affects *inference* (target, params, `always_inline`, method
+table). The remaining `CompilerConfig` fields (`kernel`, `name`, `entry_abi`,
+`opt_level`, …) do affect *codegen*, so artifacts must not be shared across them.
+Entries are matched by `===` (`jl_egal`): `CompilerConfig` is an immutable struct, so
+structurally identical configs compare equal, including against configs deserialized
+from package images.
+"""
+mutable struct JobResults
+    entries::Vector{Tuple{CompilerConfig,Any}}
+    JobResults() = new(Tuple{CompilerConfig,Any}[])
+end
+
+const cached_results_lock = ReentrantLock()
+
+function cached_results(::Type{V}, @nospecialize(job::CompilerJob)) where {V}
+    owner = cache_owner(job)
+    cache = CompilerCaching.CacheView{JobResults}(owner, job.world)
+
+    # get a CI for the job, running inference to create one if needed
+    ci = get(cache, job.source, nothing)
+    if ci === nothing
+        interp = get_interpreter(job)
+        ci = CompilerCaching.typeinf!(interp, job.source)
+        ci === nothing && error("Inference of $(job.source) failed")
+    end
+
+    jr = CompilerCaching.results(JobResults, ci)
+    Base.@lock cached_results_lock begin
+        for (config, v) in jr.entries
+            config === job.config && v isa V && return v::V
+        end
+        v = V()
+        push!(jr.entries, (job.config, v))
+        return v
     end
 end
 
-@public GPUCompilerCacheToken, cache_owner, results_type, cache_get, cache_put!
+end # HAS_INTEGRATED_CACHE
+
+@public GPUCompilerCacheToken, cache_owner, cached_results
 @static if HAS_INTEGRATED_CACHE
-    @public cache_view
+    @public JobResults
 end
 
 # the method table to use

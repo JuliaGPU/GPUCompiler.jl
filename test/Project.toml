@@ -1,5 +1,6 @@
 [deps]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+CompilerCaching = "9db33cc3-5358-4881-8759-fa4194144afd"
 FileCheck = "4e644321-382b-4b05-b0b6-5d23c3d944fb"
 GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
@@ -17,6 +18,11 @@ SPIRV_Tools_jll = "6ac6d60f-d740-5983-97d7-a4482c0689f4"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 demumble_jll = "1e29f10c-031c-5a83-9565-69cddfc27673"
+
+[sources]
+CompilerCaching = {path = "../../CompilerCaching"}
+GPUCompiler = {path = ".."}
+LLVM = {path = "/Users/tim/Julia/pkg/LLVM"}
 
 [compat]
 Aqua = "0.8"

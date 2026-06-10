@@ -229,26 +229,27 @@ function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
 end
 
 
-## 1.10 inference driver
+## 1.10 `cached_results`
 #
-# On 1.11+ this is delegated to `CompilerCaching.typeinf!`; here we keep an inline copy
-# that talks to the per-interpreter `CodeCache` instead of the integrated one. Returns
-# `nothing` (no integrated CI to hand back; the caller fetches via `code_cache(interp)`).
-function drive_inference!(interp::GPUInterpreter, mi::MethodInstance)
-    src = CC.typeinf_ext_toplevel(interp, mi)
-    @assert src !== nothing "Inference of $mi failed"
+# Session-local storage for the per-job results structs; on 1.11+ these live on the
+# `CodeInstance`s of Julia's integrated cache instead (see `interface.jl`). The key
+# mirrors the 1.11+ semantics — the full job identity, i.e. method instance, world,
+# and entire config — but nothing persists across sessions, and redefinition
+# protection comes from the world age in the key rather than from CI invalidation.
+const job_results = Dict{Any,Any}()
+const job_results_lock = ReentrantLock()
 
-    # For const-return CIs the inference result wasn't recorded — set it from the
-    # returned source so callers re-using the CI don't need to re-infer.
-    wvc = WorldView(CC.code_cache(interp), interp.world, interp.world)
-    if CC.haskey(wvc, mi)
-        ci = CC.getindex(wvc, mi)
-        if ci.inferred === nothing
-            @atomic ci.inferred = src
-        end
+function cached_results(::Type{V}, @nospecialize(job::CompilerJob)) where {V}
+    # NOTE: store the MethodInstance's objectid (not the MI) to avoid an expensive
+    #       boxing allocation; the MI is kept alive by its method specializations.
+    key = (V, objectid(job.source), job.world, job.config)
+    Base.@lock job_results_lock begin
+        get!(job_results, key) do
+            V()
+        end::V
     end
-    return nothing
 end
+
 
 end # !HAS_INTEGRATED_CACHE
 

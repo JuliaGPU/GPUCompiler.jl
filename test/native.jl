@@ -120,6 +120,54 @@ end
         end
     end
 
+    @testset "cached results" begin
+        mod = @eval module $(gensym())
+            mutable struct Results
+                asm::Union{Nothing,String}
+                Results() = new(nothing)
+            end
+            mutable struct OtherResults
+                data::Any
+                OtherResults() = new(nothing)
+            end
+
+            @noinline child(i) = i
+            kernel(i) = child(i)+1
+        end
+
+        # get-or-create: first access yields an empty struct, later accesses the same one
+        job, _ = Native.create_job(mod.kernel, (Int64,))
+        res = GPUCompiler.cached_results(mod.Results, job)
+        @test res isa mod.Results
+        @test res.asm === nothing
+        res.asm = "compiled"
+        @test GPUCompiler.cached_results(mod.Results, job) === res
+
+        # independent consumers get independent structs for the same job
+        other = GPUCompiler.cached_results(mod.OtherResults, job)
+        @test other isa mod.OtherResults
+        @test GPUCompiler.cached_results(mod.Results, job) === res
+
+        # results are keyed by the full config: a job differing only in codegen-level
+        # settings (here: the kernel name) must not share artifacts
+        named_job, _ = Native.create_job(mod.kernel, (Int64,); name="custom")
+        @test named_job.source === job.source
+        named_res = GPUCompiler.cached_results(mod.Results, named_job)
+        @test named_res !== res
+        @test named_res.asm === nothing
+
+        # ... but an equal config constructed from scratch resolves to the same struct
+        job2, _ = Native.create_job(mod.kernel, (Int64,))
+        @test GPUCompiler.cached_results(mod.Results, job2) === res
+
+        # redefinition invalidates: a job in the new world gets a fresh struct
+        @eval mod kernel(i) = child(i)+2
+        new_job, _ = Native.create_job(mod.kernel, (Int64,))
+        new_res = GPUCompiler.cached_results(mod.Results, new_job)
+        @test new_res !== res
+        @test new_res.asm === nothing
+    end
+
     @testset "allowed mutable types" begin
         # when types have no fields, we should always allow them
         mod = @eval module $(gensym())
