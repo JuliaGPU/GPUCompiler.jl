@@ -115,6 +115,84 @@ runtime_slug(job::CompilerJob{MetalCompilerTarget}) =
 isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
 
+# Re-type bfloat AIR intrinsic calls that arrive with `i16` operands to native `bfloat`.
+#
+# On Julia < 1.13 `BFloat16` has no native LLVM `bfloat` type and lowers to `i16`, so a
+# `@typed_ccall` to a bfloat AIR intrinsic (e.g. `air.simdgroup_matrix_8x8_load.v64bf16.p1bf16`)
+# arrives with `i16`/`<N x i16>` operands and, under typed pointers, an `i16*` operand -- a call
+# whose operand types contradict the `bf16` its mangled name declares, which Apple's AIR back-end
+# rejects. The `i16` already holds the exact bfloat bit pattern (BFloat16s stores the raw bits),
+# so we repair these calls: swap the declaration for a native-`bfloat` one under the same AIR name
+# and `bitcast` the i16 lanes (and, under typed pointers, the pointer) across the call boundary.
+# On Julia 1.13+ the operands are already `bfloat`, so the signature is unchanged and this is a
+# no-op. Keyed on the `bf16` type token in the AIR intrinsic name, so it covers every bfloat AIR
+# intrinsic rather than an enumerated list. Runs pre-`annotate_air_intrinsics!` so the metadata
+# annotation, which keys off the (unchanged) intrinsic name, lands on the re-typed declaration.
+function promote_bf16_intrinsics!(mod::LLVM.Module)
+    changed = false
+    bf  = LLVM.BFloatType()
+    i16 = LLVM.Int16Type()
+    typed_ptrs = supports_typed_pointers(context())
+
+    # the `bfloat` counterpart of an `i16`-flavored type; every other type is left untouched
+    bfify(@nospecialize T) =
+        if T == i16
+            bf
+        elseif T isa LLVM.VectorType && eltype(T) == i16
+            LLVM.VectorType(bf, Int(length(T)))
+        elseif typed_ptrs && T isa LLVM.PointerType && !is_opaque(T) && eltype(T) == i16
+            LLVM.PointerType(bf, addrspace(T))
+        else
+            T
+        end
+
+    for old in collect(functions(mod))
+        isdeclaration(old) || continue
+        fn = LLVM.name(old)
+        (startswith(fn, "air.") && occursin("bf16", fn)) || continue
+
+        old_ft = function_type(old)
+        old_params = collect(parameters(old_ft))
+        new_params = LLVMType[bfify(T) for T in old_params]
+        new_ret = bfify(return_type(old_ft))
+        # already native `bfloat` (Julia 1.13+): nothing to repair
+        (new_ret == return_type(old_ft) && new_params == old_params) && continue
+        new_ft = LLVM.FunctionType(new_ret, new_params)
+
+        # gather call sites before mutating the module
+        worklist = LLVM.CallBase[]
+        for use in uses(old)
+            u = user(use)
+            (u isa LLVM.CallBase && called_operand(u) === old) && push!(worklist, u)
+        end
+
+        # swap the `i16` declaration for a `bfloat`-typed one under the same AIR name
+        LLVM.name!(old, fn * ".i16")
+        new = LLVM.Function(mod, fn, new_ft)
+        linkage!(new, linkage(old))
+
+        for call in worklist
+            @dispose builder=IRBuilder() begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+                args = LLVM.Value[let a = arg
+                        value_type(a) == T ? a : bitcast!(builder, a, T)
+                    end for (arg, T) in zip(arguments(call), new_params)]
+                new_call = call!(builder, new_ft, new, args)
+                if new_ret != LLVM.VoidType()
+                    res = value_type(call) == new_ret ? new_call :
+                          bitcast!(builder, new_call, value_type(call))
+                    replace_uses!(call, res)
+                end
+                erase!(call)
+            end
+        end
+        erase!(old)
+        changed = true
+    end
+    return changed
+end
+
 function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
     # propagate `target.fastmath` as `@fastmath`-everywhere semantics, so the math-intrinsic
     # lowering in `finish_ir!` picks the relaxed `air.fast_*` functions. done here (post-link,
@@ -145,6 +223,10 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
             linkage!(gv, LLVM.API.LLVMPrivateLinkage)
         end
     end
+
+    # re-type bfloat AIR intrinsic calls that lowered to `i16` (Julia < 1.13) to native `bfloat`,
+    # before annotation so the name-keyed metadata lands on the re-typed declaration
+    promote_bf16_intrinsics!(mod)
 
     # add metadata to AIR intrinsics LLVM doesn't know about
     annotate_air_intrinsics!(job, mod)
@@ -1795,6 +1877,8 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
             add_fn_attributes("argmemonly", "nounwind")
 
         # simdgroup
+        elseif match(r"air.simdgroup_matrix_8x8_init_filled", fn) !== nothing
+            add_fn_attributes("convergent", "mustprogress", "nounwind", "willreturn")
         elseif match(r"air.simdgroup_matrix_8x8_multiply_accumulate", fn) !== nothing
             add_fn_attributes("convergent", "mustprogress", "nounwind", "willreturn")
         elseif match(r"air.simdgroup_matrix_8x8_load", fn) !== nothing
