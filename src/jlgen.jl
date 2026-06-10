@@ -127,24 +127,18 @@ get_method_table_view(world::UInt, mt::CC.MethodTable) = CC.OverlayMethodTable(w
 const INFERENCE_CACHE_TYPE = isdefined(CC, :InferenceCache) ? CC.InferenceCache : Vector{CC.InferenceResult}
 
 """
-    GPUInterpreter{V, MTV}
+    GPUInterpreter
 
 Foreign abstract interpreter that drives Julia inference for GPU compilation.
 
-The `V` type parameter is the consumer's results-struct type (default `Nothing`).
-On 1.11+ the `CC.finish!` override below — parametric on `V` — attaches a fresh
-`CachedResult{V}` to every newly-inferred `CodeInstance`'s `analysis_results`
-chain. When `V === Nothing` (no consumer override of [`results_type`](@ref))
-nothing is attached and inference behaves like the default `NativeInterpreter`.
-
 The interpreter is partitioned by an `owner` token (1.11+) or an in-process
 `CodeCache` (1.10, see [`deprecated.jl`](deprecated.jl)). The owner is what
-makes per-job CIs distinct in the integrated cache; carrying it on the
-interpreter (rather than a full `CacheView`) keeps inference state lean — the
-cache view is constructed by callers (e.g. `cache_view(job)`) only when they
-actually need to look up CIs or read consumer results.
+makes per-job CIs distinct in the integrated cache; together with the world
+age it is all CompilerCaching needs to drive inference into the integrated
+cache. Compilation results are not attached during inference at all — they
+are attached lazily when looked up (see [`cached_results`](@ref)).
 """
-struct GPUInterpreter{V, MTV<:CC.MethodTableView} <: CC.AbstractInterpreter
+struct GPUInterpreter{MTV<:CC.MethodTableView} <: CC.AbstractInterpreter
     world::UInt
     method_table_view::MTV
 
@@ -159,25 +153,25 @@ end
 end
 
 @static if HAS_INTEGRATED_CACHE
-function GPUInterpreter{V}(world::UInt=Base.get_world_counter();
-                           method_table_view::CC.MethodTableView,
-                           owner::Any,
-                           inf_params::CC.InferenceParams,
-                           opt_params::CC.OptimizationParams) where V
+function GPUInterpreter(world::UInt=Base.get_world_counter();
+                        method_table_view::CC.MethodTableView,
+                        owner::Any,
+                        inf_params::CC.InferenceParams,
+                        opt_params::CC.OptimizationParams)
     @assert world <= Base.get_world_counter()
-    return GPUInterpreter{V, typeof(method_table_view)}(
+    return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, owner, INFERENCE_CACHE_TYPE(),
         inf_params, opt_params)
 end
 
-function GPUInterpreter(interp::GPUInterpreter{V, MTV};
+function GPUInterpreter(interp::GPUInterpreter;
                         world::UInt=interp.world,
                         method_table_view::CC.MethodTableView=interp.method_table_view,
                         owner::Any=interp.owner,
                         inf_cache::INFERENCE_CACHE_TYPE=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
-                        opt_params::CC.OptimizationParams=interp.opt_params) where {MTV, V}
-    return GPUInterpreter{V, typeof(method_table_view)}(
+                        opt_params::CC.OptimizationParams=interp.opt_params)
+    return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, owner, inf_cache,
         inf_params, opt_params)
 end
@@ -186,25 +180,25 @@ CC.cache_owner(interp::GPUInterpreter) = interp.owner
 
 else # 1.10: in-process CodeCache
 
-function GPUInterpreter{V}(world::UInt=Base.get_world_counter();
-                           method_table_view::CC.MethodTableView,
-                           code_cache::CodeCache,
-                           inf_params::CC.InferenceParams,
-                           opt_params::CC.OptimizationParams) where V
+function GPUInterpreter(world::UInt=Base.get_world_counter();
+                        method_table_view::CC.MethodTableView,
+                        code_cache::CodeCache,
+                        inf_params::CC.InferenceParams,
+                        opt_params::CC.OptimizationParams)
     @assert world <= Base.get_world_counter()
-    return GPUInterpreter{V, typeof(method_table_view)}(
+    return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, code_cache, Vector{CC.InferenceResult}(),
         inf_params, opt_params)
 end
 
-function GPUInterpreter(interp::GPUInterpreter{V, MTV};
+function GPUInterpreter(interp::GPUInterpreter;
                         world::UInt=interp.world,
                         method_table_view::CC.MethodTableView=interp.method_table_view,
                         code_cache::CodeCache=interp.code_cache,
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
-                        opt_params::CC.OptimizationParams=interp.opt_params) where {MTV, V}
-    return GPUInterpreter{V, typeof(method_table_view)}(
+                        opt_params::CC.OptimizationParams=interp.opt_params)
+    return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, code_cache, inf_cache,
         inf_params, opt_params)
 end
@@ -224,17 +218,6 @@ CC.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
 
 function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
     @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
-end
-
-# Per-CI results attachment. `results_type` reads V from the interpreter's type
-# parameter; `@setup_results` generates the `CC.finish!` hook that attaches a
-# fresh `CachedResult{V}` to every newly-inferred CodeInstance. When V === Nothing
-# (default — no consumer override) the hook short-circuits to the default
-# `CC.finish!`. Gated on the integrated cache (1.11+); on 1.10 there's no
-# `analysis_results` to attach to.
-@static if HAS_INTEGRATED_CACHE
-    CompilerCaching.results_type(::GPUInterpreter{V}) where V = V
-    CompilerCaching.@setup_results GPUInterpreter
 end
 
 CC.may_optimize(interp::GPUInterpreter) = true
@@ -269,11 +252,29 @@ end
 # Drive type inference on `mi` using `interp`. On 1.11+ this is `CompilerCaching.typeinf!`,
 # which (on 1.12+) recursively walks callees so their CIs carry stored source for
 # `CompilerCaching.get_codeinfos` to read back into the `jl_emit_native` payload. Returns
-# the root `CodeInstance` (or `nothing` if inference failed). The 1.10 implementation
-# lives in `deprecated.jl`.
+# the root `CodeInstance` (or `nothing` if inference failed).
 @static if HAS_INTEGRATED_CACHE
     drive_inference!(interp::GPUInterpreter, mi::MethodInstance) =
         CompilerCaching.typeinf!(interp, mi)
+else
+    # 1.10: an inline copy that talks to the per-interpreter `CodeCache` instead of the
+    # integrated one. Returns `nothing` (no integrated CI to hand back; the caller
+    # fetches via `code_cache(interp)`).
+    function drive_inference!(interp::GPUInterpreter, mi::MethodInstance)
+        src = CC.typeinf_ext_toplevel(interp, mi)
+        @assert src !== nothing "Inference of $mi failed"
+
+        # For const-return CIs the inference result wasn't recorded — set it from the
+        # returned source so callers re-using the CI don't need to re-infer.
+        wvc = WorldView(CC.code_cache(interp), interp.world, interp.world)
+        if CC.haskey(wvc, mi)
+            ci = CC.getindex(wvc, mi)
+            if ci.inferred === nothing
+                @atomic ci.inferred = src
+            end
+        end
+        return nothing
+    end
 end
 
 

@@ -84,6 +84,12 @@ include("precompile.jl")
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
 
+    @static if !HAS_INTEGRATED_CACHE
+        # session-local results keyed by objectid+world; entries serialized during
+        # GPUCompiler's own precompilation can never be valid in a later session
+        empty!(job_results)
+    end
+
     @static if ENABLE_TRACY
         Tracy.@register_tracepoints()
     end
