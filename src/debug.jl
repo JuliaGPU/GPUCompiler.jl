@@ -14,19 +14,17 @@ function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
         push!(done, inst)
 
         # look up the debug information from the current instruction
-        if haskey(metadata(inst), LLVM.MD_dbg)
-            loc = metadata(inst)[LLVM.MD_dbg]
-            while loc !== nothing
-                scope = LLVM.scope(loc)
-                if scope !== nothing
-                    name = replace(LLVM.name(scope), r";$"=>"")
-                    file = LLVM.file(scope)
-                    path = joinpath(LLVM.directory(file), LLVM.filename(file))
-                    line = LLVM.line(loc)
-                    push!(bt, StackTraces.StackFrame(name, path, line))
-                end
-                loc = LLVM.inlined_at(loc)
+        loc = LLVM.debuglocation(inst)
+        while loc !== nothing
+            scope = LLVM.scope(loc)
+            if scope !== nothing
+                name = replace(LLVM.name(scope), r";$"=>"")
+                file = LLVM.file(scope)
+                path = joinpath(LLVM.directory(file), LLVM.filename(file))
+                line = LLVM.line(loc)
+                push!(bt, StackTraces.StackFrame(name, path, line))
             end
+            loc = LLVM.inlined_at(loc)
         end
 
         # move up the call chain
@@ -35,15 +33,13 @@ function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
         callers = filter(val -> isa(user(val), LLVM.CallInst), collect(uses(f)))
         ## get rid of calls without debug info
         filter!(callers) do call
-            md = metadata(user(call))
-            haskey(md, LLVM.MD_dbg)
+            LLVM.debuglocation(user(call)) !== nothing
         end
         if !isempty(callers)
             # figure out the call sites of this instruction
             call_sites = unique(callers) do call
                 # there could be multiple calls, originating from the same source location
-                md = metadata(user(call))
-                md[LLVM.MD_dbg]
+                LLVM.debuglocation(user(call))
             end
 
             if length(call_sites) > 1
