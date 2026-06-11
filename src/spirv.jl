@@ -24,7 +24,13 @@ export SPIRVCompilerTarget
 
 Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     version::Union{Nothing,VersionNumber} = nothing
-    extensions::Vector{String} = []
+    # SPIR-V extensions, as the comma-separated specifier string passed verbatim to the
+    # translator/back-end via `--spirv-ext`, e.g. "+SPV_EXT_shader_atomic_float_add,+SPV_KHR_expect_assume"
+    # (LLVM feature-string style, cf. `GCNCompilerTarget.features`). Kept as a plain
+    # `String` -- not a `Vector` -- because target fields must be immutable for the
+    # `jl_egal`-based cache lookups (`cache_owner`, `JobResults`) to match across
+    # sessions; see the §2.2 rule in CACHING-REDESIGN.md.
+    extensions::String = ""
     supports_fp16::Bool = true
     supports_fp64::Bool = true
     supports_bfloat16::Bool = false
@@ -149,8 +155,7 @@ end
         cmd = `$(SPIRV_LLVM_Backend_jll.llc()) $input -filetype=obj -o $translated`
 
         if !isempty(job.config.target.extensions)
-            str = join(map(ext->"+$ext", job.config.target.extensions), ",")
-            cmd = `$(cmd) -spirv-ext=$str`
+            cmd = `$(cmd) -spirv-ext=$(job.config.target.extensions)`
         end
     elseif job.config.target.backend === :khronos
         translator = if isavailable(SPIRV_LLVM_Translator_jll)
@@ -163,8 +168,7 @@ end
         cmd = `$translator -o $translated $input --spirv-debug-info-version=ocl-100`
 
         if !isempty(job.config.target.extensions)
-            str = join(map(ext->"+$ext", job.config.target.extensions), ",")
-            cmd = `$(cmd) --spirv-ext=$str`
+            cmd = `$(cmd) --spirv-ext=$(job.config.target.extensions)`
         end
 
         if job.config.target.version !== nothing
