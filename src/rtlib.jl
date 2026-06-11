@@ -118,7 +118,11 @@ function build_runtime(@nospecialize(job::CompilerJob))
 
     # the compiler job passed into here identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
-    config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false, strip=false)
+    # fields that identify the *kernel* job, like its entry-point name, are reset so
+    # that runtime artifacts are keyed (and persisted) identically for all kernels
+    # sharing a cache owner, instead of once per cosmetic config variation.
+    config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false,
+                            strip=false, name=nothing)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
