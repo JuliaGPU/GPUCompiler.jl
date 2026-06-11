@@ -87,8 +87,8 @@ end
     return mi
 end
 
-# On 1.10 we use a generated function that performs the lookup at world+specialization
-# resolution time. See deprecated.jl for `methodinstance_generator`.
+# On 1.10 we always use the generic lookup. (A @generated fast path used to exist,
+# but it was unreachable: the (ft::Type, tt::Type) method above it always won dispatch.)
 else
 const methodinstance = generic_methodinstance
 end
