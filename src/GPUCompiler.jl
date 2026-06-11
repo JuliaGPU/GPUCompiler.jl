@@ -88,6 +88,9 @@ function __init__()
         # session-local results keyed by objectid+world; entries serialized during
         # GPUCompiler's own precompilation can never be valid in a later session
         empty!(job_results)
+        # ditto for the in-process CodeCaches: CIs deposited by our own precompile
+        # workload carry world ages from the precompilation process
+        empty!(GLOBAL_CI_CACHES)
     end
 
     @static if ENABLE_TRACY
