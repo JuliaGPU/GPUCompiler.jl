@@ -329,7 +329,10 @@ struct GPUCompilerCacheToken{T<:AbstractCompilerTarget, P<:AbstractCompilerParam
     method_table::Core.MethodTable
 end
 
-cache_owner(@nospecialize(job::CompilerJob)) =
+# NOTE: deliberately specialized (one instantiation per back-end): this runs on the
+#       kernel launch hot path, and constructing the token dynamically is an order of
+#       magnitude slower.
+cache_owner(job::CompilerJob) =
     GPUCompilerCacheToken(job.config.target, job.config.params,
                           job.config.always_inline, method_table(job))
 
@@ -399,7 +402,9 @@ end
 
 const cached_results_lock = ReentrantLock()
 
-function cached_results(::Type{V}, @nospecialize(job::CompilerJob)) where {V}
+# NOTE: like `cache_owner`, specialized for the launch hot path (bounded number of
+#       instantiations: one per back-end and results type).
+function cached_results(::Type{V}, job::CompilerJob) where {V}
     owner = cache_owner(job)
     cache = CompilerCaching.CacheView{JobResults}(owner, job.world)
 

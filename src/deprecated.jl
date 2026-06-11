@@ -239,7 +239,8 @@ end
 const job_results = Dict{Any,Any}()
 const job_results_lock = ReentrantLock()
 
-function cached_results(::Type{V}, @nospecialize(job::CompilerJob)) where {V}
+# specialized for the launch hot path, mirroring the 1.11+ implementation
+function cached_results(::Type{V}, job::CompilerJob) where {V}
     # NOTE: store the MethodInstance's objectid (not the MI) to avoid an expensive
     #       boxing allocation; the MI is kept alive by its method specializations.
     key = (V, objectid(job.source), job.world, job.config)
