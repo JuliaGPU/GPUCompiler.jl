@@ -25,13 +25,10 @@ AMDGPU_LLVM_Backend_jll = "cc5c0156-bd05-5a77-8a68-bb0aafb29019"
 LLVMDowngrader_jll = "f52de702-fb25-5922-94ba-81dd59b07444"
 NVPTX_LLVM_Backend_jll = "ef6e0fe3-e6ef-59c0-bde6-4989574699e0"
 
-[sources]
-CompilerCaching = {path = "../CompilerCaching"}
-
 
 [compat]
 AMDGPU_LLVM_Backend_jll = "22"
-CompilerCaching = "0.4"
+CompilerCaching = "0.3"
 ExprTools = "0.1"
 InteractiveUtils = "1"
 LLVM = "9.9"
