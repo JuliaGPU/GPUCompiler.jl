@@ -166,6 +166,20 @@ end
         new_res = GPUCompiler.cached_results(mod.Results, new_job)
         @test new_res !== res
         @test new_res.asm === nothing
+
+        # session-dependent results (e.g. artifacts with relocated GVs) are wiped
+        # before image serialization; emulate the atexit-driven wipe directly
+        new_res.asm = "session-dependent"
+        other_job, _ = Native.create_job(mod.kernel, (Int64,); name="other")
+        other_res = GPUCompiler.cached_results(mod.Results, other_job)
+        push!(GPUCompiler.session_dependent_jobs, new_job)
+        GPUCompiler.wipe_session_dependent_results()
+        @test isempty(GPUCompiler.session_dependent_jobs)
+        wiped_res = GPUCompiler.cached_results(mod.Results, new_job)
+        @test wiped_res !== new_res
+        @test wiped_res.asm === nothing
+        # ... without affecting other configs on the same CI
+        @test GPUCompiler.cached_results(mod.Results, other_job) === other_res
     end
 
     @testset "allowed mutable types" begin
