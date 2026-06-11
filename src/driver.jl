@@ -345,6 +345,10 @@ const __llvm_initialized = Ref(false)
 
             relocate_gvs!(ir, gv_to_value)
 
+            # the IR (and any artifact derived from it) now embeds session-absolute
+            # addresses; keep results for this job out of a package image
+            isempty(gv_to_value) || mark_session_dependent!(job)
+
             if job.config.optimize
                 @tracepoint "optimization" begin
                     optimize!(job, ir; job.config.opt_level)

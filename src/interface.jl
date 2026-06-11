@@ -427,6 +427,49 @@ function cached_results(::Type{V}, job::CompilerJob) where {V}
     end
 end
 
+## session-dependent results
+#
+# Some compilation results embed session-specific data: `relocate_gvs!` bakes absolute
+# pointers into the IR of toplevel jobs that reference `julia.constgv` globals, and any
+# artifact a back-end derives from that IR (metallib, SPIR-V, ...) inherits them. Such
+# results must not survive into a package image, while remaining available for
+# within-session lookups during the precompilation process itself. Julia wipes its own
+# session-dependent CodeInstance state during serialization (staticdata.c); we
+# approximate that with an `atexit` hook, which the runtime invokes *before*
+# `jl_write_compiler_output`: right before the image is written, the entries of jobs
+# marked session-dependent are deleted from their `JobResults` container, so a later
+# session simply recompiles them.
+
+const session_dependent_jobs = Vector{CompilerJob}()
+const session_dependent_lock = ReentrantLock()
+
+function mark_session_dependent!(@nospecialize(job::CompilerJob))
+    ccall(:jl_generating_output, Cint, ()) == 1 || return
+    Base.@lock session_dependent_lock begin
+        if isempty(session_dependent_jobs)
+            atexit(wipe_session_dependent_results)
+        end
+        push!(session_dependent_jobs, job)
+    end
+    return
+end
+
+function wipe_session_dependent_results()
+    Base.@lock session_dependent_lock begin
+        for job in session_dependent_jobs
+            cache = CompilerCaching.CacheView{JobResults}(cache_owner(job), job.world)
+            ci = get(cache, job.source, nothing)
+            ci === nothing && continue
+            jr = CompilerCaching.results(JobResults, ci)
+            Base.@lock cached_results_lock begin
+                filter!(entry -> entry[1] !== job.config, jr.entries)
+            end
+        end
+        empty!(session_dependent_jobs)
+    end
+    return
+end
+
 end # HAS_INTEGRATED_CACHE
 
 @public GPUCompilerCacheToken, cache_owner, cached_results
