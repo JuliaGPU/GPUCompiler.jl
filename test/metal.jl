@@ -139,6 +139,54 @@ end
     end
 end
 
+@testset "GC runtime input arguments" begin
+    mod = @eval module $(gensym())
+        mutable struct PleaseAllocate
+            y::Csize_t
+        end
+
+        @noinline function inner(x)
+            sink(x.y)
+            return
+        end
+
+        function kernel(i)
+            inner(PleaseAllocate(Csize_t(i)))
+            return
+        end
+
+        function ref_kernel(ptr, i)
+            data = Ref{Int64}()
+            data[] = 0
+            if i > 1
+                data[] = 1
+            else
+                data[] = 2
+            end
+            unsafe_store!(ptr, data[], i)
+            return
+        end
+    end
+
+    ir = sprint() do io
+        Metal.code_llvm_threaded_runtime(io, mod.kernel, Tuple{Int};
+                                         kernel=true, dump_module=true)
+    end
+    @test occursin(r"define .*@gpu_gc_pool_alloc\(", ir)
+    @test occursin(r"call .*@gpu_gc_pool_alloc\([^)]*<3 x i32>", ir)
+    @test occursin("thread_position_in_grid", ir)
+    @test !occursin(r"declare .*@gpu_gc_pool_alloc\(", ir)
+
+    # Make sure moving Metal's input-argument threading after GC lowering does not force
+    # allocations that the optimizer can still prove unnecessary.
+    ir = sprint() do io
+        Metal.code_llvm_threaded_runtime(io, mod.ref_kernel,
+                                         Tuple{Core.LLVMPtr{Int64,1}, Int};
+                                         kernel=true, dump_module=true)
+    end
+    @test !occursin("gpu_gc_pool_alloc", ir)
+end
+
 @testset "vector intrinsics" begin
     mod = @eval module $(gensym())
         foo(x, y) = ccall("llvm.smax.v2i64", llvmcall, NTuple{2, VecElement{Int64}},

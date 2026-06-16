@@ -343,15 +343,6 @@ const __llvm_initialized = Ref(false)
 
             # GPU run-time library
             if !uses_julia_runtime(job)
-                # Calls to `gc_pool_alloc` are inserted after linking, so spoof
-                # it here so that lazy linking pulls it in, if needed.
-                if haskey(functions(ir), "julia.gc_alloc_obj")
-                    rt = Runtime.get(:gc_pool_alloc)
-                    if !haskey(functions(ir), rt.llvm_name)
-                        LLVM.Function(ir, rt.llvm_name, convert(LLVM.FunctionType, rt))
-                    end
-                end
-
                 @tracepoint "runtime library" link!(ir, runtime; only_needed=true)
             end
         end

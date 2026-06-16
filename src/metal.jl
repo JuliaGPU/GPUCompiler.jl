@@ -205,7 +205,6 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
     for f in kernels(mod)
         # update calling conventions
         f = pass_by_reference!(job, mod, f)
-        f = add_input_arguments!(job, mod, f, kernel_intrinsics)
     end
 
     # emit the AIR and Metal version numbers as constants in the module. this makes it
@@ -241,6 +240,18 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
     end
 
     return
+end
+
+function finish_runtime_intrinsics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                                    mod::LLVM.Module)
+    # AIR input arguments need to be threaded after GC lowering and runtime linking:
+    # `gpu_gc_pool_alloc` can call runtime helpers that use thread-position intrinsics.
+    changed = false
+    for f in kernels(mod)
+        add_input_arguments!(job, mod, f, kernel_intrinsics)
+        changed = true
+    end
+    return changed
 end
 
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
