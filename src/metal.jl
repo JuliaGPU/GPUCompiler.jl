@@ -106,12 +106,6 @@ have_fma(@nospecialize(target::MetalCompilerTarget), T::Type) = true
 
 ## job
 
-# the debug-info level is part of the slug (as on PTX): it changes the debug metadata emitted
-# into the runtime library, and the device-exception reporters branch on it, so a library
-# built at one level must not be reused at another.
-runtime_slug(job::CompilerJob{MetalCompilerTarget}) =
-    "metal-macos$(job.config.target.macos)-debuginfo=$(Int(llvm_debug_info(job)))"
-
 isintrinsic(@nospecialize(job::CompilerJob{MetalCompilerTarget}), fn::String) =
     return startswith(fn, "air.")
 

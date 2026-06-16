@@ -353,6 +353,8 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         end
         add!(fpm, GCInvariantVerifierPass())
         add!(fpm, LateLowerGCPass())
+        # FinalLowerGCPass moved from a module pass to a function pass in
+        # JuliaLang/julia#51081 (1.11.0-DEV.208).
         if uses_julia_runtime(job) && VERSION >= v"1.11.0-DEV.208"
             add!(fpm, FinalLowerGCPass())
         end

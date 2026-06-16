@@ -261,16 +261,22 @@ runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 
 # provide a specific interpreter to use.
-if VERSION >= v"1.11.0-DEV.1552"
-get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
-                   token=ci_cache_token(job), inf_params=inference_params(job),
+@static if HAS_INTEGRATED_CACHE
+function get_interpreter(@nospecialize(job::CompilerJob))
+    GPUInterpreter(job.world;
+                   method_table_view=maybe_cached(method_table_view(job)),
+                   owner=cache_owner(job),
+                   inf_params=inference_params(job),
                    opt_params=optimization_params(job))
+end
 else
-get_interpreter(@nospecialize(job::CompilerJob)) =
-    GPUInterpreter(job.world; method_table_view=maybe_cached(method_table_view(job)),
-                   code_cache=ci_cache(job), inf_params=inference_params(job),
+function get_interpreter(@nospecialize(job::CompilerJob))
+    GPUInterpreter(job.world;
+                   method_table_view=maybe_cached(method_table_view(job)),
+                   code_cache=get_code_cache(job),
+                   inf_params=inference_params(job),
                    opt_params=optimization_params(job))
+end
 end
 
 # does this target support throwing Julia exceptions with jl_throw?
@@ -280,11 +286,6 @@ can_throw(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 # does this target support loading from Julia safepoints?
 # if not, safepoints at function entry will not be emitted
 can_safepoint(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
-
-# generate a string that represents the type of compilation, for selecting a compiled
-# instance of the runtime library. this slug should encode everything that affects
-# the generated code of this compiler job (with exception of the function source)
-runtime_slug(@nospecialize(job::CompilerJob)) = error("Not implemented")
 
 # the type of the kernel state object, or Nothing if this back-end doesn't need one.
 #
@@ -305,34 +306,175 @@ pass_by_ref(@nospecialize(job::CompilerJob)) = false
 # whether pointer is a valid call target
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
+# Cache partitioning. On Julia 1.11+, the owner is stored on every `CodeInstance` and
+# compared via `jl_egal`, so it (and every field) must be immutable for cross-session
+# matches (e.g. via package precompilation); custom `target` / `params` types must be
+# `struct`s, not `mutable struct`s.
+#
+# On Julia 1.10, where there's no per-CI owner field, this token only identifies the
+# session-local cache partition (see `cached_compilation` / `GLOBAL_CI_CACHES` in
+# `deprecated.jl`); the immutability requirement is still useful for stable hashing.
+#
 # Care is required for anything that impacts:
 #   - method_table
 #   - inference_params
 #   - optimization_params
-# By default that is just always_inline
-# the cache token is compared with jl_egal
-struct GPUCompilerCacheToken
-    target_type::Type
+# The default covers the full target+params instances (so backends with version- or
+# arch-specific knobs partition cleanly), `always_inline` (which feeds optimization_params),
+# and the method table.
+struct GPUCompilerCacheToken{T<:AbstractCompilerTarget, P<:AbstractCompilerParams}
+    target::T
+    params::P
     always_inline::Bool
     method_table::Core.MethodTable
 end
 
-ci_cache_token(@nospecialize(job::CompilerJob)) =
-    GPUCompilerCacheToken(typeof(job.config.target), job.config.always_inline, method_table(job))
+# NOTE: deliberately specialized (one instantiation per back-end): this runs on the
+#       kernel launch hot path, and constructing the token dynamically is an order of
+#       magnitude slower.
+cache_owner(job::CompilerJob) =
+    GPUCompilerCacheToken(job.config.target, job.config.params,
+                          job.config.always_inline, method_table(job))
 
-# the codeinstance cache to use -- should only be used for the constructor
-if VERSION >= v"1.11.0-DEV.1552"
-    # Soft deprecated user should use `CC.code_cache(get_interpreter(job))`
-    ci_cache(@nospecialize(job::CompilerJob)) = CC.code_cache(get_interpreter(job))
-else
-function ci_cache(@nospecialize(job::CompilerJob))
-    lock(GLOBAL_CI_CACHES_LOCK) do
-        cache = get!(GLOBAL_CI_CACHES, job.config) do
-            CodeCache()
+"""
+    cached_results(::Type{V}, job::CompilerJob) -> V
+
+Retrieve the compilation-results struct of type `V` for `job`, creating an empty one on
+first access. `V` must be a `mutable struct` with a zero-arg constructor; back-ends
+define one such struct holding the artifacts of each compilation stage, check whether
+the relevant fields are populated, and fill them in (running the compiler) when not:
+
+```julia
+mutable struct MetalResults
+    metallib::Union{Nothing,Vector{UInt8}}
+    entry::Union{Nothing,String}
+    pipelines::Vector{Tuple{MTLDevice,MTLComputePipelineState}}  # session-local
+    MetalResults() = new(nothing, nothing, [])
+end
+
+res = GPUCompiler.cached_results(MetalResults, job)
+if res.metallib === nothing || GPUCompiler.compile_hook[] !== nothing
+    ...compile, populate res...
+end
+```
+
+Results are keyed by the *full* compiler job: its method instance, world age, and entire
+`CompilerConfig` (two jobs differing only in, say, the kernel `name` get distinct
+structs). Storage differs per Julia version, transparently to the back-end:
+
+- On Julia 1.11+, the struct lives on the `CodeInstance`'s `analysis_results` chain in
+  Julia's integrated code cache, partitioned by [`cache_owner`](@ref) and keyed by
+  config within the per-CI [`JobResults`](@ref) container. Method redefinition
+  invalidates the CI — and with it the attached results. When no CI exists yet,
+  inference is run to create one. Artifacts stored during precompilation are serialized
+  into the package image along with the CI: populate only session-portable values
+  (bytes, strings) during precompile workloads, and keep session-local handles (device
+  modules, pipeline objects) in fields that remain empty until first use at run time.
+
+- On Julia 1.10, the struct lives in a session-local Dict; redefinition protection
+  comes from the world age in the key, and nothing persists across sessions.
+
+Thread safety: concurrent calls for the same job return the same struct, but
+GPUCompiler does not serialize back-end *compilation*; take a back-end lock around
+the check-and-compile sequence (all back-ends already do, e.g. `mtlfunction_lock`).
+"""
+function cached_results end
+
+@static if HAS_INTEGRATED_CACHE
+
+"""
+    JobResults
+
+Per-CodeInstance container mapping a `CompilerConfig` to the back-end's results struct.
+
+A `CodeInstance` is shared by every job whose [`cache_owner`](@ref) matches — the owner
+token only covers what affects *inference* (target, params, `always_inline`, method
+table). The remaining `CompilerConfig` fields (`kernel`, `name`, `entry_abi`,
+`opt_level`, …) do affect *codegen*, so artifacts must not be shared across them.
+Entries are matched by `===` (`jl_egal`): `CompilerConfig` is an immutable struct, so
+structurally identical configs compare equal, including against configs deserialized
+from package images.
+"""
+mutable struct JobResults
+    entries::Vector{Tuple{CompilerConfig,Any}}
+    JobResults() = new(Tuple{CompilerConfig,Any}[])
+end
+
+const cached_results_lock = ReentrantLock()
+
+# NOTE: like `cache_owner`, specialized for the launch hot path (bounded number of
+#       instantiations: one per back-end and results type).
+function cached_results(::Type{V}, job::CompilerJob) where {V}
+    owner = cache_owner(job)
+    cache = CompilerCaching.CacheView{JobResults}(owner, job.world)
+
+    # get a CI for the job, running inference to create one if needed
+    ci = get(cache, job.source, nothing)
+    if ci === nothing
+        interp = get_interpreter(job)
+        ci = CompilerCaching.typeinf!(interp, job.source)
+        ci === nothing && error("Inference of $(job.source) failed")
+    end
+
+    jr = CompilerCaching.results(JobResults, ci)
+    Base.@lock cached_results_lock begin
+        for (config, v) in jr.entries
+            config === job.config && v isa V && return v::V
         end
-        return cache
+        v = V()
+        push!(jr.entries, (job.config, v))
+        return v
     end
 end
+
+## session-dependent results
+#
+# Some compilation results embed session-specific data: `relocate_gvs!` bakes absolute
+# pointers into the IR of toplevel jobs that reference `julia.constgv` globals, and any
+# artifact a back-end derives from that IR (metallib, SPIR-V, ...) inherits them. Such
+# results must not survive into a package image, while remaining available for
+# within-session lookups during the precompilation process itself. Julia wipes its own
+# session-dependent CodeInstance state during serialization (staticdata.c); we
+# approximate that with an `atexit` hook, which the runtime invokes *before*
+# `jl_write_compiler_output`: right before the image is written, the entries of jobs
+# marked session-dependent are deleted from their `JobResults` container, so a later
+# session simply recompiles them.
+
+const session_dependent_jobs = Vector{CompilerJob}()
+const session_dependent_lock = ReentrantLock()
+
+function mark_session_dependent!(@nospecialize(job::CompilerJob))
+    ccall(:jl_generating_output, Cint, ()) == 1 || return
+    Base.@lock session_dependent_lock begin
+        if isempty(session_dependent_jobs)
+            atexit(wipe_session_dependent_results)
+        end
+        push!(session_dependent_jobs, job)
+    end
+    return
+end
+
+function wipe_session_dependent_results()
+    Base.@lock session_dependent_lock begin
+        for job in session_dependent_jobs
+            cache = CompilerCaching.CacheView{JobResults}(cache_owner(job), job.world)
+            ci = get(cache, job.source, nothing)
+            ci === nothing && continue
+            jr = CompilerCaching.results(JobResults, ci)
+            Base.@lock cached_results_lock begin
+                filter!(entry -> entry[1] !== job.config, jr.entries)
+            end
+        end
+        empty!(session_dependent_jobs)
+    end
+    return
+end
+
+end # HAS_INTEGRATED_CACHE
+
+@public GPUCompilerCacheToken, cache_owner, cached_results
+@static if HAS_INTEGRATED_CACHE
+    @public JobResults
 end
 
 # the method table to use
@@ -398,9 +540,3 @@ finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Functi
 
 # whether an LLVM function is valid for this back-end
 validate_ir(@nospecialize(job::CompilerJob), mod::LLVM.Module) = IRError[]
-
-# deprecated
-struct DeprecationMarker end
-process_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = DeprecationMarker()
-process_entry!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
-    DeprecationMarker()

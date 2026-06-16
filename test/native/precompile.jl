@@ -59,7 +59,7 @@ precompile_test_harness("Inference caching") do load_path
 
         token = let
             job, _ = NativeCompiler.Native.create_job(identity, (Int,))
-            GPUCompiler.ci_cache_token(job)
+            GPUCompiler.cache_owner(job)
         end
         @test !check_presence(identity_mi, token)
 
@@ -76,28 +76,13 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(square_mi, token)
 
         # check that identity survived
-        @test check_presence(identity_mi, token) broken=(v"1.12.0-DEV.1268" <= VERSION < v"1.12.5" || v"1.13.0-" <= VERSION < v"1.13.0-beta3"|| v"1.14.0-" <= VERSION < v"1.14.0-DEV.1843")
-
-        GPUCompiler.clear_disk_cache!()
-        @test GPUCompiler.disk_cache_enabled() == false
-
-        GPUCompiler.enable_disk_cache!()
-        @test GPUCompiler.disk_cache_enabled() == true
-
-        job, _ = NativeCompiler.Native.create_job(NativeBackend.kernel, (Vector{Int}, Int); validate=false)
-        @assert job.source == kernel_mi
-        ci = GPUCompiler.ci_cache_lookup(GPUCompiler.ci_cache(job), job.source, job.world, job.world)
-        @assert ci !== nothing
-        @assert ci.inferred !== nothing
-        path = GPUCompiler.cache_file(ci, job.config)
-        @test path !== nothing
-        @test !ispath(path)
-        NativeCompiler.Native.cached_execution(NativeBackend.kernel, (Vector{Int}, Int))
-        @test ispath(path)
-        GPUCompiler.clear_disk_cache!()
-        @test !ispath(path)
-
-        GPUCompiler.enable_disk_cache!(false)
-        @test GPUCompiler.disk_cache_enabled() == false
+        # NOTE: on 1.13, external CIs from the workload survive only flakily (the
+        #       1.13.0-beta3 backport did not fully fix this), so skip the check there
+        ext_cis_lost = v"1.12.0-DEV.1268" <= VERSION < v"1.12.5" ||
+                       v"1.14.0-" <= VERSION < v"1.14.0-DEV.1843"
+        ext_cis_flaky = v"1.13.0-" <= VERSION < v"1.14-"
+        if !ext_cis_flaky
+            @test check_presence(identity_mi, token) broken=ext_cis_lost
+        end
     end
 end

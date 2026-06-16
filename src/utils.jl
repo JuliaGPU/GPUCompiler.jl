@@ -6,6 +6,28 @@ else
     __has_internal_julia_change(version_or::VersionNumber, feature::Symbol) =
         false
 end
+
+
+## `public` keyword compat
+
+"""
+    @public foo, bar
+
+Declare `foo, bar` as public API. Lowers to `public foo, bar` on 1.11+ (where `public`
+is keyword syntax) and to a no-op on 1.10.
+"""
+macro public(symbols_expr)
+    syms = symbols_expr isa Symbol ? [symbols_expr] :
+           symbols_expr.head === :tuple ? [a isa Symbol ? a : a.args[1] for a in symbols_expr.args] :
+           [symbols_expr.args[1]]
+    if VERSION >= v"1.11.0-DEV.469"
+        esc(Expr(:public, syms...))
+    else
+        nothing
+    end
+end
+
+
 ## debug verification
 
 should_verify() = ccall(:jl_is_debugbuild, Cint, ()) == 1 ||

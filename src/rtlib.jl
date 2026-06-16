@@ -60,10 +60,33 @@ end
 
 ## functionality to build the runtime library
 
+# Per-function compilation results for the GPU runtime library, cached through the
+# same `cached_results` mechanism back-ends use for kernels. On 1.11+ the bitcode
+# thus lives on the runtime function's `CodeInstance` — possibly alongside a
+# back-end's own results struct — and persists through precompilation, so sessions
+# loading a back-end that compiled its runtime during precompile skip codegen
+# entirely. On 1.10 it is cached for the duration of the session.
+mutable struct RuntimeFunctionResults
+    bitcode::Union{Nothing,Vector{UInt8}}
+    RuntimeFunctionResults() = new(nothing)
+end
+
+# Compile a single runtime function and link it into `mod`. The renamed bitcode is
+# memoized through `RuntimeFunctionResults`; the session-local `runtime_libs` cache
+# below additionally avoids repeating the parse-and-link work within a session.
 function emit_function!(mod, config::CompilerConfig, f, method)
     tt = Base.to_tuple_type(method.types)
     source = generic_methodinstance(f, tt)
-    new_mod, meta = compile_unhooked(:llvm, CompilerJob(source, config))
+    name = method.llvm_name
+    rt_job = CompilerJob(source, config)
+
+    res = cached_results(RuntimeFunctionResults, rt_job)
+    if res.bitcode !== nothing
+        link!(mod, parse(LLVM.Module, MemoryBuffer(res.bitcode)))
+        return
+    end
+
+    new_mod, meta = compile_unhooked(:llvm, rt_job)
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
     if return_type(ft) != return_type(expected_ft)
@@ -73,28 +96,33 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
 
-    temp_name = LLVM.name(meta.entry)
-    link!(mod, new_mod)
-    entry = functions(mod)[temp_name]
-
-    # if a declaration already existed, replace it with the function to avoid aliasing
-    # (and getting function names like gpu_signal_exception1)
-    name = method.llvm_name
-    if haskey(functions(mod), name)
-        decl = functions(mod)[name]
-        @assert value_type(decl) == value_type(entry)
-        replace_uses!(decl, entry)
+    # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
+    # is immediately link-ready (no per-session rename pass on a cache hit).
+    if haskey(functions(new_mod), name) && functions(new_mod)[name] !== meta.entry
+        decl = functions(new_mod)[name]
+        @assert value_type(decl) == value_type(meta.entry)
+        replace_uses!(decl, meta.entry)
         erase!(decl)
     end
-    LLVM.name!(entry, name)
+    LLVM.name!(meta.entry, name)
+
+    io = IOBuffer()
+    write(io, new_mod)
+    res.bitcode = take!(io)
+
+    link!(mod, new_mod)
 end
 
 function build_runtime(@nospecialize(job::CompilerJob))
     mod = LLVM.Module("GPUCompiler run-time library")
 
-    # the compiler job passed into here is identifies the job that requires the runtime.
+    # the compiler job passed into here identifies the job that requires the runtime.
     # derive a job that represents the runtime itself (notably with kernel=false).
-    config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false, strip=false)
+    # fields that identify the *kernel* job, like its entry-point name, are reset so
+    # that runtime artifacts are keyed (and persisted) identically for all kernels
+    # sharing a cache owner, instead of once per cosmetic config variation.
+    config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false,
+                            strip=false, name=nothing)
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
@@ -114,50 +142,24 @@ function build_runtime(@nospecialize(job::CompilerJob))
     mod
 end
 
-@static if VERSION >= v"1.11.0"
-    import Core.Compiler: is_asserts
-else
-    is_asserts() = false
-end
+# Session-local cache of assembled runtime libraries, keyed by
+# `(cache_owner(job), opaque_pointers)`. Cross-session persistence is the back-end's
+# concern: rebuild on first use of each session, then reuse within the session.
+const runtime_libs = Dict{Tuple{Any, Bool}, Vector{UInt8}}()
+const runtime_libs_lock = ReentrantLock()
 
 @locked function load_runtime(@nospecialize(job::CompilerJob))
-    global compile_cache
-    if compile_cache === nothing    # during precompilation
-        return build_runtime(job)
-    end
+    key = (cache_owner(job), !supports_typed_pointers(context()))
 
-    slug = runtime_slug(job)
-    if !supports_typed_pointers(context())
-        slug *= "-opaque"
-    end
-
-    # Julia codegen changes metadata in modules when `FORCE_ASSERTIONS=1`
-    if is_asserts()
-        slug *= "-asserts"
-    end
-
-    name = "runtime_$(slug).bc"
-    path = joinpath(compile_cache, name)
-
-    if !ispath(path)
-        @debug "Building the GPU runtime library at $path"
-        mkpath(compile_cache)
+    bytes = Base.@lock runtime_libs_lock get!(runtime_libs, key) do
         lib = build_runtime(job)
-
-        # atomic write to disk
-        temp_path, io = mktemp(dirname(path); cleanup=false)
+        io = IOBuffer()
         write(io, lib)
-        close(io)
-        @static if VERSION >= v"1.12.0-DEV.1023"
-            mv(temp_path, path; force=true)
-        else
-            Base.rename(temp_path, path, force=true)
-        end
+        take!(io)
     end
 
-    return parse(LLVM.Module, MemoryBufferFile(path); lazy=true)
+    return parse(LLVM.Module, MemoryBuffer(bytes); lazy=true)
 end
 
-# remove the existing cache
-# NOTE: call this function from global scope, so any change triggers recompilation.
-reset_runtime() = rm(compile_cache; recursive=true, force=true)
+# clear the session-local runtime library cache
+reset_runtime() = Base.@lock runtime_libs_lock empty!(runtime_libs)

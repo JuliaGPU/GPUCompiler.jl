@@ -118,98 +118,68 @@ end
             @check "add i64 %{{[0-9]+}}, 2"
             GPUCompiler.code_llvm(job)
         end
+    end
 
-        # cached_compilation interface
-        invocations = Ref(0)
-        function compiler(job)
-            invocations[] += 1
-            JuliaContext() do ctx
-                ir, ir_meta = GPUCompiler.compile(:llvm, job)
-                string(ir)
+    @testset "cached results" begin
+        mod = @eval module $(gensym())
+            mutable struct Results
+                asm::Union{Nothing,String}
+                Results() = new(nothing)
             end
+            mutable struct OtherResults
+                data::Any
+                OtherResults() = new(nothing)
+            end
+
+            @noinline child(i) = i
+            kernel(i) = child(i)+1
         end
-        linker(job, compiled) = compiled
-        cache = Dict()
-        ft = typeof(mod.kernel)
-        tt = Tuple{Int64}
 
-        # initial compilation
-        source = methodinstance(ft, tt, Base.get_world_counter())
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 2"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        end
-        @test invocations[] == 1
+        # get-or-create: first access yields an empty struct, later accesses the same one
+        job, _ = Native.create_job(mod.kernel, (Int64,))
+        res = GPUCompiler.cached_results(mod.Results, job)
+        @test res isa mod.Results
+        @test res.asm === nothing
+        res.asm = "compiled"
+        @test GPUCompiler.cached_results(mod.Results, job) === res
 
-        # cached compilation
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 2"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        end
-        @test invocations[] == 1
+        # independent consumers get independent structs for the same job
+        other = GPUCompiler.cached_results(mod.OtherResults, job)
+        @test other isa mod.OtherResults
+        @test GPUCompiler.cached_results(mod.Results, job) === res
 
-        # redefinition
-        @eval mod kernel(i) = child(i)+3
-        source = methodinstance(ft, tt, Base.get_world_counter())
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 3"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        end
-        @test invocations[] == 2
+        # results are keyed by the full config: a job differing only in codegen-level
+        # settings (here: the kernel name) must not share artifacts
+        named_job, _ = Native.create_job(mod.kernel, (Int64,); name="custom")
+        @test named_job.source === job.source
+        named_res = GPUCompiler.cached_results(mod.Results, named_job)
+        @test named_res !== res
+        @test named_res.asm === nothing
 
-        # cached compilation
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 3"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        end
-        @test invocations[] == 2
+        # ... but an equal config constructed from scratch resolves to the same struct
+        job2, _ = Native.create_job(mod.kernel, (Int64,))
+        @test GPUCompiler.cached_results(mod.Results, job2) === res
 
-        # redefinition of an unrelated function
-        @eval mod unrelated(i) = 42
-        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test invocations[] == 2
+        # redefinition invalidates: a job in the new world gets a fresh struct
+        @eval mod kernel(i) = child(i)+2
+        new_job, _ = Native.create_job(mod.kernel, (Int64,))
+        new_res = GPUCompiler.cached_results(mod.Results, new_job)
+        @test new_res !== res
+        @test new_res.asm === nothing
 
-        # redefining child functions
-        @eval mod @noinline child(i) = i+1
-        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test invocations[] == 3
-
-        # cached compilation
-        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test invocations[] == 3
-
-        # change in configuration
-        config = CompilerConfig(job.config; name="foobar")
-        @test @filecheck begin
-            @check "define i64 @foobar"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, config, compiler, linker)
-        end
-        @test invocations[] == 4
-
-        # tasks running in the background should keep on using the old version
-        c1, c2 = Condition(), Condition()
-        function background(job)
-            local_source = methodinstance(ft, tt, Base.get_world_counter())
-            notify(c1)
-            wait(c2)    # wait for redefinition
-            GPUCompiler.cached_compilation(cache, local_source, job.config, compiler, linker)
-        end
-        t = @async Base.invokelatest(background, job)
-        wait(c1)        # make sure the task has started
-        @eval mod kernel(i) = child(i)+4
-        source = methodinstance(ft, tt, Base.get_world_counter())
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, r"add i64 %\d+, 4")
-        notify(c2)      # wake up the task
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 3"
-            fetch(t)
-        end
+        # session-dependent results (e.g. artifacts with relocated GVs) are wiped
+        # before image serialization; emulate the atexit-driven wipe directly
+        new_res.asm = "session-dependent"
+        other_job, _ = Native.create_job(mod.kernel, (Int64,); name="other")
+        other_res = GPUCompiler.cached_results(mod.Results, other_job)
+        push!(GPUCompiler.session_dependent_jobs, new_job)
+        GPUCompiler.wipe_session_dependent_results()
+        @test isempty(GPUCompiler.session_dependent_jobs)
+        wiped_res = GPUCompiler.cached_results(mod.Results, new_job)
+        @test wiped_res !== new_res
+        @test wiped_res.asm === nothing
+        # ... without affecting other configs on the same CI
+        @test GPUCompiler.cached_results(mod.Results, other_job) === other_res
     end
 
     @testset "allowed mutable types" begin
