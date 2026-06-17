@@ -327,9 +327,11 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         add!(mpm, NewPMFunctionPassManager()) do fpm
             add!(fpm, GPULowerGCFramePass())
         end
-        add!(mpm, GPULinkRuntimePass())
-        add!(mpm, GPULinkLibrariesPass())
-        add!(mpm, GPUFinishRuntimeIntrinsicsPass())
+        if job.config.libraries
+            add!(mpm, GPULinkRuntimePass())
+            add!(mpm, GPULinkLibrariesPass())
+            add!(mpm, GPUFinishRuntimeIntrinsicsPass())
+        end
     end
 
     # lower kernel state intrinsics
@@ -472,6 +474,7 @@ GPULowerCPUFeaturesPass() = NewPMModulePass("GPULowerCPUFeatures", cpu_features!
 
 function link_runtime!(mod::LLVM.Module)
     job = current_job::CompilerJob
+    job.config.libraries || return false
     uses_julia_runtime(job) && return false
 
     # GC lowering can introduce new calls to GPU runtime functions after the runtime
