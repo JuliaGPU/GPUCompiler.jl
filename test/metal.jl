@@ -1173,4 +1173,49 @@ end
     end
 end
 
+# byval lowering must strip the (non-IPO-safe) Julia const-region metadata off loads derived
+# from the materialized argument; check the helper walks gep/addrspacecast chains and removes it.
+@testset "const-region metadata stripping for materialized args" begin
+    Context() do ctx
+        ir = """
+        define i64 @f([3 x i64] addrspace(11)* %arg, i64 addrspace(11)* %other) {
+        entry:
+          %arg.gep = getelementptr inbounds [3 x i64], [3 x i64] addrspace(11)* %arg, i64 0, i64 0
+          %arg.load = load i64, i64 addrspace(11)* %arg.gep, align 8, !tbaa !0, !invariant.load !3, !alias.scope !4, !noalias !7
+          %other.load = load i64, i64 addrspace(11)* %other, align 8, !tbaa !0, !invariant.load !3, !alias.scope !4, !noalias !7
+          %sum = add i64 %arg.load, %other.load
+          ret i64 %sum
+        }
+
+        !0 = !{!1, !1, i64 0}
+        !1 = !{!"jtbaa_const", !2, i64 0}
+        !2 = !{!"jtbaa"}
+        !3 = !{}
+        !4 = !{!5}
+        !5 = !{!"jnoalias_const", !6}
+        !6 = !{!"jnoalias"}
+        !7 = !{!8}
+        !8 = !{!"jnoalias_stack", !6}
+        """
+        mod = parse(LLVM.Module, ir)
+        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
+        load(name) = only(i for i in insts() if i isa LLVM.LoadInst && LLVM.name(i) == name)
+
+        f = only(functions(mod))
+        arg_load = load("arg.load")
+        other_load = load("other.load")
+        stripped_metadata = (LLVM.MD_invariant_load, LLVM.MD_tbaa,
+                             LLVM.MD_alias_scope, LLVM.MD_noalias)
+
+        @test all(kind -> haskey(metadata(arg_load), kind), stripped_metadata)
+
+        # strip uses derived from the first argument only
+        GPUCompiler.strip_julia_const_region_metadata_from_derived_uses!(parameters(f)[1])
+
+        @test all(kind -> !haskey(metadata(arg_load), kind), stripped_metadata)
+        @test all(kind -> haskey(metadata(other_load), kind), stripped_metadata)
+        @test (verify(mod); true)
+    end
+end
+
 end

@@ -246,11 +246,31 @@ function finish_runtime_intrinsics!(@nospecialize(job::CompilerJob{MetalCompiler
                                     mod::LLVM.Module)
     # AIR input arguments need to be threaded after GC lowering and runtime linking:
     # `gpu_gc_pool_alloc` can call runtime helpers that use thread-position intrinsics.
+    #
+    # Thread the arguments here, but inline in `optimize_module!`, not now. Julia's const-region
+    # metadata on by-pointer aggregate loads is not IPO-safe until `LateLowerGCPass` clears it
+    # (JuliaLang/julia#44285), so inlining at this point would let GVN miscompile those loads.
     changed = false
     for f in kernels(mod)
         add_input_arguments!(job, mod, f, kernel_intrinsics)
         changed = true
     end
+    return changed
+end
+
+# Inline the device code, including the late-linked Metal allocation runtime whose shape
+# `lower_air!` later needs to rewrite generic null tests.
+#
+# This runs at the end of `optimize!`, after `LateLowerGCPass`, and that order matters. Julia's
+# by-pointer aggregate loads carry const-region metadata (`!tbaa jtbaa_const`, `!invariant.load`,
+# `!alias.scope`/`!noalias` against `jnoalias_stack`) that holds only until the LLVM inliner runs
+# (JuliaLang/julia#44285). Inlining such a load onto a caller stack slot makes the metadata false,
+# letting GVN fold the load to `undef` (for example turning a bounds check into an unconditional
+# throw). `LateLowerGCPass`'s `CleanupIR` defuses this before we inline: it strips `!invariant.load`
+# and downgrades `jtbaa_const` to mutable TBAA. The scoped `!noalias` survives, but the inliner
+# clones alias scopes per instance, so the result stays correct.
+function optimize_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                          mod::LLVM.Module)
     @dispose pb=NewPMPassBuilder() begin
         LLVM.target_transform_info!(pb, MetalTTI())
         add!(pb, ModuleInlinerWrapperPass())
@@ -260,7 +280,7 @@ function finish_runtime_intrinsics!(@nospecialize(job::CompilerJob{MetalCompiler
         end
         run!(pb, mod, llvm_machine(job.config.target))
     end
-    return changed
+    return
 end
 
 function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
