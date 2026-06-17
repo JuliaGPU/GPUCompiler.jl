@@ -172,8 +172,7 @@ end
         Metal.code_llvm_threaded_runtime(io, mod.kernel, Tuple{Int};
                                          kernel=true, dump_module=true)
     end
-    @test occursin(r"define .*@gpu_gc_pool_alloc\(", ir)
-    @test occursin(r"call .*@gpu_gc_pool_alloc\([^)]*<3 x i32>", ir)
+    @test occursin(r"define .*@gpu_gc_pool_alloc\([^)]*<3 x i32>", ir)
     @test occursin("thread_position_in_grid", ir)
     @test !occursin(r"declare .*@gpu_gc_pool_alloc\(", ir)
 
@@ -339,6 +338,38 @@ end
         @check cond=typed_ptrs "load float, float addrspace(2)*"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int};
                         dump_module=true, kernel=true)
+    end
+end
+
+@testset "generic null select rewrite" begin
+    JuliaContext() do ctx
+        mod = LLVM.Module("test")
+        T_i1 = LLVM.Int1Type()
+        T_void = LLVM.VoidType()
+        T_p0 = supports_typed_pointers() ? LLVM.PointerType(LLVM.Int8Type(), 0) :
+                                           LLVM.PointerType(0)
+        T_p1 = supports_typed_pointers() ? LLVM.PointerType(LLVM.Int8Type(), 1) :
+                                           LLVM.PointerType(1)
+        f = LLVM.Function(mod, "f", LLVM.FunctionType(T_void, [T_p1]))
+        @dispose builder=IRBuilder() begin
+            entry = BasicBlock(f, "entry")
+            position!(builder, entry)
+            p0 = addrspacecast!(builder, parameters(f)[1], T_p0)
+            sel = select!(builder, ConstantInt(T_i1, 1), p0, null(T_p0))
+            cmp = icmp!(builder, LLVM.API.LLVMIntEQ, sel, null(T_p0))
+            ok = BasicBlock(f, "ok")
+            fail = BasicBlock(f, "fail")
+            br!(builder, cmp, fail, ok)
+            position!(builder, ok)
+            ret!(builder)
+            position!(builder, fail)
+            ret!(builder)
+        end
+
+        @test GPUCompiler.rewrite_generic_null_selects!(mod)
+        ir = string(mod)
+        @test occursin(r"icmp eq .*addrspace\(1\).*null", ir)
+        @test !occursin(r"icmp eq ptr %.* null", ir)
     end
 end
 

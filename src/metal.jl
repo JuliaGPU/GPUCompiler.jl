@@ -251,6 +251,15 @@ function finish_runtime_intrinsics!(@nospecialize(job::CompilerJob{MetalCompiler
         add_input_arguments!(job, mod, f, kernel_intrinsics)
         changed = true
     end
+    @dispose pb=NewPMPassBuilder() begin
+        LLVM.target_transform_info!(pb, MetalTTI())
+        add!(pb, ModuleInlinerWrapperPass())
+        add!(pb, NewPMFunctionPassManager()) do fpm
+            add!(fpm, instcombine_pass(job))
+            add!(fpm, SimplifyCFGPass())
+        end
+        run!(pb, mod, llvm_machine(job.config.target))
+    end
     return changed
 end
 
@@ -416,6 +425,12 @@ end
 # this keeps the `:llvm` output (e.g. `code_llvm`) close to what Julia generated, using
 # generic LLVM intrinsics, while the `:asm`/`:obj` outputs contain AIR intrinsics.
 function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
+    # Avoid generic-space null tests of pointers selected from concrete address spaces.
+    # AIR can miscompile the generic comparison, while comparing in the source address
+    # space and casting only the surviving pointer is the shape Julia emits for direct
+    # Metal.malloc uses.
+    rewrite_generic_null_selects!(mod)
+
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
     # force-inlines throwing functions into the kernel first so the rewrite is sound, then scrubs
@@ -916,6 +931,67 @@ function propagate_argument_address_spaces!(mod::LLVM.Module)
     while propagate_argument_address_spaces_once!(mod)
         changed = true
     end
+    return changed
+end
+
+function select_source_and_null(sel::LLVM.SelectInst)
+    ops = collect(operands(sel))
+    cond, lhs, rhs = ops
+    src_lhs = addrspacecast_to_generic_source(lhs)
+    src_rhs = addrspacecast_to_generic_source(rhs)
+    if src_lhs !== nothing && isnull(rhs)
+        return cond, src_lhs, true
+    elseif isnull(lhs) && src_rhs !== nothing
+        return cond, src_rhs, false
+    end
+    return nothing
+end
+
+function rewrite_generic_null_selects!(mod::LLVM.Module)
+    changed = false
+    worklist = LLVM.ICmpInst[]
+    for f in functions(mod)
+        isdeclaration(f) && continue
+        for bb in blocks(f), inst in instructions(bb)
+            inst isa LLVM.ICmpInst || continue
+            pred = predicate(inst)
+            pred in (LLVM.API.LLVMIntEQ, LLVM.API.LLVMIntNE) || continue
+            ops = collect(operands(inst))
+            sel_idx = ops[1] isa LLVM.SelectInst && isnull(ops[2]) ? 1 :
+                      ops[2] isa LLVM.SelectInst && isnull(ops[1]) ? 2 : 0
+            sel_idx == 0 && continue
+            sel = ops[sel_idx]::LLVM.SelectInst
+            value_type(sel) isa LLVM.PointerType || continue
+            addrspace(value_type(sel)) == 0 || continue
+            select_info = select_source_and_null(sel)
+            select_info === nothing && continue
+            push!(worklist, inst)
+        end
+    end
+
+    for inst in worklist
+        ops = collect(operands(inst))
+        sel = (ops[1] isa LLVM.SelectInst ? ops[1] : ops[2])::LLVM.SelectInst
+        cond, src, cast_is_true_value = select_source_and_null(sel)
+        @dispose builder=IRBuilder() begin
+            position!(builder, inst)
+            src_is_null = icmp!(builder, LLVM.API.LLVMIntEQ, src, null(value_type(src)))
+            replacement = if predicate(inst) == LLVM.API.LLVMIntEQ
+                select!(builder, cond,
+                        cast_is_true_value ? src_is_null : ConstantInt(LLVM.Int1Type(), 1),
+                        cast_is_true_value ? ConstantInt(LLVM.Int1Type(), 1) : src_is_null)
+            else
+                src_is_not_null = icmp!(builder, LLVM.API.LLVMIntNE, src, null(value_type(src)))
+                select!(builder, cond,
+                        cast_is_true_value ? src_is_not_null : ConstantInt(LLVM.Int1Type(), 0),
+                        cast_is_true_value ? ConstantInt(LLVM.Int1Type(), 0) : src_is_not_null)
+            end
+            replace_uses!(inst, replacement)
+            erase!(inst)
+        end
+        changed = true
+    end
+
     return changed
 end
 
