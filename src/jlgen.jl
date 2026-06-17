@@ -606,17 +606,17 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             push!(code_instances, ci′)
         end
     else
-        # When `jl_get_llvm_cis` returns CIs the cache may contain both an
-        # interpreter-token-owned CI (ours) and a `nothing`-owner native CI for the same MI;
-        # prefer the foreign one.
-        native_mis = Set{MethodInstance}()
+        # `jl_get_llvm_cis` may return both our owner-token CI and a native
+        # owner-less CI for the same MI. Prefer ours when present, but keep
+        # owner-less CIs that are the only compiled entry for their method.
+        owned_mis = Set{MethodInstance}()
         for ci′ in code_instances
             if ci′.owner !== nothing
-                push!(native_mis, ci′.def::MethodInstance)
+                push!(owned_mis, ci′.def::MethodInstance)
             end
         end
         filter!(code_instances) do ci′
-            return ci′.owner !== nothing || in(ci′.def, native_mis)
+            return ci′.owner !== nothing || ci′.def ∉ owned_mis
         end
     end
 
@@ -643,14 +643,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # process all compiled method instances
     compiled = Dict()
-    for (ci′, mi) in zip(code_instances, method_instances)
-        # get the function index
+    function compiled_entry(ci′::CodeInstance; required::Bool=true)
         llvm_func_idx = Ref{Int32}(-1)
         llvm_specfunc_idx = Ref{Int32}(-1)
         ccall(:jl_get_function_id, Nothing,
               (Ptr{Cvoid}, Any, Ptr{Int32}, Ptr{Int32}),
               native_code, ci′, llvm_func_idx, llvm_specfunc_idx)
-        @assert llvm_func_idx[] != -1 || llvm_specfunc_idx[] != -1 "Static compilation failed"
+        if llvm_func_idx[] == -1 && llvm_specfunc_idx[] == -1
+            required && error("Static compilation failed")
+            return nothing
+        end
 
         # get the function
         llvm_func = if llvm_func_idx[] >= 1
@@ -671,11 +673,24 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             nothing
         end
 
+        (; ci=ci′, func=llvm_func, specfunc=llvm_specfunc)
+    end
+
+    for (ci′, mi) in zip(code_instances, method_instances)
         @assert !haskey(compiled, mi)
 
         # NOTE: it's not safe to store raw LLVM functions here, since those may get
         #       removed or renamed during optimization, so we store their name instead.
-        compiled[mi] = (; ci=ci′, func=llvm_func, specfunc=llvm_specfunc)
+        compiled[mi] = compiled_entry(ci′)
+    end
+
+    if !haskey(compiled, job.source) && root_ci !== nothing
+        # On Julia 1.14-dev, `jl_get_llvm_cis` may omit the root CI. That root
+        # can also be less-specific than `job.source` when Julia deliberately
+        # reuses unspecialized code, so recover the entry that codegen actually
+        # emitted and expose it under the requested source.
+        entry = compiled_entry(root_ci; required=false)
+        entry !== nothing && (compiled[job.source] = entry)
     end
 
     # ensure that the requested method instance was compiled

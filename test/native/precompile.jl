@@ -55,13 +55,17 @@ precompile_test_harness("Inference caching") do load_path
         import NativeCompiler
 
         # Check that no cached entry is present
-        identity_mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Int})
+        identity_mis = Any[
+            GPUCompiler.methodinstance(typeof(identity), Tuple{Int}),
+            GPUCompiler.CompilerCaching.method_instance(identity, (Int,)),
+        ]
+        unique!(identity_mis)
 
         token = let
             job, _ = NativeCompiler.Native.create_job(identity, (Int,))
             GPUCompiler.cache_owner(job)
         end
-        @test !check_presence(identity_mi, token)
+        @test all(!check_presence(mi, token) for mi in identity_mis)
 
         using NativeBackend
 
@@ -76,13 +80,14 @@ precompile_test_harness("Inference caching") do load_path
         @test check_presence(square_mi, token)
 
         # check that identity survived
-        # NOTE: on 1.13, external CIs from the workload survive only flakily (the
-        #       1.13.0-beta3 backport did not fully fix this), so skip the check there
+        # NOTE: external CIs from the workload survive only flakily on 1.13
+        #       (the 1.13.0-beta3 backport did not fully fix this), so skip the
+        #       check there.
         ext_cis_lost = v"1.12.0-DEV.1268" <= VERSION < v"1.12.5" ||
                        v"1.14.0-" <= VERSION < v"1.14.0-DEV.1843"
         ext_cis_flaky = v"1.13.0-" <= VERSION < v"1.14-"
         if !ext_cis_flaky
-            @test check_presence(identity_mi, token) broken=ext_cis_lost
+            @test any(mi -> check_presence(mi, token), identity_mis) broken=ext_cis_lost
         end
     end
 end
