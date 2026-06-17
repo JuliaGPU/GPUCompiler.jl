@@ -62,6 +62,9 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
         register!(pb, GPULowerCPUFeaturesPass())
         register!(pb, GPULowerPTLSPass())
         register!(pb, GPULowerGCFramePass())
+        register!(pb, GPULinkRuntimePass())
+        register!(pb, GPULinkLibrariesPass())
+        register!(pb, GPUFinishRuntimeIntrinsicsPass())
         register!(pb, AddKernelStatePass())
         register!(pb, LowerKernelStatePass())
         register!(pb, CleanupKernelStatePass())
@@ -324,6 +327,11 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         add!(mpm, NewPMFunctionPassManager()) do fpm
             add!(fpm, GPULowerGCFramePass())
         end
+        if job.config.libraries
+            add!(mpm, GPULinkRuntimePass())
+            add!(mpm, GPULinkLibrariesPass())
+            add!(mpm, GPUFinishRuntimeIntrinsicsPass())
+        end
     end
 
     # lower kernel state intrinsics
@@ -463,6 +471,46 @@ function cpu_features!(mod::LLVM.Module)
     return changed
 end
 GPULowerCPUFeaturesPass() = NewPMModulePass("GPULowerCPUFeatures", cpu_features!)
+
+function link_runtime!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    job.config.libraries || return false
+    uses_julia_runtime(job) && return false
+
+    # GC lowering can introduce new calls to GPU runtime functions after the runtime
+    # was linked initially. Link again now so those calls resolve to definitions before
+    # later intrinsic-lowering passes inspect or rewrite the runtime call graph.
+    runtime = load_runtime(job)
+    link!(mod, runtime; only_needed=true)
+    return true
+end
+GPULinkRuntimePass() = NewPMModulePass("GPULinkRuntime", link_runtime!)
+
+function link_libraries!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    job.config.libraries || return false
+
+    # Runtime functions materialized by GC lowering can introduce target-library
+    # references after the normal library-linking phase has run. Give back-ends a
+    # second chance to resolve those references before they lower their own runtime
+    # intrinsics. This is a no-op for back-ends without a link_libraries! override.
+    if has_legacy_link_libraries(job)
+        undefined_fns = [LLVM.name(f) for f in functions(mod)
+                         if isdeclaration(f) && !LLVM.isintrinsic(f)]
+        link_libraries!(job, mod, undefined_fns)
+    else
+        link_libraries!(job, mod)
+    end
+    return true
+end
+GPULinkLibrariesPass() = NewPMModulePass("GPULinkLibraries", link_libraries!)
+
+function finish_runtime_intrinsics!(mod::LLVM.Module)
+    job = current_job::CompilerJob
+    return finish_runtime_intrinsics!(job, mod)
+end
+GPUFinishRuntimeIntrinsicsPass() =
+    NewPMModulePass("GPUFinishRuntimeIntrinsics", finish_runtime_intrinsics!)
 
 # lower object allocations to to PTX malloc
 #

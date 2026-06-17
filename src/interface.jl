@@ -392,6 +392,9 @@ finish_linked_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = retur
 # post-Julia optimization processing of the module
 optimize_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
+# post-runtime-intrinsic-lowering processing of the module
+finish_runtime_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = false
+
 # final processing of the IR, right before validation and machine-code generation
 finish_ir!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
     entry

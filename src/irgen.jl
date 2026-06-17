@@ -800,8 +800,8 @@ function add_kernel_state!(mod::LLVM.Module)
     job = current_job::CompilerJob
 
     # check if we even need a kernel state argument
+    job.config.kernel || return false
     state = kernel_state_type(job)
-    @assert job.config.kernel
     if state === Nothing
         return false
     end
