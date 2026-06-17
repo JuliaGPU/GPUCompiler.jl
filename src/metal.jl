@@ -604,6 +604,10 @@ end
 #
 # global constant objects need to reside in address space 2, so we clone each function
 # that uses global objects and rewrite the globals used by it
+# packages can override this for target-specific globals that must stay in AS0.
+metal_global_constant_addrspace(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                                @nospecialize(gv::LLVM.GlobalVariable)) = 2
+
 function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                     entry::LLVM.Function)
     # determine global variables we need to update
@@ -612,11 +616,14 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
         isconstant(gv) || continue
         addrspace(value_type(gv)) == 0 || continue
 
+        new_addrspace = metal_global_constant_addrspace(job, gv)
+        new_addrspace == addrspace(value_type(gv)) && continue
+
         gv_ty = global_value_type(gv)
         gv_name = LLVM.name(gv)
 
         LLVM.name!(gv, gv_name * ".old")
-        new_gv = GlobalVariable(mod, gv_ty, gv_name, 2)
+        new_gv = GlobalVariable(mod, gv_ty, gv_name, new_addrspace)
 
         alignment!(new_gv, alignment(gv))
         unnamed_addr!(new_gv, unnamed_addr(gv))
