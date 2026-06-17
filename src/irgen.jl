@@ -681,32 +681,19 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 
     # fixup metadata
     #
-    # Julia emits invariant.load and const TBAA metadata on loads from pointer args,
-    # which is invalid now that we have materialized the byval.
+    # Julia tags loads from by-pointer arguments with const-region metadata (`!tbaa jtbaa_const`,
+    # `!invariant.load`, and the `jnoalias_const`/`jnoalias_stack` `!alias.scope`/`!noalias`
+    # package). Materializing the byval as a caller stack slot below makes that metadata false, so
+    # we strip it (JuliaLang/julia#44285).
+    #
+    # We cannot defer this to Julia the way the inliner does. `CleanupIR` runs back in `optimize!`,
+    # while this is still a real by-pointer const argument whose metadata is true; the
+    # materialization that breaks it happens here, after the last Julia pass, so nothing downstream
+    # repairs it. `CleanupIR` also never touches `!alias.scope`/`!noalias`. The inliner copes with
+    # that because it clones alias scopes per instance, but `clone_into!` below copies the metadata
+    # verbatim, so we strip the whole package ourselves.
     for (i, param) in enumerate(parameters(f))
-        if byval[i]
-            # collect all uses of the argument
-            worklist = Vector{LLVM.Instruction}(user.(collect(uses(param))))
-            while !isempty(worklist)
-                value = popfirst!(worklist)
-
-                # remove the invariant.load attribute
-                md = metadata(value)
-                if haskey(md, LLVM.MD_invariant_load)
-                    delete!(md, LLVM.MD_invariant_load)
-                end
-                if haskey(md, LLVM.MD_tbaa)
-                    delete!(md, LLVM.MD_tbaa)
-                end
-
-                # recurse on the output of some instructions
-                if isa(value, LLVM.BitCastInst) ||
-                   isa(value, LLVM.GetElementPtrInst) ||
-                   isa(value, LLVM.AddrSpaceCastInst)
-                    append!(worklist, user.(collect(uses(value))))
-                end
-            end
-        end
+        byval[i] && strip_julia_const_region_metadata_from_derived_uses!(param)
     end
 
     # generate the new function type & definition
@@ -775,6 +762,45 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     return new_f
 
     end
+end
+
+const JuliaConstRegionMetadataKinds =
+    (LLVM.MD_invariant_load, LLVM.MD_tbaa, LLVM.MD_tbaa_struct,
+     LLVM.MD_alias_scope, LLVM.MD_noalias)
+
+function strip_julia_const_region_metadata!(inst::LLVM.Instruction)
+    changed = false
+    md = metadata(inst)
+    for kind in JuliaConstRegionMetadataKinds
+        if haskey(md, kind)
+            delete!(md, kind)
+            changed = true
+        end
+    end
+    return changed
+end
+
+function is_pointer_derivation_inst(v)
+    return v isa LLVM.BitCastInst ||
+           v isa LLVM.GetElementPtrInst ||
+           v isa LLVM.AddrSpaceCastInst
+end
+
+function strip_julia_const_region_metadata_from_derived_uses!(root)
+    changed = false
+    seen = Base.IdSet{LLVM.Value}()  # `IdSet` is not visible unqualified on Julia 1.10
+    worklist = Vector{LLVM.Instruction}(user.(collect(uses(root))))
+    while !isempty(worklist)
+        inst = popfirst!(worklist)
+        inst in seen && continue
+        push!(seen, inst)
+
+        changed |= strip_julia_const_region_metadata!(inst)
+
+        is_pointer_derivation_inst(inst) || continue
+        append!(worklist, user.(collect(uses(inst))))
+    end
+    return changed
 end
 
 
