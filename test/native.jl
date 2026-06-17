@@ -1,5 +1,8 @@
 @testset "reflection" begin
-    job, _ = Native.create_job(identity, (Int,))
+    mod = @eval module $(gensym())
+        f(x::Int) = x
+    end
+    job, _ = Native.create_job(mod.f, (Int,))
 
     @test only(GPUCompiler.code_lowered(job)) isa Core.CodeInfo
 
@@ -7,17 +10,17 @@
     @test rt === Int
 
     @test @filecheck begin
-        @check "MethodInstance for identity"
+        @check "MethodInstance for {{.*}}f"
         GPUCompiler.code_warntype(job)
     end
 
     @test @filecheck begin
-        @check "@{{(julia|j)_identity_[0-9]+}}"
+        @check "@{{(julia|j)_f_[0-9]+}}"
         GPUCompiler.code_llvm(job)
     end
 
     @test @filecheck begin
-        @check "@{{(julia|j)_identity_[0-9]+}}"
+        @check "@{{(julia|j)_f_[0-9]+}}"
         GPUCompiler.code_native(job)
     end
 end
@@ -167,31 +170,35 @@ end
         @test new_res !== res
         @test new_res.asm === nothing
 
-        # session-dependent results (e.g. artifacts with relocated GVs) are wiped
-        # before image serialization; emulate the atexit-driven wipe directly
-        new_res.asm = "session-dependent"
-        other_job, _ = Native.create_job(mod.kernel, (Int64,); name="other")
-        other_res = GPUCompiler.cached_results(mod.Results, other_job)
-        push!(GPUCompiler.session_dependent_jobs, new_job)
-        GPUCompiler.wipe_session_dependent_results()
-        @test isempty(GPUCompiler.session_dependent_jobs)
-        wiped_res = GPUCompiler.cached_results(mod.Results, new_job)
-        @test wiped_res !== new_res
-        @test wiped_res.asm === nothing
-        # ... without affecting other configs on the same CI
-        @test GPUCompiler.cached_results(mod.Results, other_job) === other_res
+        @static if GPUCompiler.HAS_INTEGRATED_CACHE
+            # session-dependent results (e.g. artifacts with relocated GVs) are wiped
+            # before image serialization; emulate the atexit-driven wipe directly
+            new_res.asm = "session-dependent"
+            other_job, _ = Native.create_job(mod.kernel, (Int64,); name="other")
+            other_res = GPUCompiler.cached_results(mod.Results, other_job)
+            push!(GPUCompiler.session_dependent_jobs, new_job)
+            GPUCompiler.wipe_session_dependent_results()
+            @test isempty(GPUCompiler.session_dependent_jobs)
+            wiped_res = GPUCompiler.cached_results(mod.Results, new_job)
+            @test wiped_res !== new_res
+            @test wiped_res.asm === nothing
+            # ... without affecting other configs on the same CI
+            @test GPUCompiler.cached_results(mod.Results, other_job) === other_res
+        end
     end
 
     @testset "allowed mutable types" begin
         # when types have no fields, we should always allow them
         mod = @eval module $(gensym())
             struct Empty end
+            accept_empty(::Empty) = nothing
+            accept_symbol(::Symbol) = nothing
         end
 
-        Native.code_execution(Returns(nothing), (mod.Empty,))
+        Native.code_execution(mod.accept_empty, (mod.Empty,))
 
         # this also applies to Symbols
-        Native.code_execution(Returns(nothing), (Symbol,))
+        Native.code_execution(mod.accept_symbol, (Symbol,))
     end
 
     @testset "code coverage" begin
@@ -389,19 +396,23 @@ end
 end
 
 @testset "function entry safepoint emission" begin
+    mod = @eval module $(gensym())
+        f(::Nothing) = nothing
+    end
+
     @test @filecheck begin
-        @check_label "define void @{{(julia|j)_identity_[0-9]+}}"
+        @check_label "define void @{{(julia|j)_f_[0-9]+}}"
         @check_not "%safepoint"
-        Native.code_llvm(identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true)
+        Native.code_llvm(mod.f, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true)
     end
 
     # XXX: broken by JuliaLang/julia#57010,
     #      see https://github.com/JuliaLang/julia/pull/57010/files#r2079576894
     if VERSION < v"1.13.0-DEV.533"
         @test @filecheck begin
-            @check_label "define void @{{(julia|j)_identity_[0-9]+}}"
+            @check_label "define void @{{(julia|j)_f_[0-9]+}}"
             @check "%safepoint"
-            Native.code_llvm(identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true)
+            Native.code_llvm(mod.f, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true)
         end
     end
 end

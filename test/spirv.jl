@@ -182,7 +182,7 @@ end
                 """, NTuple{N, Core.VecElement{Float32}}, NTuple{2, NTuple{N, Core.VecElement{Float32}}}, x.data, y.data))
             end
         end
-        kernel(x...) = @noinline fadd(x...)
+        kernel(x, y) = @noinline fadd(x, y)
     end
 
     @test @filecheck begin
@@ -191,7 +191,8 @@ end
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
         @check cond=(v"1.12" <= VERSION < v"1.12.5") "alloca <2 x i64>, align 16"
         @check cond=(VERSION >= v"1.12.5") "alloca [2 x i64], align 16"
-        SPIRV.code_llvm(mod.kernel, NTuple{2, mod.Vec{4, Float32}}; backend, dump_module=true)
+        SPIRV.code_llvm(mod.kernel, Tuple{mod.Vec{4, Float32}, mod.Vec{4, Float32}};
+                        backend, dump_module=true)
     end
 
     @test @filecheck begin
@@ -199,7 +200,8 @@ end
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
         @check cond=(v"1.12" <= VERSION < v"1.12.5") "alloca [2 x <2 x i64>], align 16"
         @check cond=(VERSION >= v"1.12.5") "alloca [4 x i64], align 16"
-        SPIRV.code_llvm(mod.kernel, NTuple{2, mod.Vec{8, Float32}}; backend, dump_module=true)
+        SPIRV.code_llvm(mod.kernel, Tuple{mod.Vec{8, Float32}, mod.Vec{8, Float32}};
+                        backend, dump_module=true)
     end
 end
 
