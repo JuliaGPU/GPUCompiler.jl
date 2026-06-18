@@ -49,6 +49,15 @@ function aggressiveinstcombine_pass(@nospecialize(job::CompilerJob))
     end
 end
 
+# Opt-in capture of the IR *entering* `optimize!`. When a back-end sets
+# `capture_optimization_input[] = true`, a failure anywhere in `optimize!` stashes the
+# module as it was before any optimization pass ran into `last_optimization_input[]`. That
+# snapshot is a faithful, re-optimizable reproducer (re-running `optimize!` on it reproduces
+# the failure), unlike a module recovered post-hoc via `optimize=false` (which has already
+# been through `finish_ir!`). Disabled by default so non-opted-in back-ends pay nothing.
+const capture_optimization_input = Ref(false)
+const last_optimization_input = Ref{Union{Nothing,String}}(nothing)
+
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
     tm = llvm_machine(job.config.target)
     tti = llvm_targetinfo(job.config.target)
@@ -56,26 +65,34 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
     global current_job
     current_job = job
 
-    @dispose pb=NewPMPassBuilder() begin
-        tti === nothing || LLVM.target_transform_info!(pb, tti)
+    input_snapshot = capture_optimization_input[] ? string(mod) : nothing
+    last_optimization_input[] = nothing
 
-        register!(pb, GPULowerCPUFeaturesPass())
-        register!(pb, GPULowerPTLSPass())
-        register!(pb, GPULowerGCFramePass())
-        register!(pb, GPULinkRuntimePass())
-        register!(pb, GPULinkLibrariesPass())
-        register!(pb, GPUFinishRuntimeIntrinsicsPass())
-        register!(pb, AddKernelStatePass())
-        register!(pb, LowerKernelStatePass())
-        register!(pb, CleanupKernelStatePass())
+    try
+        @dispose pb=NewPMPassBuilder() begin
+            tti === nothing || LLVM.target_transform_info!(pb, tti)
 
-        add!(pb, NewPMModulePassManager()) do mpm
-            buildNewPMPipeline!(mpm, job, opt_level)
+            register!(pb, GPULowerCPUFeaturesPass())
+            register!(pb, GPULowerPTLSPass())
+            register!(pb, GPULowerGCFramePass())
+            register!(pb, GPULinkRuntimePass())
+            register!(pb, GPULinkLibrariesPass())
+            register!(pb, GPUFinishRuntimeIntrinsicsPass())
+            register!(pb, AddKernelStatePass())
+            register!(pb, LowerKernelStatePass())
+            register!(pb, CleanupKernelStatePass())
+
+            add!(pb, NewPMModulePassManager()) do mpm
+                buildNewPMPipeline!(mpm, job, opt_level)
+            end
+            run!(pb, mod, tm)
         end
-        run!(pb, mod, tm)
+        optimize_module!(job, mod)
+        run!(DeadArgumentEliminationPass(), mod, tm)
+    catch
+        last_optimization_input[] = input_snapshot
+        rethrow()
     end
-    optimize_module!(job, mod)
-    run!(DeadArgumentEliminationPass(), mod, tm)
     return
 end
 
