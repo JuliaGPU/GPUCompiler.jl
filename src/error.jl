@@ -21,6 +21,9 @@ function Base.showerror(io::IO, err::KernelError)
     Base.show_backtrace(io, err.bt)
 end
 
+# `show` via `showerror` (cf. InvalidIRError)
+Base.show(io::IO, err::KernelError) = showerror(io, err)
+
 
 struct InternalCompilerError <: Exception
     job::CompilerJob
