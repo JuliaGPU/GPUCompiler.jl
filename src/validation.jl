@@ -160,6 +160,9 @@ function Base.showerror(io::IO, err::InvalidIRError)
     return
 end
 
+# `show` via `showerror`, avoiding the default field-dump that derefs disposed IR
+Base.show(io::IO, err::InvalidIRError) = showerror(io, err)
+
 function check_ir(job, args...)
     errors = check_ir!(job, IRError[], args...)
     unique!(errors)
@@ -365,7 +368,9 @@ function check_ir_values(mod::LLVM.Module, predicate, msg="value")
     for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
         if predicate(inst) || any(predicate, operands(inst))
             bt = backtrace(inst)
-            push!(errors, (msg, bt, inst))
+            # snapshot to a string: the error may outlive the module, and showing a
+            # disposed LLVM value segfaults
+            push!(errors, (msg, bt, string(inst)))
         end
     end
     return errors
