@@ -1270,7 +1270,13 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         # XXX: unknown
         push!(md, Metadata(ConstantInt(Int32(1))))
 
-        push!(md, MDString("air.read_write")) # TODO: Check for const array
+        # only pointer-to-data arguments are written through; by-reference values (kernel
+        # state, bitstype objects) are read into a stack slot and never written back.
+        if arg.cc == BITS_VALUE && (arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
+            push!(md, MDString("air.read_write"))
+        else
+            push!(md, MDString("air.read"))
+        end
 
         push!(md, MDString("air.address_space"))
         push!(md, Metadata(ConstantInt(Int32(addrspace(parameters(entry_ft)[arg.idx])))))
