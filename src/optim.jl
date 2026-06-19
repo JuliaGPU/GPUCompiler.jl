@@ -498,6 +498,10 @@ function link_runtime!(mod::LLVM.Module)
     # was linked initially. Link again now so those calls resolve to definitions before
     # later intrinsic-lowering passes inspect or rewrite the runtime call graph.
     runtime = load_runtime(job)
+    # `RemoveNIPass` stripped non-integral address spaces from `mod`'s datalayout, but the
+    # cached runtime kept them; align it (as with target libraries) to avoid a warning.
+    triple!(runtime, triple(mod))
+    datalayout!(runtime, datalayout(mod))
     link!(mod, runtime; only_needed=true)
     return true
 end
