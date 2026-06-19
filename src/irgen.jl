@@ -1057,7 +1057,17 @@ function lower_kernel_state!(fun::LLVM.Function)
                 if state_arg === nothing
                     # find the kernel state argument. this should be the first argument of
                     # the function, but only when this function needs the state!
-                    state_arg = parameters(fun)[1]
+                    params = parameters(fun)
+                    if isempty(params)
+                        # `add_kernel_state!` should have given every function that uses the
+                        # state intrinsic a state argument. if it didn't, fail with a clear
+                        # message (naming the offending function) instead of an opaque
+                        # `BoundsError`, so the bug is diagnosable from the error alone.
+                        error("""kernel state lowering: function `$(LLVM.name(fun))` uses the \
+                                 kernel state intrinsic but was not given a state argument. \
+                                 This is a GPUCompiler bug; please file an issue.""")
+                    end
+                    state_arg = params[1]
                     T_state = convert(LLVMType, state)
                     @assert value_type(state_arg) == T_state
                 end

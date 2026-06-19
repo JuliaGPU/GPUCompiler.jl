@@ -49,6 +49,59 @@ function aggressiveinstcombine_pass(@nospecialize(job::CompilerJob))
     end
 end
 
+# A crash in an optimization pass is a compiler bug, and the only reliable way to debug one
+# that reproduces only in CI is to get the offending module off the machine. On a failure we
+# write out the IR *entering* `optimize!` -- a faithful, re-optimizable reproducer (parse it
+# and call `optimize!` again), unlike a module recovered later via `optimize=false`, which has
+# already been through back-end IR finalization -- and, on a CI agent, publish it:
+#  - Buildkite: `buildkite-agent artifact upload`, plus an error annotation pointing to it.
+#  - GitHub Actions: drop it in `$RUNNER_TEMP` for an `actions/upload-artifact` step and
+#    surface it as a workflow notice.
+# Snapshotting costs a `string(mod)` per compile, so it is gated to CI (auto-detected) or an
+# explicit `JULIA_GPUCOMPILER_DUMP_IR`; everything else pays nothing.
+function dump_failing_ir_enabled()
+    if haskey(ENV, "JULIA_GPUCOMPILER_DUMP_IR")
+        return parse(Bool, ENV["JULIA_GPUCOMPILER_DUMP_IR"])
+    end
+    return haskey(ENV, "BUILDKITE") || get(ENV, "GITHUB_ACTIONS", "false") == "true"
+end
+
+function dump_failing_ir(ir::AbstractString, @nospecialize(err))
+    path = tempname() * ".ll"
+    try
+        write(path, ir)
+    catch e
+        @error "GPUCompiler: could not write failing IR" exception=(e, catch_backtrace())
+        return nothing
+    end
+    name = basename(path)
+
+    if parse(Bool, get(ENV, "BUILDKITE", "false"))
+        try
+            run(`buildkite-agent artifact upload $path`)
+            annotation = "GPUCompiler optimization failed: `$(sprint(showerror, err))`. " *
+                "Un-optimized IR uploaded as artifact `$name` (download with " *
+                "`buildkite-agent artifact download $name .` and re-run the optimizer on it " *
+                "to reproduce)."
+            run(pipeline(`buildkite-agent annotate --style error --context gpucompiler-optimization`;
+                         stdin=IOBuffer(annotation)))
+        catch e
+            @error "GPUCompiler: failed to upload failing IR via buildkite-agent" exception=(e, catch_backtrace())
+        end
+    elseif get(ENV, "GITHUB_ACTIONS", "false") == "true"
+        try
+            dir = mkpath(joinpath(get(ENV, "RUNNER_TEMP", tempdir()), "gpucompiler-dumps"))
+            cp(path, joinpath(dir, name); force=true)
+            println("::notice title=GPUCompiler optimization failure::wrote $name to $dir")
+        catch e
+            @error "GPUCompiler: failed to stage failing IR for upload" exception=(e, catch_backtrace())
+        end
+    end
+
+    @info "GPUCompiler: wrote failing module to $path"
+    return path
+end
+
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=2)
     tm = llvm_machine(job.config.target)
     tti = llvm_targetinfo(job.config.target)
@@ -56,26 +109,34 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
     global current_job
     current_job = job
 
-    @dispose pb=NewPMPassBuilder() begin
-        tti === nothing || LLVM.target_transform_info!(pb, tti)
+    # snapshot the (re-optimizable) input so a pass crash can surface a reproducer
+    input_ir = dump_failing_ir_enabled() ? string(mod) : nothing
 
-        register!(pb, GPULowerCPUFeaturesPass())
-        register!(pb, GPULowerPTLSPass())
-        register!(pb, GPULowerGCFramePass())
-        register!(pb, GPULinkRuntimePass())
-        register!(pb, GPULinkLibrariesPass())
-        register!(pb, GPUFinishRuntimeIntrinsicsPass())
-        register!(pb, AddKernelStatePass())
-        register!(pb, LowerKernelStatePass())
-        register!(pb, CleanupKernelStatePass())
+    try
+        @dispose pb=NewPMPassBuilder() begin
+            tti === nothing || LLVM.target_transform_info!(pb, tti)
 
-        add!(pb, NewPMModulePassManager()) do mpm
-            buildNewPMPipeline!(mpm, job, opt_level)
+            register!(pb, GPULowerCPUFeaturesPass())
+            register!(pb, GPULowerPTLSPass())
+            register!(pb, GPULowerGCFramePass())
+            register!(pb, GPULinkRuntimePass())
+            register!(pb, GPULinkLibrariesPass())
+            register!(pb, GPUFinishRuntimeIntrinsicsPass())
+            register!(pb, AddKernelStatePass())
+            register!(pb, LowerKernelStatePass())
+            register!(pb, CleanupKernelStatePass())
+
+            add!(pb, NewPMModulePassManager()) do mpm
+                buildNewPMPipeline!(mpm, job, opt_level)
+            end
+            run!(pb, mod, tm)
         end
-        run!(pb, mod, tm)
+        optimize_module!(job, mod)
+        run!(DeadArgumentEliminationPass(), mod, tm)
+    catch err
+        input_ir === nothing || dump_failing_ir(input_ir, err)
+        rethrow()
     end
-    optimize_module!(job, mod)
-    run!(DeadArgumentEliminationPass(), mod, tm)
     return
 end
 
