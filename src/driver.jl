@@ -82,44 +82,53 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob); kwarg
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
 
-    @tracepoint "Validation" begin
-        check_method(job)   # not optional
-        job.config.validate && check_invocation(job)
-    end
-
-    prepare_job!(job)
-
-
-    ## LLVM IR
-
-    ir, ir_meta = emit_llvm(job)
-
-    if output == :llvm
-        if job.config.strip
-            @tracepoint "strip debug info" strip_debuginfo!(ir)
+    # save/restore the `current_job` global that passes read: compilation nests (the relink
+    # pass rebuilds the runtime via `compile_unhooked` on a cold cache), and a leaked inner
+    # `kernel=false` job would make the outer kernel-state passes misfire.
+    global current_job
+    prev_job = @isdefined(current_job) ? current_job : nothing
+    try
+        @tracepoint "Validation" begin
+            check_method(job)   # not optional
+            job.config.validate && check_invocation(job)
         end
 
-        return ir, ir_meta
+        prepare_job!(job)
+
+
+        ## LLVM IR
+
+        ir, ir_meta = emit_llvm(job)
+
+        if output == :llvm
+            if job.config.strip
+                @tracepoint "strip debug info" strip_debuginfo!(ir)
+            end
+
+            return ir, ir_meta
+        end
+
+
+        ## machine code
+
+        format = if output == :asm
+            LLVM.API.LLVMAssemblyFile
+        elseif output == :obj
+            LLVM.API.LLVMObjectFile
+        else
+            error("Unknown assembly format $output")
+        end
+        asm, asm_meta = emit_asm(job, ir, format)
+
+        if output == :asm || output == :obj
+            return asm, (; asm_meta..., ir_meta..., ir)
+        end
+
+
+        error("Unknown compilation output $output")
+    finally
+        current_job = prev_job
     end
-
-
-    ## machine code
-
-    format = if output == :asm
-        LLVM.API.LLVMAssemblyFile
-    elseif output == :obj
-        LLVM.API.LLVMObjectFile
-    else
-        error("Unknown assembly format $output")
-    end
-    asm, asm_meta = emit_asm(job, ir, format)
-
-    if output == :asm || output == :obj
-        return asm, (; asm_meta..., ir_meta..., ir)
-    end
-
-
-    error("Unknown compilation output $output")
 end
 
 # primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
