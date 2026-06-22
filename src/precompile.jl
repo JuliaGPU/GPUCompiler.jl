@@ -1,5 +1,9 @@
 using PrecompileTools: @setup_workload, @compile_workload
 
+# Load REPL so that interactive use doesn't invalidate the precompiled compiler
+# pipeline (fixed on Julia 1.14, see JuliaLang/julia#61714).
+import REPL
+
 @setup_workload begin
     precompile_module = @eval module $(gensym())
         using ..GPUCompiler
