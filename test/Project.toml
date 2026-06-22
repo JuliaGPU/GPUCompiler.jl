@@ -1,4 +1,5 @@
 [deps]
+AMDGPU_LLVM_Backend_jll = "cc5c0156-bd05-5a77-8a68-bb0aafb29019"
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 FileCheck = "4e644321-382b-4b05-b0b6-5d23c3d944fb"
 GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"

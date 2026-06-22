@@ -1,5 +1,10 @@
 # implementation of the GPUCompiler interfaces for generating GCN code
 
+const AMDGPU_LLVM_Backend_jll =
+    LazyModule("AMDGPU_LLVM_Backend_jll",
+               UUID("cc5c0156-bd05-5a77-8a68-bb0aafb29019"))
+
+
 ## target
 
 export GCNCompilerTarget
@@ -151,6 +156,56 @@ function add_kernarg_address_spaces!(
     end
 
     return new_f
+end
+
+@unlocked function mcgen(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                         mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
+    if !isavailable(AMDGPU_LLVM_Backend_jll) || !AMDGPU_LLVM_Backend_jll.is_available()
+        error("AMDGPU LLVM back-end not loaded; cannot compile to GCN.")
+    end
+
+    target = job.config.target
+    filetype = if format == LLVM.API.LLVMAssemblyFile
+        "asm"
+    elseif format == LLVM.API.LLVMObjectFile
+        "obj"
+    else
+        error("Unsupported GCN output format $format")
+    end
+
+    input  = tempname(cleanup=false) * ".bc"
+    output = tempname(cleanup=false) * (filetype == "asm" ? ".s" : ".o")
+    write(input, mod)
+
+    cmd = `$(AMDGPU_LLVM_Backend_jll.llc()) $input
+              -mtriple=$(llvm_triple(target))
+              -mcpu=$(target.dev_isa)
+              -mattr=$(target.features)
+              --relocation-model=pic
+              -filetype=$filetype
+              -o $output`
+    out = Pipe()
+    proc = run(pipeline(ignorestatus(cmd); stdout=out, stderr=out); wait=false)
+    close(out.in)
+    log = strip(read(out, String))
+    wait(proc)
+    if !success(proc)
+        # keep the input around for debugging
+        msg = "Failed to compile to GCN with external llc"
+        isempty(log) || (msg *= ":\n" * log)
+        msg *= "\nIf you think this is a bug, please file an issue and attach $(input)."
+        isfile(output) && rm(output)
+        error(msg)
+    elseif !isempty(log)
+        # llc only diagnoses on stderr; even successful compilation may e.g. have
+        # ignored an unrecognized CPU or feature, so make sure this surfaces.
+        @warn "External llc reported:\n$log"
+    end
+
+    code = filetype == "asm" ? read(output, String) : String(read(output))
+    rm(input)
+    rm(output)
+    return code
 end
 
 
