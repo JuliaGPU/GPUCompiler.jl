@@ -984,17 +984,24 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             push!(code_instances, ci)
         end
     else
+        # `jl_get_llvm_cis` can report stale CIs that no longer cover the world
+        # this job was compiled in. The explicit cache lookup path already filters
+        # by world; do the same here before de-duplicating by MI.
+        filter!(code_instances) do ci
+            ci.min_world <= job.world <= ci.max_world
+        end
+
         # To avoid a clash in the compiled cache containing both with an interpreter token (like GPUCompiler.GPUCompilerCacheToken) and native,
         # prefer the non-native code-instance.
         # TODO: in the future we should migrate compiled to have the ci as the key, not the mi.
-        native_mis = Set{MethodInstance}()
+        owned_mis = Set{MethodInstance}()
         for ci in code_instances
             if ci.owner !== nothing
-                push!(native_mis, ci.def::MethodInstance)
+                push!(owned_mis, ci.def::MethodInstance)
             end
         end
         filter!(code_instances) do ci
-            return ci.owner !== nothing || in(ci.def, native_mis)
+            return ci.owner !== nothing || ci.def ∉ owned_mis
         end
     end
 
