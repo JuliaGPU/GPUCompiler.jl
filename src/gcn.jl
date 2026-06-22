@@ -161,7 +161,18 @@ end
 @unlocked function mcgen(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                          mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
     if !isavailable(AMDGPU_LLVM_Backend_jll) || !AMDGPU_LLVM_Backend_jll.is_available()
-        error("AMDGPU LLVM back-end not loaded; cannot compile to GCN.")
+        # fall back to the in-process LLVM back-end, which is deprecated and will be
+        # removed in the next breaking release in favor of AMDGPU_LLVM_Backend_jll.
+        safe_depwarn(
+            "Generating GCN machine code with the in-process LLVM is deprecated; " *
+            "load AMDGPU_LLVM_Backend_jll to use the external back-end instead.",
+            :mcgen)
+        if :AMDGPU ∉ LLVM.backends()
+            error("AMDGPU LLVM back-end not loaded and the in-process LLVM lacks the " *
+                  "AMDGPU target; cannot compile to GCN.")
+        end
+        return invoke(mcgen, Tuple{CompilerJob, LLVM.Module, typeof(format)},
+                      job, mod, format)
     end
 
     target = job.config.target
