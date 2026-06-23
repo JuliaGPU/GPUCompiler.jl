@@ -56,7 +56,7 @@ jobs:
             os: 'windows-2025'
             llvm_args: '--opaque-pointers'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Julia
         uses: julia-actions/setup-julia@v3
@@ -102,7 +102,7 @@ jobs:
           #  build: 'x86_64-linux-gnuassert'
           #  branch: 'master'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download Julia
         env:
