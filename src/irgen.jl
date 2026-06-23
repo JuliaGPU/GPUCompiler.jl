@@ -1230,7 +1230,7 @@ end
 #
 # this exists because emitting an `alloca` directly through `llvmcall` is unsound/ineffective:
 # the `Ptr` round-trip through `ptrtoint`/`inttoptr` blocks SROA/mem2reg promotion, the target
-# stack address space (e.g. AS 5 on NVPTX/AMDGPU) isn't known at the front end, and the
+# stack address space (e.g. AS 5 on NVPTX/AMDGPU) isn't known at the front-end, and the
 # LangRef lifetime of an `alloca` is tied to the (inlined) `llvmcall` wrapper. lowering it
 # ourselves lets us place the slot in the kernel entry block, in the datalayout's alloca
 # address space, early enough for the optimizer to promote it.
@@ -1300,7 +1300,7 @@ function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     prefix = "julia.gpu.alloca."
 
-    for intr in collect(functions(mod))
+    for intr in functions(mod)
         fn = LLVM.name(intr)
         startswith(fn, prefix) || continue
 
@@ -1320,7 +1320,7 @@ function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                 alignment!(slot, align)
 
                 # `alloca!` placed the slot in the datalayout's alloca address space; cast back
-                # to generic (AS 0) to match the `Ptr` the front end handed out.
+                # to generic (AS 0) to match the `Ptr` `alloca` returns.
                 ptr = if LLVM.addrspace(value_type(slot)) == 0
                     slot
                 else
