@@ -407,18 +407,25 @@ function merge_byte_gep_chains!(mod::LLVM.Module)
         v isa LLVM.GetElementPtrInst && length(operands(v)) == 2 &&
         LLVM.LLVMType(LLVM.API.LLVMGetGEPSourceElementType(v)) == i8
 
+    # the first `gep i8, (gep i8, p, A), B` in `f`, or `nothing`
+    function next_chain(f)
+        for bb in blocks(f), inst in instructions(bb)
+            is_byte_gep(inst) && is_byte_gep(operands(inst)[1]) && return inst
+        end
+        return nothing
+    end
+
     for f in functions(mod)
         isdeclaration(f) && continue
-        worklist = LLVM.Instruction[]
-        for bb in blocks(f), inst in instructions(bb)
-            is_byte_gep(inst) && is_byte_gep(operands(inst)[1]) && push!(worklist, inst)
-        end
-        # process defs-before-uses (instruction order) so longer chains collapse fully:
-        # an inner gep is rewritten before the outer one that consumes it.
-        for gep in worklist
-            src = operands(gep)[1]
-            (is_byte_gep(gep) && is_byte_gep(src)) || continue   # may already be merged
-            base    = operands(src)[1]
+        # Rescan after each merge instead of keeping a worklist: a merge can erase a *different*
+        # chained GEP (a now-dead inner GEP whose only use was the one we just folded), and a
+        # block layout that doesn't follow dominance can place that inner GEP after the outer one,
+        # so stale worklist entries would be use-after-free. Rescanning only ever inspects live
+        # instructions; each merge replaces a chained GEP with a shallower one (and shortens its
+        # users), so the total chain depth strictly decreases and this terminates.
+        while (gep = next_chain(f)) !== nothing
+            src  = operands(gep)[1]
+            base = operands(src)[1]
             inbounds = LLVM.API.LLVMIsInBounds(gep) != 0 && LLVM.API.LLVMIsInBounds(src) != 0
             @dispose builder=IRBuilder() begin
                 position!(builder, gep)
