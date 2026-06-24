@@ -390,6 +390,51 @@ function split_aggregate_loads!(mod::LLVM.Module)
     return changed
 end
 
+# Flatten chained single-index byte `getelementptr`s into one: `gep i8, (gep i8, p, A), B`
+# -> `gep i8, p, (A + B)`. The AGX back-end miscompiles a 1-byte load/store made through a
+# chained GEP (a byte GEP whose base is another byte GEP) when the grid has exactly two
+# threadgroups -- the first threadgroup's access is silently dropped. LLVM deliberately keeps
+# such chains split: `InstCombine`'s `visitGEPOfGEP` only merges when the combined index folds
+# to an existing value (it bails on variable-plus-constant to avoid materializing an extra
+# `add`), and the Metal driver never coalesces them either. On a normal back-end the split form
+# is free (the constant GEP folds into the addressing mode), so this is purely an AGX defect; we
+# work around it by force-merging here, which only costs a cheap `add` and makes the back-end
+# emit correct code. Runs on the optimized, opaque-pointer IR, before AIR lowering.
+function merge_byte_gep_chains!(mod::LLVM.Module)
+    changed = false
+    i8 = LLVM.Int8Type()
+    is_byte_gep(v) =
+        v isa LLVM.GetElementPtrInst && length(operands(v)) == 2 &&
+        LLVM.LLVMType(LLVM.API.LLVMGetGEPSourceElementType(v)) == i8
+
+    for f in functions(mod)
+        isdeclaration(f) && continue
+        worklist = LLVM.Instruction[]
+        for bb in blocks(f), inst in instructions(bb)
+            is_byte_gep(inst) && is_byte_gep(operands(inst)[1]) && push!(worklist, inst)
+        end
+        # process defs-before-uses (instruction order) so longer chains collapse fully:
+        # an inner gep is rewritten before the outer one that consumes it.
+        for gep in worklist
+            src = operands(gep)[1]
+            (is_byte_gep(gep) && is_byte_gep(src)) || continue   # may already be merged
+            base    = operands(src)[1]
+            inbounds = LLVM.API.LLVMIsInBounds(gep) != 0 && LLVM.API.LLVMIsInBounds(src) != 0
+            @dispose builder=IRBuilder() begin
+                position!(builder, gep)
+                sum = add!(builder, operands(src)[2], operands(gep)[2])
+                newgep = inbounds ? inbounds_gep!(builder, i8, base, [sum]) :
+                                    gep!(builder, i8, base, [sum])
+                replace_uses!(gep, newgep)
+            end
+            erase!(gep)
+            isempty(uses(src)) && erase!(src)
+            changed = true
+        end
+    end
+    return changed
+end
+
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
@@ -493,6 +538,11 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
             run!(pm, mod)
         end
     end
+
+    # flatten chained byte GEPs that the AGX back-end miscompiles for 1-byte accesses on a
+    # 2-threadgroup grid (see `merge_byte_gep_chains!`). run last, after the intrinsic-lowering
+    # cleanup above, so the merged form is what reaches the AIR downgrader / back-end.
+    merge_byte_gep_chains!(mod)
 
     return
 end
