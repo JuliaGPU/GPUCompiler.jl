@@ -159,6 +159,38 @@ end
     @test count("getelementptr", air) == 1
 end
 
+@testset "byte GEP coalescing across blocks" begin
+    # Regression: when the outer GEP's block is laid out before its (dominating) inner base's
+    # block, the inner GEP can be erased before it is reached. A stale worklist would then
+    # dereference a freed instruction (`BoundsError` on a 0-element operand set), so the pass
+    # must rescan live instructions instead. It must also still fully coalesce the 3-level chain.
+    p = opaque_ptrs ? "ptr addrspace(1)" : "i8 addrspace(1)*"
+    ir = """
+    define void @k($p %p, i64 %i, i64 %a, i64 %b) {
+    entry:
+      br label %bbB
+    bbA:
+      %g3 = getelementptr i8, $p %g2, i64 %b
+      store i8 0, $p %g3, align 1
+      br label %end
+    bbB:
+      %g1 = getelementptr i8, $p %p, i64 %i
+      %g2 = getelementptr i8, $p %g1, i64 %a
+      br label %bbA
+    end:
+      ret void
+    }
+    """
+    @dispose ctx=Context() begin
+        mod = parse(LLVM.Module, ir)
+        GPUCompiler.merge_byte_gep_chains!(mod)
+        f = functions(mod)["k"]
+        ngep = sum(bb -> count(i -> i isa LLVM.GetElementPtrInst, collect(instructions(bb))),
+                   collect(blocks(f)))
+        @test ngep == 1
+    end
+end
+
 @testset "GC runtime input arguments" begin
     mod = @eval module $(gensym())
         mutable struct PleaseAllocate
