@@ -139,6 +139,26 @@ end
     end
 end
 
+@testset "byte GEP coalescing" begin
+    # The AGX back-end miscompiles a 1-byte load/store addressed through a *chained* byte
+    # `getelementptr` (`gep i8, (gep i8, p, i), 1`) on a grid of exactly two threadgroups,
+    # silently dropping the first threadgroup's access. LLVM deliberately leaves such chains
+    # split (`InstCombine`'s `visitGEPOfGEP` only merges when the combined index folds, to avoid
+    # an extra `add`), so `merge_byte_gep_chains!` coalesces them into a single GEP during AIR
+    # lowering. Without that pass the kernel below keeps two GEPs.
+    mod = @eval module $(gensym())
+        function kernel(ptr::Core.LLVMPtr{Int8,1}, i::Int64)
+            p = ptr + i
+            Base.unsafe_store!(p + Int64(1), Int8(0))
+            return
+        end
+    end
+
+    air = sprint(io -> Metal.code_native(io, mod.kernel,
+                                         Tuple{Core.LLVMPtr{Int8,1}, Int64}; kernel=true))
+    @test count("getelementptr", air) == 1
+end
+
 @testset "GC runtime input arguments" begin
     mod = @eval module $(gensym())
         mutable struct PleaseAllocate
