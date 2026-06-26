@@ -59,7 +59,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
     @dispose pb=NewPMPassBuilder() begin
         tti === nothing || LLVM.target_transform_info!(pb, tti)
 
-        register!(pb, GPULowerCPUFeaturesPass())
+        register!(pb, GPULowerCPUFeaturesPass(job))
         register!(pb, GPULowerPTLSPass())
         register!(pb, GPULowerGCFramePass())
         register!(pb, GPULinkRuntimePass())
@@ -168,7 +168,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
             end
         end
     end
-    add!(mpm, GPULowerCPUFeaturesPass())
+    add!(mpm, GPULowerCPUFeaturesPass(job))
     if opt_level >= 1
         add!(mpm, NewPMFunctionPassManager()) do fpm
             if opt_level >= 2
@@ -425,8 +425,10 @@ end
 ## custom passes
 
 # lowering intrinsics
-function cpu_features!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+struct CPUFeatures
+    current_job::CompilerJob
+end
+function (self::CPUFeatures)(mod::LLVM.Module)
     changed = false
 
     argtyps = Dict(
@@ -470,7 +472,7 @@ function cpu_features!(mod::LLVM.Module)
 
     return changed
 end
-GPULowerCPUFeaturesPass() = NewPMModulePass("GPULowerCPUFeatures", cpu_features!)
+GPULowerCPUFeaturesPass(current_job) = NewPMModulePass("GPULowerCPUFeatures", CPUFeatures(current_job))
 
 function link_runtime!(mod::LLVM.Module)
     job = current_job::CompilerJob
