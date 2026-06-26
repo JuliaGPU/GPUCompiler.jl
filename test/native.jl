@@ -25,6 +25,12 @@
     end
 end
 
+@testset "method instances for type-valued callees" begin
+    mi = GPUCompiler.methodinstance(Base._stable_typeof(Memory{Int}), Tuple{typeof(undef), Int})
+    @test mi isa Core.MethodInstance
+    @test Base.isdispatchtuple(mi.specTypes)
+end
+
 @testset "compilation" begin
     @testset "callable structs" begin
         mod = @eval module $(gensym())

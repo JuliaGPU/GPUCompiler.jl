@@ -14,9 +14,21 @@ end
 
 export methodinstance, generic_methodinstance
 
+@static if isdefined(Core, :TypeEgal)
+    @inline function dispatch_function_key(ft::Type)
+        if Base.isType(ft)
+            f = Base.type_parameter(ft)
+            !Base.has_free_typevars(f) && return Core.TypeEgal{f}
+        end
+        return ft
+    end
+else
+    @inline dispatch_function_key(ft::Type) = ft
+end
+
 @inline function signature_type_by_tt(ft::Type, tt::Type)
     u = Base.unwrap_unionall(tt)::DataType
-    return Base.rewrap_unionall(Tuple{ft, u.parameters...}, tt)
+    return Base.rewrap_unionall(Tuple{dispatch_function_key(ft), u.parameters...}, tt)
 end
 
 # create a MethodError from a function type
