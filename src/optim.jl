@@ -53,21 +53,18 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module; opt_level=
     tm = llvm_machine(job.config.target)
     tti = llvm_targetinfo(job.config.target)
 
-    global current_job
-    current_job = job
-
     @dispose pb=NewPMPassBuilder() begin
         tti === nothing || LLVM.target_transform_info!(pb, tti)
 
         register!(pb, GPULowerCPUFeaturesPass(job))
-        register!(pb, GPULowerPTLSPass())
-        register!(pb, GPULowerGCFramePass())
-        register!(pb, GPULinkRuntimePass())
-        register!(pb, GPULinkLibrariesPass())
-        register!(pb, GPUFinishRuntimeIntrinsicsPass())
-        register!(pb, AddKernelStatePass())
-        register!(pb, LowerKernelStatePass())
-        register!(pb, CleanupKernelStatePass())
+        register!(pb, GPULowerPTLSPass(job))
+        register!(pb, GPULowerGCFramePass(job))
+        register!(pb, GPULinkRuntimePass(job))
+        register!(pb, GPULinkLibrariesPass(job))
+        register!(pb, GPUFinishRuntimeIntrinsicsPass(job))
+        register!(pb, AddKernelStatePass(job))
+        register!(pb, LowerKernelStatePass(job))
+        register!(pb, CleanupKernelStatePass(job))
 
         add!(pb, NewPMModulePassManager()) do mpm
             buildNewPMPipeline!(mpm, job, opt_level)
@@ -325,12 +322,12 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     # lower GC intrinsics
     if !uses_julia_runtime(job)
         add!(mpm, NewPMFunctionPassManager()) do fpm
-            add!(fpm, GPULowerGCFramePass())
+            add!(fpm, GPULowerGCFramePass(job))
         end
         if job.config.libraries
-            add!(mpm, GPULinkRuntimePass())
-            add!(mpm, GPULinkLibrariesPass())
-            add!(mpm, GPUFinishRuntimeIntrinsicsPass())
+            add!(mpm, GPULinkRuntimePass(job))
+            add!(mpm, GPULinkLibrariesPass(job))
+            add!(mpm, GPUFinishRuntimeIntrinsicsPass(job))
         end
     end
 
@@ -339,11 +336,11 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     #       and thus additional uses of the kernel state intrinsics.
     if job.config.kernel
         # TODO: now that all kernel state-related passes are being run here, merge some?
-        add!(mpm, AddKernelStatePass())
+        add!(mpm, AddKernelStatePass(job))
         add!(mpm, NewPMFunctionPassManager()) do fpm
-            add!(fpm, LowerKernelStatePass())
+            add!(fpm, LowerKernelStatePass(job))
         end
-        add!(mpm, CleanupKernelStatePass())
+        add!(mpm, CleanupKernelStatePass(job))
     end
 
     if !uses_julia_runtime(job)
@@ -351,7 +348,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         add!(mpm, NewPMFunctionPassManager()) do fpm
             add!(fpm, ADCEPass())
         end
-        add!(mpm, GPULowerPTLSPass())
+        add!(mpm, GPULowerPTLSPass(job))
     end
 
     add!(mpm, NewPMFunctionPassManager()) do fpm
@@ -426,7 +423,7 @@ end
 
 # lowering intrinsics
 struct CPUFeatures
-    current_job::CompilerJob
+    job::CompilerJob
 end
 function (self::CPUFeatures)(mod::LLVM.Module)
     changed = false
@@ -446,7 +443,7 @@ function (self::CPUFeatures)(mod::LLVM.Module)
         # determine whether this back-end supports FMA on this type
         has_fma = if haskey(argtyps, typnam)
             typ = argtyps[typnam]
-            have_fma(job.config.target, typ)
+            have_fma(self.job.config.target, typ)
         else
             # warn?
             false
@@ -472,17 +469,19 @@ function (self::CPUFeatures)(mod::LLVM.Module)
 
     return changed
 end
-GPULowerCPUFeaturesPass(current_job) = NewPMModulePass("GPULowerCPUFeatures", CPUFeatures(current_job))
+GPULowerCPUFeaturesPass(job) = NewPMModulePass("GPULowerCPUFeatures", CPUFeatures(job))
 
-function link_runtime!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    job.config.libraries || return false
-    uses_julia_runtime(job) && return false
+struct LinkRuntime
+    job::CompilerJob
+end
+function (self::LinkRuntime)(mod::LLVM.Module)
+    self.job.config.libraries || return false
+    uses_julia_runtime(self.job) && return false
 
     # GC lowering can introduce new calls to GPU runtime functions after the runtime
     # was linked initially. Link again now so those calls resolve to definitions before
     # later intrinsic-lowering passes inspect or rewrite the runtime call graph.
-    runtime = load_runtime(job)
+    runtime = load_runtime(self.job)
     # `RemoveNIPass` stripped non-integral address spaces from `mod`'s datalayout, but the
     # cached runtime kept them; align it (as with target libraries) to avoid a warning.
     triple!(runtime, triple(mod))
@@ -490,33 +489,37 @@ function link_runtime!(mod::LLVM.Module)
     link!(mod, runtime; only_needed=true)
     return true
 end
-GPULinkRuntimePass() = NewPMModulePass("GPULinkRuntime", link_runtime!)
+GPULinkRuntimePass(job) = NewPMModulePass("GPULinkRuntime", LinkRuntime(job))
 
-function link_libraries!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    job.config.libraries || return false
+struct LinkLibraries
+    job::CompilerJob
+end
+function (self::LinkLibraries)(mod::LLVM.Module)
+    self.job.config.libraries || return false
 
     # Runtime functions materialized by GC lowering can introduce target-library
     # references after the normal library-linking phase has run. Give back-ends a
     # second chance to resolve those references before they lower their own runtime
     # intrinsics. This is a no-op for back-ends without a link_libraries! override.
-    if has_legacy_link_libraries(job)
+    if has_legacy_link_libraries(self.job)
         undefined_fns = [LLVM.name(f) for f in functions(mod)
                          if isdeclaration(f) && !LLVM.isintrinsic(f)]
-        link_libraries!(job, mod, undefined_fns)
+        link_libraries!(self.job, mod, undefined_fns)
     else
-        link_libraries!(job, mod)
+        link_libraries!(self.job, mod)
     end
     return true
 end
-GPULinkLibrariesPass() = NewPMModulePass("GPULinkLibraries", link_libraries!)
+GPULinkLibrariesPass(job) = NewPMModulePass("GPULinkLibraries", LinkLibraries(job))
 
-function finish_runtime_intrinsics!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-    return finish_runtime_intrinsics!(job, mod)
+struct FinishRuntimeIntrinsics
+    job::CompilerJob
 end
-GPUFinishRuntimeIntrinsicsPass() =
-    NewPMModulePass("GPUFinishRuntimeIntrinsics", finish_runtime_intrinsics!)
+function (self::FinishRuntimeIntrinsics)(mod::LLVM.Module)
+    return finish_runtime_intrinsics!(self.job, mod)
+end
+GPUFinishRuntimeIntrinsicsPass(job) =
+    NewPMModulePass("GPUFinishRuntimeIntrinsics", FinishRuntimeIntrinsics(job))
 
 # lower object allocations to to PTX malloc
 #
@@ -526,8 +529,10 @@ GPUFinishRuntimeIntrinsicsPass() =
 # is currently very architecture/CPU specific: hard-coded pool sizes, TLS references, etc.
 # such IR is hard to clean-up, so we probably will need to have the GC lowering pass emit
 # lower-level intrinsics which then can be lowered to architecture-specific code.
-function lower_gc_frame!(fun::LLVM.Function)
-    job = current_job::CompilerJob
+struct LowerGCFrame
+    job::CompilerJob
+end
+function (self::LowerGCFrame)(fun::LLVM.Function)
     mod = LLVM.parent(fun)
     changed = false
 
@@ -557,7 +562,7 @@ function lower_gc_frame!(fun::LLVM.Function)
             changed = true
         end
 
-        @compiler_assert isempty(uses(alloc_obj)) job
+        @compiler_assert isempty(uses(alloc_obj)) self.job
     end
 
     # we don't care about write barriers
@@ -570,12 +575,12 @@ function lower_gc_frame!(fun::LLVM.Function)
             changed = true
         end
 
-        @compiler_assert isempty(uses(barrier)) job
+        @compiler_assert isempty(uses(barrier)) self.job
     end
 
     return changed
 end
-GPULowerGCFramePass() = NewPMFunctionPass("GPULowerGCFrame", lower_gc_frame!)
+GPULowerGCFramePass(job) = NewPMFunctionPass("GPULowerGCFrame", LowerGCFrame(job))
 
 # lower the `julia.ptls_states` intrinsic by removing it, since it is GPU incompatible.
 #
@@ -584,8 +589,10 @@ GPULowerGCFramePass() = NewPMFunctionPass("GPULowerGCFrame", lower_gc_frame!)
 #
 # TODO: maybe don't have Julia emit actual uses of the TLS, but use intrinsics instead,
 #       making it easier to remove or reimplement that functionality here.
-function lower_ptls!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+struct LowerPTLS
+    job::CompilerJob
+end
+function (self::LowerPTLS)(mod::LLVM.Module)
     changed = false
 
     intrinsic = "julia.get_pgcstack"
@@ -606,4 +613,4 @@ function lower_ptls!(mod::LLVM.Module)
 
     return changed
 end
-GPULowerPTLSPass() = NewPMModulePass("GPULowerPTLS", lower_ptls!)
+GPULowerPTLSPass(job) = NewPMModulePass("GPULowerPTLS", LowerPTLS(job))

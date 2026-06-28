@@ -143,9 +143,7 @@ function irgen(@nospecialize(job::CompilerJob))
             end
         end
 
-        global current_job
-        current_job = job
-        can_throw(job) || lower_throw!(mod)
+        can_throw(job) || lower_throw!(job, mod)
 
         # resolve the `julia.gpu.debug_level` intrinsic (see `kernel_debug_level_value`) to
         # the job's configured level, so device code can branch on it as a compile-time
@@ -166,8 +164,7 @@ end
 #
 # once we have thorough inference (ie. discarding `@nospecialize` and thus supporting
 # exception arguments) and proper debug info to unwind the stack, this pass can go.
-function lower_throw!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "lower throw" begin
 
@@ -200,7 +197,7 @@ function lower_throw!(mod::LLVM.Module)
                 # replace the throw with a PTX-compatible exception
                 @dispose builder=IRBuilder() begin
                     position!(builder, call)
-                    emit_exception!(builder, name, call)
+                    emit_exception!(job, builder, name, call)
                 end
 
                 # remove the call
@@ -249,8 +246,7 @@ end
 # while `!mayThrow() && willReturn()`) from deleting the `signal_exception` call below and
 # folding away the guarding bounds-check branch. so the trap is the optimizer-correctness guard;
 # do not move its removal earlier than post-`optimize!`.
-function emit_exception!(builder, name, inst)
-    job = current_job::CompilerJob
+function emit_exception!(@nospecialize(job::CompilerJob), builder, name, inst)
     bb = position(builder)
     fun = LLVM.parent(bb)
     mod = LLVM.parent(fun)
@@ -822,12 +818,13 @@ end
 # so that the julia.gpu.state_getter` can be simplified to return an opaque pointer.
 
 # add a state argument to every function in the module, starting from the kernel entry point
-function add_kernel_state!(mod::LLVM.Module)
-    job = current_job::CompilerJob
-
+struct AddKernelState
+    job::CompilerJob
+end
+function (self::AddKernelState)(mod::LLVM.Module)
     # check if we even need a kernel state argument
-    job.config.kernel || return false
-    state = kernel_state_type(job)
+    self.job.config.kernel || return false
+    state = kernel_state_type(self.job)
     if state === Nothing
         return false
     end
@@ -1022,18 +1019,20 @@ function add_kernel_state!(mod::LLVM.Module)
 
     return true
 end
-AddKernelStatePass() = NewPMModulePass("AddKernelStatePass", add_kernel_state!)
+AddKernelStatePass(job) = NewPMModulePass("AddKernelStatePass", AddKernelState(job))
 
 # lower calls to the state getter intrinsic. this is a two-step process, so that the state
 # argument can be added before optimization, and that optimization can introduce new uses
 # before the intrinsic getting lowered late during optimization.
-function lower_kernel_state!(fun::LLVM.Function)
-    job = current_job::CompilerJob
+struct LowerKernelState
+    job::CompilerJob
+end
+function (self::LowerKernelState)(fun::LLVM.Function)
     mod = LLVM.parent(fun)
     changed = false
 
     # check if we even need a kernel state argument
-    state = kernel_state_type(job)
+    state = kernel_state_type(self.job)
     if state === Nothing
         return false
     end
@@ -1084,10 +1083,12 @@ function lower_kernel_state!(fun::LLVM.Function)
 
     return changed
 end
-LowerKernelStatePass() = NewPMFunctionPass("LowerKernelStatePass", lower_kernel_state!)
+LowerKernelStatePass(job) = NewPMFunctionPass("LowerKernelStatePass", LowerKernelState(job))
 
-function cleanup_kernel_state!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+struct CleanupKernelState
+    job::CompilerJob
+end
+function (self::CleanupKernelState)(mod::LLVM.Module)
     changed = false
 
     # remove the getter intrinsic
@@ -1102,7 +1103,7 @@ function cleanup_kernel_state!(mod::LLVM.Module)
 
     return changed
 end
-CleanupKernelStatePass() = NewPMModulePass("CleanupKernelStatePass", cleanup_kernel_state!)
+CleanupKernelStatePass(job) = NewPMModulePass("CleanupKernelStatePass", CleanupKernelState(job))
 
 function kernel_state_intr(mod::LLVM.Module, T_state)
     state_intr = if haskey(functions(mod), "julia.gpu.state_getter")
@@ -1147,7 +1148,7 @@ end
 
 # device code can query the job's configured debug level as a compile-time constant via
 # `kernel_debug_level()`, which emits the `julia.gpu.debug_level` intrinsic; `lower_debug_level!`
-# (run from `irgen`, with `current_job` in scope) replaces it with the constant. this keeps
+# (run from `irgen`, with `job` in scope) replaces it with the constant. this keeps
 # the level part of the cache key (it lives in `CompilerConfig`), unlike reading the `-g`
 # global at parse time (which would bake the wrong level under pkgimage reuse across `-g`).
 

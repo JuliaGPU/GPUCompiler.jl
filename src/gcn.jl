@@ -44,7 +44,7 @@ pass_by_ref(@nospecialize(job::CompilerJob{GCNCompilerTarget})) = true
 
 function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
-    lower_throw_extra!(mod)
+    lower_throw_extra!(job, mod)
 
     if job.config.kernel
         # calling convention
@@ -156,8 +156,7 @@ end
 
 ## LLVM passes
 
-function lower_throw_extra!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "lower throw (extra)" begin
 
@@ -179,7 +178,7 @@ function lower_throw_extra!(mod::LLVM.Module)
                     # replace the throw with a trap
                     @dispose builder=IRBuilder() begin
                         position!(builder, call)
-                        emit_exception!(builder, f_name, call)
+                        emit_exception!(job, builder, f_name, call)
                     end
 
                     # remove the call

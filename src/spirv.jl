@@ -144,7 +144,7 @@ end
 
     # the LLVM to SPIR-V translator does not support the freeze instruction
     # (SPIRV-LLVM-Translator#1140)
-    rm_freeze!(mod)
+    rm_freeze!(job, mod)
 
     # translate to SPIR-V
     input = tempname(cleanup=false) * ".bc"
@@ -249,8 +249,7 @@ end
 
 # remove freeze and replace uses by the original value
 # (KhronosGroup/SPIRV-LLVM-Translator#1140)
-function rm_freeze!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+function rm_freeze!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "remove freeze" begin
 
@@ -271,7 +270,6 @@ end
 # convert alloca [N x i128] to alloca [N x <2 x i64>]
 # SPIR-V doesn't support i128 types, but we can represent them as vectors
 function convert_i128_allocas!(mod::LLVM.Module)
-    job = current_job::CompilerJob
     changed = false
     @tracepoint "convert i128 allocas" begin
 
