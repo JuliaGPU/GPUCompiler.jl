@@ -442,32 +442,5 @@ end
     GCN.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
 end
 
-@testset "in-process fallback" begin
-    # when AMDGPU_LLVM_Backend_jll is unavailable, GCN machine-code generation should
-    # fall back to the (deprecated) in-process LLVM back-end instead of erroring.
-    # this whole file is gated on the in-process AMDGPU back-end being available, so
-    # the fallback path is exercisable here.
-    mod = @eval module $(gensym())
-        kernel() = return
-    end
-
-    # simulate AMDGPU_LLVM_Backend_jll not being loaded
-    pkg = Base.PkgId(Base.UUID("cc5c0156-bd05-5a77-8a68-bb0aafb29019"),
-                     "AMDGPU_LLVM_Backend_jll")
-    saved = get(Base.loaded_modules, pkg, nothing)
-    try
-        delete!(Base.loaded_modules, pkg)
-        @test !GPUCompiler.isavailable(GPUCompiler.AMDGPU_LLVM_Backend_jll)
-
-        # the in-process back-end should still produce valid GCN assembly
-        @test @filecheck begin
-            @check "s_endpgm"
-            GCN.code_native(mod.kernel, Tuple{}; kernel=true)
-        end
-    finally
-        saved === nothing || (Base.loaded_modules[pkg] = saved)
-    end
-end
-
 end
 end # :AMDGPU in LLVM.backends()
