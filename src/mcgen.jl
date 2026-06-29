@@ -3,15 +3,12 @@
 # final preparations for the module to be compiled to machine code
 # these passes should not be run when e.g. compiling to write to disk.
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    global current_job
-    current_job = job
-
     @dispose pb=NewPMPassBuilder() begin
-        register!(pb, ResolveCPUReferencesPass())
+        register!(pb, ResolveCPUReferencesPass(job))
 
         add!(pb, RecomputeGlobalsAAPass())
         add!(pb, GlobalOptPass())
-        add!(pb, ResolveCPUReferencesPass())
+        add!(pb, ResolveCPUReferencesPass(job))
         add!(pb, GlobalDCEPass())
         add!(pb, StripDeadPrototypesPass())
 
@@ -29,8 +26,10 @@ end
 # but at the same time the GPU can't resolve them at run-time.
 #
 # this pass performs that resolution at link time.
-function resolve_cpu_references!(mod::LLVM.Module)
-    job = current_job::CompilerJob
+struct ResolveCPUReferences
+    job::CompilerJob
+end
+function (self::ResolveCPUReferences)(mod::LLVM.Module)
     changed = false
 
     for f in functions(mod)
@@ -65,8 +64,8 @@ function resolve_cpu_references!(mod::LLVM.Module)
 
     return changed
 end
-ResolveCPUReferencesPass() =
-    NewPMModulePass("ResolveCPUReferences", resolve_cpu_references!)
+ResolveCPUReferencesPass(job) =
+    NewPMModulePass("ResolveCPUReferences", ResolveCPUReferences(job))
 
 
 function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
