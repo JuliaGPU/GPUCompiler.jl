@@ -12,8 +12,10 @@ export GCNCompilerTarget
 Base.@kwdef struct GCNCompilerTarget <: AbstractCompilerTarget
     dev_isa::String
     features::String=""
+
+    backend::Symbol = isavailable(AMDGPU_LLVM_Backend_jll) ? :external : :inprocess
 end
-GCNCompilerTarget(dev_isa; features="") = GCNCompilerTarget(dev_isa, features)
+GCNCompilerTarget(dev_isa; kwargs...) = GCNCompilerTarget(; dev_isa, kwargs...)
 
 llvm_triple(::GCNCompilerTarget) = "amdgcn-amd-amdhsa"
 
@@ -40,7 +42,7 @@ end
 
 # TODO: encode debug build or not in the compiler job
 #       https://github.com/JuliaGPU/CUDAnative.jl/issues/368
-runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.config.target.dev_isa)$(job.config.target.features)"
+runtime_slug(job::CompilerJob{GCNCompilerTarget}) = "gcn-$(job.config.target.dev_isa)$(job.config.target.features)-$(job.config.target.backend)"
 
 const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
 isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
@@ -160,22 +162,31 @@ end
 
 @unlocked function mcgen(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                          mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
-    if !isavailable(AMDGPU_LLVM_Backend_jll) || !AMDGPU_LLVM_Backend_jll.is_available()
-        # fall back to the in-process LLVM back-end, which is deprecated and will be
-        # removed in the next breaking release in favor of AMDGPU_LLVM_Backend_jll.
+    target = job.config.target
+
+    if target.backend === :inprocess
+        # the in-process LLVM back-end is deprecated and will be removed in the next
+        # breaking release in favor of AMDGPU_LLVM_Backend_jll (backend=:external).
         safe_depwarn(
             "Generating GCN machine code with the in-process LLVM is deprecated; " *
-            "load AMDGPU_LLVM_Backend_jll to use the external back-end instead.",
+            "load AMDGPU_LLVM_Backend_jll and use `backend=:external` instead.",
             :mcgen)
         if :AMDGPU ∉ LLVM.backends()
-            error("AMDGPU LLVM back-end not loaded and the in-process LLVM lacks the " *
-                  "AMDGPU target; cannot compile to GCN.")
+            error("The in-process LLVM lacks the AMDGPU target; cannot compile to GCN. " *
+                  "Load AMDGPU_LLVM_Backend_jll and use `backend=:external` instead.")
         end
         return invoke(mcgen, Tuple{CompilerJob, LLVM.Module, typeof(format)},
                       job, mod, format)
+    elseif target.backend !== :external
+        error("Unsupported GCN back-end $(repr(target.backend)); " *
+              "expected :external or :inprocess.")
     end
 
-    target = job.config.target
+    if !isavailable(AMDGPU_LLVM_Backend_jll) || !AMDGPU_LLVM_Backend_jll.is_available()
+        error("The :external GCN back-end requires AMDGPU_LLVM_Backend_jll, which " *
+              "should be installed and loaded first.")
+    end
+
     filetype = if format == LLVM.API.LLVMAssemblyFile
         "asm"
     elseif format == LLVM.API.LLVMObjectFile
