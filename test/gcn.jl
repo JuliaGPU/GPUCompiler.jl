@@ -476,5 +476,46 @@ end
     GCN.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
 end
 
+@testset "stack allocation intrinsic" begin
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+
+        function scratch(x)
+            p = GPUCompiler.alloca(Float32, Val(8))
+            @inbounds unsafe_store!(p, x, 1)
+            @inbounds unsafe_store!(p, x, 8)
+            return @inbounds unsafe_load(p, 1) + unsafe_load(p, 8)
+        end
+
+        # zero-element scratch yields a (null) pointer without emitting an alloca
+        empty_scratch() = GPUCompiler.alloca(Float32, Val(0)) === reinterpret(Ptr{Float32}, C_NULL)
+    end
+
+    # AMDGPU uses alloca address space 5, so the materialized slot lives in AS 5 and
+    # `lower_alloca!` emits an `addrspacecast` back to generic (AS 0).
+    @test @filecheck begin
+        @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
+        @check "alloca [32 x i8], align 4, addrspace(5)"
+        @check "addrspacecast"
+        @check_not "julia.gpu.alloca"
+        GCN.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)
+    end
+
+    # once optimized the slot is promoted away entirely (result is x + x).
+    @test @filecheck begin
+        @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
+        @check_not "julia.gpu.alloca"
+        GCN.code_llvm(mod.scratch, Tuple{Float32})
+    end
+
+    # a zero-byte allocation lowers to a null pointer rather than a degenerate alloca.
+    @test @filecheck begin
+        @check_label "define {{.*}}@{{(julia|j)_empty_scratch_[0-9]+}}"
+        @check_not "alloca"
+        @check_not "julia.gpu.alloca"
+        GCN.code_llvm(mod.empty_scratch, Tuple{})
+    end
+end
+
 end
 end # :AMDGPU in LLVM.backends()

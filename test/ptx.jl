@@ -137,6 +137,47 @@ end
     @test occursin("call void @julia_", ir)
 end
 
+@testset "stack allocation intrinsic" begin
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+
+        function scratch(x)
+            p = GPUCompiler.alloca(Float32, Val(8))
+            @inbounds unsafe_store!(p, x, 1)
+            @inbounds unsafe_store!(p, x, 8)
+            return @inbounds unsafe_load(p, 1) + unsafe_load(p, 8)
+        end
+
+        # zero-element scratch yields a (null) pointer without emitting an alloca
+        empty_scratch() = GPUCompiler.alloca(Float32, Val(0)) === reinterpret(Ptr{Float32}, C_NULL)
+    end
+
+    # the intrinsic is materialized as a single entry-block `alloca [32 x i8]`,
+    # and no `julia.gpu.alloca` call/declaration survives lowering.
+    @test @filecheck begin
+        @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
+        @check "alloca [32 x i8], align 4"
+        @check_not "julia.gpu.alloca"
+        PTX.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)
+    end
+
+    # once optimized the slot is promoted away entirely (result is x + x).
+    @test @filecheck begin
+        @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
+        @check_not "alloca"
+        @check_not "julia.gpu.alloca"
+        PTX.code_llvm(mod.scratch, Tuple{Float32})
+    end
+
+    # a zero-byte allocation lowers to a null pointer rather than a degenerate alloca.
+    @test @filecheck begin
+        @check_label "define {{.*}}@{{(julia|j)_empty_scratch_[0-9]+}}"
+        @check_not "alloca"
+        @check_not "julia.gpu.alloca"
+        PTX.code_llvm(mod.empty_scratch, Tuple{})
+    end
+end
+
 end
 
 ############################################################################################
