@@ -483,6 +483,8 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
 
         add_argument_metadata!(job, mod, entry)
 
+        add_globals_metadata!(job, mod)
+
         add_module_metadata!(job, mod)
     end
 
@@ -1285,6 +1287,70 @@ function argument_type_name(typ)
     end
 end
 
+# global metadata generation
+#
+# module metadata is used to identify global buffers that are used as kernel arguments.
+function add_globals_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    # Iterate through arguments and create metadata for them
+    globs = globals(mod)
+    dl = datalayout(mod)
+
+    i = 1
+    for gv in globs
+        gv_typ = global_value_type(gv)
+        (isconstant(gv) && gv_typ isa LLVM.PointerType && addrspace(gv_typ) == 3) || continue
+
+        global_infos = Metadata[]
+
+        push!(global_infos, MDString("air.global_binding"))
+        push!(global_infos, Metadata(gv))
+
+        md = Metadata[]
+
+        # argument index
+        push!(md, Metadata(ConstantInt(Int32(-1))))
+
+        push!(md, MDString("air.buffer"))
+
+        push!(md, MDString("air.location_index"))
+        push!(md, Metadata(ConstantInt(Int32(i-1))))
+
+        # XXX: unknown
+        push!(md, Metadata(ConstantInt(Int32(1))))
+
+        push!(md, MDString("air.read_write")) # TODO: Check for const array
+
+        push!(md, MDString("air.address_space"))
+        push!(md, Metadata(ConstantInt(Int32(addrspace(global_value_type(gv))))))
+
+        arg_type_name, arg_type_size = if !is_opaque(gv_typ)
+            string(eltype(gv_typ)), Int(sizeof(dl, eltype(gv_typ)))
+        else
+            string(gv_typ), Int(sizeof(dl, gv_typ))
+        end
+
+        push!(md, MDString("air.arg_type_size"))
+        push!(md, Metadata(ConstantInt(Int32(arg_type_size))))
+
+        push!(md, MDString("air.arg_type_align_size"))
+        push!(md, Metadata(ConstantInt(Int32(alignment(gv)))))
+
+        push!(md, MDString("air.arg_type_name"))
+        push!(md, MDString(arg_type_name))
+
+        push!(md, MDString("air.arg_name"))
+        push!(md, MDString(String(LLVM.name(gv))))
+
+        push!(global_infos, MDNode(md))
+
+        push!(metadata(mod)["air.global_bindings"], MDNode(global_infos))
+
+        i += 1
+    end
+
+    return
+end
+
 # argument metadata generation
 #
 # module metadata is used to identify buffers that are passed as kernel arguments.
@@ -1300,7 +1366,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     args = classify_arguments(job, entry_ft; post_optimization=job.config.optimize)
     i = 1
     for arg in args
-        arg.idx ===  nothing && continue
+        arg.idx === nothing && continue
         if job.config.optimize
             @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
         else
