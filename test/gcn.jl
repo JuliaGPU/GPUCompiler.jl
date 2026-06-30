@@ -30,6 +30,9 @@ sink_gcn(i) = sink(i, Val(5))
     # the explicit :external backend generates machine code through the external llc
     @test (GCN.code_native(devnull, mod.kernel, Tuple{}; backend=:external); true)
 
+    # the :inprocess backend generates machine code through the in-process LLVM back-end
+    @test (GCN.code_native(devnull, mod.kernel, Tuple{}; backend=:inprocess); true)
+
     # an unknown back-end is rejected at machine-code generation
     @test_throws "Unsupported GCN back-end" GCN.code_native(devnull, mod.kernel, Tuple{}; backend=:bogus)
 end

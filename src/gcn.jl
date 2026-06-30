@@ -4,7 +4,6 @@ const AMDGPU_LLVM_Backend_jll =
     LazyModule("AMDGPU_LLVM_Backend_jll",
                UUID("cc5c0156-bd05-5a77-8a68-bb0aafb29019"))
 
-
 ## target
 
 export GCNCompilerTarget
@@ -165,12 +164,6 @@ end
     target = job.config.target
 
     if target.backend === :inprocess
-        # the in-process LLVM back-end is deprecated and will be removed in the next
-        # breaking release in favor of AMDGPU_LLVM_Backend_jll (backend=:external).
-        safe_depwarn(
-            "Generating GCN machine code with the in-process LLVM is deprecated; " *
-            "load AMDGPU_LLVM_Backend_jll and use `backend=:external` instead.",
-            :mcgen)
         if :AMDGPU ∉ LLVM.backends()
             error("The in-process LLVM lacks the AMDGPU target; cannot compile to GCN. " *
                   "Load AMDGPU_LLVM_Backend_jll and use `backend=:external` instead.")
