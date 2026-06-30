@@ -1242,7 +1242,8 @@ function alloca_intr(mod::LLVM.Module, bytes::Integer, align::Integer)
     else
         # returns an opaque pointer; intentionally *not* readnone/speculatable, as each call
         # must yield a distinct slot and must not be hoisted or CSE'd.
-        LLVM.Function(mod, name, LLVM.FunctionType(LLVM.PointerType()))
+        T_ptr = LLVM.supports_typed_pointers(LLVM.context(mod)) ? LLVM.PointerType(LLVM.Int8Type()) : LLVM.PointerType()
+        LLVM.Function(mod, name, LLVM.FunctionType(T_ptr))
     end
     return intr
 end
@@ -1264,7 +1265,7 @@ function alloca_value(@nospecialize(T), N::Int)
     end
 
     @dispose ctx=Context() begin
-        T_ptr = LLVM.PointerType()
+        T_ptr = LLVM.supports_typed_pointers(ctx) ? LLVM.PointerType(LLVM.Int8Type()) : LLVM.PointerType()
 
         # create function
         llvm_f, _ = create_function(T_ptr)
@@ -1321,10 +1322,14 @@ function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
                 # `alloca!` placed the slot in the datalayout's alloca address space; cast back
                 # to generic (AS 0) to match the `Ptr` `alloca` returns.
-                ptr = if LLVM.addrspace(value_type(slot)) == 0
+                ptr = if value_type(slot) == value_type(call)
                     slot
                 else
-                    addrspacecast!(builder, slot, LLVM.PointerType())
+                    if LLVM.addrspace(value_type(slot)) == LLVM.addrspace(value_type(call))
+                        bitcast!(builder, slot, value_type(call))
+                    else
+                        addrspacecast!(builder, slot, value_type(call))
+                    end
                 end
                 replace_uses!(call, ptr)
             end

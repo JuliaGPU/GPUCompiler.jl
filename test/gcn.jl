@@ -498,7 +498,7 @@ end
         @check "alloca [32 x i8], align 4, addrspace(5)"
         @check "addrspacecast"
         @check_not "julia.gpu.alloca"
-        GCN.code_llvm(mod.scratch, Tuple{Float32}; optimize=false)
+        GCN.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)
     end
 
     # once optimized the slot is promoted away entirely (result is x + x).

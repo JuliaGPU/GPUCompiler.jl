@@ -761,7 +761,7 @@ end
         @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
         @check "alloca [32 x i8], align 4"
         @check_not "julia.gpu.alloca"
-        Native.code_llvm(mod.scratch, Tuple{Float32}; optimize=false)
+        Native.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)
     end
 
     # once optimized the slot is promoted away entirely (result is x + x).
