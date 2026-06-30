@@ -3,6 +3,40 @@ if :AMDGPU in LLVM.backends()
 # XXX: generic `sink` generates an instruction selection error
 sink_gcn(i) = sink(i, Val(5))
 
+@testset "backend selector" begin
+    # in the test environment AMDGPU_LLVM_Backend_jll is loaded, so the default is :external
+    @test GCNCompilerTarget(dev_isa="gfx900").backend === :external
+
+    # both constructor forms accept an explicit backend, alongside the other options
+    @test GCNCompilerTarget(dev_isa="gfx900"; backend=:inprocess).backend === :inprocess
+    @test GCNCompilerTarget("gfx900"; backend=:inprocess).backend === :inprocess
+    let target = GCNCompilerTarget("gfx900"; features="+wavefrontsize64", backend=:external)
+        @test target.dev_isa == "gfx900"
+        @test target.features == "+wavefrontsize64"
+        @test target.backend === :external
+    end
+
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+
+    # the backend participates in the runtime slug, so different back-ends don't share a cache
+    job_ext, _ = GCN.create_job(mod.kernel, Tuple{}; backend=:external)
+    job_inp, _ = GCN.create_job(mod.kernel, Tuple{}; backend=:inprocess)
+    @test endswith(GPUCompiler.runtime_slug(job_ext), "-external")
+    @test endswith(GPUCompiler.runtime_slug(job_inp), "-inprocess")
+    @test GPUCompiler.runtime_slug(job_ext) != GPUCompiler.runtime_slug(job_inp)
+
+    # the explicit :external backend generates machine code through the external llc
+    @test (GCN.code_native(devnull, mod.kernel, Tuple{}; backend=:external); true)
+
+    # the :inprocess backend generates machine code through the in-process LLVM back-end
+    @test (GCN.code_native(devnull, mod.kernel, Tuple{}; backend=:inprocess); true)
+
+    # an unknown back-end is rejected at machine-code generation
+    @test_throws "Unsupported GCN back-end" GCN.code_native(devnull, mod.kernel, Tuple{}; backend=:bogus)
+end
+
 @testset "IR" begin
 
 @testset "kernel calling convention" begin
