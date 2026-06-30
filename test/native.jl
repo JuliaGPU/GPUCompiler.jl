@@ -229,6 +229,14 @@ end
             @inline inlined_callee(x) = x + one(x)
             @noinline noinline_callee(x) = x * 2
             entry(x) = noinline_callee(inlined_callee(x))
+
+            # a genuinely multi-line function, so its definition (signature) line is
+            # distinct from its body lines; compiled as its own entry below.
+            function multiline(x)
+                y = x + 1
+                z = y * 2
+                return z
+            end
         end
 
         # whether any line in `lo:hi` of `file` has a nonzero execution count in an
@@ -248,24 +256,49 @@ end
             return false
         end
 
+        # the execution count recorded for an exact line of `file`, or `nothing` if that
+        # line was not instrumented
+        function lcov_line_count(tracefile, file, line)
+            in_block = false
+            for l in eachline(tracefile)
+                if startswith(l, "SF:")
+                    in_block = (l == "SF:" * file)
+                elseif l == "end_of_record"
+                    in_block = false
+                elseif in_block && startswith(l, "DA:")
+                    ln, cnt = parse.(Int, split(l[4:end], ","))
+                    ln == line && return cnt
+                end
+            end
+            return nothing
+        end
+
         if Base.JLOptions().code_coverage == 0
             @test_skip "requires --code-coverage"
         else
-            job, _ = Native.create_job(mod.entry, (Int,))
-            JuliaContext() do ctx
-                GPUCompiler.compile(:asm, job)
-            end
-
-            # flush coverage data in-process; the device functions must show covered
-            # lines even though they were never executed by the host.
-            mktempdir() do dir
-                tracefile = joinpath(dir, "coverage.info")
-                ccall(:jl_write_coverage_data, Cvoid, (Cstring,), tracefile)
-                for f in (mod.inlined_callee, mod.noinline_callee, mod.entry)
-                    m = only(methods(f))
-                    @test lcov_any_covered(tracefile, string(m.file), m.line, m.line + 1)
+            for entry in (mod.entry, mod.multiline)
+                job, _ = Native.create_job(entry, (Int,))
+                JuliaContext() do ctx
+                    GPUCompiler.compile(:asm, job)
                 end
             end
+
+            # flush coverage in-process; device lines show covered despite never running.
+            # bare mktempdir (cleaned at exit, after a GC) dodges the EBUSY `rm` race the
+            # `do` form hits on Windows. jl_write_coverage_data needs a `.info` path.
+            dir = mktempdir()
+            tracefile = joinpath(dir, "coverage.info")
+            ccall(:jl_write_coverage_data, Cvoid, (Cstring,), tracefile)
+            for f in (mod.inlined_callee, mod.noinline_callee, mod.entry)
+                m = only(methods(f))
+                @test lcov_any_covered(tracefile, string(m.file), m.line, m.line + 1)
+            end
+
+            # the definition line must be covered too, not just the body (Julia covers
+            # it separately at the prologue)
+            m = only(methods(mod.multiline))
+            @test lcov_line_count(tracefile, string(m.file), m.line) !== nothing
+            @test something(lcov_line_count(tracefile, string(m.file), m.line), 0) >= 1
         end
     end
 end
