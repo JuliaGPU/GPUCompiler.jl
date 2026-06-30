@@ -715,9 +715,20 @@ end
 # Julia runtime, so instead we mark those lines as visited when compiling them: Coverage of
 # device code thus means "this code was compiled", with counts reflecting the number of
 # compilations rather than executions.
-function record_coverage(src::CodeInfo)
+function coverage_visit_line(@nospecialize(file), line::Integer)
+    file isa Symbol || return
+    filename = String(file)
+    (isempty(filename) || line <= 0) && return
+    ccall(:jl_coverage_visit_line, Cvoid, (Cstring, Csize_t, Cint),
+          filename, ncodeunits(filename), line)
+    return
+end
+
+function record_coverage(mi::MethodInstance, src::CodeInfo)
+    tracked = false
     for (pc, stmt) in enumerate(src.code)
         (stmt isa Expr && stmt.head === :code_coverage_effect) || continue
+        tracked = true
         @static if VERSION >= v"1.12-"
             scopes = Base.IRShow.buildLineInfoNode(src.debuginfo, nothing, pc)
             isempty(scopes) && continue
@@ -729,11 +740,20 @@ function record_coverage(src::CodeInfo)
             loc = src.linetable[lineidx]::Core.LineInfoNode
             file, line = loc.file, loc.line
         end
-        file isa Symbol || continue
-        filename = String(file)
-        (isempty(filename) || line <= 0) && continue
-        ccall(:jl_coverage_visit_line, Cvoid, (Cstring, Csize_t, Cint),
-              filename, ncodeunits(filename), line)
+        coverage_visit_line(file, line)
+    end
+
+    # the `:code_coverage_effect` expressions only cover the body statements; the function
+    # definition (signature) line is handled separately by Julia's codegen, which visits it
+    # at the function prologue (`toplineno`, i.e., the method's own file and line). Mirror
+    # that here, or the signature is reported as missed while the body is hit. Only do so for
+    # methods that are actually tracked (i.e., whose body carries coverage effects), to avoid
+    # reporting signatures of untracked code.
+    if tracked
+        def = mi.def
+        if def isa Method
+            coverage_visit_line(def.file, def.line)
+        end
     end
     return
 end
@@ -760,7 +780,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # `ci_cache_populate` does not return sources, this happens after codegen instead)
     if Base.JLOptions().code_coverage != 0
         for (ci, src) in populated
-            record_coverage(src)
+            record_coverage(ci.def::MethodInstance, src)
         end
     end
 
@@ -1017,7 +1037,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 src = Base._uncompressed_ir(ci, src)
             end
             if src isa CodeInfo
-                record_coverage(src)
+                record_coverage(ci.def::MethodInstance, src)
             end
         end
     end
