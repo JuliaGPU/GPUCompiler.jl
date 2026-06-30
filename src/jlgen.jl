@@ -743,12 +743,9 @@ function record_coverage(mi::MethodInstance, src::CodeInfo)
         coverage_visit_line(file, line)
     end
 
-    # the `:code_coverage_effect` expressions only cover the body statements; the function
-    # definition (signature) line is handled separately by Julia's codegen, which visits it
-    # at the function prologue (`toplineno`, i.e., the method's own file and line). Mirror
-    # that here, or the signature is reported as missed while the body is hit. Only do so for
-    # methods that are actually tracked (i.e., whose body carries coverage effects), to avoid
-    # reporting signatures of untracked code.
+    # the definition (signature) line isn't a `:code_coverage_effect`; Julia's codegen
+    # visits it separately at the prologue. Mirror that, gated on the body being tracked,
+    # or the signature reads as missed while the body is hit.
     if tracked
         def = mi.def
         if def isa Method

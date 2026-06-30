@@ -283,23 +283,22 @@ end
                 end
             end
 
-            # flush coverage data in-process; the device functions must show covered
-            # lines even though they were never executed by the host.
-            mktempdir() do dir
-                tracefile = joinpath(dir, "coverage.info")
-                ccall(:jl_write_coverage_data, Cvoid, (Cstring,), tracefile)
-                for f in (mod.inlined_callee, mod.noinline_callee, mod.entry)
-                    m = only(methods(f))
-                    @test lcov_any_covered(tracefile, string(m.file), m.line, m.line + 1)
-                end
-
-                # the function definition (signature) line itself must be covered, not
-                # just the body: Julia's codegen visits it separately at the prologue, so
-                # device coverage has to mirror that.
-                m = only(methods(mod.multiline))
-                @test lcov_line_count(tracefile, string(m.file), m.line) !== nothing
-                @test something(lcov_line_count(tracefile, string(m.file), m.line), 0) >= 1
+            # flush coverage in-process; device lines show covered despite never running.
+            # bare mktempdir (cleaned at exit, after a GC) dodges the EBUSY `rm` race the
+            # `do` form hits on Windows. jl_write_coverage_data needs a `.info` path.
+            dir = mktempdir()
+            tracefile = joinpath(dir, "coverage.info")
+            ccall(:jl_write_coverage_data, Cvoid, (Cstring,), tracefile)
+            for f in (mod.inlined_callee, mod.noinline_callee, mod.entry)
+                m = only(methods(f))
+                @test lcov_any_covered(tracefile, string(m.file), m.line, m.line + 1)
             end
+
+            # the definition line must be covered too, not just the body (Julia covers
+            # it separately at the prologue)
+            m = only(methods(mod.multiline))
+            @test lcov_line_count(tracefile, string(m.file), m.line) !== nothing
+            @test something(lcov_line_count(tracefile, string(m.file), m.line), 0) >= 1
         end
     end
 end
