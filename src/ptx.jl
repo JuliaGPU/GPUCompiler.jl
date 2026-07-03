@@ -144,9 +144,8 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     # for `-fcuda-flush-denormals-to-zero` and is the only `__nvvm_reflect` key
     # LLVM's NVVMReflectPass honors besides `__CUDA_ARCH`. only emit it on the
     # toplevel module that runs through `optimize!`, as sub-modules (the cached
-    # runtime, deferred jobs) don't need it, and the cached runtime in
-    # particular would otherwise conflict on link if it was built with a
-    # different `fastmath` setting (which isn't part of `runtime_slug`).
+    # runtime, deferred jobs) don't need it and should not get module-level
+    # flags that can collide when linked into the toplevel module.
     if job.config.toplevel
         flags(mod)["nvvm-reflect-ftz", LLVM.API.LLVMModuleFlagBehaviorOverride] =
             Metadata(ConstantInt(Int32(job.config.target.fastmath ? 1 : 0)))

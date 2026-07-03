@@ -554,8 +554,8 @@ end
     @test GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"10.0", feature_set=:family)) == "sm_100f"
     @test_throws ErrorException GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"9.0", feature_set=:bogus))
 
-    # hash must discriminate, otherwise two configs differing only on feature_set
-    # would share the same on-disk runtime slug and collide in the compiler cache.
+    # hash must discriminate, otherwise two targets differing only on feature_set
+    # could compare equal inside cache-owner keys.
     @test hash(PTXCompilerTarget(cap=v"9.0", feature_set=:baseline)) !=
           hash(PTXCompilerTarget(cap=v"9.0", feature_set=:arch))
 
