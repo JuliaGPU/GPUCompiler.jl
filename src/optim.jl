@@ -503,13 +503,7 @@ function (self::LinkLibraries)(mod::LLVM.Module)
     # references after the normal library-linking phase has run. Give back-ends a
     # second chance to resolve those references before they lower their own runtime
     # intrinsics. This is a no-op for back-ends without a link_libraries! override.
-    if has_legacy_link_libraries(self.job)
-        undefined_fns = [LLVM.name(f) for f in functions(mod)
-                         if isdeclaration(f) && !LLVM.isintrinsic(f)]
-        link_libraries!(self.job, mod, undefined_fns)
-    else
-        link_libraries!(self.job, mod)
-    end
+    link_libraries!(self.job, mod)
     return true
 end
 GPULinkLibrariesPass(job) = NewPMModulePass("GPULinkLibraries", LinkLibraries(job))
