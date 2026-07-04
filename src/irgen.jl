@@ -1225,8 +1225,9 @@ end
 
 # device code can request a fixed-size, per-workitem stack scratch buffer via
 # `alloca(T, Val(N))`, returning a `Ptr{T}` to uninitialized storage for `N` elements of
-# `T`. this emits the `julia.gpu.alloca.<bytes>.<align>` intrinsic, which `lower_alloca!`
-# (run from `irgen`, before the optimizer) materializes as a real entry-block `alloca`.
+# `T`. this emits a call to the `julia.gpu.alloca` intrinsic with the size and alignment
+# as constant operands, which `lower_alloca!` (run from `irgen`, before the optimizer)
+# materializes as a real entry-block `alloca`.
 #
 # this exists because emitting an `alloca` directly through `llvmcall` is unsound/ineffective:
 # the `Ptr` round-trip through `ptrtoint`/`inttoptr` blocks SROA/mem2reg promotion, the target
@@ -1235,15 +1236,16 @@ end
 # ourselves lets us place the slot in the kernel entry block, in the datalayout's alloca
 # address space, early enough for the optimizer to promote it.
 
-function alloca_intr(mod::LLVM.Module, bytes::Integer, align::Integer)
-    name = "julia.gpu.alloca.$(bytes).$(align)"
+function alloca_intr(mod::LLVM.Module, T_ptr::LLVMType)
+    name = "julia.gpu.alloca"
     intr = if haskey(functions(mod), name)
         functions(mod)[name]
     else
-        # returns an opaque pointer; intentionally *not* readnone/speculatable, as each call
-        # must yield a distinct slot and must not be hoisted or CSE'd.
-        T_ptr = LLVM.supports_typed_pointers(LLVM.context(mod)) ? LLVM.PointerType(LLVM.Int8Type()) : LLVM.PointerType()
-        LLVM.Function(mod, name, LLVM.FunctionType(T_ptr))
+        # takes the size in bytes and the alignment as constant operands, and returns an
+        # opaque pointer; intentionally *not* readnone/speculatable, as each call must
+        # yield a distinct slot and must not be hoisted or CSE'd.
+        T_i64 = LLVM.Int64Type()
+        LLVM.Function(mod, name, LLVM.FunctionType(T_ptr, [T_i64, T_i64]))
     end
     return intr
 end
@@ -1272,7 +1274,7 @@ function alloca_value(@nospecialize(T), N::Int)
         mod = LLVM.parent(llvm_f)
 
         # get intrinsic
-        intr = alloca_intr(mod, bytes, align)
+        intr = alloca_intr(mod, T_ptr)
         intr_ft = function_type(intr)
 
         # generate IR
@@ -1280,7 +1282,9 @@ function alloca_value(@nospecialize(T), N::Int)
             entry = BasicBlock(llvm_f, "entry")
             position!(builder, entry)
 
-            ptr = call!(builder, intr_ft, intr, Value[], "alloca")
+            args = Value[ConstantInt(LLVM.Int64Type(), bytes),
+                         ConstantInt(LLVM.Int64Type(), align)]
+            ptr = call!(builder, intr_ft, intr, args, "alloca")
 
             ret!(builder, ptr)
         end
@@ -1294,54 +1298,38 @@ end
 # (an `alloca` of GC-tracked references would be unrooted). intended as a building block for
 # higher-level scratch abstractions (e.g. KernelAbstractions' `@private`).
 @inline @generated alloca(::Type{T}, ::Val{N}) where {T,N} = alloca_value(T, N)
-export alloca
 
-# replace every `julia.gpu.alloca.*` call with an entry-block alloca in the containing function
+# replace every `julia.gpu.alloca` call with an entry-block alloca in the containing function
 function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    changed = false
-    prefix = "julia.gpu.alloca."
+    haskey(functions(mod), "julia.gpu.alloca") || return false
+    intr = functions(mod)["julia.gpu.alloca"]
 
-    for intr in functions(mod)
-        fn = LLVM.name(intr)
-        startswith(fn, prefix) || continue
-
-        bytes, align = parse.(Int, split(fn[length(prefix)+1:end], '.'))
-        slot_typ = LLVM.ArrayType(LLVM.Int8Type(), bytes)
-
+    @dispose builder=IRBuilder() begin
         for use in collect(uses(intr))
             call = user(use)
             @assert call isa LLVM.CallInst
+            bytes, align = convert.(Int, operands(call)[1:2])
             f = LLVM.parent(LLVM.parent(call))
 
-            @dispose builder=IRBuilder() begin
-                # materialize the slot at the top of the entry block so that it is a static
-                # alloca (promotable, and allocated once rather than per loop iteration).
-                position!(builder, first(instructions(first(blocks(f)))))
-                slot = alloca!(builder, slot_typ, "alloca")
-                alignment!(slot, align)
+            # materialize the slot at the top of the entry block so that it is a static
+            # alloca (promotable, and allocated once rather than per loop iteration).
+            position!(builder, first(instructions(first(blocks(f)))))
+            slot = alloca!(builder, LLVM.ArrayType(LLVM.Int8Type(), bytes), "alloca")
+            alignment!(slot, align)
 
-                # `alloca!` placed the slot in the datalayout's alloca address space; cast back
-                # to generic (AS 0) to match the `Ptr` `alloca` returns.
-                ptr = if value_type(slot) == value_type(call)
-                    slot
-                else
-                    if LLVM.addrspace(value_type(slot)) == LLVM.addrspace(value_type(call))
-                        bitcast!(builder, slot, value_type(call))
-                    else
-                        addrspacecast!(builder, slot, value_type(call))
-                    end
-                end
-                replace_uses!(call, ptr)
-            end
+            # `alloca!` placed the slot in the datalayout's alloca address space; cast back
+            # to generic (AS 0) to match the `Ptr` `alloca` returns.
+            ptr = pointercast!(builder, slot, value_type(call))
+
+            replace_uses!(call, ptr)
             erase!(call)
-            changed = true
         end
-
-        @assert isempty(uses(intr))
-        erase!(intr)
     end
 
-    return changed
+    @assert isempty(uses(intr))
+    erase!(intr)
+
+    return true
 end
 
 # convert kernel state argument from pass-by-value to pass-by-reference
