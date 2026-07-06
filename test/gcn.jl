@@ -495,7 +495,7 @@ end
     # `lower_alloca!` emits an `addrspacecast` back to generic (AS 0).
     @test @filecheck begin
         @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
-        @check "alloca [32 x i8], align 4, addrspace(5)"
+        @check "alloca [8 x i32], align 4, addrspace(5)"
         @check "addrspacecast"
         @check_not "julia.gpu.alloca"
         GCN.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)

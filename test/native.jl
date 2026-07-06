@@ -755,11 +755,12 @@ end
         empty_scratch() = GPUCompiler.alloca(Float32, Val(0)) === reinterpret(Ptr{Float32}, C_NULL)
     end
 
-    # the intrinsic is materialized as a single entry-block `alloca [8 x f32 = 32 x i8]`,
-    # and no `julia.gpu.alloca` call/declaration survives lowering.
+    # the intrinsic is materialized as a single entry-block alloca whose element type is
+    # sized to the alignment (32 bytes of Float32 scratch → `[8 x i32], align 4`), and no
+    # `julia.gpu.alloca` call/declaration survives lowering.
     @test @filecheck begin
         @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
-        @check "alloca [32 x i8], align 4"
+        @check "alloca [8 x i32], align 4"
         @check_not "julia.gpu.alloca"
         Native.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)
     end

@@ -1299,6 +1299,20 @@ end
 # higher-level scratch abstractions (e.g. KernelAbstractions' `@private`).
 @inline @generated alloca(::Type{T}, ::Val{N}) where {T,N} = alloca_value(T, N)
 
+# pick the element type for a `bytes`-sized, `align`-aligned stack slot. rather than a flat
+# `[bytes x i8]`, emit aligned integer chunks: SROA takes a hint from the element type and
+# will happily shred an i8 array into unaligned scalars (terrible for vectorization), whereas
+# an element size equal to the alignment makes it split into aligned pieces instead. the
+# element size is capped at 64 bits since not all back-ends support wider integers. mirrors
+# Julia's `emit_static_alloca` (src/codegen.cpp).
+function alloca_slot_type(bytes::Integer, align::Integer)
+    elsize = min(align, 8)
+    padded = cld(bytes, elsize) * elsize
+    eltyp = LLVM.IntType(elsize * 8)
+    # a single element covers the whole slot; don't bother wrapping it in a length-1 array.
+    return padded == elsize ? eltyp : LLVM.ArrayType(eltyp, padded ÷ elsize)
+end
+
 # replace every `julia.gpu.alloca` call with an entry-block alloca in the containing function
 function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     haskey(functions(mod), "julia.gpu.alloca") || return false
@@ -1314,7 +1328,7 @@ function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             # materialize the slot at the top of the entry block so that it is a static
             # alloca (promotable, and allocated once rather than per loop iteration).
             position!(builder, first(instructions(first(blocks(f)))))
-            slot = alloca!(builder, LLVM.ArrayType(LLVM.Int8Type(), bytes), "alloca")
+            slot = alloca!(builder, alloca_slot_type(bytes, align), "alloca")
             alignment!(slot, align)
 
             # `alloca!` placed the slot in the datalayout's alloca address space; cast back
