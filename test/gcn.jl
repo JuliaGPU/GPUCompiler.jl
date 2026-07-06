@@ -458,11 +458,8 @@ end
 @testset "float boxes" begin
     mod = @eval module $(gensym())
         function kernel(a,b)
+            # Int32(a) may fail, boxing the Float32 for the @nospecialize ctor
             c = Int32(a)
-            # the conversion to Int32 may fail, in which case the input Float32 is boxed in order to
-            # pass it to the @nospecialize exception constructor. we should really avoid that (eg.
-            # by avoiding @nospecialize, or optimize the unused arguments away), but for now the box
-            # should just work.
             unsafe_store!(b, c)
             return
         end
@@ -470,8 +467,10 @@ end
 
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
-        @check "jl_box_float32"
-        GCN.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}})
+        # box: a jl_box_float32 call <1.14; 1.14+ inlines it into the devirt'd ctor
+        @check cond=(VERSION < v"1.14-")  "jl_box_float32"
+        @check cond=(VERSION >= v"1.14-") "gpu_gc_pool_alloc"
+        GCN.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}}; dump_module=true)
     end
     GCN.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
 end
