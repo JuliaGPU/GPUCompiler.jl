@@ -14,6 +14,9 @@ precompile_test_harness("Inference caching") do load_path
             return
         end
 
+        # a kernel that makes no calls, so its CodeInstance has no inference edges
+        leaf_kernel(A) = nothing
+
         function kernel_w_global(A, x, sym)
             if sym == :A
                 A[1] = x
@@ -31,6 +34,11 @@ precompile_test_harness("Inference caching") do load_path
 
         let
             job, _ = NativeCompiler.Native.create_job(kernel, (Vector{Int}, Int))
+            precompile(job)
+        end
+
+        let
+            job, _ = NativeCompiler.Native.create_job(leaf_kernel, (Vector{Int},))
             precompile(job)
         end
 
@@ -86,6 +94,15 @@ precompile_test_harness("Inference caching") do load_path
 
         kernel_w_global_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel_w_global), Tuple{Vector{Int}, Int, Symbol})
         @test check_presence(kernel_w_global_mi, token)
+
+        # a CodeInstance without inference edges (a kernel making no calls) is
+        # serialized with the revalidation sentinel but excluded from the edge
+        # verification list on Julia 1.12 (jl_record_edges skips empty-edge CIs),
+        # so it deserializes permanently invalid. Fixed by the serialization
+        # rework in 1.13; 1.11 uses the old scheme and is unaffected.
+        leaf_edges_lost = v"1.12-" <= VERSION < v"1.13-"
+        leaf_kernel_mi = GPUCompiler.methodinstance(typeof(NativeBackend.leaf_kernel), Tuple{Vector{Int}})
+        @test check_presence(leaf_kernel_mi, token) broken=leaf_edges_lost
 
         square_mi = GPUCompiler.methodinstance(typeof(NativeBackend.square), Tuple{Float64})
         @test check_presence(square_mi, token)
