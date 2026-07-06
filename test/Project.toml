@@ -23,6 +23,3 @@ demumble_jll = "1e29f10c-031c-5a83-9565-69cddfc27673"
 Aqua = "0.8"
 LLVM_jll = "15,16,18,20"
 ParallelTestRunner = "2"
-
-[sources]
-GPUCompiler = { path=".." }
