@@ -113,16 +113,19 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     link!(mod, new_mod)
 end
 
-function build_runtime(@nospecialize(job::CompilerJob))
-    mod = LLVM.Module("GPUCompiler run-time library")
+# the compiler job passed into here identifies the job that requires the runtime.
+# derive a config that represents the runtime itself (notably with kernel=false).
+# fields that identify the *kernel* job, like its entry-point name, are reset so
+# that runtime artifacts are keyed (and persisted) identically for all kernels
+# sharing the remaining codegen-relevant settings, instead of once per cosmetic
+# config variation.
+function runtime_config(@nospecialize(job::CompilerJob))
+    CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false,
+                   strip=false, name=nothing)
+end
 
-    # the compiler job passed into here identifies the job that requires the runtime.
-    # derive a job that represents the runtime itself (notably with kernel=false).
-    # fields that identify the *kernel* job, like its entry-point name, are reset so
-    # that runtime artifacts are keyed (and persisted) identically for all kernels
-    # sharing a cache owner, instead of once per cosmetic config variation.
-    config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false,
-                            strip=false, name=nothing)
+function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
+    mod = LLVM.Module("GPUCompiler run-time library")
 
     for method in values(Runtime.methods)
         def = if isa(method.def, Symbol)
@@ -143,16 +146,25 @@ function build_runtime(@nospecialize(job::CompilerJob))
 end
 
 # Session-local cache of assembled runtime libraries, keyed by
-# `(cache_owner(job), opaque_pointers)`. Cross-session persistence is the back-end's
-# concern: rebuild on first use of each session, then reuse within the session.
-const runtime_libs = Dict{Tuple{Any, Bool}, Vector{UInt8}}()
+# `(runtime_config(job), opaque_pointers)`: the derived runtime config covers every
+# codegen-relevant setting (e.g. the debug level, which is baked into the runtime IR
+# as a constant), while cosmetic kernel-job fields are normalized away. Cross-session
+# persistence happens at the per-function level (see `RuntimeFunctionResults`):
+# reassemble on first use of each session, then reuse within the session.
+#
+# NOTE: unlike the per-function bitcode, whose CodeInstances Julia invalidates on
+# method redefinition, the assembled library is world-blind: redefining a runtime
+# function mid-session leaves a stale assembly behind. That only affects interactive
+# development of a back-end's runtime module (restart, or `empty!` this cache).
+const runtime_libs = Dict{Tuple{CompilerConfig, Bool}, Vector{UInt8}}()
 const runtime_libs_lock = ReentrantLock()
 
 @locked function load_runtime(@nospecialize(job::CompilerJob))
-    key = (cache_owner(job), !supports_typed_pointers(context()))
+    config = runtime_config(job)
+    key = (config, !supports_typed_pointers(context()))
 
     bytes = Base.@lock runtime_libs_lock get!(runtime_libs, key) do
-        lib = build_runtime(job)
+        lib = build_runtime(job, config)
         io = IOBuffer()
         write(io, lib)
         take!(io)
