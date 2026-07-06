@@ -172,6 +172,3 @@ const runtime_libs_lock = ReentrantLock()
 
     return parse(LLVM.Module, MemoryBuffer(bytes); lazy=true)
 end
-
-# clear the session-local runtime library cache
-reset_runtime() = Base.@lock runtime_libs_lock empty!(runtime_libs)

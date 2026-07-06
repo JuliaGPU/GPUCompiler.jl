@@ -10,23 +10,19 @@
     end
 end
 
-@testset "kernel state survives a runtime rebuild during optimization" begin
-    # Clearing the cache forces the relink pass inside `optimize!` to rebuild the runtime
-    # (nested compilation); the kernel must still get its state argument afterwards.
+@testset "kernel state survives a runtime rebuild" begin
+    # Clearing the runtime cache forces the library link inside `emit_llvm` to rebuild
+    # the runtime (nested compilation); the kernel must still get its state argument
+    # afterwards.
     mod = @eval module $(gensym())
         function kernel(x)
             x < 1 && throw(DivideError())
             return
         end
     end
-    old_cache = GPUCompiler.compile_cache
-    ir = try
-        GPUCompiler.compile_cache = nothing
-        sprint() do io
-            PTX.code_llvm(io, mod.kernel, Tuple{Int}; kernel=true, dump_module=true)
-        end
-    finally
-        GPUCompiler.compile_cache = old_cache
+    Base.@lock GPUCompiler.runtime_libs_lock empty!(GPUCompiler.runtime_libs)
+    ir = sprint() do io
+        PTX.code_llvm(io, mod.kernel, Tuple{Int}; kernel=true, dump_module=true)
     end
     @test occursin("gpu_report_exception", ir)
     @test occursin("[1 x i64] %state", ir)
