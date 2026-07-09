@@ -139,13 +139,23 @@ end
     name = "runtime_$(slug).bc"
     path = joinpath(compile_cache, name)
 
-    if !ispath(path)
-        @debug "Building the GPU runtime library at $path"
-        mkpath(compile_cache)
-        lib = build_runtime(job)
+    # the cache is shared across processes and may disappear at any point
+    # (e.g. `reset_runtime()` in another process), so treat it as best-effort
+    if ispath(path)
+        try
+            return parse(LLVM.Module, MemoryBufferFile(path); lazy=true)
+        catch err
+            @debug "Failed to load cached GPU runtime library; rebuilding" exception=(err, catch_backtrace())
+        end
+    end
 
+    @debug "Building the GPU runtime library at $path"
+    lib = build_runtime(job)
+
+    try
         # atomic write to disk
-        temp_path, io = mktemp(dirname(path); cleanup=false)
+        mkpath(compile_cache)
+        temp_path, io = mktemp(compile_cache; cleanup=false)
         write(io, lib)
         close(io)
         @static if VERSION >= v"1.12.0-DEV.1023"
@@ -153,9 +163,11 @@ end
         else
             Base.rename(temp_path, path, force=true)
         end
+    catch err
+        @warn "Failed to cache GPU runtime library" exception=(err, catch_backtrace()) maxlog=1
     end
 
-    return parse(LLVM.Module, MemoryBufferFile(path); lazy=true)
+    return lib
 end
 
 # remove the existing cache
