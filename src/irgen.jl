@@ -1301,9 +1301,8 @@ end
 # `T` in address space `AS`. the storage is uninitialized and only valid within the calling
 # kernel. `T` must be `isbits` (an `alloca` of GC-tracked references would be unrooted).
 # intended as a building block for higher-level scratch abstractions (e.g. KernelAbstractions'
-# `@private`). the address space defaults to 0 (generic).
+# `@private`).
 @inline @generated alloca(::Type{T}, ::Val{N}, ::Val{AS}) where {T,N,AS} = alloca_value(T, N, AS)
-@inline alloca(::Type{T}, ::Val{N}) where {T,N} = alloca(T, Val(N), Val(0))
 
 # pick the element type for a `bytes`-sized, `align`-aligned stack slot. rather than a flat
 # `[bytes x i8]`, emit aligned integer chunks: SROA takes a hint from the element type and
