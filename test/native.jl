@@ -745,14 +745,14 @@ end
         import ..GPUCompiler
 
         function scratch(x)
-            p = GPUCompiler.alloca(Float32, Val(8))
+            p = GPUCompiler.alloca(Float32, Val(8), Val(0))
             @inbounds unsafe_store!(p, x, 1)
             @inbounds unsafe_store!(p, x, 8)
             return @inbounds unsafe_load(p, 1) + unsafe_load(p, 8)
         end
 
         # zero-element scratch yields a (null) pointer without emitting an alloca
-        empty_scratch() = GPUCompiler.alloca(Float32, Val(0)) === reinterpret(Ptr{Float32}, C_NULL)
+        empty_scratch() = GPUCompiler.alloca(Float32, Val(0), Val(0)) === reinterpret(Core.LLVMPtr{Float32,0}, C_NULL)
     end
 
     # the intrinsic is materialized as a single entry-block alloca whose element type is

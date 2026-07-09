@@ -481,22 +481,22 @@ end
         import ..GPUCompiler
 
         function scratch(x)
-            p = GPUCompiler.alloca(Float32, Val(8))
+            p = GPUCompiler.alloca(Float32, Val(8), Val(5))
             @inbounds unsafe_store!(p, x, 1)
             @inbounds unsafe_store!(p, x, 8)
             return @inbounds unsafe_load(p, 1) + unsafe_load(p, 8)
         end
 
         # zero-element scratch yields a (null) pointer without emitting an alloca
-        empty_scratch() = GPUCompiler.alloca(Float32, Val(0)) === reinterpret(Ptr{Float32}, C_NULL)
+        empty_scratch() = GPUCompiler.alloca(Float32, Val(0), Val(5)) === reinterpret(Core.LLVMPtr{Float32,5}, C_NULL)
     end
 
-    # AMDGPU uses alloca address space 5, so the materialized slot lives in AS 5 and
-    # `lower_alloca!` emits an `addrspacecast` back to generic (AS 0).
+    # AMDGPU uses alloca address space 5, which is exactly what the scratch requests, so the
+    # materialized slot lives in AS 5 and no `addrspacecast` is needed.
     @test @filecheck begin
         @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
         @check "alloca [8 x i32], align 4, addrspace(5)"
-        @check "addrspacecast"
+        @check_not "addrspacecast"
         @check_not "julia.gpu.alloca"
         GCN.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)
     end
