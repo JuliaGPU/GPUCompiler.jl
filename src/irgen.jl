@@ -149,6 +149,10 @@ function irgen(@nospecialize(job::CompilerJob))
         # the job's configured level, so device code can branch on it as a compile-time
         # constant that is part of the cache key (unlike reading the `-g` global directly).
         lower_debug_level!(job, mod)
+
+        # materialize `GPUCompiler.alloca` intrinsics as real entry-block allocas, before the
+        # optimizer runs so the slots can be promoted (see `lower_alloca!`).
+        lower_alloca!(job, mod)
     end
 
     return mod, compiled, gv_to_value
@@ -1210,6 +1214,138 @@ function lower_debug_level!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         replace_uses!(inst, level)
         erase!(inst)
     end
+    @assert isempty(uses(intr))
+    erase!(intr)
+
+    return true
+end
+
+
+## stack allocation
+
+# device code can request a fixed-size, per-workitem stack scratch buffer via
+# `alloca(T, Val(N), Val(AS))`, returning an `LLVMPtr{T,AS}` to uninitialized storage for `N`
+# elements of `T` in address space `AS`. this emits a call to the `julia.gpu.alloca` intrinsic
+# with the size and alignment as constant operands, which `lower_alloca!` (run from `irgen`,
+# before the optimizer) materializes as a real entry-block `alloca`.
+#
+# this exists because emitting an `alloca` directly through `llvmcall` is unsound/ineffective:
+# the `Ptr` round-trip through `ptrtoint`/`inttoptr` blocks SROA/mem2reg promotion, the target
+# stack address space (e.g. AS 5 on NVPTX/AMDGPU) isn't known at the front-end, and the
+# LangRef lifetime of an `alloca` is tied to the (inlined) `llvmcall` wrapper. lowering it
+# ourselves lets us place the slot in the kernel entry block, in the datalayout's alloca
+# address space, early enough for the optimizer to promote it.
+
+function alloca_intr(mod::LLVM.Module, T_ptr::LLVMType)
+    name = "julia.gpu.alloca"
+    intr = if haskey(functions(mod), name)
+        functions(mod)[name]
+    else
+        # takes the size in bytes and the alignment as constant operands, and returns a
+        # pointer in the requested address space; intentionally *not* readnone/speculatable,
+        # as each call must yield a distinct slot and must not be hoisted or CSE'd. a module
+        # only ever targets a single address space, so one declaration suffices.
+        T_i64 = LLVM.Int64Type()
+        LLVM.Function(mod, name, LLVM.FunctionType(T_ptr, [T_i64, T_i64]))
+    end
+    return intr
+end
+
+# run-time equivalent: emits a call to the alloca intrinsic, returning an `LLVMPtr{T,AS}` to
+# scratch storage for `N` elements of `T` in address space `AS` (materialized by
+# `lower_alloca!`).
+function alloca_value(@nospecialize(T), N::Int, AS::Int)
+    isbitstype(T) ||
+        error("GPUCompiler.alloca only supports `isbits` element types, got $T")
+    N >= 0 || throw(ArgumentError("GPUCompiler.alloca count must be non-negative, got $N"))
+
+    bytes = sizeof(T) * N
+    align = Base.datatype_alignment(T)
+
+    # a zero-byte allocation has no storage to point at; hand back a null pointer rather than
+    # emitting a degenerate 0-element alloca.
+    if bytes == 0
+        return :(reinterpret(Core.LLVMPtr{$T,$AS}, C_NULL))
+    end
+
+    @dispose ctx=Context() begin
+        # `LLVMPtr{T,AS}` lowers to an (i8/opaque) pointer in address space `AS`; match that
+        # as the intrinsic's return type so the `llvmcall` boundary type-checks.
+        T_ptr = convert(LLVMType, Core.LLVMPtr{T,AS})
+
+        # create function
+        llvm_f, _ = create_function(T_ptr)
+        mod = LLVM.parent(llvm_f)
+
+        # get intrinsic
+        intr = alloca_intr(mod, T_ptr)
+        intr_ft = function_type(intr)
+
+        # generate IR
+        @dispose builder=IRBuilder() begin
+            entry = BasicBlock(llvm_f, "entry")
+            position!(builder, entry)
+
+            args = Value[ConstantInt(LLVM.Int64Type(), bytes),
+                         ConstantInt(LLVM.Int64Type(), align)]
+            ptr = call!(builder, intr_ft, intr, args, "alloca")
+
+            ret!(builder, ptr)
+        end
+
+        call_function(llvm_f, Core.LLVMPtr{T,AS})
+    end
+end
+
+# device-facing accessor: an `LLVMPtr{T,AS}` to per-workitem stack scratch for `N` elements of
+# `T` in address space `AS`. the storage is uninitialized and only valid within the calling
+# kernel. `T` must be `isbits` (an `alloca` of GC-tracked references would be unrooted).
+# intended as a building block for higher-level scratch abstractions (e.g. KernelAbstractions'
+# `@private`).
+@inline @generated alloca(::Type{T}, ::Val{N}, ::Val{AS}) where {T,N,AS} = alloca_value(T, N, AS)
+
+# pick the element type for a `bytes`-sized, `align`-aligned stack slot. rather than a flat
+# `[bytes x i8]`, emit aligned integer chunks: SROA takes a hint from the element type and
+# will happily shred an i8 array into unaligned scalars (terrible for vectorization), whereas
+# an element size equal to the alignment makes it split into aligned pieces instead. the
+# element size is capped at 64 bits since not all back-ends support wider integers. mirrors
+# Julia's `emit_static_alloca` (src/codegen.cpp).
+function alloca_slot_type(bytes::Integer, align::Integer)
+    elsize = min(align, 8)
+    padded = cld(bytes, elsize) * elsize
+    eltyp = LLVM.IntType(elsize * 8)
+    # a single element covers the whole slot; don't bother wrapping it in a length-1 array.
+    return padded == elsize ? eltyp : LLVM.ArrayType(eltyp, padded ÷ elsize)
+end
+
+# replace every `julia.gpu.alloca` call with an entry-block alloca in the containing function
+function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    haskey(functions(mod), "julia.gpu.alloca") || return false
+    intr = functions(mod)["julia.gpu.alloca"]
+
+    @dispose builder=IRBuilder() begin
+        for use in collect(uses(intr))
+            call = user(use)
+            @assert call isa LLVM.CallInst
+            bytes, align = convert.(Int, operands(call)[1:2])
+            f = LLVM.parent(LLVM.parent(call))
+
+            # materialize the slot at the top of the entry block so that it is a static
+            # alloca (promotable, and allocated once rather than per loop iteration).
+            position!(builder, first(instructions(first(blocks(f)))))
+            slot = alloca!(builder, alloca_slot_type(bytes, align), "alloca")
+            alignment!(slot, align)
+
+            # `alloca!` placed the slot in the datalayout's alloca address space; cast it to
+            # the intrinsic's return type, i.e. the address space requested by the caller
+            # (emitting an addrspacecast when it differs from the alloca address space).
+            ptr = pointercast!(builder, slot, value_type(call))
+
+            replace_uses!(call, ptr)
+            erase!(call)
+        end
+    end
+
     @assert isempty(uses(intr))
     erase!(intr)
 
