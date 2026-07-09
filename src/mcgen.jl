@@ -35,10 +35,17 @@ function (self::ResolveCPUReferences)(mod::LLVM.Module)
     for f in functions(mod)
         fn = LLVM.name(f)
         if isdeclaration(f) && !LLVM.isintrinsic(f) && startswith(fn, "jl_")
-            # eagerly resolve the address of the binding
-            address = ccall(:jl_cglobal, Any, (Any, Any), fn, UInt)
-            dereferenced = unsafe_load(address)
-            dereferenced = LLVM.ConstantInt(dereferenced)
+            # lazily resolve the address of the binding; some symbols only exist
+            # within the JIT (e.g. `jl_get_pgcstack_resolved`) and cannot be looked up,
+            # but such symbols are only ever called, not loaded from.
+            dereferenced = nothing
+            function resolve_binding()
+                if dereferenced === nothing
+                    address = ccall(:jl_cglobal, Any, (Any, Any), fn, UInt)
+                    dereferenced = LLVM.ConstantInt(unsafe_load(address))
+                end
+                dereferenced
+            end
 
             function replace_bindings!(value)
                 changed = false
@@ -49,7 +56,7 @@ function (self::ResolveCPUReferences)(mod::LLVM.Module)
                         changed |= replace_bindings!(val)
                     elseif isa(val, LLVM.LoadInst)
                         # resolve
-                        replace_uses!(val, dereferenced)
+                        replace_uses!(val, resolve_binding())
                         erase!(val)
                         # FIXME: iterator invalidation?
                         changed = true

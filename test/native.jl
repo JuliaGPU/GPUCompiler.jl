@@ -324,8 +324,11 @@ end
 end
 
 @testset "unbound typevars" begin
-    mod = @eval module $(gensym())
-        invalid_kernel() where {unbound} = return
+    # suppress the warning Julia emits when defining a method with an unbound typevar
+    mod = redirect_stderr(devnull) do
+        @eval module $(gensym())
+            invalid_kernel() where {unbound} = return
+        end
     end
     @test_throws KernelError Native.code_llvm(devnull, mod.invalid_kernel, Tuple{})
 end
@@ -456,20 +459,27 @@ end
         Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
-    @test @filecheck(begin
-        @check_not "@{{(julia|j)_expensive_[0-9]+}}"
-        Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
-    end) broken=broken
+    # suppress FileCheck diagnostics when the failure is known and expected
+    quiet(f) = broken ? redirect_stderr(f, devnull) : f()
+
+    @test quiet() do
+        @filecheck begin
+            @check_not "@{{(julia|j)_expensive_[0-9]+}}"
+            Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
+        end
+    end broken=broken
 
     @test @filecheck begin
         @check "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
-    @test @filecheck(begin
-        @check_not "@{{(julia|j)_expensive_[0-9]+}}"
-        Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
-    end) broken=broken
+    @test quiet() do
+        @filecheck begin
+            @check_not "@{{(julia|j)_expensive_[0-9]+}}"
+            Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
+        end
+    end broken=broken
 end
 
 @testset "function attributes" begin
@@ -492,6 +502,24 @@ end
     @test @filecheck begin
         @check "attributes #{{.}} = { convergent }"
         Native.code_llvm(mod.convergent_barrier, Tuple{}; dump_module=true, raw=true)
+    end
+end
+
+@testset "CPU reference resolution" begin
+    # JIT-private symbols like `jl_get_pgcstack_resolved` (JuliaLang/julia#61527) cannot
+    # be looked up using `jl_cglobal`, so we should only resolve bindings that are
+    # actually loaded from, leaving called functions alone.
+    job, _ = Native.create_job(identity, (Nothing,))
+    JuliaContext() do ctx
+        mod = parse(LLVM.Module, """
+            declare void @jl_get_pgcstack_resolved()
+
+            define void @entry() {
+                call void @jl_get_pgcstack_resolved()
+                ret void
+            }""")
+        GPUCompiler.prepare_execution!(job, mod)
+        @test haskey(functions(mod), "jl_get_pgcstack_resolved")
     end
 end
 
