@@ -351,7 +351,11 @@ end
 
         # relocate_gvs! reports whether the module stayed session-portable
         JuliaContext() do ctx
-            objs = Any[Int64(42), 1.25, :sym, Int128(1)]
+            # Unlike Int128, vector-shaped tuples are 16-byte aligned on all
+            # supported architectures and Julia versions.
+            aligned = (VecElement(Int64(1)), VecElement(Int64(2)))
+            @test Base.datatype_alignment(typeof(aligned)) > sizeof(Int)
+            objs = Any[Int64(42), 1.25, :sym, aligned]
             # pointers to the heap boxes rooted in `objs` (passing an element
             # through a specialized function would re-box, possibly on the stack)
             ptrs = [ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x) for x in objs]
