@@ -25,8 +25,14 @@
     end
 end
 
-@testset "method instances for type-valued callees" begin
-    mi = GPUCompiler.methodinstance(Base._stable_typeof(Memory{Int}), Tuple{typeof(undef), Int})
+@testset "method instances for type-valued callees and arguments" begin
+    # JuliaLang/julia#62001: closed type-valued callees and arguments
+    # dispatch on Core.TypeEgal keys instead of Type{T}
+    mi = GPUCompiler.methodinstance(Base._stable_typeof(Vector{Int}), Tuple{typeof(undef), Int})
+    @test mi isa Core.MethodInstance
+    @test Base.isdispatchtuple(mi.specTypes)
+
+    mi = GPUCompiler.methodinstance(typeof(identity), Tuple{Type{Int}})
     @test mi isa Core.MethodInstance
     @test Base.isdispatchtuple(mi.specTypes)
 end

@@ -14,21 +14,27 @@ end
 
 export methodinstance, generic_methodinstance
 
+# JuliaLang/julia#62001 specializes closed type-valued callees and arguments on
+# `Core.TypeEgal` dispatch keys, making `Type{T}` elements non-dispatchable, so
+# normalize them when constructing signature types.
 @static if isdefined(Core, :TypeEgal)
-    @inline function dispatch_function_key(ft::Type)
-        if Base.isType(ft)
-            f = Base.type_parameter(ft)
-            !Base.has_free_typevars(f) && return Core.TypeEgal{f}
+    @inline function dispatch_key(@nospecialize(t))
+        if Base.isType(t)
+            u = Base.type_parameter(t)
+            !Base.has_free_typevars(u) && return Core.TypeEgal{u}
         end
-        return ft
+        return t
+    end
+
+    @inline function signature_type_by_tt(ft::Type, tt::Type)
+        u = Base.unwrap_unionall(tt)::DataType
+        return Base.rewrap_unionall(Tuple{dispatch_key(ft), map(dispatch_key, u.parameters)...}, tt)
     end
 else
-    @inline dispatch_function_key(ft::Type) = ft
-end
-
-@inline function signature_type_by_tt(ft::Type, tt::Type)
-    u = Base.unwrap_unionall(tt)::DataType
-    return Base.rewrap_unionall(Tuple{dispatch_function_key(ft), u.parameters...}, tt)
+    @inline function signature_type_by_tt(ft::Type, tt::Type)
+        u = Base.unwrap_unionall(tt)::DataType
+        return Base.rewrap_unionall(Tuple{ft, u.parameters...}, tt)
+    end
 end
 
 # create a MethodError from a function type
