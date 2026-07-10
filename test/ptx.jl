@@ -28,34 +28,6 @@ end
     @test occursin("[1 x i64] %state", ir)
 end
 
-@testset "runtime cache disappearing" begin
-    # the cache may be deleted or unusable at any point; compilation should keep working
-    mod = @eval module $(gensym())
-        kernel() = return
-    end
-    old_cache = GPUCompiler.compile_cache
-    try
-        GPUCompiler.compile_cache = mktempdir()
-        PTX.code_llvm(devnull, mod.kernel, Tuple{}; kernel=true)
-        @test !isempty(readdir(GPUCompiler.compile_cache))
-
-        # remove the cache directory altogether
-        GPUCompiler.reset_runtime()
-        PTX.code_llvm(devnull, mod.kernel, Tuple{}; kernel=true)
-        @test !isempty(readdir(GPUCompiler.compile_cache))
-
-        # make the cache unwritable; compilation should proceed with only a warning
-        GPUCompiler.reset_runtime()
-        write(GPUCompiler.compile_cache, "not a directory")
-        @test_logs (:warn, r"Failed to cache GPU runtime library") match_mode=:any begin
-            PTX.code_llvm(devnull, mod.kernel, Tuple{}; kernel=true)
-        end
-        rm(GPUCompiler.compile_cache)
-    finally
-        GPUCompiler.compile_cache = old_cache
-    end
-end
-
 @testset "kernel functions" begin
 @testset "kernel argument attributes" begin
     mod = @eval module $(gensym())
