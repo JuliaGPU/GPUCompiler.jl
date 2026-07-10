@@ -234,6 +234,34 @@ end
         end
     end
 
+    @testset "runtime constgv relocation" begin
+        # runtime functions like `box_bool` may reference Julia singletons through
+        # `julia.constgv` globals. Their session-absolute addresses must be baked into
+        # the cached runtime bitcode when it is built: only kernel modules go through
+        # `relocate_gvs!`, so a slot left null here would stay null on the device.
+        job, _ = Native.create_job(identity, (Nothing,))
+        JuliaContext() do ctx
+            GPUCompiler.load_runtime(job)
+            key = (GPUCompiler.runtime_config(job),
+                   !GPUCompiler.supports_typed_pointers(ctx))
+            lib = Base.@lock GPUCompiler.runtime_libs_lock GPUCompiler.runtime_libs[key]
+            # NOTE: parse eagerly; a lazily-parsed module doesn't expose uses
+            rt = parse(LLVM.Module, MemoryBuffer(lib.bytes))
+            used = 0
+            for gv in globals(rt)
+                haskey(metadata(gv), "julia.constgv") || continue
+                isempty(uses(gv)) && continue
+                used += 1
+                init = LLVM.initializer(gv)
+                @test init !== nothing && !LLVM.isnull(init)
+            end
+            @static if VERSION >= v"1.12-"
+                # on older versions, Julia bakes addresses without tagging globals
+                @test used > 0
+            end
+        end
+    end
+
     @testset "allowed mutable types" begin
         # when types have no fields, we should always allow them
         mod = @eval module $(gensym())
