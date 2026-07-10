@@ -20,12 +20,14 @@ sink_gcn(i) = sink(i, Val(5))
         kernel() = return
     end
 
-    # the backend participates in the runtime slug, so different back-ends don't share a cache
+    # the backend participates in the cache owner, so different back-ends don't share a cache
     job_ext, _ = GCN.create_job(mod.kernel, Tuple{}; backend=:external)
     job_inp, _ = GCN.create_job(mod.kernel, Tuple{}; backend=:inprocess)
-    @test endswith(GPUCompiler.runtime_slug(job_ext), "-external")
-    @test endswith(GPUCompiler.runtime_slug(job_inp), "-inprocess")
-    @test GPUCompiler.runtime_slug(job_ext) != GPUCompiler.runtime_slug(job_inp)
+    owner_ext = GPUCompiler.cache_owner(job_ext)
+    owner_inp = GPUCompiler.cache_owner(job_inp)
+    @test owner_ext.target.backend === :external
+    @test owner_inp.target.backend === :inprocess
+    @test owner_ext != owner_inp
 
     # the explicit :external backend generates machine code through the external llc
     @test (GCN.code_native(devnull, mod.kernel, Tuple{}; backend=:external); true)

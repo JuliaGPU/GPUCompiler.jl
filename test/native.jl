@@ -1,5 +1,8 @@
 @testset "reflection" begin
-    job, _ = Native.create_job(identity, (Int,))
+    mod = @eval module $(gensym())
+        f(x::Int) = x
+    end
+    job, _ = Native.create_job(mod.f, (Int,))
 
     @test only(GPUCompiler.code_lowered(job)) isa Core.CodeInfo
 
@@ -7,17 +10,17 @@
     @test rt === Int
 
     @test @filecheck begin
-        @check "MethodInstance for identity"
+        @check "MethodInstance for {{.*}}f"
         GPUCompiler.code_warntype(job)
     end
 
     @test @filecheck begin
-        @check "@{{(julia|j)_identity_[0-9]+}}"
+        @check "@{{(julia|j)_f_[0-9]+}}"
         GPUCompiler.code_llvm(job)
     end
 
     @test @filecheck begin
-        @check "@{{(julia|j)_identity_[0-9]+}}"
+        @check "@{{(julia|j)_f_[0-9]+}}"
         GPUCompiler.code_native(job)
     end
 end
@@ -118,97 +121,169 @@ end
             @check "add i64 %{{[0-9]+}}, 2"
             GPUCompiler.code_llvm(job)
         end
+    end
 
-        # cached_compilation interface
-        invocations = Ref(0)
-        function compiler(job)
-            invocations[] += 1
+    @testset "cached results" begin
+        mod = @eval module $(gensym())
+            Base.Experimental.@MethodTable(other_method_table)
+
+            mutable struct Results
+                asm::Union{Nothing,String}
+                Results() = new(nothing)
+            end
+            mutable struct OtherResults
+                data::Any
+                OtherResults() = new(nothing)
+            end
+
+            @noinline child(i) = i
+            kernel(i) = child(i)+1
+        end
+
+        job, _ = Native.create_job(mod.kernel, (Int64,))
+
+        @static if GPUCompiler.HAS_INTEGRATED_CACHE
+            # before any code exists for the job, the lookup comes up empty
+            @test GPUCompiler.cached_results(mod.Results, job) === nothing
+        end
+
+        # get-or-create: first access after inference yields an empty struct, later
+        # accesses return the same one
+        precompile(job)
+        res = GPUCompiler.cached_results(mod.Results, job)
+        @test res isa mod.Results
+        @test res.asm === nothing
+        res.asm = "compiled"
+        @test GPUCompiler.cached_results(mod.Results, job) === res
+
+        # independent consumers get independent structs for the same job
+        other = GPUCompiler.cached_results(mod.OtherResults, job)
+        @test other isa mod.OtherResults
+        @test GPUCompiler.cached_results(mod.Results, job) === res
+
+        # results are keyed by the full config: a job differing only in codegen-level
+        # settings (here: the kernel name) must not share artifacts
+        named_job, _ = Native.create_job(mod.kernel, (Int64,); name="custom")
+        @test named_job.source === job.source
+        named_res = GPUCompiler.cached_results(mod.Results, named_job)
+        @test named_res !== res
+        @test named_res.asm === nothing
+
+        # ... but an equal config constructed from scratch resolves to the same struct
+        job2, _ = Native.create_job(mod.kernel, (Int64,))
+        @test GPUCompiler.cached_results(mod.Results, job2) === res
+
+        # vararg kernels: on 1.14+, inference caches these under the compilable
+        # (vararg-widened) MethodInstance rather than the fully-specialized job.source,
+        # which the lookup needs to chase
+        vmod = @eval module $(gensym())
+            kernel(args...) = nothing
+        end
+        vjob, _ = Native.create_job(vmod.kernel, (Int64, Int64))
+        precompile(vjob)
+        @test GPUCompiler.cached_results(mod.Results, vjob) isa mod.Results
+
+        @static if GPUCompiler.HAS_INTEGRATED_CACHE
+            # The compiler may report CIs for several foreign owners when the same MI has
+            # been inferred through multiple interpreters. Codegen must select this job's
+            # owner rather than treating every non-native CI as interchangeable.
+            other_owner_job, _ = Native.create_job(
+                mod.kernel, (Int64,); method_table=mod.other_method_table)
+            precompile(other_owner_job)
+            other_owner_res = GPUCompiler.cached_results(mod.Results, other_owner_job)
+            @test other_owner_res !== res
             JuliaContext() do ctx
-                ir, ir_meta = GPUCompiler.compile(:llvm, job)
-                string(ir)
+                _, meta = GPUCompiler.compile(:llvm, job)
+                @test meta.compiled[job.source].ci.owner === GPUCompiler.cache_owner(job)
             end
         end
-        linker(job, compiled) = compiled
-        cache = Dict()
-        ft = typeof(mod.kernel)
-        tt = Tuple{Int64}
 
-        # initial compilation
-        source = methodinstance(ft, tt, Base.get_world_counter())
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 2"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        # redefinition invalidates: a job in the new world gets a fresh struct
+        @eval mod kernel(i) = child(i)+2
+        new_job, _ = Native.create_job(mod.kernel, (Int64,))
+        @static if GPUCompiler.HAS_INTEGRATED_CACHE
+            # ... after first showing up empty, as the old CodeInstance no longer covers
+            # the new world
+            @test GPUCompiler.cached_results(mod.Results, new_job) === nothing
         end
-        @test invocations[] == 1
+        precompile(new_job)
+        new_res = GPUCompiler.cached_results(mod.Results, new_job)
+        @test new_res !== res
+        @test new_res.asm === nothing
 
-        # cached compilation
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 2"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+        @static if GPUCompiler.HAS_INTEGRATED_CACHE
+            # session-dependent results (e.g. artifacts with relocated GVs) are wiped
+            # before image serialization; emulate the atexit-driven wipe directly
+            new_res.asm = "session-dependent"
+            other_job, _ = Native.create_job(mod.kernel, (Int64,); name="other")
+            other_res = GPUCompiler.cached_results(mod.Results, other_job)
+            push!(GPUCompiler.session_dependent_jobs, new_job)
+            GPUCompiler.wipe_session_dependent_results()
+            @test isempty(GPUCompiler.session_dependent_jobs)
+            wiped_res = GPUCompiler.cached_results(mod.Results, new_job)
+            @test wiped_res !== new_res
+            @test wiped_res.asm === nothing
+            # ... without affecting other configs on the same CI
+            @test GPUCompiler.cached_results(mod.Results, other_job) === other_res
         end
-        @test invocations[] == 1
+    end
 
-        # redefinition
-        @eval mod kernel(i) = child(i)+3
-        source = methodinstance(ft, tt, Base.get_world_counter())
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 3"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
+    @testset "runtime cache invalidation" begin
+        # The assembled runtime cache must follow Julia's CodeInstance invalidation. Runtime
+        # functions are ordinary Julia methods and can be redefined during a session.
+        @eval Native.Runtime signal_exception() = nothing
+        job, _ = Native.create_job(identity, (Nothing,))
+
+        func_job, _ = Native.create_job(identity, (Nothing,); entry_abi=:func, opt_level=3)
+        rt_config = GPUCompiler.runtime_config(func_job)
+        @test rt_config.entry_abi === :specfunc
+        @test rt_config.opt_level == 0
+
+        JuliaContext() do ctx
+            empty!(GPUCompiler.runtime_libs)
+            GPUCompiler.load_runtime(job)
+
+            key = (GPUCompiler.runtime_config(job), !GPUCompiler.supports_typed_pointers(ctx))
+            old = GPUCompiler.runtime_libs[key]
+            @test GPUCompiler.runtime_library_valid(old, job)
+
+            @eval Native.Runtime signal_exception() = return
+            new_job, _ = Native.create_job(identity, (Nothing,))
+            new_job = CompilerJob(new_job.source, new_job.config, Base.get_world_counter())
+            @test !GPUCompiler.runtime_library_valid(old, new_job)
+
+            GPUCompiler.load_runtime(new_job)
+            new = GPUCompiler.runtime_libs[key]
+            @test new !== old
+            @test GPUCompiler.runtime_library_valid(new, new_job)
         end
-        @test invocations[] == 2
+    end
 
-        # cached compilation
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 3"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        end
-        @test invocations[] == 2
-
-        # redefinition of an unrelated function
-        @eval mod unrelated(i) = 42
-        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test invocations[] == 2
-
-        # redefining child functions
-        @eval mod @noinline child(i) = i+1
-        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test invocations[] == 3
-
-        # cached compilation
-        Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test invocations[] == 3
-
-        # change in configuration
-        config = CompilerConfig(job.config; name="foobar")
-        @test @filecheck begin
-            @check "define i64 @foobar"
-            Base.invokelatest(GPUCompiler.cached_compilation, cache, source, config, compiler, linker)
-        end
-        @test invocations[] == 4
-
-        # tasks running in the background should keep on using the old version
-        c1, c2 = Condition(), Condition()
-        function background(job)
-            local_source = methodinstance(ft, tt, Base.get_world_counter())
-            notify(c1)
-            wait(c2)    # wait for redefinition
-            GPUCompiler.cached_compilation(cache, local_source, job.config, compiler, linker)
-        end
-        t = @async Base.invokelatest(background, job)
-        wait(c1)        # make sure the task has started
-        @eval mod kernel(i) = child(i)+4
-        source = methodinstance(ft, tt, Base.get_world_counter())
-        ir = Base.invokelatest(GPUCompiler.cached_compilation, cache, source, job.config, compiler, linker)
-        @test contains(ir, r"add i64 %\d+, 4")
-        notify(c2)      # wake up the task
-        @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 3"
-            fetch(t)
+    @testset "runtime constgv relocation" begin
+        # runtime functions like `box_bool` may reference Julia singletons through
+        # `julia.constgv` globals. Their session-absolute addresses must be baked into
+        # the cached runtime bitcode when it is built: only kernel modules go through
+        # `relocate_gvs!`, so a slot left null here would stay null on the device.
+        job, _ = Native.create_job(identity, (Nothing,))
+        JuliaContext() do ctx
+            GPUCompiler.load_runtime(job)
+            key = (GPUCompiler.runtime_config(job),
+                   !GPUCompiler.supports_typed_pointers(ctx))
+            lib = Base.@lock GPUCompiler.runtime_libs_lock GPUCompiler.runtime_libs[key]
+            # NOTE: parse eagerly; a lazily-parsed module doesn't expose uses
+            rt = parse(LLVM.Module, MemoryBuffer(lib.bytes))
+            used = 0
+            for gv in globals(rt)
+                haskey(metadata(gv), "julia.constgv") || continue
+                isempty(uses(gv)) && continue
+                used += 1
+                init = LLVM.initializer(gv)
+                @test init !== nothing && !LLVM.isnull(init)
+            end
+            @static if VERSION >= v"1.12-"
+                # on older versions, Julia bakes addresses without tagging globals
+                @test used > 0
+            end
         end
     end
 
@@ -216,12 +291,14 @@ end
         # when types have no fields, we should always allow them
         mod = @eval module $(gensym())
             struct Empty end
+            accept_empty(::Empty) = nothing
+            accept_symbol(::Symbol) = nothing
         end
 
-        Native.code_execution(Returns(nothing), (mod.Empty,))
+        Native.code_execution(mod.accept_empty, (mod.Empty,))
 
         # this also applies to Symbols
-        Native.code_execution(Returns(nothing), (Symbol,))
+        Native.code_execution(mod.accept_symbol, (Symbol,))
     end
 
     @testset "code coverage" begin
@@ -419,19 +496,23 @@ end
 end
 
 @testset "function entry safepoint emission" begin
+    mod = @eval module $(gensym())
+        f(::Nothing) = nothing
+    end
+
     @test @filecheck begin
-        @check_label "define void @{{(julia|j)_identity_[0-9]+}}"
+        @check_label "define void @{{(julia|j)_f_[0-9]+}}"
         @check_not "%safepoint"
-        Native.code_llvm(identity, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true)
+        Native.code_llvm(mod.f, Tuple{Nothing}; entry_safepoint=false, optimize=false, dump_module=true)
     end
 
     # XXX: broken by JuliaLang/julia#57010,
     #      see https://github.com/JuliaLang/julia/pull/57010/files#r2079576894
     if VERSION < v"1.13.0-DEV.533"
         @test @filecheck begin
-            @check_label "define void @{{(julia|j)_identity_[0-9]+}}"
+            @check_label "define void @{{(julia|j)_f_[0-9]+}}"
             @check "%safepoint"
-            Native.code_llvm(identity, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true)
+            Native.code_llvm(mod.f, Tuple{Nothing}; entry_safepoint=true, optimize=false, dump_module=true)
         end
     end
 end

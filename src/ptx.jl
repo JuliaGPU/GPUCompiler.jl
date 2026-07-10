@@ -138,21 +138,14 @@ isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
     # libdevice's __CUDA_ARCH dispatch, are still supported by the external back-end.
     startswith(fn, "llvm.nvvm.")
 
-# XXX: the debuginfo part should be handled by GPUCompiler as it applies to all back-ends.
-runtime_slug(@nospecialize(job::CompilerJob{PTXCompilerTarget})) =
-    "ptx$(job.config.target.ptx.major)$(job.config.target.ptx.minor)" *
-    "-$(cpu_name(job.config.target))" *
-    "-debuginfo=$(Int(llvm_debug_info(job)))"
-
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     # tell NVVMReflect whether to flush denormals; this mirrors what Clang does
     # for `-fcuda-flush-denormals-to-zero` and is the only `__nvvm_reflect` key
     # LLVM's NVVMReflectPass honors besides `__CUDA_ARCH`. only emit it on the
     # toplevel module that runs through `optimize!`, as sub-modules (the cached
-    # runtime, deferred jobs) don't need it, and the cached runtime in
-    # particular would otherwise conflict on link if it was built with a
-    # different `fastmath` setting (which isn't part of `runtime_slug`).
+    # runtime, deferred jobs) don't need it and should not get module-level
+    # flags that can collide when linked into the toplevel module.
     if job.config.toplevel
         flags(mod)["nvvm-reflect-ftz", LLVM.API.LLVMModuleFlagBehaviorOverride] =
             Metadata(ConstantInt(Int32(job.config.target.fastmath ? 1 : 0)))

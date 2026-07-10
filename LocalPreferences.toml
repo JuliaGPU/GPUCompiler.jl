@@ -1,4 +1,0 @@
-[GPUCompiler]
-# wether caching of object files should be enabled. If the disk cache is enabled
-# cache files are storied in scratch memory.
-#disk_cache = "false"

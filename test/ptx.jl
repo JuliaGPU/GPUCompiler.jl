@@ -10,54 +10,22 @@
     end
 end
 
-@testset "kernel state survives a runtime rebuild during optimization" begin
-    # Clearing the cache forces the relink pass inside `optimize!` to rebuild the runtime
-    # (nested compilation); the kernel must still get its state argument afterwards.
+@testset "kernel state survives a runtime rebuild" begin
+    # Clearing the runtime cache forces the library link inside `emit_llvm` to rebuild
+    # the runtime (nested compilation); the kernel must still get its state argument
+    # afterwards.
     mod = @eval module $(gensym())
         function kernel(x)
             x < 1 && throw(DivideError())
             return
         end
     end
-    old_cache = GPUCompiler.compile_cache
-    ir = try
-        GPUCompiler.compile_cache = nothing
-        sprint() do io
-            PTX.code_llvm(io, mod.kernel, Tuple{Int}; kernel=true, dump_module=true)
-        end
-    finally
-        GPUCompiler.compile_cache = old_cache
+    Base.@lock GPUCompiler.runtime_libs_lock empty!(GPUCompiler.runtime_libs)
+    ir = sprint() do io
+        PTX.code_llvm(io, mod.kernel, Tuple{Int}; kernel=true, dump_module=true)
     end
     @test occursin("gpu_report_exception", ir)
     @test occursin("[1 x i64] %state", ir)
-end
-
-@testset "runtime cache disappearing" begin
-    # the cache may be deleted or unusable at any point; compilation should keep working
-    mod = @eval module $(gensym())
-        kernel() = return
-    end
-    old_cache = GPUCompiler.compile_cache
-    try
-        GPUCompiler.compile_cache = mktempdir()
-        PTX.code_llvm(devnull, mod.kernel, Tuple{}; kernel=true)
-        @test !isempty(readdir(GPUCompiler.compile_cache))
-
-        # remove the cache directory altogether
-        GPUCompiler.reset_runtime()
-        PTX.code_llvm(devnull, mod.kernel, Tuple{}; kernel=true)
-        @test !isempty(readdir(GPUCompiler.compile_cache))
-
-        # make the cache unwritable; compilation should proceed with only a warning
-        GPUCompiler.reset_runtime()
-        write(GPUCompiler.compile_cache, "not a directory")
-        @test_logs (:warn, r"Failed to cache GPU runtime library") match_mode=:any begin
-            PTX.code_llvm(devnull, mod.kernel, Tuple{}; kernel=true)
-        end
-        rm(GPUCompiler.compile_cache)
-    finally
-        GPUCompiler.compile_cache = old_cache
-    end
 end
 
 @testset "kernel functions" begin
@@ -554,8 +522,8 @@ end
     @test GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"10.0", feature_set=:family)) == "sm_100f"
     @test_throws ErrorException GPUCompiler.cpu_name(PTXCompilerTarget(cap=v"9.0", feature_set=:bogus))
 
-    # hash must discriminate, otherwise two configs differing only on feature_set
-    # would share the same on-disk runtime slug and collide in the compiler cache.
+    # hash must discriminate, otherwise two targets differing only on feature_set
+    # could compare equal inside cache-owner keys.
     @test hash(PTXCompilerTarget(cap=v"9.0", feature_set=:baseline)) !=
           hash(PTXCompilerTarget(cap=v"9.0", feature_set=:arch))
 

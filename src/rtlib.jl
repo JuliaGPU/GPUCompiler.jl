@@ -60,10 +60,36 @@ end
 
 ## functionality to build the runtime library
 
-function emit_function!(mod, config::CompilerConfig, f, method)
-    tt = Base.to_tuple_type(method.types)
-    source = generic_methodinstance(f, tt)
-    new_mod, meta = compile_unhooked(:llvm, CompilerJob(source, config))
+# Per-function compilation results for the GPU runtime library, cached through the
+# same `cached_results` mechanism back-ends use for kernels. On 1.11+ the bitcode
+# thus lives on the runtime function's `CodeInstance` — possibly alongside a
+# back-end's own results struct — and persists through precompilation, so sessions
+# loading a back-end that compiled its runtime during precompile skip codegen
+# entirely. On 1.10 it is cached for the duration of the session.
+mutable struct RuntimeFunctionResults
+    bitcode::Union{Nothing,Vector{UInt8}}
+    RuntimeFunctionResults() = new(nothing)
+end
+
+# Compile a single runtime function and link it into `mod`. The renamed bitcode is
+# memoized through `RuntimeFunctionResults`; the session-local `runtime_libs` cache
+# below additionally avoids repeating the parse-and-link work within a session.
+function emit_function!(mod, config::CompilerConfig, source::MethodInstance, method,
+                        world::UInt)
+    name = method.llvm_name
+    rt_job = CompilerJob(source, config, world)
+
+    # On 1.11+, don't run a standalone inference walk on a miss: `compile_unhooked` below
+    # drives inference itself. The 1.10 implementation returns its session-local result
+    # directly, without touching inference.
+    ci, res = runtime_function_results(rt_job)
+    if res !== nothing && res.bitcode !== nothing
+        link!(mod, parse(LLVM.Module, MemoryBuffer(res.bitcode)))
+        ci === nothing && (ci = runtime_code_instance(rt_job))
+        return ci::CodeInstance
+    end
+
+    new_mod, meta = compile_unhooked(:llvm, rt_job)
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
     if return_type(ft) != return_type(expected_ft)
@@ -73,37 +99,95 @@ function emit_function!(mod, config::CompilerConfig, f, method)
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
 
-    temp_name = LLVM.name(meta.entry)
-    link!(mod, new_mod)
-    entry = functions(mod)[temp_name]
+    # runtime functions may reference Julia objects through `julia.constgv` globals (e.g.
+    # `box_bool` returning the `jl_true`/`jl_false` singletons). Kernels get theirs
+    # relocated when the fully-linked toplevel module is finalized, but the runtime's
+    # mappings would be dropped along with the rest of its per-function metadata: bake
+    # the session-absolute addresses into the cached bitcode instead, and keep such
+    # functions out of package images (their pointers don't survive into other sessions).
+    if !isempty(meta.gv_to_value)
+        relocate_gvs!(new_mod, meta.gv_to_value)
+        mark_session_dependent!(rt_job)
+    end
 
-    # if a declaration already existed, replace it with the function to avoid aliasing
-    # (and getting function names like gpu_signal_exception1)
-    name = method.llvm_name
-    if haskey(functions(mod), name)
-        decl = functions(mod)[name]
-        @assert value_type(decl) == value_type(entry)
-        replace_uses!(decl, entry)
+    # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
+    # is immediately link-ready (no per-session rename pass on a cache hit).
+    if haskey(functions(new_mod), name) && functions(new_mod)[name] !== meta.entry
+        decl = functions(new_mod)[name]
+        @assert value_type(decl) == value_type(meta.entry)
+        replace_uses!(decl, meta.entry)
         erase!(decl)
     end
-    LLVM.name!(entry, name)
+    LLVM.name!(meta.entry, name)
+
+    io = IOBuffer()
+    write(io, new_mod)
+    ci === nothing && (ci = runtime_code_instance(rt_job))
+    res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
+    res.bitcode = take!(io)
+
+    link!(mod, new_mod)
+    return ci::CodeInstance
 end
 
-function build_runtime(@nospecialize(job::CompilerJob))
-    mod = LLVM.Module("GPUCompiler run-time library")
+function runtime_function_results(@nospecialize(job::CompilerJob))
+    @static if HAS_INTEGRATED_CACHE
+        ci = job_code_instance(job)
+        ci === nothing && return nothing, nothing
+        return ci, job_results(RuntimeFunctionResults, ci, job.config)
+    else
+        # The 1.10 results store is independent of the CodeCache. Avoid querying the latter
+        # until the caller actually needs the contributing CI.
+        return nothing, cached_results(RuntimeFunctionResults, job)
+    end
+end
 
-    # the compiler job passed into here is identifies the job that requires the runtime.
-    # derive a job that represents the runtime itself (notably with kernel=false).
-    config = CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false, strip=false)
+function runtime_method_instance(@nospecialize(job::CompilerJob), method)
+    def = if isa(method.def, Symbol)
+        isdefined(runtime_module(job), method.def) || return nothing
+        getfield(runtime_module(job), method.def)
+    else
+        method.def
+    end
+    # Resolve at the requesting job's explicit world, rather than this task's TLS world.
+    # Runtime methods may be redefined while a long-lived compilation task is running.
+    return generic_methodinstance(
+        typeof(def), Base.to_tuple_type(method.types), job.world)
+end
+
+function runtime_code_instance(@nospecialize(job::CompilerJob))
+    ci = @static if HAS_INTEGRATED_CACHE
+        job_code_instance(job)
+    else
+        cache = WorldView(get_code_cache(job), job.world, job.world)
+        CC.get(cache, job.source, nothing)
+    end
+    ci === nothing && error("Missing CodeInstance after compiling $(job.source)")
+    return ci::CodeInstance
+end
+
+# the compiler job passed into here identifies the job that requires the runtime.
+# derive a config that represents the runtime itself (notably with kernel=false).
+# Fields that identify or optimize only the *kernel* job are reset so runtime artifacts are
+# keyed identically for all kernels sharing the remaining codegen-relevant settings. Runtime
+# functions always use the specfunc ABI and are deliberately left unoptimized until linked
+# into the toplevel module, making the kernel's entry ABI and LLVM opt level irrelevant.
+function runtime_config(@nospecialize(job::CompilerJob))
+    CompilerConfig(job.config; kernel=false, entry_abi=:specfunc, opt_level=0,
+                   toplevel=false, only_entry=false, strip=false, name=nothing)
+end
+
+function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
+    mod = LLVM.Module("GPUCompiler run-time library")
+    sources = MethodInstance[]
+    code_instances = CodeInstance[]
 
     for method in values(Runtime.methods)
-        def = if isa(method.def, Symbol)
-            isdefined(runtime_module(job), method.def) || continue
-            getfield(runtime_module(job), method.def)
-        else
-            method.def
-        end
-        emit_function!(mod, config, typeof(def), method)
+        resolved = runtime_method_instance(job, method)
+        resolved === nothing && continue
+        source = resolved
+        push!(sources, source)
+        push!(code_instances, emit_function!(mod, config, source, method, job.world))
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again
@@ -111,65 +195,65 @@ function build_runtime(@nospecialize(job::CompilerJob))
     # removes Julia address spaces, which would then lead to type mismatches when using
     # functions from the runtime library from IR that has not been stripped of AS info.
 
-    mod
+    return mod, sources, code_instances
 end
 
-@static if VERSION >= v"1.11.0"
-    import Core.Compiler: is_asserts
-else
-    is_asserts() = false
+# Session-local cache of assembled runtime libraries, keyed by
+# `(runtime_config(job), opaque_pointers)`: the derived runtime config covers every
+# codegen-relevant setting (e.g. the debug level, which is baked into the runtime IR
+# as a constant), while cosmetic kernel-job fields are normalized away. Cross-session
+# persistence happens at the per-function level (see `RuntimeFunctionResults`):
+# reassemble on first use of each session, then reuse within the session.
+#
+# Keep both the selected MethodInstances and their contributing CodeInstances with the
+# assembled bytes. Re-resolving methods after the world changes detects direct method-table
+# changes; clipped CI ranges detect invalidated transitive callees. This makes the assembled
+# cache follow Julia's validity model without a manual `reset_runtime` hook.
+mutable struct RuntimeLibrary
+    bytes::Vector{UInt8}
+    sources::Vector{MethodInstance}
+    code_instances::Vector{CodeInstance}
+    validated_world::UInt
 end
+
+function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob))
+    # Method-table changes and CI invalidations always advance the world counter. A runtime
+    # already validated for this exact world therefore needs no per-function scan on the
+    # common cache-hit path.
+    job.world == lib.validated_world && return true
+
+    i = 0
+    for method in values(Runtime.methods)
+        resolved = runtime_method_instance(job, method)
+        resolved === nothing && continue
+        i += 1
+        i <= length(lib.sources) || return false
+        resolved === lib.sources[i] || return false
+    end
+    i == length(lib.sources) || return false
+    all(ci -> ci.min_world <= job.world <= ci.max_world, lib.code_instances) || return false
+    lib.validated_world = job.world
+    return true
+end
+
+const runtime_libs = Dict{Tuple{CompilerConfig, Bool}, RuntimeLibrary}()
+const runtime_libs_lock = ReentrantLock()
 
 @locked function load_runtime(@nospecialize(job::CompilerJob))
-    global compile_cache
-    if compile_cache === nothing    # during precompilation
-        return build_runtime(job)
-    end
+    config = runtime_config(job)
+    key = (config, !supports_typed_pointers(context()))
 
-    slug = runtime_slug(job)
-    if !supports_typed_pointers(context())
-        slug *= "-opaque"
-    end
-
-    # Julia codegen changes metadata in modules when `FORCE_ASSERTIONS=1`
-    if is_asserts()
-        slug *= "-asserts"
-    end
-
-    name = "runtime_$(slug).bc"
-    path = joinpath(compile_cache, name)
-
-    # the cache is shared across processes and may disappear at any point
-    # (e.g. `reset_runtime()` in another process), so treat it as best-effort
-    if ispath(path)
-        try
-            return parse(LLVM.Module, MemoryBufferFile(path); lazy=true)
-        catch err
-            @debug "Failed to load cached GPU runtime library; rebuilding" exception=(err, catch_backtrace())
+    cached = Base.@lock runtime_libs_lock begin
+        cached = get(runtime_libs, key, nothing)
+        if cached === nothing || !runtime_library_valid(cached, job)
+            lib, sources, code_instances = build_runtime(job, config)
+            io = IOBuffer()
+            write(io, lib)
+            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world)
+            runtime_libs[key] = cached
         end
+        cached
     end
 
-    @debug "Building the GPU runtime library at $path"
-    lib = build_runtime(job)
-
-    try
-        # atomic write to disk
-        mkpath(compile_cache)
-        temp_path, io = mktemp(compile_cache; cleanup=false)
-        write(io, lib)
-        close(io)
-        @static if VERSION >= v"1.12.0-DEV.1023"
-            mv(temp_path, path; force=true)
-        else
-            Base.rename(temp_path, path, force=true)
-        end
-    catch err
-        @warn "Failed to cache GPU runtime library" exception=(err, catch_backtrace()) maxlog=1
-    end
-
-    return lib
+    return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true)
 end
-
-# remove the existing cache
-# NOTE: call this function from global scope, so any change triggers recompilation.
-reset_runtime() = rm(compile_cache; recursive=true, force=true)

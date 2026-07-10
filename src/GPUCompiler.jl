@@ -8,8 +8,6 @@ using ExprTools: splitdef, combinedef
 
 using Libdl
 
-using Serialization
-using Scratch: @get_scratch!
 using Preferences
 
 const ENABLE_TRACY = parse(Bool, @load_preference("tracy", "false"))
@@ -35,8 +33,21 @@ end
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
 
-compile_cache = nothing # set during __init__()
-const pkgver = Base.pkgversion(GPUCompiler)
+# `HAS_INTEGRATED_CACHE` distinguishes 1.11+ (owner-keyed `Core.Compiler.InternalCodeCache`)
+# from 1.10 (per-interpreter `CodeCache` IdDict + invalidation callbacks). The two have
+# disjoint shapes; everything cache-related fans on this flag.
+const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
+
+# Loads as an empty shell on 1.10; on 1.11+ provides `CacheView`, `typeinf!`,
+# `get_codeinfos`, `lookup`, `results`, etc. We `import` the module name (not its
+# exports) to avoid clashing with `LLVM.lookup`; internal call sites qualify with
+# `CompilerCaching.`.
+import CompilerCaching
+
+# Optional callback invoked from `compile(...)` / `cached_compilation(...)` before
+# compilation runs. Set by `@device_code_*` reflection macros. Defined here (early)
+# so the legacy `cached_compilation` in deprecated.jl can reference it.
+const compile_hook = Ref{Union{Nothing,Function}}(nothing)
 
 include("utils.jl")
 include("mangling.jl")
@@ -54,6 +65,7 @@ include("metal.jl")
 include("runtime.jl")
 
 # compiler implementation
+include("deprecated.jl")
 include("jlgen.jl")
 include("irgen.jl")
 include("optim.jl")
@@ -67,24 +79,19 @@ include("driver.jl")
 include("execution.jl")
 include("reflection.jl")
 
-include("deprecated.jl")
-
 include("precompile.jl")
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
 
-    dir = @get_scratch!("compiled")
-    ## add the Julia version
-    dir = joinpath(dir, "v$(VERSION.major).$(VERSION.minor)")
-    ## also add the package version
-    if pkgver !== nothing
-        # XXX: `Base.pkgversion` is buggy and sometimes returns `nothing`, see e.g.
-        #       JuliaLang/PackageCompiler.jl#896 and JuliaGPU/GPUCompiler.jl#593
-        dir = joinpath(dir, "v$(pkgver.major).$(pkgver.minor)")
+    @static if !HAS_INTEGRATED_CACHE
+        # session-local results keyed by objectid+world; entries serialized during
+        # GPUCompiler's own precompilation can never be valid in a later session
+        empty!(job_results)
+        # ditto for the in-process CodeCaches: CIs deposited by our own precompile
+        # workload carry world ages from the precompilation process
+        empty!(GLOBAL_CI_CACHES)
     end
-    mkpath(dir)
-    global compile_cache = dir
 
     @static if ENABLE_TRACY
         Tracy.@register_tracepoints()

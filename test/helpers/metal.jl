@@ -25,8 +25,6 @@ end
 
 ThreadedRuntimeCompilerJob = CompilerJob{MetalCompilerTarget,ThreadedRuntimeCompilerParams}
 GPUCompiler.runtime_module(::ThreadedRuntimeCompilerJob) = ThreadedRuntime
-GPUCompiler.runtime_slug(job::ThreadedRuntimeCompilerJob) =
-    "metal-threadedruntime-macos$(job.config.target.macos)-debuginfo=$(Int(GPUCompiler.llvm_debug_info(job)))"
 
 function create_job(@nospecialize(func), @nospecialize(types); kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
