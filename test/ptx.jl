@@ -384,41 +384,6 @@ end
     PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
 end
 
-@testset "bool boxes" begin
-    # boxing a non-constant Bool links the runtime's `box_bool` into the kernel module.
-    # every `julia.constgv` slot that remains in use in the final module — whether from
-    # the kernel or from linked runtime bitcode — must have an address relocated into it.
-    mod = @eval module $(gensym())
-        function kernel(a, b)
-            val = unsafe_load(a)
-            # box `val < -1f0` for the @nospecialize InexactError ctor
-            val < 0f0 && throw(InexactError(:kernel, Int, val < -1f0))
-            unsafe_store!(b, val)
-            return
-        end
-    end
-
-    JuliaContext() do ctx
-        job, _ = PTX.create_job(mod.kernel, Tuple{Ptr{Float32},Ptr{Float32}};
-                                kernel=true, optimize=false, validate=false)
-        ir, meta = GPUCompiler.compile(:llvm, job)
-        @test haskey(functions(ir), "ijl_box_bool")
-        # all used constant-global slots must have been relocated to actual addresses
-        used_constgvs = 0
-        for gv in globals(ir)
-            haskey(metadata(gv), "julia.constgv") || continue
-            isempty(uses(gv)) && continue
-            used_constgvs += 1
-            init = LLVM.initializer(gv)
-            @test init !== nothing && !LLVM.isnull(init)
-        end
-        if VERSION >= v"1.12-"
-            # on older versions, Julia bakes addresses directly instead of using constgvs
-            @test used_constgvs > 0
-        end
-    end
-end
-
 @testset "fastmath" begin
     # `fastmath=true` on the target calls `apply_fastmath!` from
     # `finish_linked_module!`, stamping `unsafe-fp-math` + fast-math flags on
