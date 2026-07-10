@@ -574,13 +574,20 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
             gv_to_value[LLVM.name(gv)] = init
-            # Mirror what `jl_emit_native_impl` does on 1.13+ (aotcompile.cpp:865):
-            # reset the initializer to null so the IR we hand back is session-portable,
-            # then `relocate_gvs!` at the toplevel link step writes the session-current
-            # value in. On 1.13+ this is a no-op (Julia already nulled them); on 1.12,
-            # where `jl_emit_native_impl` bakes pointers via `literal_static_pointer_val`,
-            # this is what makes the bitcode we cache safe across sessions.
-            initializer!(gv, LLVM.null(value_type(initializer(gv))))
+        end
+        # Strip the initializers so the IR we hand back is session-portable
+        # (on 1.12 `jl_emit_native_impl` bakes pointers via
+        # `literal_static_pointer_val`; on 1.13+ Julia nulls them itself);
+        # `relocate_gvs!` at the toplevel link step writes the session-current
+        # value in. Demote each GV to an external *declaration* rather than
+        # giving it a null initializer: an internal global initialized to null
+        # is fair game for optimization passes that run before relocation
+        # (e.g. GlobalOpt in the PTX back-end's `finish_module!`), which would
+        # fold loads of it to null and delete the global.
+        for gv in globals(llvm_mod)
+            haskey(gv_to_value, LLVM.name(gv)) || continue
+            initializer!(gv, nothing)
+            linkage!(gv, LLVM.API.LLVMExternalLinkage)
         end
     end
 
@@ -731,20 +738,28 @@ end
     relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
 
 Bake absolute pointer values into the initializers of `julia.constgv`-tagged
-global variables, matching them by name against `gv_to_value`. Only GVs whose
-initializer is currently null are touched: Preserving existing initializers
-covers the older-Julia path where Julia itself emits pointer values directly.
+global variables, matching them by name against `gv_to_value`. Only GVs that
+are declarations (as produced by `compile_method_instance`, which strips the
+initializers for session portability) or still have a null initializer are
+touched: preserving existing initializers covers the older-Julia path where
+Julia itself emits pointer values directly.
 
-GVs present in `mod` but missing from `gv_to_value` keep a null initializer.
+GVs present in `mod` but missing from `gv_to_value` remain declarations, which
+back-ends will reject loudly (undefined symbol) rather than silently folding
+to null.
 """
 function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
     mod_gvs = globals(mod)
     for (name, init) in gv_to_value
         haskey(mod_gvs, name) || continue
         gv = mod_gvs[name]
-        if LLVM.isnull(initializer(gv))
-            val = const_inttoptr(ConstantInt(Int64(init)), value_type(initializer(gv)))
+        cur = initializer(gv)
+        if cur === nothing || LLVM.isnull(cur)
+            val = const_inttoptr(ConstantInt(Int64(init)), global_value_type(gv))
             initializer!(gv, val)
+            # re-internalize what compile_method_instance demoted to an external
+            # declaration; with the address baked in, the optimizer can now fold it
+            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
         end
     end
     return

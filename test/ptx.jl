@@ -28,6 +28,22 @@ end
     @test occursin("[1 x i64] %state", ir)
 end
 
+@testset "global variable relocation" begin
+    # references to Julia objects (`julia.constgv` globals, e.g. Symbol literals) must
+    # survive until `relocate_gvs!` bakes in their addresses at the toplevel link step.
+    # they used to be kept alive as internal globals with a null initializer, which the
+    # GlobalOpt run in `finish_module!` folded away, constant-folding any comparison
+    # against them (JuliaGPU/CUDA.jl#3185: kernels specialized on Symbols misbehaved).
+    mod = @eval module $(gensym())
+        kernel(name::Symbol) = name === :var ? 1 : 2
+    end
+    ir = sprint() do io
+        PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; dump_module=true)
+    end
+    addr = UInt64(pointer_from_objref(:var))
+    @test occursin(string(addr), ir)
+end
+
 @testset "kernel functions" begin
 @testset "kernel argument attributes" begin
     mod = @eval module $(gensym())
