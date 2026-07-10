@@ -219,6 +219,8 @@ end
     return output
 end
 
+source_code(target::SPIRVCompilerTarget) = "spirv"
+
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
@@ -230,14 +232,10 @@ function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=fa
         flush(input_io)
 
         disassembler = SPIRV_Tools_jll.spirv_dis()
-        if io == stdout
-            run(`$disassembler $input_path`)
-        else
-            mktemp() do output_path, output_io
-                run(`$disassembler $input_path -o $output_path`)
-                asm = read(output_io, String)
-                print(io, asm)
-            end
+        mktemp() do output_path, output_io
+            run(`$disassembler $input_path -o $output_path`)
+            asm = read(output_io, String)
+            highlight(io, asm, source_code(job.config.target))
         end
     end
 end

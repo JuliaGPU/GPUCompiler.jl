@@ -8,101 +8,40 @@ const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulh
 # syntax highlighting
 #
 
-const _pygmentize = Ref{Union{String,Nothing}}()
-function pygmentize()
-    if !isassigned(_pygmentize)
-        _pygmentize[] = Sys.which("pygmentize")
-    end
-    return _pygmentize[]
-end
+import Highlights
+using tree_sitter_llvm_jll, tree_sitter_ptx_jll, tree_sitter_spirv_jll,
+      tree_sitter_gcn_jll
 
-const _pygmentize_version = Ref{Union{VersionNumber, Nothing}}()
-function pygmentize_version()
-    isassigned(_pygmentize_version) && return _pygmentize_version[]
+# tree-sitter grammars for the assembly formats we emit, keyed by the
+# `source_code` of the compiler target
+const highlight_languages = Dict(
+    "llvm"  => tree_sitter_llvm_jll,
+    "ptx"   => tree_sitter_ptx_jll,
+    "spirv" => tree_sitter_spirv_jll,
+    "gcn"   => tree_sitter_gcn_jll,
+)
 
-    pygmentize_cmd = pygmentize()
-    if isnothing(pygmentize_cmd)
-        return _pygmentize_version[] = nothing
-    end
-
-    cmd = `$pygmentize_cmd -V`
-    @static if Sys.iswindows()
-        # Avoid encoding issues with pipes on Windows by using cmd.exe to capture stdout for us
-        cmd = `cmd.exe /C $cmd`
-        cmd = addenv(cmd, "PYTHONUTF8" => 1)
-    end
-    version_str = readchomp(cmd)
-
-    pos = findfirst("Pygments version ", version_str)
-    if !isnothing(pos)
-        version_start = last(pos) + 1
-        version_end = findnext(',', version_str, version_start) - 1
-        version = tryparse(VersionNumber, version_str[version_start:version_end])
-    else
-        version = nothing
-    end
-
-    if isnothing(version)
-        @warn "Could not parse Pygments version:\n$version_str"
-    end
-
-    return _pygmentize_version[] = version
-end
-
-function pygmentize_support(lexer)
-    highlighter_ver = pygmentize_version()
-    if isnothing(highlighter_ver)
-        @warn "Syntax highlighting of $lexer code relies on Pygments.\n\
-               Use `pip install pygments` to install the lastest version" maxlog = 1
-        return false
-    elseif lexer == "ptx"
-        if highlighter_ver < v"2.16"
-            @warn "Pygments supports PTX highlighting starting from version 2.16\n\
-                   Detected version $highlighter_ver\n\
-                   Please update with `pip install pygments -U`" maxlog = 1
-            return false
-        end
-        return true
-    elseif lexer == "gcn"
-        if highlighter_ver < v"2.8"
-            @warn "Pygments supports GCN highlighting starting from version 2.8\n\
-                   Detected version $highlighter_ver\n\
-                   Please update with `pip install pygments -U`" maxlog = 1
-            return false
-        end
-        return true
-    else
-        return false
-    end
-end
+# the Highlights.jl theme used for syntax highlighting; can be set to any
+# theme name known to Highlights.jl, or a `Highlights.Theme` object
+const highlight_theme = Ref{Any}("Monokai Pro")
 
 function highlight(io::IO, code, lexer)
     have_color = get(io, :color, false)
-    if !have_color
+    language = get(highlight_languages, lexer, nothing)
+    if !have_color || language === nothing
         print(io, code)
-    elseif lexer == "llvm"
-        InteractiveUtils.print_llvm(io, code)
-    elseif pygmentize_support(lexer)
-        lexer = lexer == "gcn" ? "amdgpu" : lexer
-        pygments_args = String[pygmentize(), "-f", "terminal", "-P", "bg=dark", "-l", lexer]
-        @static if Sys.iswindows()
-            # Avoid encoding issues with pipes on Windows by using a temporary file
-            mktemp() do tmp_path, tmp_io
-                println(tmp_io, code)
-                close(tmp_io)
-                push!(pygments_args, "-o", tmp_path, tmp_path)
-                cmd = Cmd(pygments_args)
-                wait(open(cmd))  # stdout and stderr go to devnull
-                print(io, read(tmp_path, String))
-            end
-        else
-            cmd = Cmd(pygments_args)
-            pipe = open(cmd, "r+")
-            print(pipe, code)
-            close(pipe.in)
-            print(io, read(pipe, String))
-        end
-    else
+        return
+    end
+
+    # render to a buffer first so that highlighting failures don't result in
+    # partial output
+    buf = IOBuffer()
+    try
+        Highlights.highlight(buf, MIME("text/ansi"), code, language,
+                             highlight_theme[])
+        write(io, take!(buf))
+    catch err
+        @warn "Failed to highlight $lexer code" exception=(err, catch_backtrace()) maxlog=1
         print(io, code)
     end
     return

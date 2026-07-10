@@ -121,20 +121,49 @@ end
             setp.lt.u64     %p2, %rd7, %rd24;
             @%p2 bra        \$L__BB0_3;
         """
-        can_highlight = GPUCompiler.pygmentize_support("ptx")
         highlighted = sprint(GPUCompiler.highlight, sample, "ptx"; context = (:color => true))
-        @test occursin(ansi_color, highlighted) skip = !can_highlight
+        @test occursin(ansi_color, highlighted)
+
+        # no color without a color-enabled IO
+        plain = sprint(GPUCompiler.highlight, sample, "ptx")
+        @test plain == sample
+    end
+
+    @testset "SPIR-V" begin
+        sample = """
+                       OpCapability Kernel
+                  %1 = OpExtInstImport "OpenCL.std"
+                 %10 = OpTypeInt 32 0
+        """
+        highlighted = sprint(GPUCompiler.highlight, sample, "spirv"; context = (:color => true))
+        @test occursin(ansi_color, highlighted)
+    end
+
+    @testset "LLVM" begin
+        sample = """
+            define i32 @add(i32 %x, i32 %y) {
+              %sum = add i32 %x, %y
+              ret i32 %sum
+            }
+        """
+        highlighted = sprint(GPUCompiler.highlight, sample, "llvm"; context = (:color => true))
+        @test occursin(ansi_color, highlighted)
     end
 
     @testset "GCN" begin
         sample = """
             v_add_u32     v3, vcc, s0, v0
             v_mov_b32     v4, s1
-            v_addc_u32    v4, vcc, v4, 0, vcc
+            s_endpgm
         """
-        can_highlight = GPUCompiler.pygmentize_support("gcn")
         highlighted = sprint(GPUCompiler.highlight, sample, "gcn"; context = (:color => true))
-        @test occursin(ansi_color, highlighted) skip = !can_highlight
+        @test occursin(ansi_color, highlighted)
+    end
+
+    @testset "unknown lexers pass through" begin
+        sample = "some random text\n"
+        highlighted = sprint(GPUCompiler.highlight, sample, "metal"; context = (:color => true))
+        @test highlighted == sample
     end
 end
 
