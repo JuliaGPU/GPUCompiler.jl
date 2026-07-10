@@ -101,12 +101,13 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
     # runtime functions may reference Julia objects through `julia.constgv` globals (e.g.
     # `box_bool` returning the `jl_true`/`jl_false` singletons). Kernels get theirs
     # relocated when the fully-linked toplevel module is finalized, but the runtime's
-    # mappings would be dropped along with the rest of its per-function metadata: bake
-    # the session-absolute addresses into the cached bitcode instead, and keep such
-    # functions out of package images (their pointers don't survive into other sessions).
+    # mappings would be dropped along with the rest of its per-function metadata: resolve
+    # the slots into the cached bitcode instead, and keep functions whose resolution baked
+    # session-absolute addresses (rather than materialized session-portable constants)
+    # out of package images.
     if !isempty(meta.gv_to_value)
-        relocate_gvs!(new_mod, meta.gv_to_value)
-        mark_session_dependent!(rt_job)
+        portable = relocate_gvs!(new_mod, meta.gv_to_value)
+        portable || mark_session_dependent!(rt_job)
     end
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode

@@ -334,11 +334,11 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
-            relocate_gvs!(ir, gv_to_value)
-
-            # the IR (and any artifact derived from it) now embeds session-absolute
-            # addresses; keep results for this job out of a package image
-            isempty(gv_to_value) || mark_session_dependent!(job)
+            # resolve `julia.constgv` slots: isbits constants are materialized as
+            # device-resident globals, everything else gets this session's absolute
+            # address baked in; only the latter makes the result session-dependent
+            portable = relocate_gvs!(ir, gv_to_value)
+            portable || mark_session_dependent!(job)
 
             if job.config.optimize
                 @tracepoint "optimization" begin
