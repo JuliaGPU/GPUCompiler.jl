@@ -251,6 +251,10 @@ function cached_results(::Type{V}, job::CompilerJob) where {V}
     end
 end
 
+# The 1.10 results store is independent of CodeInstances, so obtaining its empty result does
+# not trigger inference. Match the integrated-cache API used by back-end compile-or-lookup paths.
+cached_results_if_present(::Type{V}, job::CompilerJob) where {V} = cached_results(V, job)
+
 
 ## 1.10 session-dependent results
 #
@@ -265,10 +269,9 @@ end # !HAS_INTEGRATED_CACHE
 
 ## Legacy `cached_compilation` (1.10+)
 
-# A session-local, MI-keyed kernel cache modeled after the pre-CompilerCaching API. Used
-# by back-ends that haven't migrated to the `CacheView`-based flow (and by all back-ends
-# on Julia 1.10, where the new flow doesn't apply because there's no integrated cache /
-# `analysis_results`).
+# A session-local, MI-keyed kernel cache modeled after the pre-CompilerCaching API. Kept
+# only for back-ends that have not migrated to `cached_results`; migrated back-ends use
+# that API on every Julia version, including its lightweight 1.10 implementation above.
 
 """
     cached_compilation(cache::AbstractDict, src::MethodInstance, cfg::CompilerConfig,
@@ -282,8 +285,8 @@ whatever the `linker` function returns. The `compiler` function should take a
 `CompilerJob` and return data that the `linker` function then turns into a session-local
 artifact (e.g. a `CuModule`).
 
-This is the legacy caching API used before GPUCompiler 2.0. New code on Julia 1.11+
-should prefer `CompilerCaching.CacheView`-based caching (see the package extension).
+This is the legacy caching API used before GPUCompiler 2.0. New code should use
+[`cached_results`](@ref) and keep portable artifacts separate from session-local handles.
 """
 function cached_compilation(cache::AbstractDict{<:Any,V},
                             src::MethodInstance, cfg::CompilerConfig,

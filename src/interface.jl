@@ -66,11 +66,47 @@ abstract type AbstractCompilerParams end
 nest_params(params::AbstractCompilerParams, parent::AbstractCompilerParams) = params
 
 
+## cache owner
+
+# Inference results are shared by jobs with the same target, params, inlining policy, and
+# method-table identity. Store this token on the CompilerConfig (as `Any`) so the immutable
+# value is boxed once when the config is created, instead of on every integrated-cache lookup.
+struct GPUCompilerCacheToken{T<:AbstractCompilerTarget, P<:AbstractCompilerParams, M}
+    target::T
+    params::P
+    always_inline::Bool
+    method_table::M
+end
+
+"""
+    cache_owner(target, params, always_inline)
+
+Construct the immutable token that partitions inference for a compiler configuration.
+Back-ends that override `method_table` or `method_table_view` must override this form as
+well and include every method-table identity used by the view. On Julia 1.11+, the
+job-level `cache_owner(job)` returns the pre-boxed token stored on its `CompilerConfig`.
+
+The returned value must match under `===`/`jl_egal` after package-image deserialization;
+use immutable containers and canonical method-table objects.
+"""
+cache_owner(target::AbstractCompilerTarget, params::AbstractCompilerParams,
+            always_inline::Bool) =
+    GPUCompilerCacheToken(target, params, always_inline, GLOBAL_METHOD_TABLE)
+
+
 ## config
 
 export CompilerConfig
 
 # the configuration of the compiler
+
+# Keep the 1.10 layout concrete: an `Any` field makes otherwise-inline configs escape when
+# used in the legacy results key. Integrated caching needs the pre-boxed owner on 1.11+.
+const CompilerConfigCacheOwner = @static if HAS_INTEGRATED_CACHE
+    Any
+else
+    Nothing
+end
 
 const CONFIG_KWARGS = [:kernel, :name, :entry_abi, :always_inline, :opt_level,
                        :libraries, :optimize, :cleanup, :validate, :strip]
@@ -128,6 +164,9 @@ struct CompilerConfig{T,P}
     toplevel::Bool
     only_entry::Bool
 
+    # Boxed once so calls into Julia's Any-typed integrated cache don't allocate on every hit.
+    cache_owner::CompilerConfigCacheOwner
+
     function CompilerConfig(target::AbstractCompilerTarget, params::AbstractCompilerParams;
                             kernel=true, name=nothing, entry_abi=:specfunc, toplevel=true,
                             always_inline=false, opt_level=2,
@@ -137,10 +176,15 @@ struct CompilerConfig{T,P}
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
+        owner = @static if HAS_INTEGRATED_CACHE
+            cache_owner(target, params, always_inline)
+        else
+            nothing
+        end
         new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
                                             always_inline, opt_level, debug_level, libraries,
                                             optimize, cleanup, validate, strip, toplevel,
-                                            only_entry)
+                                            only_entry, owner)
     end
 end
 
@@ -187,7 +231,9 @@ function Base.hash(cfg::CompilerConfig, h::UInt)
     h = hash(cfg.strip, h)
     h = hash(cfg.toplevel, h)
     h = hash(cfg.only_entry, h)
-
+    # `cache_owner` deliberately is not hashed: its target/params/inlining components were
+    # already included above, and a method-table-only difference may safely collide. Hashing
+    # the full token here would duplicate the most expensive parts of every config hash.
     return h
 end
 
@@ -307,13 +353,12 @@ pass_by_ref(@nospecialize(job::CompilerJob)) = false
 valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 
 # Cache partitioning. On Julia 1.11+, the owner is stored on every `CodeInstance` and
-# compared via `jl_egal`, so it (and every field) must be immutable for cross-session
-# matches (e.g. via package precompilation); custom `target` / `params` types must be
-# `struct`s, not `mutable struct`s.
+# compared via `jl_egal`; custom `target` / `params` containers must be immutable so
+# equivalent values can match across package-image deserialization.
 #
 # On Julia 1.10, where there's no per-CI owner field, this token only identifies the
-# session-local cache partition (see `cached_compilation` / `GLOBAL_CI_CACHES` in
-# `deprecated.jl`); the immutability requirement is still useful for stable hashing.
+# session-local `GLOBAL_CI_CACHES` partition in `deprecated.jl`; the immutability
+# requirement is still useful for stable hashing.
 #
 # Care is required for anything that impacts:
 #   - method_table
@@ -322,19 +367,17 @@ valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 # The default covers the full target+params instances (so backends with version- or
 # arch-specific knobs partition cleanly), `always_inline` (which feeds optimization_params),
 # and the method table.
-struct GPUCompilerCacheToken{T<:AbstractCompilerTarget, P<:AbstractCompilerParams}
-    target::T
-    params::P
-    always_inline::Bool
-    method_table::Core.MethodTable
+# The token is created and boxed by the CompilerConfig constructor. Returning the boxed field
+# is important: passing a freshly-constructed immutable token to the Any-typed C cache API
+# allocates on every kernel-cache hit.
+@static if HAS_INTEGRATED_CACHE
+    cache_owner(job::CompilerJob) = job.config.cache_owner
+else
+    # Preserve the allocation-free 1.10 path: constructing this specialized immutable token
+    # is cheaper than storing an Any-typed box on every CompilerConfig.
+    cache_owner(job::CompilerJob) = GPUCompilerCacheToken(
+        job.config.target, job.config.params, job.config.always_inline, method_table(job))
 end
-
-# NOTE: deliberately specialized (one instantiation per back-end): this runs on the
-#       kernel launch hot path, and constructing the token dynamically is an order of
-#       magnitude slower.
-cache_owner(job::CompilerJob) =
-    GPUCompilerCacheToken(job.config.target, job.config.params,
-                          job.config.always_inline, method_table(job))
 
 """
     cached_results(::Type{V}, job::CompilerJob) -> V
@@ -352,9 +395,11 @@ mutable struct MetalResults
     MetalResults() = new(nothing, nothing, [])
 end
 
-res = GPUCompiler.cached_results(MetalResults, job)
-if res.metallib === nothing || GPUCompiler.compile_hook[] !== nothing
-    ...compile, populate res...
+res = GPUCompiler.cached_results_if_present(MetalResults, job)
+if res === nothing || res.metallib === nothing || GPUCompiler.compile_hook[] !== nothing
+    artifacts = ...compile...
+    res === nothing && (res = GPUCompiler.cached_results(MetalResults, job))
+    ...populate res from artifacts...
 end
 ```
 
@@ -395,36 +440,67 @@ Entries are matched by `===` (`jl_egal`): `CompilerConfig` is an immutable struc
 structurally identical configs compare equal, including against configs deserialized
 from package images.
 """
+# `CompilerConfig` is an abstract UnionAll here. Keeping it in a tuple stored inline in a
+# Vector boxes the config again on every iteration. A non-isbits entry object is stored by
+# reference, so both fields are boxed once and hot-path scans allocate nothing.
+struct JobResultEntry
+    config::CompilerConfig
+    value::Any
+end
+
 mutable struct JobResults
-    entries::Vector{Tuple{CompilerConfig,Any}}
-    JobResults() = new(Tuple{CompilerConfig,Any}[])
+    entries::Vector{JobResultEntry}
+    JobResults() = new(JobResultEntry[])
 end
 
 const cached_results_lock = ReentrantLock()
 
 # NOTE: like `cache_owner`, specialized for the launch hot path (bounded number of
 #       instantiations: one per back-end and results type).
-function cached_results(::Type{V}, job::CompilerJob) where {V}
-    owner = cache_owner(job)
-    cache = CompilerCaching.CacheView{JobResults}(owner, job.world)
-
-    # get a CI for the job, running inference to create one if needed
-    ci = get(cache, job.source, nothing)
-    if ci === nothing
-        interp = get_interpreter(job)
-        ci = CompilerCaching.typeinf!(interp, job.source)
-        ci === nothing && error("Inference of $(job.source) failed")
-    end
-
+function job_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
     jr = CompilerCaching.results(JobResults, ci)
     Base.@lock cached_results_lock begin
-        for (config, v) in jr.entries
-            config === job.config && v isa V && return v::V
+        for entry in jr.entries
+            entry.config === config && entry.value isa V && return entry.value::V
         end
         v = V()
-        push!(jr.entries, (job.config, v))
+        push!(jr.entries, JobResultEntry(config, v))
         return v
     end
+end
+
+function cache_view(@nospecialize(job::CompilerJob))
+    # `cache_owner` is deliberately stored as Any on CompilerConfig: preserve that box in the
+    # CacheView instead of re-specializing and re-boxing the immutable token for the ccall.
+    CompilerCaching.CacheView{Any,JobResults}(cache_owner(job), job.world)
+end
+
+"""
+    cached_results_if_present(::Type{V}, job::CompilerJob) -> Union{Nothing,V}
+
+Return the results struct for `job` when its CodeInstance already exists, creating only the
+per-config `V` entry. Return `nothing` without running inference when no CI exists.
+
+Back-end compile-or-lookup paths should use this first: on a miss, run codegen (which drives
+inference itself), then call [`cached_results`](@ref) to attach the artifacts. This avoids a
+standalone inference walk immediately followed by the compiler's own walk.
+"""
+function cached_results_if_present(::Type{V}, job::CompilerJob) where {V}
+    ci = get(cache_view(job), job.source, nothing)
+    ci === nothing && return nothing
+    return job_results(V, ci, job.config)
+end
+
+function cached_results(::Type{V}, job::CompilerJob) where {V}
+    v = cached_results_if_present(V, job)
+    v === nothing || return v
+
+    # No CI exists yet. This path is useful to consumers that need a results object before
+    # codegen; back-end compile-or-lookup paths avoid it via `cached_results_if_present`.
+    interp = get_interpreter(job)
+    ci = CompilerCaching.typeinf!(interp, job.source)
+    ci === nothing && error("Inference of $(job.source) failed")
+    return job_results(V, ci, job.config)
 end
 
 ## session-dependent results
@@ -457,12 +533,12 @@ end
 function wipe_session_dependent_results()
     Base.@lock session_dependent_lock begin
         for job in session_dependent_jobs
-            cache = CompilerCaching.CacheView{JobResults}(cache_owner(job), job.world)
+            cache = cache_view(job)
             ci = get(cache, job.source, nothing)
             ci === nothing && continue
             jr = CompilerCaching.results(JobResults, ci)
             Base.@lock cached_results_lock begin
-                filter!(entry -> entry[1] !== job.config, jr.entries)
+                filter!(entry -> entry.config !== job.config, jr.entries)
             end
         end
         empty!(session_dependent_jobs)
@@ -472,9 +548,9 @@ end
 
 end # HAS_INTEGRATED_CACHE
 
-@public GPUCompilerCacheToken, cache_owner, cached_results
+@public GPUCompilerCacheToken, cache_owner, cached_results, cached_results_if_present
 @static if HAS_INTEGRATED_CACHE
-    @public JobResults
+    @public JobResults, JobResultEntry
 end
 
 # the method table to use

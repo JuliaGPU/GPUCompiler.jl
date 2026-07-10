@@ -32,6 +32,27 @@ precompile_test_harness("Inference caching") do load_path
             return Int(x)
         end
 
+        mutable struct Results
+            artifact::Union{Nothing,String}
+            Results() = new(nothing)
+        end
+
+        portable_kernel(x) = x + 1
+        session_kernel(x) = x + 2
+
+        # Attach representative back-end artifacts while the package image is built. The
+        # portable entry should survive serialization; the session-dependent one should be
+        # removed by GPUCompiler's pre-output atexit hook.
+        let
+            job, _ = NativeCompiler.Native.create_job(portable_kernel, (Int,))
+            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "portable"
+        end
+        let
+            job, _ = NativeCompiler.Native.create_job(session_kernel, (Int,))
+            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "session"
+            NativeCompiler.GPUCompiler.mark_session_dependent!(job)
+        end
+
         let
             job, _ = NativeCompiler.Native.create_job(kernel, (Vector{Int}, Int))
             precompile(job)
@@ -87,6 +108,14 @@ precompile_test_harness("Inference caching") do load_path
         @test all(!check_presence(mi, token) for mi in identity_mis)
 
         using NativeBackend
+
+        portable_job, _ = NativeCompiler.Native.create_job(NativeBackend.portable_kernel, (Int,))
+        portable_res = GPUCompiler.cached_results(NativeBackend.Results, portable_job)
+        @test portable_res.artifact == "portable"
+
+        session_job, _ = NativeCompiler.Native.create_job(NativeBackend.session_kernel, (Int,))
+        session_res = GPUCompiler.cached_results(NativeBackend.Results, session_job)
+        @test session_res.artifact === nothing
 
         # Check that kernel survived
         kernel_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel), Tuple{Vector{Int}, Int})

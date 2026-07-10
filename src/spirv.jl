@@ -27,9 +27,8 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     # SPIR-V extensions, as the comma-separated specifier string passed verbatim to the
     # translator/back-end via `--spirv-ext`, e.g. "+SPV_EXT_shader_atomic_float_add,+SPV_KHR_expect_assume"
     # (LLVM feature-string style, cf. `GCNCompilerTarget.features`). Kept as a plain
-    # `String` -- not a `Vector` -- because target fields must be immutable for the
-    # `jl_egal`-based cache lookups (`cache_owner`, `JobResults`) to match across
-    # sessions; see the §2.2 rule in CACHING-REDESIGN.md.
+    # `String` -- not a `Vector` -- so `jl_egal`-based owner/config lookups can match
+    # structurally equivalent targets after package-image deserialization.
     extensions::String = ""
     supports_fp16::Bool = true
     supports_fp64::Bool = true

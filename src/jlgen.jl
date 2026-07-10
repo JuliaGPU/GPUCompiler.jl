@@ -630,17 +630,21 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             ci′.min_world <= job.world <= ci′.max_world
         end
 
-        # `jl_get_llvm_cis` may return both our owner-token CI and a native
-        # owner-less CI for the same MI. Prefer ours when present, but keep
-        # owner-less CIs that are the only compiled entry for their method.
+        # `jl_get_llvm_cis` may return CIs belonging to several foreign interpreters as
+        # well as a native owner-less CI for the same MI. Keep only this job's owner, and
+        # retain an owner-less CI only when this job has no owned entry for that method.
+        # Treating every non-nothing owner as ours breaks when multiple GPU back-ends are
+        # loaded in the same process and eventually creates duplicate compiled entries.
+        owner = cache_owner(job)
         owned_mis = Set{MethodInstance}()
         for ci′ in code_instances
-            if ci′.owner !== nothing
+            if ci′.owner === owner
                 push!(owned_mis, ci′.def::MethodInstance)
             end
         end
         filter!(code_instances) do ci′
-            return ci′.owner !== nothing || ci′.def ∉ owned_mis
+            return ci′.owner === owner ||
+                   (ci′.owner === nothing && ci′.def ∉ owned_mis)
         end
     end
 

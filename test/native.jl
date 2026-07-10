@@ -125,6 +125,8 @@ end
 
     @testset "cached results" begin
         mod = @eval module $(gensym())
+            Base.Experimental.@MethodTable(other_method_table)
+
             mutable struct Results
                 asm::Union{Nothing,String}
                 Results() = new(nothing)
@@ -163,6 +165,20 @@ end
         job2, _ = Native.create_job(mod.kernel, (Int64,))
         @test GPUCompiler.cached_results(mod.Results, job2) === res
 
+        @static if GPUCompiler.HAS_INTEGRATED_CACHE
+            # The compiler may report CIs for several foreign owners when the same MI has
+            # been inferred through multiple interpreters. Codegen must select this job's
+            # owner rather than treating every non-native CI as interchangeable.
+            other_owner_job, _ = Native.create_job(
+                mod.kernel, (Int64,); method_table=mod.other_method_table)
+            other_owner_res = GPUCompiler.cached_results(mod.Results, other_owner_job)
+            @test other_owner_res !== res
+            JuliaContext() do ctx
+                _, meta = GPUCompiler.compile(:llvm, job)
+                @test meta.compiled[job.source].ci.owner === GPUCompiler.cache_owner(job)
+            end
+        end
+
         # redefinition invalidates: a job in the new world gets a fresh struct
         @eval mod kernel(i) = child(i)+2
         new_job, _ = Native.create_job(mod.kernel, (Int64,))
@@ -184,6 +200,37 @@ end
             @test wiped_res.asm === nothing
             # ... without affecting other configs on the same CI
             @test GPUCompiler.cached_results(mod.Results, other_job) === other_res
+        end
+    end
+
+    @testset "runtime cache invalidation" begin
+        # The assembled runtime cache must follow Julia's CodeInstance invalidation. Runtime
+        # functions are ordinary Julia methods and can be redefined during a session.
+        @eval Native.Runtime signal_exception() = nothing
+        job, _ = Native.create_job(identity, (Nothing,))
+
+        func_job, _ = Native.create_job(identity, (Nothing,); entry_abi=:func, opt_level=3)
+        rt_config = GPUCompiler.runtime_config(func_job)
+        @test rt_config.entry_abi === :specfunc
+        @test rt_config.opt_level == 0
+
+        JuliaContext() do ctx
+            empty!(GPUCompiler.runtime_libs)
+            GPUCompiler.load_runtime(job)
+
+            key = (GPUCompiler.runtime_config(job), !GPUCompiler.supports_typed_pointers(ctx))
+            old = GPUCompiler.runtime_libs[key]
+            @test GPUCompiler.runtime_library_valid(old, job)
+
+            @eval Native.Runtime signal_exception() = return
+            new_job, _ = Native.create_job(identity, (Nothing,))
+            new_job = CompilerJob(new_job.source, new_job.config, Base.get_world_counter())
+            @test !GPUCompiler.runtime_library_valid(old, new_job)
+
+            GPUCompiler.load_runtime(new_job)
+            new = GPUCompiler.runtime_libs[key]
+            @test new !== old
+            @test GPUCompiler.runtime_library_valid(new, new_job)
         end
     end
 

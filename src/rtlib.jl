@@ -74,16 +74,19 @@ end
 # Compile a single runtime function and link it into `mod`. The renamed bitcode is
 # memoized through `RuntimeFunctionResults`; the session-local `runtime_libs` cache
 # below additionally avoids repeating the parse-and-link work within a session.
-function emit_function!(mod, config::CompilerConfig, f, method)
-    tt = Base.to_tuple_type(method.types)
-    source = generic_methodinstance(f, tt)
+function emit_function!(mod, config::CompilerConfig, source::MethodInstance, method,
+                        world::UInt)
     name = method.llvm_name
-    rt_job = CompilerJob(source, config)
+    rt_job = CompilerJob(source, config, world)
 
-    res = cached_results(RuntimeFunctionResults, rt_job)
-    if res.bitcode !== nothing
+    # On 1.11+, don't run a standalone inference walk on a miss: `compile_unhooked` below
+    # drives inference itself. The 1.10 implementation returns its session-local result
+    # directly, without touching inference.
+    ci, res = runtime_function_results(rt_job)
+    if res !== nothing && res.bitcode !== nothing
         link!(mod, parse(LLVM.Module, MemoryBuffer(res.bitcode)))
-        return
+        ci === nothing && (ci = runtime_code_instance(rt_job))
+        return ci::CodeInstance
     end
 
     new_mod, meta = compile_unhooked(:llvm, rt_job)
@@ -108,33 +111,72 @@ function emit_function!(mod, config::CompilerConfig, f, method)
 
     io = IOBuffer()
     write(io, new_mod)
+    ci === nothing && (ci = runtime_code_instance(rt_job))
+    res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
     res.bitcode = take!(io)
 
     link!(mod, new_mod)
+    return ci::CodeInstance
+end
+
+function runtime_function_results(@nospecialize(job::CompilerJob))
+    @static if HAS_INTEGRATED_CACHE
+        ci = get(cache_view(job), job.source, nothing)
+        ci === nothing && return nothing, nothing
+        return ci, job_results(RuntimeFunctionResults, ci, job.config)
+    else
+        # The 1.10 results store is independent of the CodeCache. Avoid querying the latter
+        # until the caller actually needs the contributing CI.
+        return nothing, cached_results(RuntimeFunctionResults, job)
+    end
+end
+
+function runtime_method_instance(@nospecialize(job::CompilerJob), method)
+    def = if isa(method.def, Symbol)
+        isdefined(runtime_module(job), method.def) || return nothing
+        getfield(runtime_module(job), method.def)
+    else
+        method.def
+    end
+    # Resolve at the requesting job's explicit world, rather than this task's TLS world.
+    # Runtime methods may be redefined while a long-lived compilation task is running.
+    return generic_methodinstance(
+        typeof(def), Base.to_tuple_type(method.types), job.world)
+end
+
+function runtime_code_instance(@nospecialize(job::CompilerJob))
+    ci = @static if HAS_INTEGRATED_CACHE
+        get(cache_view(job), job.source, nothing)
+    else
+        cache = WorldView(get_code_cache(job), job.world, job.world)
+        CC.get(cache, job.source, nothing)
+    end
+    ci === nothing && error("Missing CodeInstance after compiling $(job.source)")
+    return ci::CodeInstance
 end
 
 # the compiler job passed into here identifies the job that requires the runtime.
 # derive a config that represents the runtime itself (notably with kernel=false).
-# fields that identify the *kernel* job, like its entry-point name, are reset so
-# that runtime artifacts are keyed (and persisted) identically for all kernels
-# sharing the remaining codegen-relevant settings, instead of once per cosmetic
-# config variation.
+# Fields that identify or optimize only the *kernel* job are reset so runtime artifacts are
+# keyed identically for all kernels sharing the remaining codegen-relevant settings. Runtime
+# functions always use the specfunc ABI and are deliberately left unoptimized until linked
+# into the toplevel module, making the kernel's entry ABI and LLVM opt level irrelevant.
 function runtime_config(@nospecialize(job::CompilerJob))
-    CompilerConfig(job.config; kernel=false, toplevel=false, only_entry=false,
-                   strip=false, name=nothing)
+    CompilerConfig(job.config; kernel=false, entry_abi=:specfunc, opt_level=0,
+                   toplevel=false, only_entry=false, strip=false, name=nothing)
 end
 
 function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     mod = LLVM.Module("GPUCompiler run-time library")
+    sources = MethodInstance[]
+    code_instances = CodeInstance[]
 
     for method in values(Runtime.methods)
-        def = if isa(method.def, Symbol)
-            isdefined(runtime_module(job), method.def) || continue
-            getfield(runtime_module(job), method.def)
-        else
-            method.def
-        end
-        emit_function!(mod, config, typeof(def), method)
+        resolved = runtime_method_instance(job, method)
+        resolved === nothing && continue
+        source = resolved
+        push!(sources, source)
+        push!(code_instances, emit_function!(mod, config, source, method, job.world))
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again
@@ -142,7 +184,7 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     # removes Julia address spaces, which would then lead to type mismatches when using
     # functions from the runtime library from IR that has not been stripped of AS info.
 
-    mod
+    return mod, sources, code_instances
 end
 
 # Session-local cache of assembled runtime libraries, keyed by
@@ -152,23 +194,55 @@ end
 # persistence happens at the per-function level (see `RuntimeFunctionResults`):
 # reassemble on first use of each session, then reuse within the session.
 #
-# NOTE: unlike the per-function bitcode, whose CodeInstances Julia invalidates on
-# method redefinition, the assembled library is world-blind: redefining a runtime
-# function mid-session leaves a stale assembly behind. That only affects interactive
-# development of a back-end's runtime module (restart, or `empty!` this cache).
-const runtime_libs = Dict{Tuple{CompilerConfig, Bool}, Vector{UInt8}}()
+# Keep both the selected MethodInstances and their contributing CodeInstances with the
+# assembled bytes. Re-resolving methods after the world changes detects direct method-table
+# changes; clipped CI ranges detect invalidated transitive callees. This makes the assembled
+# cache follow Julia's validity model without a manual `reset_runtime` hook.
+mutable struct RuntimeLibrary
+    bytes::Vector{UInt8}
+    sources::Vector{MethodInstance}
+    code_instances::Vector{CodeInstance}
+    validated_world::UInt
+end
+
+function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob))
+    # Method-table changes and CI invalidations always advance the world counter. A runtime
+    # already validated for this exact world therefore needs no per-function scan on the
+    # common cache-hit path.
+    job.world == lib.validated_world && return true
+
+    i = 0
+    for method in values(Runtime.methods)
+        resolved = runtime_method_instance(job, method)
+        resolved === nothing && continue
+        i += 1
+        i <= length(lib.sources) || return false
+        resolved === lib.sources[i] || return false
+    end
+    i == length(lib.sources) || return false
+    all(ci -> ci.min_world <= job.world <= ci.max_world, lib.code_instances) || return false
+    lib.validated_world = job.world
+    return true
+end
+
+const runtime_libs = Dict{Tuple{CompilerConfig, Bool}, RuntimeLibrary}()
 const runtime_libs_lock = ReentrantLock()
 
 @locked function load_runtime(@nospecialize(job::CompilerJob))
     config = runtime_config(job)
     key = (config, !supports_typed_pointers(context()))
 
-    bytes = Base.@lock runtime_libs_lock get!(runtime_libs, key) do
-        lib = build_runtime(job, config)
-        io = IOBuffer()
-        write(io, lib)
-        take!(io)
+    cached = Base.@lock runtime_libs_lock begin
+        cached = get(runtime_libs, key, nothing)
+        if cached === nothing || !runtime_library_valid(cached, job)
+            lib, sources, code_instances = build_runtime(job, config)
+            io = IOBuffer()
+            write(io, lib)
+            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world)
+            runtime_libs[key] = cached
+        end
+        cached
     end
 
-    return parse(LLVM.Module, MemoryBuffer(bytes); lazy=true)
+    return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true)
 end
