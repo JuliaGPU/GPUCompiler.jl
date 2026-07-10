@@ -132,7 +132,7 @@ end
 
 function runtime_function_results(@nospecialize(job::CompilerJob))
     @static if HAS_INTEGRATED_CACHE
-        ci = get(cache_view(job), job.source, nothing)
+        ci = job_code_instance(job)
         ci === nothing && return nothing, nothing
         return ci, job_results(RuntimeFunctionResults, ci, job.config)
     else
@@ -157,7 +157,7 @@ end
 
 function runtime_code_instance(@nospecialize(job::CompilerJob))
     ci = @static if HAS_INTEGRATED_CACHE
-        get(cache_view(job), job.source, nothing)
+        job_code_instance(job)
     else
         cache = WorldView(get_code_cache(job), job.world, job.world)
         CC.get(cache, job.source, nothing)

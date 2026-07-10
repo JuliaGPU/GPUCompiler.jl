@@ -140,8 +140,16 @@ end
             kernel(i) = child(i)+1
         end
 
-        # get-or-create: first access yields an empty struct, later accesses the same one
         job, _ = Native.create_job(mod.kernel, (Int64,))
+
+        @static if GPUCompiler.HAS_INTEGRATED_CACHE
+            # before any code exists for the job, the lookup comes up empty
+            @test GPUCompiler.cached_results(mod.Results, job) === nothing
+        end
+
+        # get-or-create: first access after inference yields an empty struct, later
+        # accesses return the same one
+        precompile(job)
         res = GPUCompiler.cached_results(mod.Results, job)
         @test res isa mod.Results
         @test res.asm === nothing
@@ -165,12 +173,23 @@ end
         job2, _ = Native.create_job(mod.kernel, (Int64,))
         @test GPUCompiler.cached_results(mod.Results, job2) === res
 
+        # vararg kernels: on 1.14+, inference caches these under the compilable
+        # (vararg-widened) MethodInstance rather than the fully-specialized job.source,
+        # which the lookup needs to chase
+        vmod = @eval module $(gensym())
+            kernel(args...) = nothing
+        end
+        vjob, _ = Native.create_job(vmod.kernel, (Int64, Int64))
+        precompile(vjob)
+        @test GPUCompiler.cached_results(mod.Results, vjob) isa mod.Results
+
         @static if GPUCompiler.HAS_INTEGRATED_CACHE
             # The compiler may report CIs for several foreign owners when the same MI has
             # been inferred through multiple interpreters. Codegen must select this job's
             # owner rather than treating every non-native CI as interchangeable.
             other_owner_job, _ = Native.create_job(
                 mod.kernel, (Int64,); method_table=mod.other_method_table)
+            precompile(other_owner_job)
             other_owner_res = GPUCompiler.cached_results(mod.Results, other_owner_job)
             @test other_owner_res !== res
             JuliaContext() do ctx
@@ -182,6 +201,12 @@ end
         # redefinition invalidates: a job in the new world gets a fresh struct
         @eval mod kernel(i) = child(i)+2
         new_job, _ = Native.create_job(mod.kernel, (Int64,))
+        @static if GPUCompiler.HAS_INTEGRATED_CACHE
+            # ... after first showing up empty, as the old CodeInstance no longer covers
+            # the new world
+            @test GPUCompiler.cached_results(mod.Results, new_job) === nothing
+        end
+        precompile(new_job)
         new_res = GPUCompiler.cached_results(mod.Results, new_job)
         @test new_res !== res
         @test new_res.asm === nothing

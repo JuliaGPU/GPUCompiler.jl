@@ -45,10 +45,12 @@ precompile_test_harness("Inference caching") do load_path
         # removed by GPUCompiler's pre-output atexit hook.
         let
             job, _ = NativeCompiler.Native.create_job(portable_kernel, (Int,))
+            precompile(job)
             NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "portable"
         end
         let
             job, _ = NativeCompiler.Native.create_job(session_kernel, (Int,))
+            precompile(job)
             NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "session"
             NativeCompiler.GPUCompiler.mark_session_dependent!(job)
         end
@@ -111,10 +113,12 @@ precompile_test_harness("Inference caching") do load_path
 
         portable_job, _ = NativeCompiler.Native.create_job(NativeBackend.portable_kernel, (Int,))
         portable_res = GPUCompiler.cached_results(NativeBackend.Results, portable_job)
+        @test portable_res !== nothing
         @test portable_res.artifact == "portable"
 
         session_job, _ = NativeCompiler.Native.create_job(NativeBackend.session_kernel, (Int,))
         session_res = GPUCompiler.cached_results(NativeBackend.Results, session_job)
+        @test session_res !== nothing
         @test session_res.artifact === nothing
 
         # Check that kernel survived

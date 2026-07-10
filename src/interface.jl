@@ -68,30 +68,34 @@ nest_params(params::AbstractCompilerParams, parent::AbstractCompilerParams) = pa
 
 ## cache owner
 
-# Inference results are shared by jobs with the same target, params, inlining policy, and
-# method-table identity. Store this token on the CompilerConfig (as `Any`) so the immutable
-# value is boxed once when the config is created, instead of on every integrated-cache lookup.
-struct GPUCompilerCacheToken{T<:AbstractCompilerTarget, P<:AbstractCompilerParams, M}
+# Inference results are shared by jobs with the same target, params, and inlining policy.
+# On 1.11+, store this token on the CompilerConfig (as `Any`) so the immutable value is
+# boxed once when the config is created, instead of on every integrated-cache lookup.
+struct GPUCompilerCacheToken{T<:AbstractCompilerTarget, P<:AbstractCompilerParams}
     target::T
     params::P
     always_inline::Bool
-    method_table::M
 end
 
 """
     cache_owner(target, params, always_inline)
 
-Construct the immutable token that partitions inference for a compiler configuration.
-Back-ends that override `method_table` or `method_table_view` must override this form as
-well and include every method-table identity used by the view. On Julia 1.11+, the
-job-level `cache_owner(job)` returns the pre-boxed token stored on its `CompilerConfig`.
+Construct the immutable token that partitions inference for a compiler configuration. On
+Julia 1.11+, the job-level `cache_owner(job)` returns the pre-boxed token stored on its
+`CompilerConfig`.
 
-The returned value must match under `===`/`jl_egal` after package-image deserialization;
-use immutable containers and canonical method-table objects.
+The default token covers the full `target` and `params` instances plus `always_inline`.
+That is sufficient because the inference inputs derived from a job — `method_table`,
+`method_table_view`, `inference_params` and `optimization_params` — must be pure
+functions of those values, so back-ends normally leave this untouched.
+
+When overriding, the returned value must match under `===`/`jl_egal` after package-image
+deserialization: use immutable containers, and only reference mutable objects (like method
+tables) that are module-level singletons.
 """
 cache_owner(target::AbstractCompilerTarget, params::AbstractCompilerParams,
             always_inline::Bool) =
-    GPUCompilerCacheToken(target, params, always_inline, GLOBAL_METHOD_TABLE)
+    GPUCompilerCacheToken(target, params, always_inline)
 
 
 ## config
@@ -360,13 +364,6 @@ valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 # session-local `GLOBAL_CI_CACHES` partition in `deprecated.jl`; the immutability
 # requirement is still useful for stable hashing.
 #
-# Care is required for anything that impacts:
-#   - method_table
-#   - inference_params
-#   - optimization_params
-# The default covers the full target+params instances (so backends with version- or
-# arch-specific knobs partition cleanly), `always_inline` (which feeds optimization_params),
-# and the method table.
 # The token is created and boxed by the CompilerConfig constructor. Returning the boxed field
 # is important: passing a freshly-constructed immutable token to the Any-typed C cache API
 # allocates on every kernel-cache hit.
@@ -375,17 +372,19 @@ valid_function_pointer(@nospecialize(job::CompilerJob), ptr::Ptr{Cvoid}) = false
 else
     # Preserve the allocation-free 1.10 path: constructing this specialized immutable token
     # is cheaper than storing an Any-typed box on every CompilerConfig.
-    cache_owner(job::CompilerJob) = GPUCompilerCacheToken(
-        job.config.target, job.config.params, job.config.always_inline, method_table(job))
+    cache_owner(job::CompilerJob) =
+        cache_owner(job.config.target, job.config.params, job.config.always_inline)
 end
 
 """
-    cached_results(::Type{V}, job::CompilerJob) -> V
+    cached_results(::Type{V}, job::CompilerJob) -> Union{Nothing,V}
 
-Retrieve the compilation-results struct of type `V` for `job`, creating an empty one on
-first access. `V` must be a `mutable struct` with a zero-arg constructor; back-ends
-define one such struct holding the artifacts of each compilation stage, check whether
-the relevant fields are populated, and fill them in (running the compiler) when not:
+Retrieve the compilation-results struct of type `V` for `job`. Returns `nothing` when no
+code has been compiled (or inferred) for the job yet; once code exists, an empty `V` is
+created on first access and the same struct is returned ever after. `V` must be a
+`mutable struct` with a zero-arg constructor; back-ends define one such struct holding
+the artifacts of each compilation stage, check whether the relevant fields are
+populated, and fill them in (running the compiler) when not:
 
 ```julia
 mutable struct MetalResults
@@ -395,13 +394,18 @@ mutable struct MetalResults
     MetalResults() = new(nothing, nothing, [])
 end
 
-res = GPUCompiler.cached_results_if_present(MetalResults, job)
+res = GPUCompiler.cached_results(MetalResults, job)
 if res === nothing || res.metallib === nothing || GPUCompiler.compile_hook[] !== nothing
     artifacts = ...compile...
-    res === nothing && (res = GPUCompiler.cached_results(MetalResults, job))
+    res = @something res GPUCompiler.cached_results(MetalResults, job)
     ...populate res from artifacts...
 end
 ```
+
+Compiling the job (through `GPUCompiler.compile`) populates Julia's code cache, so the
+post-compile lookup in the example is guaranteed to succeed. To attach results without
+generating code — e.g. from an inference-only precompilation workload — run
+`precompile(job)` first.
 
 Results are keyed by the *full* compiler job: its method instance, world age, and entire
 `CompilerConfig` (two jobs differing only in, say, the kernel `name` get distinct
@@ -410,14 +414,15 @@ structs). Storage differs per Julia version, transparently to the back-end:
 - On Julia 1.11+, the struct lives on the `CodeInstance`'s `analysis_results` chain in
   Julia's integrated code cache, partitioned by [`cache_owner`](@ref) and keyed by
   config within the per-CI [`JobResults`](@ref) container. Method redefinition
-  invalidates the CI — and with it the attached results. When no CI exists yet,
-  inference is run to create one. Artifacts stored during precompilation are serialized
-  into the package image along with the CI: populate only session-portable values
-  (bytes, strings) during precompile workloads, and keep session-local handles (device
-  modules, pipeline objects) in fields that remain empty until first use at run time.
+  invalidates the CI — and with it the attached results. Artifacts stored during
+  precompilation are serialized into the package image along with the CI: populate only
+  session-portable values (bytes, strings) during precompile workloads, and keep
+  session-local handles (device modules, pipeline objects) in fields that remain empty
+  until first use at run time.
 
-- On Julia 1.10, the struct lives in a session-local Dict; redefinition protection
-  comes from the world age in the key, and nothing persists across sessions.
+- On Julia 1.10, the struct lives in a session-local Dict keyed by the job, so the
+  lookup always succeeds (`nothing` is never returned); redefinition protection comes
+  from the world age in the key, and nothing persists across sessions.
 
 Thread safety: concurrent calls for the same job return the same struct, but
 GPUCompiler does not serialize back-end *compilation*; take a back-end lock around
@@ -433,8 +438,8 @@ function cached_results end
 Per-CodeInstance container mapping a `CompilerConfig` to the back-end's results struct.
 
 A `CodeInstance` is shared by every job whose [`cache_owner`](@ref) matches — the owner
-token only covers what affects *inference* (target, params, `always_inline`, method
-table). The remaining `CompilerConfig` fields (`kernel`, `name`, `entry_abi`,
+token only covers what affects *inference* (target, params, `always_inline`). The
+remaining `CompilerConfig` fields (`kernel`, `name`, `entry_abi`,
 `opt_level`, …) do affect *codegen*, so artifacts must not be shared across them.
 Entries are matched by `===` (`jl_egal`): `CompilerConfig` is an immutable struct, so
 structurally identical configs compare equal, including against configs deserialized
@@ -475,31 +480,28 @@ function cache_view(@nospecialize(job::CompilerJob))
     CompilerCaching.CacheView{Any,JobResults}(cache_owner(job), job.world)
 end
 
-"""
-    cached_results_if_present(::Type{V}, job::CompilerJob) -> Union{Nothing,V}
-
-Return the results struct for `job` when its CodeInstance already exists, creating only the
-per-config `V` entry. Return `nothing` without running inference when no CI exists.
-
-Back-end compile-or-lookup paths should use this first: on a miss, run codegen (which drives
-inference itself), then call [`cached_results`](@ref) to attach the artifacts. This avoids a
-standalone inference walk immediately followed by the compiler's own walk.
-"""
-function cached_results_if_present(::Type{V}, job::CompilerJob) where {V}
-    ci = get(cache_view(job), job.source, nothing)
-    ci === nothing && return nothing
-    return job_results(V, ci, job.config)
+# Fetch the CodeInstance backing `job` from the integrated cache. On 1.14+, inference
+# caches vararg methods under their compilable (vararg-widened) MethodInstance, which
+# for such methods differs from the fully-specialized `job.source`: retry there.
+function job_code_instance(@nospecialize(job::CompilerJob))
+    cache = cache_view(job)
+    ci = get(cache, job.source, nothing)
+    @static if VERSION >= v"1.14-"
+        if ci === nothing
+            mi = ccall(:jl_normalize_to_compilable_mi, Any, (Any,),
+                       job.source)::MethodInstance
+            mi === job.source || (ci = get(cache, mi, nothing))
+        end
+    end
+    return ci
 end
 
+# Deliberately lookup-only: when no CI exists, back-ends run codegen (which drives
+# inference itself) and re-fetch, instead of us running a standalone inference walk here
+# that the compiler's own walk would immediately repeat.
 function cached_results(::Type{V}, job::CompilerJob) where {V}
-    v = cached_results_if_present(V, job)
-    v === nothing || return v
-
-    # No CI exists yet. This path is useful to consumers that need a results object before
-    # codegen; back-end compile-or-lookup paths avoid it via `cached_results_if_present`.
-    interp = get_interpreter(job)
-    ci = CompilerCaching.typeinf!(interp, job.source)
-    ci === nothing && error("Inference of $(job.source) failed")
+    ci = job_code_instance(job)
+    ci === nothing && return nothing
     return job_results(V, ci, job.config)
 end
 
@@ -533,8 +535,7 @@ end
 function wipe_session_dependent_results()
     Base.@lock session_dependent_lock begin
         for job in session_dependent_jobs
-            cache = cache_view(job)
-            ci = get(cache, job.source, nothing)
+            ci = job_code_instance(job)
             ci === nothing && continue
             jr = CompilerCaching.results(JobResults, ci)
             Base.@lock cached_results_lock begin
@@ -548,12 +549,13 @@ end
 
 end # HAS_INTEGRATED_CACHE
 
-@public GPUCompilerCacheToken, cache_owner, cached_results, cached_results_if_present
-@static if HAS_INTEGRATED_CACHE
-    @public JobResults, JobResultEntry
-end
+@public GPUCompilerCacheToken, cache_owner, cached_results
 
 # the method table to use
+#
+# NOTE: these (like `inference_params` and `optimization_params` below) may only depend on
+#       the job's world and its config's `target`/`params` values (+ `always_inline`);
+#       [`cache_owner`](@ref) relies on that to partition inference results correctly.
 # deprecate method_table on next-breaking release
 method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
 method_table_view(@nospecialize(job::CompilerJob)) = get_method_table_view(job.world, method_table(job))

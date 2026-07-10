@@ -239,7 +239,8 @@ end
 const job_results = Dict{Any,Any}()
 const job_results_lock = ReentrantLock()
 
-# specialized for the launch hot path, mirroring the 1.11+ implementation
+# specialized for the launch hot path, mirroring the 1.11+ implementation. As the store is
+# independent of CodeInstances, the lookup always succeeds (`nothing` is never returned).
 function cached_results(::Type{V}, job::CompilerJob) where {V}
     # NOTE: store the MethodInstance's objectid (not the MI) to avoid an expensive
     #       boxing allocation; the MI is kept alive by its method specializations.
@@ -250,10 +251,6 @@ function cached_results(::Type{V}, job::CompilerJob) where {V}
         end::V
     end
 end
-
-# The 1.10 results store is independent of CodeInstances, so obtaining its empty result does
-# not trigger inference. Match the integrated-cache API used by back-end compile-or-lookup paths.
-cached_results_if_present(::Type{V}, job::CompilerJob) where {V} = cached_results(V, job)
 
 
 ## 1.10 session-dependent results

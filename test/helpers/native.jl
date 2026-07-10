@@ -20,9 +20,6 @@ NativeCompilerJob = CompilerJob{NativeCompilerTarget,CompilerParams}
 GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
-GPUCompiler.cache_owner(target::NativeCompilerTarget, params::CompilerParams,
-                        always_inline::Bool) =
-    GPUCompiler.GPUCompilerCacheToken(target, params, always_inline, params.method_table)
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
 function create_job(@nospecialize(func), @nospecialize(types);
