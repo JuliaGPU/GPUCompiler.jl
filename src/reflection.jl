@@ -21,9 +21,99 @@ const highlight_languages = Dict(
     "gcn"   => tree_sitter_gcn_jll,
 )
 
-# the Highlights.jl theme used for syntax highlighting; can be set to any
-# theme name known to Highlights.jl, or a `Highlights.Theme` object
-const highlight_theme = Ref{Any}("Monokai Pro")
+# Set to a Highlights.jl theme, or `nothing` to detect the terminal background.
+const highlight_theme = Ref{Any}(nothing)
+const detected_highlight_theme = Ref{Union{Nothing,String}}()
+const highlight_theme_lock = ReentrantLock()
+
+function environment_highlight_theme(colorfgbg = get(ENV, "COLORFGBG", ""))
+    background = tryparse(Int, last(rsplit(colorfgbg, ';'; limit=2)))
+    isnothing(background) && return
+    rgb = if 0 <= background < 16
+        palette = (0x000000, 0x800000, 0x008000, 0x808000,
+                   0x000080, 0x800080, 0x008080, 0xc0c0c0,
+                   0x808080, 0xff0000, 0x00ff00, 0xffff00,
+                   0x0000ff, 0xff00ff, 0x00ffff, 0xffffff)
+        color = palette[background + 1]
+        ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff) ./ 255
+    elseif 16 <= background < 232
+        levels = (0, 95, 135, 175, 215, 255)
+        color = background - 16
+        (levels[color ÷ 36 + 1], levels[(color ÷ 6) % 6 + 1], levels[color % 6 + 1]) ./ 255
+    elseif 232 <= background < 256
+        fill((8 + 10 * (background - 232)) / 255, 3)
+    else
+        return
+    end
+    light_background(rgb) ? "Monokai Pro Light" : "Monokai Pro"
+end
+
+light_background(rgb) = 0.299 * rgb[1] + 0.587 * rgb[2] + 0.114 * rgb[3] > 0.5
+
+function terminal_background(reply)
+    match = Base.match(r"\e\]11;rgb:([0-9a-f]{1,4})/([0-9a-f]{1,4})/([0-9a-f]{1,4})(?:\a|\e\\)"i,
+                       reply)
+    isnothing(match) && return
+    map(match.captures) do component
+        parse(Int, component; base=16) / (16^length(component) - 1)
+    end
+end
+
+function terminal_highlight_theme(reply)
+    rgb = terminal_background(reply)
+    isnothing(rgb) && return
+    light_background(rgb) ? "Monokai Pro Light" : "Monokai Pro"
+end
+
+function repl_terminal(io)
+    repl = isdefined(Base, :active_repl) ? Base.active_repl : nothing
+    hasproperty(repl, :t) || return
+    terminal = repl.t
+    terminal isa Base.Terminals.TTYTerminal || return
+    only(Base.unwrapcontext(io)) === terminal.out_stream || return
+    terminal.in_stream isa Base.TTY || return
+    terminal
+end
+
+function query_terminal_theme(terminal; timeout=0.1)
+    input = terminal.in_stream
+    Base.Terminals.raw!(terminal, true) || return
+    try
+        Base.start_reading(input)
+        print(terminal.out_stream, "\e]11;?\a")
+        flush(terminal.out_stream)
+
+        reply = UInt8[]
+        deadline = time() + timeout
+        while time() < deadline
+            timedwait(() -> bytesavailable(input) > 0, max(0, deadline - time()); pollint=0.005) ===
+                :timed_out && break
+            append!(reply, readavailable(input))
+            theme = terminal_highlight_theme(String(reply))
+            isnothing(theme) || return theme
+        end
+    finally
+        Base.stop_reading(input)
+        Base.Terminals.raw!(terminal, false)
+    end
+end
+
+function selected_highlight_theme(io)
+    theme = highlight_theme[]
+    isnothing(theme) || return theme
+
+    theme = environment_highlight_theme()
+    isnothing(theme) || return theme
+
+    terminal = repl_terminal(io)
+    isnothing(terminal) && return "Monokai Pro"
+    lock(highlight_theme_lock) do
+        if !isassigned(detected_highlight_theme)
+            detected_highlight_theme[] = query_terminal_theme(terminal)
+        end
+        something(detected_highlight_theme[], "Monokai Pro")
+    end
+end
 
 function highlight(io::IO, code, lexer)
     have_color = get(io, :color, false)
@@ -38,7 +128,7 @@ function highlight(io::IO, code, lexer)
     buf = IOBuffer()
     try
         Highlights.highlight(buf, MIME("text/ansi"), code, language,
-                             highlight_theme[])
+                             selected_highlight_theme(io))
         write(io, take!(buf))
     catch err
         @warn "Failed to highlight $lexer code" exception=(err, catch_backtrace()) maxlog=1
