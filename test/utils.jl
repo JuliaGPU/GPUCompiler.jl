@@ -114,6 +114,37 @@ end
 @testset "highlighting" begin
     ansi_color = "\x1B[3"  # beginning of any foreground color change
 
+    @test GPUCompiler.environment_background("15;0") == (0, 0, 0)
+    @test GPUCompiler.environment_background("0;15") == (1, 1, 1)
+    @test GPUCompiler.environment_background("0;231") == (1, 1, 1)
+    @test GPUCompiler.environment_background("15;232") == ntuple(_ -> 8/255, 3)
+    @test GPUCompiler.environment_background("0;255") == ntuple(_ -> 238/255, 3)
+    @test GPUCompiler.environment_background("ignored;15;0") == (0, 0, 0)
+    @test GPUCompiler.environment_background("") === nothing
+    @test GPUCompiler.environment_background("15;unknown") === nothing
+    @test GPUCompiler.environment_background("15;256") === nothing
+
+    @test GPUCompiler.is_light_background((1, 1, 1))
+    @test !GPUCompiler.is_light_background((0, 0, 0))
+    @test GPUCompiler.terminal_background("\e]11;rgb:f/f/f\a") == (1, 1, 1)
+    @test GPUCompiler.terminal_background("\e]11;rgb:00/80/ff\e\\") == (0, 128/255, 1)
+    @test GPUCompiler.terminal_background("\e]11;rgb:0000/0000/0000\a") == (0, 0, 0)
+    @test GPUCompiler.terminal_background("\e]10;rgb:ffff/ffff/ffff\a") === nothing
+
+    old_theme = GPUCompiler.highlight_theme[]
+    try
+        GPUCompiler.highlight_theme[] = "GitHub"
+        @test GPUCompiler.selected_highlight_theme(IOBuffer()) == "GitHub"
+    finally
+        GPUCompiler.highlight_theme[] = old_theme
+    end
+    withenv("COLORFGBG" => "0;15") do
+        @test GPUCompiler.selected_highlight_theme(IOBuffer()) == "Monokai Pro Light"
+    end
+    withenv("COLORFGBG" => "15;0") do
+        @test GPUCompiler.selected_highlight_theme(IOBuffer()) == "Monokai Pro"
+    end
+
     @testset "PTX" begin
         sample = """
             max.s64         %rd24, %rd18, 0;
@@ -121,20 +152,49 @@ end
             setp.lt.u64     %p2, %rd7, %rd24;
             @%p2 bra        \$L__BB0_3;
         """
-        can_highlight = GPUCompiler.pygmentize_support("ptx")
         highlighted = sprint(GPUCompiler.highlight, sample, "ptx"; context = (:color => true))
-        @test occursin(ansi_color, highlighted) skip = !can_highlight
+        @test occursin(ansi_color, highlighted)
+
+        # no color without a color-enabled IO
+        plain = sprint(GPUCompiler.highlight, sample, "ptx")
+        @test plain == sample
+    end
+
+    @testset "SPIR-V" begin
+        sample = """
+                       OpCapability Kernel
+                  %1 = OpExtInstImport "OpenCL.std"
+                 %10 = OpTypeInt 32 0
+        """
+        highlighted = sprint(GPUCompiler.highlight, sample, "spirv"; context = (:color => true))
+        @test occursin(ansi_color, highlighted)
+    end
+
+    @testset "LLVM" begin
+        sample = """
+            define i32 @add(i32 %x, i32 %y) {
+              %sum = add i32 %x, %y
+              ret i32 %sum
+            }
+        """
+        highlighted = sprint(GPUCompiler.highlight, sample, "llvm"; context = (:color => true))
+        @test occursin(ansi_color, highlighted)
     end
 
     @testset "GCN" begin
         sample = """
             v_add_u32     v3, vcc, s0, v0
             v_mov_b32     v4, s1
-            v_addc_u32    v4, vcc, v4, 0, vcc
+            s_endpgm
         """
-        can_highlight = GPUCompiler.pygmentize_support("gcn")
         highlighted = sprint(GPUCompiler.highlight, sample, "gcn"; context = (:color => true))
-        @test occursin(ansi_color, highlighted) skip = !can_highlight
+        @test occursin(ansi_color, highlighted)
+    end
+
+    @testset "unknown lexers pass through" begin
+        sample = "some random text\n"
+        highlighted = sprint(GPUCompiler.highlight, sample, "metal"; context = (:color => true))
+        @test highlighted == sample
     end
 end
 

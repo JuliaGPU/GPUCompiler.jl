@@ -8,101 +8,161 @@ const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulh
 # syntax highlighting
 #
 
-const _pygmentize = Ref{Union{String,Nothing}}()
-function pygmentize()
-    if !isassigned(_pygmentize)
-        _pygmentize[] = Sys.which("pygmentize")
+import Highlights
+using tree_sitter_llvm_jll, tree_sitter_ptx_jll, tree_sitter_spirv_jll,
+      tree_sitter_gcn_jll
+
+# tree-sitter grammars for the assembly formats we emit, keyed by the
+# `source_code` of the compiler target
+const highlight_languages = Dict(
+    "llvm"  => tree_sitter_llvm_jll,
+    "ptx"   => tree_sitter_ptx_jll,
+    "spirv" => tree_sitter_spirv_jll,
+    "gcn"   => tree_sitter_gcn_jll,
+)
+
+# Set to a Highlights.jl theme, or `nothing` to detect the terminal background.
+const highlight_theme = Ref{Any}(nothing)
+const detected_background = Ref{Union{Nothing,NTuple{3,Float64}}}()
+const terminal_background_lock = ReentrantLock()
+
+"""
+    environment_background([colorfgbg]) -> Union{NTuple{3,Float64},Nothing}
+
+Read the terminal background color from its `COLORFGBG` environment variable.
+`COLORFGBG` conventionally contains semicolon-separated foreground and
+background color indices (for example, `"15;0"` for white on black). Some
+terminals add more fields, so only the final, background field is used.
+
+Decode the background as an xterm 256-color palette index and return its RGB
+components, normalized to the range 0 to 1. Return `nothing` if the value is
+missing, malformed, or outside the palette.
+"""
+function environment_background(colorfgbg = get(ENV, "COLORFGBG", ""))
+    index = tryparse(Int, last(rsplit(colorfgbg, ';'; limit=2)))
+    isnothing(index) && return
+    if 0 <= index < 16
+        # The 16 ANSI colors, represented as 0xRRGGBB.
+        palette = (0x000000, 0x800000, 0x008000, 0x808000,
+                   0x000080, 0x800080, 0x008080, 0xc0c0c0,
+                   0x808080, 0xff0000, 0x00ff00, 0xffff00,
+                   0x0000ff, 0xff00ff, 0x00ffff, 0xffffff)
+        color = palette[index + 1]
+        ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff) ./ 255
+    elseif 16 <= index < 232
+        # A 6×6×6 RGB cube, ordered with blue changing fastest.
+        levels = (0, 95, 135, 175, 215, 255)
+        color = index - 16
+        (levels[color ÷ 36 + 1], levels[(color ÷ 6) % 6 + 1], levels[color % 6 + 1]) ./ 255
+    elseif 232 <= index < 256
+        # A 24-step grayscale ramp, from 8 to 238.
+        level = (8 + 10 * (index - 232)) / 255
+        (level, level, level)
+    else
+        return
     end
-    return _pygmentize[]
 end
 
-const _pygmentize_version = Ref{Union{VersionNumber, Nothing}}()
-function pygmentize_version()
-    isassigned(_pygmentize_version) && return _pygmentize_version[]
+"""
+    is_light_background(rgb) -> Bool
 
-    pygmentize_cmd = pygmentize()
-    if isnothing(pygmentize_cmd)
-        return _pygmentize_version[] = nothing
-    end
+Classify a normalized RGB background color as light or dark. Brightness is
+estimated using luma weights that account for human sensitivity to each color
+channel; a value above 0.5 is considered light.
+"""
+is_light_background(rgb) =
+    0.299 * rgb[1] + 0.587 * rgb[2] + 0.114 * rgb[3] > 0.5
 
-    cmd = `$pygmentize_cmd -V`
-    @static if Sys.iswindows()
-        # Avoid encoding issues with pipes on Windows by using cmd.exe to capture stdout for us
-        cmd = `cmd.exe /C $cmd`
-        cmd = addenv(cmd, "PYTHONUTF8" => 1)
-    end
-    version_str = readchomp(cmd)
-
-    pos = findfirst("Pygments version ", version_str)
-    if !isnothing(pos)
-        version_start = last(pos) + 1
-        version_end = findnext(',', version_str, version_start) - 1
-        version = tryparse(VersionNumber, version_str[version_start:version_end])
-    else
-        version = nothing
-    end
-
-    if isnothing(version)
-        @warn "Could not parse Pygments version:\n$version_str"
-    end
-
-    return _pygmentize_version[] = version
+function terminal_background(reply::AbstractString)
+    match = Base.match(r"\e\]11;rgb:([0-9a-f]{1,4})/([0-9a-f]{1,4})/([0-9a-f]{1,4})(?:\a|\e\\)"i,
+                       reply)
+    isnothing(match) && return
+    Tuple(map(match.captures) do component
+        parse(Int, component; base=16) / (16^length(component) - 1)
+    end)
 end
 
-function pygmentize_support(lexer)
-    highlighter_ver = pygmentize_version()
-    if isnothing(highlighter_ver)
-        @warn "Syntax highlighting of $lexer code relies on Pygments.\n\
-               Use `pip install pygments` to install the lastest version" maxlog = 1
-        return false
-    elseif lexer == "ptx"
-        if highlighter_ver < v"2.16"
-            @warn "Pygments supports PTX highlighting starting from version 2.16\n\
-                   Detected version $highlighter_ver\n\
-                   Please update with `pip install pygments -U`" maxlog = 1
-            return false
+function repl_terminal(io)
+    repl = isdefined(Base, :active_repl) ? Base.active_repl : nothing
+    hasproperty(repl, :t) || return
+    terminal = repl.t
+    terminal isa Base.Terminals.TTYTerminal || return
+    only(Base.unwrapcontext(io)) === terminal.out_stream || return
+    terminal.in_stream isa Base.TTY || return
+    terminal
+end
+
+function query_terminal_background(terminal; timeout=0.1)
+    input = terminal.in_stream
+    Base.Terminals.raw!(terminal, true) || return
+    try
+        Base.start_reading(input)
+        print(terminal.out_stream, "\e]11;?\a")
+        flush(terminal.out_stream)
+
+        reply = UInt8[]
+        deadline = time() + timeout
+        while time() < deadline
+            timedwait(() -> bytesavailable(input) > 0, max(0, deadline - time()); pollint=0.005) ===
+                :timed_out && break
+            append!(reply, readavailable(input))
+            background = terminal_background(String(reply))
+            isnothing(background) || return background
         end
-        return true
-    elseif lexer == "gcn"
-        if highlighter_ver < v"2.8"
-            @warn "Pygments supports GCN highlighting starting from version 2.8\n\
-                   Detected version $highlighter_ver\n\
-                   Please update with `pip install pygments -U`" maxlog = 1
-            return false
-        end
-        return true
-    else
-        return false
+    finally
+        Base.stop_reading(input)
+        Base.Terminals.raw!(terminal, false)
     end
+end
+
+function terminal_background(io::IO)
+    terminal = repl_terminal(io)
+    isnothing(terminal) && return
+    lock(terminal_background_lock) do
+        if !isassigned(detected_background)
+            detected_background[] = query_terminal_background(terminal)
+        end
+        detected_background[]
+    end
+end
+
+"""
+    selected_highlight_theme(io)
+
+Select the Highlights.jl theme for output to `io`. An explicit
+`highlight_theme[]` override takes priority, followed by the `COLORFGBG` hint.
+For the active REPL terminal, query its current background color with OSC 11 as
+a final detection step. If none of these provides a usable background, default
+to the dark `"Monokai Pro"` theme.
+
+Automatic detection distinguishes only light from dark backgrounds; it does not
+try to recover the terminal's named theme.
+"""
+function selected_highlight_theme(io)
+    theme = highlight_theme[]
+    isnothing(theme) || return theme
+
+    background = @something environment_background() terminal_background(io) (0.0, 0.0, 0.0)
+    is_light_background(background) ? "Monokai Pro Light" : "Monokai Pro"
 end
 
 function highlight(io::IO, code, lexer)
     have_color = get(io, :color, false)
-    if !have_color
+    language = get(highlight_languages, lexer, nothing)
+    if !have_color || language === nothing
         print(io, code)
-    elseif lexer == "llvm"
-        InteractiveUtils.print_llvm(io, code)
-    elseif pygmentize_support(lexer)
-        lexer = lexer == "gcn" ? "amdgpu" : lexer
-        pygments_args = String[pygmentize(), "-f", "terminal", "-P", "bg=dark", "-l", lexer]
-        @static if Sys.iswindows()
-            # Avoid encoding issues with pipes on Windows by using a temporary file
-            mktemp() do tmp_path, tmp_io
-                println(tmp_io, code)
-                close(tmp_io)
-                push!(pygments_args, "-o", tmp_path, tmp_path)
-                cmd = Cmd(pygments_args)
-                wait(open(cmd))  # stdout and stderr go to devnull
-                print(io, read(tmp_path, String))
-            end
-        else
-            cmd = Cmd(pygments_args)
-            pipe = open(cmd, "r+")
-            print(pipe, code)
-            close(pipe.in)
-            print(io, read(pipe, String))
-        end
-    else
+        return
+    end
+
+    # render to a buffer first so that highlighting failures don't result in
+    # partial output
+    buf = IOBuffer()
+    try
+        Highlights.highlight(buf, MIME("text/ansi"), code, language,
+                             selected_highlight_theme(io))
+        write(io, take!(buf))
+    catch err
+        @warn "Failed to highlight $lexer code" exception=(err, catch_backtrace()) maxlog=1
         print(io, code)
     end
     return
