@@ -79,9 +79,8 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
     name = method.llvm_name
     rt_job = CompilerJob(source, config, world)
 
-    # On 1.11+, don't run a standalone inference walk on a miss: `compile_unhooked` below
-    # drives inference itself. The 1.10 implementation returns its session-local result
-    # directly, without touching inference.
+    # Don't run a standalone inference walk on a miss: `compile_unhooked` below drives
+    # inference itself.
     ci, res = runtime_function_results(rt_job)
     if res !== nothing && res.bitcode !== nothing
         link!(mod, parse(LLVM.Module, MemoryBuffer(res.bitcode)))
@@ -131,15 +130,9 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
 end
 
 function runtime_function_results(@nospecialize(job::CompilerJob))
-    @static if HAS_INTEGRATED_CACHE
-        ci = job_code_instance(job)
-        ci === nothing && return nothing, nothing
-        return ci, job_results(RuntimeFunctionResults, ci, job.config)
-    else
-        # The 1.10 results store is independent of the CodeCache. Avoid querying the latter
-        # until the caller actually needs the contributing CI.
-        return nothing, cached_results(RuntimeFunctionResults, job)
-    end
+    ci = job_code_instance(job)
+    ci === nothing && return nothing, nothing
+    return ci, job_results(RuntimeFunctionResults, ci, job.config)
 end
 
 function runtime_method_instance(@nospecialize(job::CompilerJob), method)

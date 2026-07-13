@@ -154,10 +154,8 @@ end
 
         job, _ = Native.create_job(mod.kernel, (Int64,))
 
-        @static if GPUCompiler.HAS_INTEGRATED_CACHE
-            # before any code exists for the job, the lookup comes up empty
-            @test GPUCompiler.cached_results(mod.Results, job) === nothing
-        end
+        # before any code exists for the job, the lookup comes up empty
+        @test GPUCompiler.cached_results(mod.Results, job) === nothing
 
         # get-or-create: first access after inference yields an empty struct, later
         # accesses return the same one
@@ -184,6 +182,12 @@ end
         # ... but an equal config constructed from scratch resolves to the same struct
         job2, _ = Native.create_job(mod.kernel, (Int64,))
         @test GPUCompiler.cached_results(mod.Results, job2) === res
+
+        # an unrelated world-age advance keeps the existing CodeInstance valid
+        @eval mod unrelated() = nothing
+        later_job, _ = Native.create_job(mod.kernel, (Int64,))
+        @test later_job.world > job.world
+        @test GPUCompiler.cached_results(mod.Results, later_job) === res
 
         # vararg kernels: on 1.14+, inference caches these under the compilable
         # (vararg-widened) MethodInstance rather than the fully-specialized job.source,
@@ -213,11 +217,9 @@ end
         # redefinition invalidates: a job in the new world gets a fresh struct
         @eval mod kernel(i) = child(i)+2
         new_job, _ = Native.create_job(mod.kernel, (Int64,))
-        @static if GPUCompiler.HAS_INTEGRATED_CACHE
-            # ... after first showing up empty, as the old CodeInstance no longer covers
-            # the new world
-            @test GPUCompiler.cached_results(mod.Results, new_job) === nothing
-        end
+        # ... after first showing up empty, as the old CodeInstance no longer covers
+        # the new world
+        @test GPUCompiler.cached_results(mod.Results, new_job) === nothing
         precompile(new_job)
         new_res = GPUCompiler.cached_results(mod.Results, new_job)
         @test new_res !== res
