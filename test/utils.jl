@@ -114,21 +114,22 @@ end
 @testset "highlighting" begin
     ansi_color = "\x1B[3"  # beginning of any foreground color change
 
-    @test GPUCompiler.environment_highlight_theme("15;0") == "Monokai Pro"
-    @test GPUCompiler.environment_highlight_theme("0;15") == "Monokai Pro Light"
-    @test GPUCompiler.environment_highlight_theme("0;231") == "Monokai Pro Light"
-    @test GPUCompiler.environment_highlight_theme("15;232") == "Monokai Pro"
-    @test GPUCompiler.environment_highlight_theme("0;255") == "Monokai Pro Light"
-    @test GPUCompiler.environment_highlight_theme("") === nothing
+    @test GPUCompiler.environment_background("15;0") == (0, 0, 0)
+    @test GPUCompiler.environment_background("0;15") == (1, 1, 1)
+    @test GPUCompiler.environment_background("0;231") == (1, 1, 1)
+    @test GPUCompiler.environment_background("15;232") == ntuple(_ -> 8/255, 3)
+    @test GPUCompiler.environment_background("0;255") == ntuple(_ -> 238/255, 3)
+    @test GPUCompiler.environment_background("ignored;15;0") == (0, 0, 0)
+    @test GPUCompiler.environment_background("") === nothing
+    @test GPUCompiler.environment_background("15;unknown") === nothing
+    @test GPUCompiler.environment_background("15;256") === nothing
 
-    @test GPUCompiler.terminal_background("\e]11;rgb:f/f/f\a") == [1, 1, 1]
-    @test GPUCompiler.terminal_background("\e]11;rgb:00/80/ff\e\\") == [0, 128/255, 1]
-    @test GPUCompiler.terminal_background("\e]11;rgb:0000/0000/0000\a") == [0, 0, 0]
+    @test GPUCompiler.is_light_background((1, 1, 1))
+    @test !GPUCompiler.is_light_background((0, 0, 0))
+    @test GPUCompiler.terminal_background("\e]11;rgb:f/f/f\a") == (1, 1, 1)
+    @test GPUCompiler.terminal_background("\e]11;rgb:00/80/ff\e\\") == (0, 128/255, 1)
+    @test GPUCompiler.terminal_background("\e]11;rgb:0000/0000/0000\a") == (0, 0, 0)
     @test GPUCompiler.terminal_background("\e]10;rgb:ffff/ffff/ffff\a") === nothing
-    @test GPUCompiler.terminal_highlight_theme("\e]11;rgb:ffff/ffff/ffff\a") ==
-          "Monokai Pro Light"
-    @test GPUCompiler.terminal_highlight_theme("\e]11;rgb:0000/0000/0000\a") ==
-          "Monokai Pro"
 
     old_theme = GPUCompiler.highlight_theme[]
     try
@@ -136,6 +137,12 @@ end
         @test GPUCompiler.selected_highlight_theme(IOBuffer()) == "GitHub"
     finally
         GPUCompiler.highlight_theme[] = old_theme
+    end
+    withenv("COLORFGBG" => "0;15") do
+        @test GPUCompiler.selected_highlight_theme(IOBuffer()) == "Monokai Pro Light"
+    end
+    withenv("COLORFGBG" => "15;0") do
+        @test GPUCompiler.selected_highlight_theme(IOBuffer()) == "Monokai Pro"
     end
 
     @testset "PTX" begin

@@ -23,46 +23,63 @@ const highlight_languages = Dict(
 
 # Set to a Highlights.jl theme, or `nothing` to detect the terminal background.
 const highlight_theme = Ref{Any}(nothing)
-const detected_highlight_theme = Ref{Union{Nothing,String}}()
-const highlight_theme_lock = ReentrantLock()
+const detected_background = Ref{Union{Nothing,NTuple{3,Float64}}}()
+const terminal_background_lock = ReentrantLock()
 
-function environment_highlight_theme(colorfgbg = get(ENV, "COLORFGBG", ""))
-    background = tryparse(Int, last(rsplit(colorfgbg, ';'; limit=2)))
-    isnothing(background) && return
-    rgb = if 0 <= background < 16
+"""
+    environment_background([colorfgbg]) -> Union{NTuple{3,Float64},Nothing}
+
+Read the terminal background color from its `COLORFGBG` environment variable.
+`COLORFGBG` conventionally contains semicolon-separated foreground and
+background color indices (for example, `"15;0"` for white on black). Some
+terminals add more fields, so only the final, background field is used.
+
+Decode the background as an xterm 256-color palette index and return its RGB
+components, normalized to the range 0 to 1. Return `nothing` if the value is
+missing, malformed, or outside the palette.
+"""
+function environment_background(colorfgbg = get(ENV, "COLORFGBG", ""))
+    index = tryparse(Int, last(rsplit(colorfgbg, ';'; limit=2)))
+    isnothing(index) && return
+    if 0 <= index < 16
+        # The 16 ANSI colors, represented as 0xRRGGBB.
         palette = (0x000000, 0x800000, 0x008000, 0x808000,
                    0x000080, 0x800080, 0x008080, 0xc0c0c0,
                    0x808080, 0xff0000, 0x00ff00, 0xffff00,
                    0x0000ff, 0xff00ff, 0x00ffff, 0xffffff)
-        color = palette[background + 1]
+        color = palette[index + 1]
         ((color >> 16) & 0xff, (color >> 8) & 0xff, color & 0xff) ./ 255
-    elseif 16 <= background < 232
+    elseif 16 <= index < 232
+        # A 6×6×6 RGB cube, ordered with blue changing fastest.
         levels = (0, 95, 135, 175, 215, 255)
-        color = background - 16
+        color = index - 16
         (levels[color ÷ 36 + 1], levels[(color ÷ 6) % 6 + 1], levels[color % 6 + 1]) ./ 255
-    elseif 232 <= background < 256
-        fill((8 + 10 * (background - 232)) / 255, 3)
+    elseif 232 <= index < 256
+        # A 24-step grayscale ramp, from 8 to 238.
+        level = (8 + 10 * (index - 232)) / 255
+        (level, level, level)
     else
         return
     end
-    light_background(rgb) ? "Monokai Pro Light" : "Monokai Pro"
 end
 
-light_background(rgb) = 0.299 * rgb[1] + 0.587 * rgb[2] + 0.114 * rgb[3] > 0.5
+"""
+    is_light_background(rgb) -> Bool
 
-function terminal_background(reply)
+Classify a normalized RGB background color as light or dark. Brightness is
+estimated using luma weights that account for human sensitivity to each color
+channel; a value above 0.5 is considered light.
+"""
+is_light_background(rgb) =
+    0.299 * rgb[1] + 0.587 * rgb[2] + 0.114 * rgb[3] > 0.5
+
+function terminal_background(reply::AbstractString)
     match = Base.match(r"\e\]11;rgb:([0-9a-f]{1,4})/([0-9a-f]{1,4})/([0-9a-f]{1,4})(?:\a|\e\\)"i,
                        reply)
     isnothing(match) && return
-    map(match.captures) do component
+    Tuple(map(match.captures) do component
         parse(Int, component; base=16) / (16^length(component) - 1)
-    end
-end
-
-function terminal_highlight_theme(reply)
-    rgb = terminal_background(reply)
-    isnothing(rgb) && return
-    light_background(rgb) ? "Monokai Pro Light" : "Monokai Pro"
+    end)
 end
 
 function repl_terminal(io)
@@ -75,7 +92,7 @@ function repl_terminal(io)
     terminal
 end
 
-function query_terminal_theme(terminal; timeout=0.1)
+function query_terminal_background(terminal; timeout=0.1)
     input = terminal.in_stream
     Base.Terminals.raw!(terminal, true) || return
     try
@@ -89,8 +106,8 @@ function query_terminal_theme(terminal; timeout=0.1)
             timedwait(() -> bytesavailable(input) > 0, max(0, deadline - time()); pollint=0.005) ===
                 :timed_out && break
             append!(reply, readavailable(input))
-            theme = terminal_highlight_theme(String(reply))
-            isnothing(theme) || return theme
+            background = terminal_background(String(reply))
+            isnothing(background) || return background
         end
     finally
         Base.stop_reading(input)
@@ -98,21 +115,35 @@ function query_terminal_theme(terminal; timeout=0.1)
     end
 end
 
+function terminal_background(io::IO)
+    terminal = repl_terminal(io)
+    isnothing(terminal) && return
+    lock(terminal_background_lock) do
+        if !isassigned(detected_background)
+            detected_background[] = query_terminal_background(terminal)
+        end
+        detected_background[]
+    end
+end
+
+"""
+    selected_highlight_theme(io)
+
+Select the Highlights.jl theme for output to `io`. An explicit
+`highlight_theme[]` override takes priority, followed by the `COLORFGBG` hint.
+For the active REPL terminal, query its current background color with OSC 11 as
+a final detection step. If none of these provides a usable background, default
+to the dark `"Monokai Pro"` theme.
+
+Automatic detection distinguishes only light from dark backgrounds; it does not
+try to recover the terminal's named theme.
+"""
 function selected_highlight_theme(io)
     theme = highlight_theme[]
     isnothing(theme) || return theme
 
-    theme = environment_highlight_theme()
-    isnothing(theme) || return theme
-
-    terminal = repl_terminal(io)
-    isnothing(terminal) && return "Monokai Pro"
-    lock(highlight_theme_lock) do
-        if !isassigned(detected_highlight_theme)
-            detected_highlight_theme[] = query_terminal_theme(terminal)
-        end
-        something(detected_highlight_theme[], "Monokai Pro")
-    end
+    background = @something environment_background() terminal_background(io) (0.0, 0.0, 0.0)
+    is_light_background(background) ? "Monokai Pro Light" : "Monokai Pro"
 end
 
 function highlight(io::IO, code, lexer)
