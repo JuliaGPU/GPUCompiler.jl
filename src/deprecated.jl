@@ -232,33 +232,52 @@ end
 ## 1.10 `cached_results`
 #
 # Session-local storage for the per-job results structs; on 1.11+ these live on the
-# `CodeInstance`s of Julia's integrated cache instead (see `interface.jl`). The key
-# mirrors the 1.11+ semantics — the full job identity, i.e. method instance, world,
-# and entire config — but nothing persists across sessions, and redefinition
-# protection comes from the world age in the key rather than from CI invalidation.
-const job_results = Dict{Any,Any}()
+# `CodeInstance`s of Julia's integrated cache instead (see `interface.jl`). Keep the
+# same identity here by associating results with a foreign `CodeInstance`: unrelated
+# world-age advances can reuse a still-valid CI, while invalidation makes the lookup
+# resolve to a new CI and therefore a new results struct.
+struct LegacyJobResultEntry
+    config::CompilerConfig
+    value::Any
+end
+
+const legacy_job_results = IdDict{CodeInstance,Vector{LegacyJobResultEntry}}()
 const job_results_lock = ReentrantLock()
 
-# specialized for the launch hot path, mirroring the 1.11+ implementation. As the store is
-# independent of CodeInstances, the lookup always succeeds (`nothing` is never returned).
-function cached_results(::Type{V}, job::CompilerJob) where {V}
-    # NOTE: store the MethodInstance's objectid (not the MI) to avoid an expensive
-    #       boxing allocation; the MI is kept alive by its method specializations.
-    key = (V, objectid(job.source), job.world, job.config)
+function job_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
     Base.@lock job_results_lock begin
-        get!(job_results, key) do
-            V()
-        end::V
+        entries = get!(legacy_job_results, ci) do
+            LegacyJobResultEntry[]
+        end
+        for entry in entries
+            entry.config === config && entry.value isa V && return entry.value::V
+        end
+        v = V()
+        push!(entries, LegacyJobResultEntry(config, v))
+        return v
     end
+end
+
+function job_code_instance(@nospecialize(job::CompilerJob))
+    cache = WorldView(get_code_cache(job), job.world, job.world)
+    CC.get(cache, job.source, nothing)
+end
+
+# Deliberately lookup-only, matching the integrated-cache implementation. Codegen drives
+# inference on a miss, after which a second lookup finds the newly-created CodeInstance.
+function cached_results(::Type{V}, job::CompilerJob) where {V}
+    ci = job_code_instance(job)
+    ci === nothing && return nothing
+    return job_results(V, ci, job.config)
 end
 
 
 ## 1.10 session-dependent results
 #
-# Nothing to wipe: `job_results` never persists meaningfully across sessions (its
-# `objectid`-based keys are session-specific, and our own image's entries are cleared
-# in `__init__`; entries written by a downstream package's workload don't make it into
-# that package's image at all, cf. cross-image mutation loss).
+# Nothing to wipe: `legacy_job_results` never persists meaningfully across sessions (its
+# CodeInstance keys are session-specific, and our own image's entries are cleared in
+# `__init__`; entries written by a downstream package's workload don't make it into that
+# package's image at all, cf. cross-image mutation loss).
 mark_session_dependent!(@nospecialize(job::CompilerJob)) = nothing
 
 end # !HAS_INTEGRATED_CACHE

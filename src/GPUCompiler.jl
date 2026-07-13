@@ -85,9 +85,9 @@ function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
 
     @static if !HAS_INTEGRATED_CACHE
-        # session-local results keyed by objectid+world; entries serialized during
+        # session-local results keyed by CodeInstance; entries serialized during
         # GPUCompiler's own precompilation can never be valid in a later session
-        empty!(job_results)
+        empty!(legacy_job_results)
         # ditto for the in-process CodeCaches: CIs deposited by our own precompile
         # workload carry world ages from the precompilation process
         empty!(GLOBAL_CI_CACHES)

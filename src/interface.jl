@@ -420,9 +420,8 @@ structs). Storage differs per Julia version, transparently to the back-end:
   session-local handles (device modules, pipeline objects) in fields that remain empty
   until first use at run time.
 
-- On Julia 1.10, the struct lives in a session-local Dict keyed by the job, so the
-  lookup always succeeds (`nothing` is never returned); redefinition protection comes
-  from the world age in the key, and nothing persists across sessions.
+- On Julia 1.10, the struct lives in a session-local store keyed by the foreign
+  `CodeInstance` and config. Nothing persists across sessions.
 
 Thread safety: concurrent calls for the same job return the same struct, but
 GPUCompiler does not serialize back-end *compilation*; take a back-end lock around
