@@ -368,6 +368,31 @@ end
     end
 end
 
+@testset "boxed Bool singleton relocation" begin
+    @static if VERSION >= v"1.14.0-DEV.1348"
+        mod = @eval module $(gensym())
+            @noinline produce(cond::Bool, a::Int32) = cond ? a : true
+            function consume(cond::Bool, a::Int32)
+                x = produce(cond, a)
+                x isa Bool && x && return Int32(1)
+                return Int32(0)
+            end
+            function kernel(ptr, cond::Bool, a::Int32)
+                unsafe_store!(ptr, consume(cond, a))
+                return
+            end
+        end
+
+        ir = sprint() do io
+            Metal.code_llvm(io, mod.kernel,
+                            Tuple{Core.LLVMPtr{Int32,1}, Bool, Int32};
+                            dump_module=true, kernel=true)
+        end
+        @test occursin("@jl_true_box = private unnamed_addr addrspace(2) constant", ir)
+        @test !occursin("@jl_true = external", ir)
+    end
+end
+
 # Tuples with a dynamic index are lowered to an addrspace(2) constant plus a
 # GEP+load. Without InferAddressSpaces propagating AS 2 through the cast to
 # the generic AS introduced during `add_global_address_spaces!`, the load

@@ -334,9 +334,7 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
-            # resolve `julia.constgv` slots: isbits constants are materialized as
-            # device-resident globals, everything else gets this session's absolute
-            # address baked in; only the latter makes the result session-dependent
+            # Materialize isbits and Bool boxes; bake addresses for other objects.
             portable = relocate_gvs!(ir, gv_to_value)
             portable || mark_session_dependent!(job)
 

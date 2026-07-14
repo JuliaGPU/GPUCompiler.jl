@@ -98,13 +98,8 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
 
-    # runtime functions may reference Julia objects through `julia.constgv` globals (e.g.
-    # `box_bool` returning the `jl_true`/`jl_false` singletons). Kernels get theirs
-    # relocated when the fully-linked toplevel module is finalized, but the runtime's
-    # mappings would be dropped along with the rest of its per-function metadata: resolve
-    # the slots into the cached bitcode instead, and keep functions whose resolution baked
-    # session-absolute addresses (rather than materialized session-portable constants)
-    # out of package images.
+    # Resolve constgv mappings before their metadata is discarded. Dedicated Bool
+    # globals are resolved after linking into the toplevel module.
     if !isempty(meta.gv_to_value)
         portable = relocate_gvs!(new_mod, meta.gv_to_value)
         portable || mark_session_dependent!(rt_job)
