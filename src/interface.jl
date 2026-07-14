@@ -507,7 +507,8 @@ end
 ## session-dependent results
 #
 # Some compilation results embed session-specific data: `relocate_gvs!` bakes absolute
-# pointers into the IR of toplevel jobs that reference `julia.constgv` globals, and any
+# pointers into the IR of toplevel jobs that reference `julia.constgv` globals (except
+# for slots it can materialize as session-portable device constants), and any
 # artifact a back-end derives from that IR (metallib, SPIR-V, ...) inherits them. Such
 # results must not survive into a package image, while remaining available for
 # within-session lookups during the precompilation process itself. Julia wipes its own

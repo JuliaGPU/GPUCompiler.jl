@@ -44,6 +44,34 @@ end
     @test occursin(string(addr), ir)
 end
 
+@testset "boxed Bool singleton relocation" begin
+    @static if VERSION >= v"1.14.0-DEV.1348"
+        mod = @eval module $(gensym())
+            @noinline produce_true(cond::Bool, a::Int32) = cond ? a : true
+            @noinline produce_false(cond::Bool, a::Int32) = cond ? a : false
+            function consume_true(cond::Bool, a::Int32)
+                x = produce_true(cond, a)
+                x isa Bool && x && return Int32(1)
+                return Int32(0)
+            end
+            function consume_false(cond::Bool, a::Int32)
+                x = produce_false(cond, a)
+                x isa Bool && !x && return Int32(1)
+                return Int32(0)
+            end
+        end
+
+        for (f, name) in ((mod.consume_true, "jl_true"),
+                          (mod.consume_false, "jl_false"))
+            ir = sprint(io->PTX.code_llvm(io, f, Tuple{Bool, Int32};
+                                          dump_module=true))
+            @test occursin("@$(name)_box = private unnamed_addr constant", ir)
+            @test !occursin("@$name = external", ir)
+            @test !occursin("inttoptr", ir)
+        end
+    end
+end
+
 @testset "kernel functions" begin
 @testset "kernel argument attributes" begin
     mod = @eval module $(gensym())
@@ -154,6 +182,23 @@ end
 ############################################################################################
 if :NVPTX in LLVM.backends()
 @testset "assembly" begin
+
+@testset "boxed Bool singleton relocation" begin
+    @static if VERSION >= v"1.14.0-DEV.1348"
+        mod = @eval module $(gensym())
+            @noinline produce(cond::Bool, a::Int32) = cond ? a : true
+            function consume(cond::Bool, a::Int32)
+                x = produce(cond, a)
+                x isa Bool && x && return Int32(1)
+                return Int32(0)
+            end
+        end
+        ptx = sprint(io->PTX.code_native(io, mod.consume, Tuple{Bool, Int32};
+                                         dump_module=true))
+        @test occursin("jl_true_box", ptx)
+        @test !occursin(r"(?m)^\.extern .*\bjl_true\b", ptx)
+    end
+end
 
 @testset "child functions" begin
     # we often test using @noinline child functions, so test whether these survive

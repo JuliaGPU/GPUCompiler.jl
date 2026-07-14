@@ -301,6 +301,137 @@ end
         end
     end
 
+    @testset "boxed constant materialization" begin
+        # since JuliaLang/julia#55045, isbits union constants stay fully boxed; the
+        # box must be replicated on device instead of referencing a host address
+        mod = @eval module $(gensym())
+            union_smalltag(cond::Bool, a::Int32) = cond ? a : Int64(0)
+            union_float(cond::Bool, a::Float32) = cond ? a : 1.0
+            union_ghost(cond::Bool, a::Int32) = cond ? a : nothing
+            @noinline produce_true(cond::Bool, a::Int32) = cond ? a : true
+            @noinline produce_false(cond::Bool, a::Int32) = cond ? a : false
+            function consume_true(cond::Bool, a::Int32)
+                x = produce_true(cond, a)
+                x isa Bool && x && return Int32(1)
+                return Int32(0)
+            end
+            function consume_false(cond::Bool, a::Int32)
+                x = produce_false(cond, a)
+                x isa Bool && !x && return Int32(1)
+                return Int32(0)
+            end
+            function kernel(p::Ptr{Int64}, cond::Bool, a::Int32)
+                x = cond ? a : Int64(0)
+                unsafe_store!(p, Int64(x))
+                return
+            end
+            function egal_kernel(p::Ptr{Bool}, cond::Bool, a::Int32)
+                x = cond ? a : Int64(0)
+                unsafe_store!(p, x === Int64(0))
+                return
+            end
+        end
+
+        # smalltag constants materialize fully session-portably
+        ir = sprint(io->Native.code_llvm(io, mod.union_smalltag, Tuple{Bool, Int32};
+                                         dump_module=true, validate=true))
+        @static if VERSION >= v"1.14.0-DEV.1348"
+            @test occursin("_box", ir)
+            @test !occursin("inttoptr", ir)
+        end
+
+        # non-smalltag constants carry a host type pointer in the box header,
+        # but the payload is still device-resident
+        ir = sprint(io->Native.code_llvm(io, mod.union_float, Tuple{Bool, Float32};
+                                         dump_module=true, validate=true))
+        @static if VERSION >= v"1.14.0-DEV.1348"
+            @test occursin("_box", ir)
+        end
+
+        # Boxed Bool leaves use canonical device boxes.
+        for (f, name) in ((mod.consume_true, "jl_true"),
+                          (mod.consume_false, "jl_false"))
+            ir = sprint(io->Native.code_llvm(io, f, Tuple{Bool, Int32};
+                                             dump_module=true, validate=true))
+            @static if VERSION >= v"1.14.0-DEV.1348"
+                @test occursin("@$(name)_box = private unnamed_addr constant", ir)
+                @test !occursin("@$name = external", ir)
+                @test !occursin("inttoptr", ir)
+            end
+        end
+
+        # zero-sized identity objects remain opaque host tokens
+        ir = sprint(io->Native.code_llvm(io, mod.union_ghost, Tuple{Bool, Int32};
+                                         dump_module=true, validate=true))
+        @test !occursin("_box", ir)
+
+        # kernel compilation, including bits-egal on the materialized leaf
+        Native.code_execution(mod.kernel, (Ptr{Int64}, Bool, Int32))
+        Native.code_execution(mod.egal_kernel, (Ptr{Bool}, Bool, Int32))
+
+        # relocate_gvs! reports whether the module stayed session-portable
+        JuliaContext() do ctx
+            # Unlike Int128, vector-shaped tuples are 16-byte aligned on all
+            # supported architectures and Julia versions.
+            aligned = (VecElement(Int64(1)), VecElement(Int64(2)))
+            @test Base.datatype_alignment(typeof(aligned)) > sizeof(Int)
+            objs = Any[Int64(42), 1.25, :sym, aligned]
+            # pointers to the heap boxes rooted in `objs` (passing an element
+            # through a specialized function would re-box, possibly on the stack)
+            ptrs = [ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x) for x in objs]
+            function slot_module(ptr::Ptr{Cvoid})
+                llvm_mod = LLVM.Module("test")
+                name = "jl_global#0"
+                LLVM.GlobalVariable(llvm_mod, LLVM.PointerType(LLVM.Int8Type()), name)
+                llvm_mod, Dict(name => ptr)
+            end
+
+            # Bool JuliaVariables are absent from `gv_to_value`.
+            m = LLVM.Module("bool singletons")
+            for name in ("jl_true", "jl_false")
+                gv = LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()), name)
+                constant!(gv, true)
+            end
+            @test GPUCompiler.relocate_gvs!(m, Dict{String, Ptr{Cvoid}}())
+            bool_ir = string(m)
+            for name in ("jl_true", "jl_false")
+                @test haskey(globals(m), "$(name)_box")
+                @test occursin("@$name = private constant", bool_ir)
+            end
+            @test !occursin("external", bool_ir)
+            @test !occursin("inttoptr", bool_ir)
+            dispose(m)
+
+            GC.@preserve objs begin
+                # smalltag isbits: materialized, portable
+                m, map = slot_module(ptrs[1])
+                @test GPUCompiler.relocate_gvs!(m, map)
+                @test haskey(globals(m), "jl_global_0_box")
+                dispose(m)
+
+                # Float64: materialized, but the header carries a type pointer
+                m, map = slot_module(ptrs[2])
+                @test !GPUCompiler.relocate_gvs!(m, map)
+                @test haskey(globals(m), "jl_global_0_box")
+                dispose(m)
+
+                # Symbol: baked address
+                m, map = slot_module(ptrs[3])
+                @test !GPUCompiler.relocate_gvs!(m, map)
+                @test !haskey(globals(m), "jl_global_0_box")
+                @test occursin("inttoptr", string(m))
+                dispose(m)
+
+                # 16-byte-aligned payloads get padded past the header word
+                m, map = slot_module(ptrs[4])
+                GPUCompiler.relocate_gvs!(m, map)
+                box = globals(m)["jl_global_0_box"]
+                @test length(elements(LLVM.global_value_type(box))) == 3
+                dispose(m)
+            end
+        end
+    end
+
     @testset "allowed mutable types" begin
         # when types have no fields, we should always allow them
         mod = @eval module $(gensym())

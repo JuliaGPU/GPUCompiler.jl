@@ -775,6 +775,8 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
     # delete old globals
     for (old, new) in global_map
         prune_constexpr_uses!(old)
+        # Rewrite constant-expression uses left after cloning.
+        replace_uses!(old, new)
         @assert isempty(uses(old))
         replace_metadata_uses!(old, new)
         erase!(old)
