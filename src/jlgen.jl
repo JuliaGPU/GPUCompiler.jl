@@ -845,6 +845,8 @@ end
 # the constant to store in the slot, and the (gcbits-masked) header word
 function materialize_box!(mod::LLVM.Module, gv::GlobalVariable, @nospecialize(obj),
                           init::Ptr{Cvoid})
+    @assert isbitstype(typeof(obj)) && sizeof(obj) > 0
+
     W = sizeof(Int)
     hdr, bytes = GC.@preserve obj begin
         # the header word transparently yields the smalltag immediate for
