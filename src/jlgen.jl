@@ -494,7 +494,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 push!(codeinfos, ci′::CodeInstance)
                 push!(codeinfos, src::CodeInfo)
             end
-            @ccall jl_emit_native(codeinfos::Vector{Any}, ts_mod::LLVM.API.LLVMOrcThreadSafeModuleRef, Ref(params)::Ptr{Base.CodegenParams}, #=extern linkage=# false::Cint)::Ptr{Cvoid}
+            if VERSION >= v"1.14.0-DEV.2641"
+                @ccall jl_emit_native(codeinfos::Vector{Any}, C_NULL::Ptr{Cvoid}, ts_mod::LLVM.API.LLVMOrcThreadSafeModuleRef, Ref(params)::Ptr{Base.CodegenParams}, #=extern linkage=# false::Cint)::Ptr{Cvoid}
+            else
+                @ccall jl_emit_native(codeinfos::Vector{Any}, ts_mod::LLVM.API.LLVMOrcThreadSafeModuleRef, Ref(params)::Ptr{Base.CodegenParams}, #=extern linkage=# false::Cint)::Ptr{Cvoid}
+            end
         elseif VERSION >= v"1.12.0-DEV.1667"
             ccall(:jl_create_native, Ptr{Cvoid},
                 (Vector{MethodInstance}, LLVM.API.LLVMOrcThreadSafeModuleRef, Ptr{Base.CodegenParams}, Cint, Cint, Cint, Csize_t, Ptr{Cvoid}),
