@@ -25,6 +25,19 @@ end
 Base.show(io::IO, err::KernelError) = showerror(io, err)
 
 
+"""
+    unwrap_error(err)
+
+Unwrap a compiler exception from container exceptions such as the REPL's `err` global
+(a `Base.ExceptionStack`) or the `LoadError` thrown by `include`, so that it can be
+passed to reflection functions like `code_typed`. Other exceptions are returned as-is.
+"""
+unwrap_error(err) = err
+unwrap_error(err::Base.ExceptionStack) =
+    isempty(err.stack) ? err : unwrap_error(last(err.stack).exception)
+unwrap_error(err::LoadError) = unwrap_error(err.error)
+
+
 struct InternalCompilerError <: Exception
     job::CompilerJob
     message::String
