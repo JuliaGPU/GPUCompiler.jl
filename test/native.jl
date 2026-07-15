@@ -848,6 +848,79 @@ end
     end
 end
 
+@testset "static assertions" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        kernel() = (@static_assert true "this should disappear"; return)
+    end
+
+    llvm = sprint(io -> Native.code_llvm(io, mod.kernel, Tuple{}; dump_module=true))
+    @test !occursin(GPUCompiler.STATIC_ASSERT_MARKER, llvm)
+    @test Native.code_execution(mod.kernel, Tuple{}) !== nothing
+
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        kernel() = (@static_assert false "the target is too old"; return)
+    end
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{})) do msg
+        occursin(GPUCompiler.STATIC_ASSERTION, msg) &&
+        occursin("the target is too old", msg) &&
+        occursin("kernel", msg)
+    end
+
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        function kernel(condition)
+            @static_assert condition "condition was not proven"
+            return
+        end
+    end
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{Bool}; opt_level=0)) do msg
+        occursin(GPUCompiler.STATIC_ASSERTION, msg) &&
+        occursin("condition was not proven", msg)
+    end
+
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        function kernel()
+            if false
+                @static_assert false "dead assertion"
+            end
+            return
+        end
+    end
+    @test Native.code_execution(mod.kernel, Tuple{}; opt_level=0) !== nothing
+
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        function kernel(condition)
+            @static_assert condition "first failure"
+            @static_assert condition "second failure"
+            return
+        end
+    end
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{Bool})) do msg
+        occursin("first failure", msg) && occursin("second failure", msg) &&
+        !occursin("unknown function", msg)
+    end
+
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        @inline assertion() = @static_assert false "inlined failure"
+        kernel() = (assertion(); return)
+    end
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{})) do msg
+        occursin("inlined failure", msg) &&
+        occursin("assertion", msg) && occursin("kernel", msg)
+    end
+
+    @test_throws ArgumentError macroexpand(mod, :(@static_assert true string("message")))
+end
+
 @testset "invalid LLVM IR (ccall)" begin
     mod = @eval module $(gensym())
         function foobar(p)

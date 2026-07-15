@@ -77,6 +77,7 @@ include("driver.jl")
 
 # other reusable functionality
 include("execution.jl")
+include("static_assert.jl")
 include("reflection.jl")
 
 include("precompile.jl")

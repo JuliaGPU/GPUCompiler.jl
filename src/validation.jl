@@ -135,12 +135,15 @@ const DYNAMIC_CALL     = "dynamic function invocation"
 function Base.showerror(io::IO, err::InvalidIRError)
     print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
     for (kind, bt, meta) in err.errors
-        printstyled(io, "\nReason: unsupported $kind"; color=:red)
+        prefix = kind == STATIC_ASSERTION ? "Reason: $kind" : "Reason: unsupported $kind"
+        printstyled(io, "\n$prefix"; color=:red)
         if meta !== nothing
             if kind == RUNTIME_FUNCTION || kind == UNKNOWN_FUNCTION || kind == POINTER_FUNCTION || kind == DYNAMIC_CALL || kind == CCALL_FUNCTION || kind == LAZY_FUNCTION
                 printstyled(io, " (call to ", meta, ")"; color=:red)
             elseif kind == DELAYED_BINDING
                 printstyled(io, " (use of '", meta, "')"; color=:red)
+            elseif kind == STATIC_ASSERTION
+                printstyled(io, " (", meta, ")"; color=:red)
             end
         end
         Base.show_backtrace(io, bt)
@@ -225,7 +228,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
         fn = LLVM.name(dest)
 
         # some special handling for runtime functions that we don't implement
-        if fn == "jl_get_binding_or_error" || fn == "ijl_get_binding_or_error"
+        if fn == STATIC_ASSERT_MARKER
+            push!(errors, (STATIC_ASSERTION, bt, static_assert_message(inst)))
+        elseif fn == "jl_get_binding_or_error" || fn == "ijl_get_binding_or_error"
             try
                 m, sym = arguments(inst)
                 sym = first(operands(sym::ConstantExpr))::ConstantInt
