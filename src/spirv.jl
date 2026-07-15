@@ -353,6 +353,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
     replace_function!(f, new_f)
 
+    # XXX: work around KhronosGroup/SPIRV-LLVM-Translator#3389
     if job.config.target.backend === :khronos
         @dispose pb=NewPMPassBuilder() begin
             add!(pb, SimplifyCFGPass())
