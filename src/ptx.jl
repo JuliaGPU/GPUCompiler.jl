@@ -9,15 +9,6 @@ const NVPTX_LLVM_Backend_jll =
 
 export PTXCompilerTarget
 
-# Wire-format encoding of the feature set, stamped into the `sm_features` LLVM
-# global by `finish_module!` and read back by host-side runtime intrinsics (e.g.
-# CUDA.jl's `target_feature_set()`).
-@enum TargetFeatureSet::UInt32 begin
-    BaselineFeatures = 0
-    FamilyFeatures   = 1
-    ArchFeatures     = 2
-end
-
 Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     cap::VersionNumber
     ptx::VersionNumber = v"6.0" # for compatibility with older versions of CUDA.jl
@@ -151,26 +142,6 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             Metadata(ConstantInt(Int32(job.config.target.fastmath ? 1 : 0)))
     end
 
-    # emit the device capability and ptx isa version as constants in the module. this makes
-    # it possible to 'query' these in device code, relying on LLVM to optimize the checks
-    # away and generate static code. note that we only do so if there's actual uses of these
-    # variables; unconditionally creating a gvar would result in duplicate declarations.
-    sm_features = job.config.target.feature_set === :arch    ? ArchFeatures :
-                  job.config.target.feature_set === :family  ? FamilyFeatures :
-                                                               BaselineFeatures
-    for (name, value) in ["sm_major"    => job.config.target.cap.major,
-                          "sm_minor"    => job.config.target.cap.minor,
-                          "sm_features" => UInt32(sm_features),
-                          "ptx_major"   => job.config.target.ptx.major,
-                          "ptx_minor"   => job.config.target.ptx.minor]
-        if haskey(globals(mod), name)
-            gv = globals(mod)[name]
-            initializer!(gv, ConstantInt(LLVM.Int32Type(), value))
-            # change the linkage so that we can inline the value
-            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-        end
-    end
-
     # update calling convention
     if LLVM.version() >= v"8"
         for f in functions(mod)
@@ -242,14 +213,6 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         if length(annotations) > 1
             push!(metadata(mod)["nvvm.annotations"], MDNode(annotations))
         end
-    end
-
-    # we emit properties (of the device and ptx isa) as private global constants,
-    # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-    @dispose pb=NewPMPassBuilder() begin
-        add!(pb, RecomputeGlobalsAAPass())
-        add!(pb, GlobalOptPass())
-        run!(pb, mod, llvm_machine(job.config.target))
     end
 
     return entry
