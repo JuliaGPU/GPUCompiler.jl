@@ -429,6 +429,82 @@ the check-and-compile sequence (all back-ends already do, e.g. `mtlfunction_lock
 """
 function cached_results end
 
+"""
+    JuliaValueRef(value)
+
+A Julia value used as the serializable identity of a host reference. Resolve it in the active
+session with [`resolve_host_reference`](@ref); a loader that writes the resulting address into
+device storage must keep `value` rooted for as long as that storage remains reachable.
+"""
+struct JuliaValueRef
+    value::Any
+end
+
+"""
+    CGlobalRef(symbol)
+
+A libjulia C data global. Resolving this reference calls `jl_cglobal` for `symbol` and loads
+the word stored at that address.
+"""
+struct CGlobalRef
+    symbol::Symbol
+end
+
+"""
+    HostReference
+
+A serializable source for a host-derived word: either a [`JuliaValueRef`](@ref) or a
+[`CGlobalRef`](@ref).
+"""
+const HostReference = Union{JuliaValueRef,CGlobalRef}
+
+"""
+    HostReferences(slots, embedded_pointer)
+
+Host-reference metadata accompanying a module. `slots` maps each object-code symbol to the
+source of the word that must be written there. `embedded_pointer` conservatively records that
+an unavoidable session pointer has been embedded, so the artifact cannot be serialized into a
+package image even if `slots` is empty.
+"""
+mutable struct HostReferences
+    slots::Dict{String,HostReference}
+    embedded_pointer::Bool
+end
+
+HostReferences() = HostReferences(Dict{String,HostReference}(), false)
+copy_host_references(refs::HostReferences) =
+    HostReferences(copy(refs.slots), refs.embedded_pointer)
+
+same_host_reference(a::JuliaValueRef, b::JuliaValueRef) = a.value === b.value
+same_host_reference(a::CGlobalRef, b::CGlobalRef) = a.symbol === b.symbol
+same_host_reference(::HostReference, ::HostReference) = false
+
+"""
+    resolve_host_reference(ref) -> UInt
+
+Resolve `ref` to its current-session word. Loader-based backends use this after loading the
+object and before exposing a callable function.
+"""
+resolve_host_reference(ref::JuliaValueRef) =
+    UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), ref.value))
+function resolve_host_reference(ref::CGlobalRef)
+    address = ccall(:jl_cglobal, Any, (Any, Any), String(ref.symbol), UInt)
+    return unsafe_load(address)
+end
+
+"""
+    lower_host_references!(job, mod, refs)
+
+Lower compiler-managed Julia value globals and Julia runtime globals for `job`'s final
+backend representation. The default lowering resolves every live reference in the current
+Julia session. Backends with a loader relocation mechanism may call
+[`emit_host_reference_slots!`](@ref) instead, then resolve and patch those slots after loading.
+"""
+function lower_host_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                                refs::HostReferences)
+    resolve_host_reference_slots!(mod, refs)
+end
+
 @static if HAS_INTEGRATED_CACHE
 
 """
@@ -550,6 +626,8 @@ end
 end # HAS_INTEGRATED_CACHE
 
 @public GPUCompilerCacheToken, cache_owner, cached_results
+@public JuliaValueRef, CGlobalRef, HostReference, HostReferences
+@public lower_host_references!, emit_host_reference_slots!, resolve_host_reference
 
 # the method table to use
 #

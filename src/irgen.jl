@@ -43,18 +43,33 @@ function irgen(@nospecialize(job::CompilerJob))
         end
     end
 
-    # sanitize global values (Julia doesn't when using the external codegen policy)
-    for val in [collect(globals(mod)); collect(functions(mod))]
+    # Julia value globals can be declarations. Sanitize every definition as well as every
+    # mapped global, but leave unrelated external declarations alone because their names are
+    # part of their ABI.
+    for val in collect(globals(mod))
+        old_name = LLVM.name(val)
+        mapped = haskey(gv_to_value, old_name)
+        isdeclaration(val) && !mapped && continue
+        new_name = safe_name(old_name)
+        if old_name != new_name
+            LLVM.name!(val, new_name)
+            actual_name = LLVM.name(val)
+            if mapped
+                init = pop!(gv_to_value, old_name)
+                haskey(gv_to_value, actual_name) &&
+                    error("Duplicate Julia value global '$actual_name'")
+                gv_to_value[actual_name] = init
+            end
+        end
+    end
+
+    # sanitize defined functions (Julia doesn't when using the external codegen policy)
+    for val in collect(functions(mod))
         isdeclaration(val) && continue
         old_name = LLVM.name(val)
         new_name = safe_name(old_name)
         if old_name != new_name
             LLVM.name!(val, new_name)
-            val = get(gv_to_value, old_name, nothing)
-            if val !== nothing
-                delete!(gv_to_value, old_name)
-                gv_to_value[new_name] = val
-            end
         end
     end
 

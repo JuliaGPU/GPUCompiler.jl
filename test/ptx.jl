@@ -40,8 +40,25 @@ end
     ir = sprint() do io
         PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; dump_module=true)
     end
-    addr = UInt64(pointer_from_objref(:var))
-    @test occursin(string(addr), ir)
+    # Julia 1.10 may bake the Symbol pointer into the generated IR before exposing it to
+    # GPUCompiler. Newer versions provide a symbolic global that we can preserve and relocate.
+    @static if VERSION >= v"1.11"
+        @test occursin("@jl_sym_var_", ir)
+    else
+        @test occursin("@jl_sym_var_", ir) || occursin("inttoptr", ir)
+    end
+    @test !occursin("@\"jl_sym#", ir)
+end
+
+@testset "Julia value global names" begin
+    # Julia's external codegen can name the declaration for this Symbol with `#`.
+    # The final PTX path must see the sanitized Julia value global, not the original
+    # declaration name rejected by NVPTX.
+    mod = @eval module $(gensym())
+        const unusual_symbol = Symbol("value#global")
+        kernel(name::Symbol) = (name === unusual_symbol; return)
+    end
+    @test PTX.code_execution(mod.kernel, Tuple{Symbol}) !== nothing
 end
 
 @testset "boxed Bool singleton relocation" begin

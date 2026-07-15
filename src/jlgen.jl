@@ -756,63 +756,179 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     return llvm_mod, compiled, gv_to_value
 end
 
-"""
-    relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
-
-Resolve globals that refer to Julia objects. `jl_true`/`jl_false`, which are
-absent from `gv_to_value`, become canonical module-local boxes. Ordinary
-non-ghost isbits objects are also materialized; other objects keep their host
-address as an opaque identity token.
-
-Only GVs that are declarations (as produced by `compile_method_instance`,
-which strips the initializers for session portability) or still have a null
-initializer are touched: preserving existing initializers covers the
-older-Julia path where Julia itself emits pointer values directly.
-
-Apart from the dedicated Bool globals, GVs present in `mod` but missing from
-`gv_to_value` remain declarations, which back-ends will reject loudly
-(undefined symbol) rather than silently folding to null.
-
-Returns `true` if the module is session-portable afterwards: no absolute host
-address was written (neither a baked slot nor a materialized header carrying
-a non-smalltag type pointer).
-"""
-function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
-    portable = materialize_bool_singletons!(mod)
+function classify_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
+    refs = HostReferences()
     mod_gvs = globals(mod)
     for (name, init) in gv_to_value
-        # Bools are resolved by name above.
-        name in ("jl_true", "jl_false") && continue
-
         haskey(mod_gvs, name) || continue
         gv = mod_gvs[name]
         cur = initializer(gv)
         if !(cur === nothing || LLVM.isnull(cur))
-            # pre-baked by Julia itself (pre-1.13): also session-absolute
-            portable = false
+            refs.embedded_pointer = true
             continue
         end
 
-        val = nothing
-        if init != C_NULL
-            obj = Base.unsafe_pointer_to_objref(init)
-            # Zero-sized objects remain identity tokens.
-            if isbitstype(typeof(obj)) && sizeof(obj) > 0 && !(obj isa Bool)
-                val, hdr = materialize_box!(mod, gv, obj, init)
-                # non-smalltag headers carry a host DataType pointer
-                portable &= hdr < UInt(64 << 4)   # jl_max_tags << 4
-            end
+        init == C_NULL && error("Missing Julia object for global '$name'")
+        obj = Base.unsafe_pointer_to_objref(init)
+        if isbitstype(typeof(obj)) && sizeof(obj) > 0 && !(obj isa Bool)
+            val, hdr = materialize_box!(mod, gv, obj, init)
+            initializer!(gv, val)
+            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+            refs.embedded_pointer |= hdr >= UInt(64 << 4)
+        else
+            host_reference_slot_size(mod, gv, name)
+            refs.slots[name] = JuliaValueRef(obj)
         end
-        if val === nothing
-            val = const_inttoptr(ConstantInt(Int64(init)), global_value_type(gv))
-            portable = false
-        end
-        initializer!(gv, val)
-        # re-internalize what compile_method_instance demoted to an external
-        # declaration; with the value in place, the optimizer can now fold it
-        linkage!(gv, LLVM.API.LLVMPrivateLinkage)
     end
-    return portable
+    return refs
+end
+
+host_reference_word_type() = LLVM.IntType(8sizeof(UInt))
+
+function host_reference_slot_size(mod::LLVM.Module, gv::GlobalVariable, name::String)
+    size = abi_size(datalayout(mod), global_value_type(gv))
+    size == sizeof(UInt) ||
+        error("Host reference slot '$name' has size $size, expected $(sizeof(UInt))")
+    return
+end
+
+function host_reference_slot_initializer(gv::GlobalVariable, value::UInt)
+    T = global_value_type(gv)
+    if T isa LLVM.PointerType
+        return const_inttoptr(ConstantInt(UInt64(value)), T)
+    elseif T isa LLVM.IntegerType && width(T) == 8sizeof(UInt)
+        return ConstantInt(T, value)
+    end
+    error("Host reference slot '$(LLVM.name(gv))' has unsupported LLVM type $T")
+end
+
+function check_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
+    mod_gvs = globals(mod)
+    for name in keys(refs.slots)
+        haskey(mod_gvs, name) || error("Missing host reference slot '$name'")
+    end
+    return
+end
+
+function prune_dead_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
+    mod_gvs = globals(mod)
+    for name in collect(keys(refs.slots))
+        haskey(mod_gvs, name) || delete!(refs.slots, name)
+    end
+    return
+end
+
+function resolve_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
+    check_host_reference_slots!(mod, refs)
+    mod_gvs = globals(mod)
+    for (name, ref) in refs.slots
+        gv = mod_gvs[name]
+        host_reference_slot_size(mod, gv, name)
+        value = resolve_host_reference(ref)
+        val = host_reference_slot_initializer(gv, value)
+        initializer!(gv, val)
+        linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+        refs.embedded_pointer = true
+    end
+    empty!(refs.slots)
+    return
+end
+
+"""
+    emit_host_reference_slots!(mod, refs)
+
+Prepare the globals named by `refs.slots` for loader-based lowering. Each remains a writable,
+word-sized external symbol that the loader must resolve and patch after loading the object.
+"""
+function emit_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
+    check_host_reference_slots!(mod, refs)
+    mod_gvs = globals(mod)
+    slots = GlobalVariable[]
+    for name in keys(refs.slots)
+        gv = mod_gvs[name]
+        host_reference_slot_size(mod, gv, name)
+        initializer!(gv, null(global_value_type(gv)))
+        constant!(gv, false)
+        linkage!(gv, LLVM.API.LLVMExternalLinkage)
+        extinit!(gv, true)
+        push!(slots, gv)
+    end
+    isempty(slots) || set_used!(mod, slots...)
+    return
+end
+
+function link_with_host_references!(dest_mod::LLVM.Module, dest_refs::HostReferences,
+                                    src_mod::LLVM.Module, src_refs::HostReferences;
+                                    only_needed=false)
+    # Link-time optimization may already have removed an unreferenced global. This is the
+    # last point where its absence is provably dead rather than a broken relocation.
+    prune_dead_host_reference_slots!(dest_mod, dest_refs)
+    prune_dead_host_reference_slots!(src_mod, src_refs)
+    src_gvs = globals(src_mod)
+    dest_names = Set{String}(LLVM.name(v) for v in [collect(globals(dest_mod));
+                                                      collect(functions(dest_mod))])
+    src_names = Set{String}(LLVM.name(v) for v in [collect(globals(src_mod));
+                                                     collect(functions(src_mod))])
+
+    function fresh_slot_name(name)
+        base = safe_name(name) * "_gpucompiler"
+        candidate = base
+        suffix = 0
+        while candidate in dest_names || candidate in src_names
+            suffix += 1
+            candidate = base * "_" * string(suffix)
+        end
+        return candidate
+    end
+
+    for (name, ref) in collect(src_refs.slots)
+        dest_ref = get(dest_refs.slots, name, nothing)
+        haskey(src_gvs, name) || error("Missing source host reference slot '$name'")
+        if dest_ref !== nothing && same_host_reference(dest_ref, ref)
+            haskey(globals(dest_mod), name) ||
+                error("Missing destination host reference slot '$name'")
+            continue
+        end
+
+        gv = src_gvs[name]
+        if name in dest_names || dest_ref !== nothing
+            delete!(src_names, name)
+            LLVM.name!(gv, fresh_slot_name(name))
+            push!(src_names, LLVM.name(gv))
+        else
+            continue
+        end
+        actual_name = LLVM.name(gv)
+        delete!(src_refs.slots, name)
+        haskey(src_refs.slots, actual_name) &&
+            error("Duplicate source host reference slot '$actual_name'")
+        src_refs.slots[actual_name] = ref
+    end
+
+    link!(dest_mod, src_mod; only_needed)
+    for (name, ref) in src_refs.slots
+        if !haskey(globals(dest_mod), name)
+            only_needed && continue
+            error("Linked host reference slot '$name' is missing")
+        end
+        dest_ref = get(dest_refs.slots, name, nothing)
+        dest_ref === nothing && (dest_refs.slots[name] = ref)
+        dest_ref === nothing || same_host_reference(dest_ref, ref) ||
+            error("Conflicting linked host reference slot '$name'")
+    end
+    for name in keys(dest_refs.slots)
+        haskey(globals(dest_mod), name) ||
+            error("Merged host reference slot '$name' is missing")
+    end
+    dest_refs.embedded_pointer |= src_refs.embedded_pointer
+    return
+end
+
+function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
+    refs = classify_gvs!(mod, gv_to_value)
+    refs.embedded_pointer |= !materialize_bool_singletons!(mod)
+    resolve_host_reference_slots!(mod, refs)
+    return !refs.embedded_pointer
 end
 
 # Bool JuliaVariables are absent from `gv_to_value`; define one device box per name.

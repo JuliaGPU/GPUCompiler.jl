@@ -68,14 +68,15 @@ end
 # entirely. On 1.10 it is cached for the duration of the session.
 mutable struct RuntimeFunctionResults
     bitcode::Union{Nothing,Vector{UInt8}}
-    RuntimeFunctionResults() = new(nothing)
+    host_references::HostReferences
+    RuntimeFunctionResults() = new(nothing, HostReferences())
 end
 
 # Compile a single runtime function and link it into `mod`. The renamed bitcode is
 # memoized through `RuntimeFunctionResults`; the session-local `runtime_libs` cache
 # below additionally avoids repeating the parse-and-link work within a session.
-function emit_function!(mod, config::CompilerConfig, source::MethodInstance, method,
-                        world::UInt)
+function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
+                        source::MethodInstance, method, world::UInt)
     name = method.llvm_name
     rt_job = CompilerJob(source, config, world)
 
@@ -83,7 +84,9 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
     # inference itself.
     ci, res = runtime_function_results(rt_job)
     if res !== nothing && res.bitcode !== nothing
-        link!(mod, parse(LLVM.Module, MemoryBuffer(res.bitcode)))
+        cached_refs = copy_host_references(res.host_references)
+        link_with_host_references!(mod, refs,
+                                   parse(LLVM.Module, MemoryBuffer(res.bitcode)), cached_refs)
         ci === nothing && (ci = runtime_code_instance(rt_job))
         return ci::CodeInstance
     end
@@ -97,13 +100,9 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
+    prune_dead_host_reference_slots!(new_mod, meta.host_references)
 
-    # Resolve constgv mappings before their metadata is discarded. Dedicated Bool
-    # globals are resolved after linking into the toplevel module.
-    if !isempty(meta.gv_to_value)
-        portable = relocate_gvs!(new_mod, meta.gv_to_value)
-        portable || mark_session_dependent!(rt_job)
-    end
+    meta.host_references.embedded_pointer && mark_session_dependent!(rt_job)
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
@@ -120,8 +119,9 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
     ci === nothing && (ci = runtime_code_instance(rt_job))
     res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
     res.bitcode = take!(io)
+    res.host_references = copy_host_references(meta.host_references)
 
-    link!(mod, new_mod)
+    link_with_host_references!(mod, refs, new_mod, meta.host_references)
     return ci::CodeInstance
 end
 
@@ -170,13 +170,14 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     mod = LLVM.Module("GPUCompiler run-time library")
     sources = MethodInstance[]
     code_instances = CodeInstance[]
+    refs = HostReferences()
 
     for method in values(Runtime.methods)
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         source = resolved
         push!(sources, source)
-        push!(code_instances, emit_function!(mod, config, source, method, job.world))
+        push!(code_instances, emit_function!(mod, refs, config, source, method, job.world))
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again
@@ -184,7 +185,7 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     # removes Julia address spaces, which would then lead to type mismatches when using
     # functions from the runtime library from IR that has not been stripped of AS info.
 
-    return mod, sources, code_instances
+    return mod, sources, code_instances, refs
 end
 
 # Session-local cache of assembled runtime libraries, keyed by
@@ -203,6 +204,7 @@ mutable struct RuntimeLibrary
     sources::Vector{MethodInstance}
     code_instances::Vector{CodeInstance}
     validated_world::UInt
+    host_references::HostReferences
 end
 
 function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob))
@@ -235,14 +237,16 @@ const runtime_libs_lock = ReentrantLock()
     cached = Base.@lock runtime_libs_lock begin
         cached = get(runtime_libs, key, nothing)
         if cached === nothing || !runtime_library_valid(cached, job)
-            lib, sources, code_instances = build_runtime(job, config)
+            lib, sources, code_instances, host_references = build_runtime(job, config)
             io = IOBuffer()
             write(io, lib)
-            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world)
+            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world,
+                                    host_references)
             runtime_libs[key] = cached
         end
         cached
     end
 
-    return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true)
+    return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true),
+           copy_host_references(cached.host_references)
 end

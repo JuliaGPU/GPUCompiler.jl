@@ -2,19 +2,25 @@
 
 # final preparations for the module to be compiled to machine code
 # these passes should not be run when e.g. compiling to write to disk.
-function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                            refs::HostReferences=HostReferences())
+    prune_dead_host_reference_slots!(mod, refs)
+    collect_runtime_global_references!(job, mod, refs)
+    lower_host_references!(job, mod, refs)
     @dispose pb=NewPMPassBuilder() begin
-        register!(pb, ResolveCPUReferencesPass(job))
+        register!(pb, CollectRuntimeGlobalReferencesPass(job, refs))
 
         add!(pb, RecomputeGlobalsAAPass())
         add!(pb, GlobalOptPass())
-        add!(pb, ResolveCPUReferencesPass(job))
+        add!(pb, CollectRuntimeGlobalReferencesPass(job, refs))
         add!(pb, GlobalDCEPass())
         add!(pb, StripDeadPrototypesPass())
 
         run!(pb, mod, llvm_machine(job.config.target))
     end
 
+    prune_dead_host_reference_slots!(mod, refs)
+    lower_host_references!(job, mod, refs)
     return
 end
 
@@ -26,25 +32,34 @@ end
 # but at the same time the GPU can't resolve them at run-time.
 #
 # this pass performs that resolution at link time.
-struct ResolveCPUReferences
+struct CollectRuntimeGlobalReferences
     job::CompilerJob
+    refs::HostReferences
 end
-function (self::ResolveCPUReferences)(mod::LLVM.Module)
+function (self::CollectRuntimeGlobalReferences)(mod::LLVM.Module)
     changed = false
 
-    for f in functions(mod)
+    for f in [collect(functions(mod)); collect(globals(mod))]
         fn = LLVM.name(f)
-        if isdeclaration(f) && !LLVM.isintrinsic(f) && startswith(fn, "jl_")
-            # lazily resolve the address of the binding; some symbols only exist
-            # within the JIT (e.g. `jl_get_pgcstack_resolved`) and cannot be looked up,
-            # but such symbols are only ever called, not loaded from.
-            dereferenced = nothing
-            function resolve_binding()
-                if dereferenced === nothing
-                    address = ccall(:jl_cglobal, Any, (Any, Any), fn, UInt)
-                    dereferenced = LLVM.ConstantInt(unsafe_load(address))
+        # Julia value globals are already represented by an identity in `refs`; they may
+        # use a `jl_*` spelling but are not exported libjulia runtime globals.
+        f isa LLVM.GlobalVariable && haskey(self.refs.slots, fn) && continue
+        if isdeclaration(f) && (!(f isa LLVM.Function) || !LLVM.isintrinsic(f)) &&
+           startswith(fn, "jl_")
+            slot = nothing
+            function runtime_global_slot()
+                if slot === nothing
+                    name = safe_name("gpu_" * fn)
+                    slot = GlobalVariable(mod, host_reference_word_type(), name)
+                    initializer!(slot, null(global_value_type(slot)))
+                    linkage!(slot, LLVM.API.LLVMExternalLinkage)
+                    extinit!(slot, true)
+                    actual_name = LLVM.name(slot)
+                    haskey(self.refs.slots, actual_name) &&
+                        error("Duplicate Julia runtime global slot '$actual_name'")
+                    self.refs.slots[actual_name] = CGlobalRef(Symbol(fn))
                 end
-                dereferenced
+                slot
             end
 
             function replace_bindings!(value)
@@ -55,8 +70,20 @@ function (self::ResolveCPUReferences)(mod::LLVM.Module)
                         # recurse
                         changed |= replace_bindings!(val)
                     elseif isa(val, LLVM.LoadInst)
-                        # resolve
-                        replace_uses!(val, resolve_binding())
+                        T = value_type(val)
+                        if !(T isa LLVM.PointerType ||
+                             (T isa LLVM.IntegerType && width(T) == 8sizeof(UInt)))
+                            error("Unsupported Julia runtime global '$fn' load of LLVM type $T")
+                        end
+                        @dispose builder=IRBuilder() begin
+                            position!(builder, val)
+                            replacement = load!(builder, host_reference_word_type(),
+                                                runtime_global_slot())
+                            if T isa LLVM.PointerType
+                                replacement = inttoptr!(builder, replacement, T)
+                            end
+                            replace_uses!(val, replacement)
+                        end
                         erase!(val)
                         # FIXME: iterator invalidation?
                         changed = true
@@ -71,8 +98,11 @@ function (self::ResolveCPUReferences)(mod::LLVM.Module)
 
     return changed
 end
-ResolveCPUReferencesPass(job) =
-    NewPMModulePass("ResolveCPUReferences", ResolveCPUReferences(job))
+collect_runtime_global_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                                   refs::HostReferences) =
+    CollectRuntimeGlobalReferences(job, refs)(mod)
+CollectRuntimeGlobalReferencesPass(job, refs=HostReferences()) =
+    NewPMModulePass("CollectRuntimeGlobalReferences", CollectRuntimeGlobalReferences(job, refs))
 
 
 function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)

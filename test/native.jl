@@ -73,17 +73,9 @@ end
             @test only(other_mis).def in methods(mod.inner)
 
             if VERSION >= v"1.12"
-                @test length(meta.gv_to_value) == 1
-                for (k, v) in meta.gv_to_value
-                    @test v != C_NULL
-                end
+                @test length(meta.host_references.slots) == 1
+                @test only(values(meta.host_references.slots)) isa GPUCompiler.JuliaValueRef
             end
-            # TODO: Global values get privatized, so we can't find them by name anymore.
-            # %.not = icmp eq ptr %"sym::Symbol", inttoptr (i64 140096668482288 to ptr), !dbg !38
-            # for (name, v) in meta.gv_to_value
-            #     gv = globals(ir)[name]
-            #     @test LLVM.initializer(gv) === v
-            # end
         end
     end
 
@@ -273,11 +265,10 @@ end
         end
     end
 
-    @testset "runtime constgv relocation" begin
+    @testset "runtime host references" begin
         # runtime functions like `box_bool` may reference Julia singletons through
-        # `julia.constgv` globals. Their session-absolute addresses must be baked into
-        # the cached runtime bitcode when it is built: only kernel modules go through
-        # `relocate_gvs!`, so a slot left null here would stay null on the device.
+        # `julia.constgv` globals. Keep their Julia identities with the cached bitcode
+        # so the final kernel can resolve them in its own session.
         job, _ = Native.create_job(identity, (Nothing,))
         JuliaContext() do ctx
             GPUCompiler.load_runtime(job)
@@ -292,7 +283,8 @@ end
                 isempty(uses(gv)) && continue
                 used += 1
                 init = LLVM.initializer(gv)
-                @test init !== nothing && !LLVM.isnull(init)
+                @test init === nothing
+                @test haskey(lib.host_references.slots, LLVM.name(gv))
             end
             @static if VERSION >= v"1.12-"
                 # on older versions, Julia bakes addresses without tagging globals
@@ -737,6 +729,12 @@ end
     # actually loaded from, leaving called functions alone.
     job, _ = Native.create_job(identity, (Nothing,))
     JuliaContext() do ctx
+        ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
+        word_ptr = ptr("i8")
+        word_ptr_ptr = ptr(word_ptr)
+        function_word_ptr(name) = GPUCompiler.supports_typed_pointers(ctx) ?
+            "i64* bitcast (i64 ()* @$name to i64*)" : "ptr @$name"
+
         mod = parse(LLVM.Module, """
             declare void @jl_get_pgcstack_resolved()
 
@@ -746,6 +744,118 @@ end
             }""")
         GPUCompiler.prepare_execution!(job, mod)
         @test haskey(functions(mod), "jl_get_pgcstack_resolved")
+
+        mod = parse(LLVM.Module, """
+            @jl_float32_type = external global $word_ptr
+
+            define $word_ptr @entry() {
+                %value = load $word_ptr, $word_ptr_ptr @jl_float32_type
+                ret $word_ptr %value
+            }""")
+        GPUCompiler.prepare_execution!(job, mod)
+        @test !occursin("load $word_ptr, $word_ptr_ptr @jl_float32_type", string(mod))
+
+        mod = parse(LLVM.Module, """
+            @jl_float32_type = external global $word_ptr
+
+            define $word_ptr @entry() {
+                %value = load $word_ptr, $word_ptr_ptr @jl_float32_type
+                ret $word_ptr %value
+            }""")
+        refs = GPUCompiler.HostReferences()
+        @test GPUCompiler.collect_runtime_global_references!(job, mod, refs)
+        name = only(keys(refs.slots))
+        @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test occursin("externally_initialized global i64 0", string(mod))
+
+        mod = parse(LLVM.Module, """
+            declare i64 @jl_float32_type()
+
+            define i64 @entry() {
+                %value = load i64, $(function_word_ptr("jl_float32_type"))
+                ret i64 %value
+            }""")
+        refs = GPUCompiler.HostReferences()
+        @test GPUCompiler.collect_runtime_global_references!(job, mod, refs)
+        name = only(keys(refs.slots))
+        @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test occursin("externally_initialized global i64 0", string(mod))
+    end
+end
+
+@testset "host reference linking" begin
+    JuliaContext() do ctx
+        ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
+
+        function slot_module(name, entry)
+            parse(LLVM.Module, """
+                @$name = external global i64
+
+                define i64 @$entry() {
+                    %value = load i64, $(ptr("i64")) @$name
+                    ret i64 %value
+                }""")
+        end
+
+        refs(name, value) =
+            GPUCompiler.HostReferences(Dict(name => GPUCompiler.JuliaValueRef(value)), false)
+
+        # Three unrelated values requested the same slot name. Each load keeps its own
+        # relocation after linking, including the second fresh-name suffix.
+        dest = slot_module("slot", "first")
+        dest_refs = refs("slot", :first)
+        for (entry, value) in (("second", :second), ("third", :third))
+            src = slot_module("slot", entry)
+            src_refs = refs("slot", value)
+            GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs)
+        end
+        @test Set(keys(dest_refs.slots)) ==
+              Set(("slot", "slot_gpucompiler", "slot_gpucompiler_1"))
+        @test Set(ref.value for ref in values(dest_refs.slots)) == Set((:first, :second, :third))
+
+        # A global outside the metadata table is still part of LLVM's namespace.
+        dest = slot_module("slot", "occupied")
+        dest_refs = GPUCompiler.HostReferences()
+        src = slot_module("slot", "source")
+        src_refs = refs("slot", :source)
+        GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs)
+        @test only(keys(dest_refs.slots)) == "slot_gpucompiler"
+
+        # Equal Julia identities deliberately share a single slot.
+        dest = slot_module("slot", "first")
+        dest_refs = refs("slot", :shared)
+        src = slot_module("slot", "second")
+        src_refs = refs("slot", :shared)
+        GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs)
+        @test collect(keys(dest_refs.slots)) == ["slot"]
+        @test occursin("@slot = external global i64", string(dest))
+
+        # `only_needed` must keep metadata for imported slots and discard metadata for
+        # source globals that the LLVM linker did not import.
+        dest = parse(LLVM.Module, """
+            declare i64 @source()
+
+            define i64 @entry() {
+                %value = call i64 @source()
+                ret i64 %value
+            }""")
+        src = parse(LLVM.Module, """
+            @used = external global i64
+            @unused = external global i64
+
+            define i64 @source() {
+                %value = load i64, $(ptr("i64")) @used
+                ret i64 %value
+            }""")
+        src_refs = GPUCompiler.HostReferences(Dict(
+            "used" => GPUCompiler.JuliaValueRef(:used),
+            "unused" => GPUCompiler.JuliaValueRef(:unused),
+        ), false)
+        dest_refs = GPUCompiler.HostReferences()
+        GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs;
+                                               only_needed=true)
+        @test collect(keys(dest_refs.slots)) == ["used"]
+        @test only(values(dest_refs.slots)).value === :used
     end
 end
 

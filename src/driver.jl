@@ -93,7 +93,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob))
     else
         error("Unknown assembly format $output")
     end
-    asm, asm_meta = emit_asm(job, ir, format)
+    asm, asm_meta = emit_asm(job, ir, ir_meta.host_references, format)
 
     if output == :asm || output == :obj
         return asm, (; asm_meta..., ir_meta..., ir)
@@ -192,6 +192,7 @@ const __llvm_initialized = Ref(false)
     # finalize the current module. this needs to happen before linking deferred modules,
     # since those modules have been finalized themselves, and we don't want to re-finalize.
     entry = finish_module!(job, ir, entry)
+    host_references = classify_gvs!(ir, gv_to_value)
 
     # deferred code generation
     has_deferred_jobs = job.config.toplevel && !job.config.only_entry &&
@@ -245,11 +246,9 @@ const __llvm_initialized = Ref(false)
                     dyn_ir, dyn_meta = @invokelatest deferred_codegen(dyn_job, job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
-                    if haskey(dyn_meta, :gv_to_value)
-                        merge!(gv_to_value, dyn_meta.gv_to_value)
-                    end
                     @assert context(dyn_ir) == context(ir)
-                    link!(ir, dyn_ir)
+                    link_with_host_references!(ir, host_references, dyn_ir,
+                                               dyn_meta.host_references)
                     changed = true
                     dyn_entry_fn
                 end
@@ -292,7 +291,7 @@ const __llvm_initialized = Ref(false)
     if job.config.toplevel && job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
-            runtime = load_runtime(job)
+            runtime, runtime_references = load_runtime(job)
         end
 
         @tracepoint "Library linking" begin
@@ -301,7 +300,8 @@ const __llvm_initialized = Ref(false)
 
             # GPU run-time library
             if !uses_julia_runtime(job)
-                @tracepoint "runtime library" link!(ir, runtime; only_needed=true)
+                @tracepoint "runtime library" link_with_host_references!(
+                    ir, host_references, runtime, runtime_references; only_needed=true)
             end
         end
     end
@@ -334,13 +334,12 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
-            # Materialize isbits and Bool boxes; bake addresses for other objects.
-            portable = relocate_gvs!(ir, gv_to_value)
-            portable || mark_session_dependent!(job)
+            host_references.embedded_pointer |= !materialize_bool_singletons!(ir)
+            host_references.embedded_pointer && mark_session_dependent!(job)
 
             if job.config.optimize
                 @tracepoint "optimization" begin
-                    optimize!(job, ir; job.config.opt_level)
+                    optimize!(job, ir, host_references; job.config.opt_level)
 
                     # deferred codegen has some special optimization requirements,
                     # which also need to happen _after_ regular optimization.
@@ -405,7 +404,7 @@ const __llvm_initialized = Ref(false)
 
     if job.config.toplevel && job.config.validate
         @tracepoint "validation" begin
-            check_ir(job, ir)
+            check_ir(job, ir, host_references)
         end
     end
 
@@ -413,18 +412,19 @@ const __llvm_initialized = Ref(false)
         @tracepoint "verification" verify(ir)
     end
 
-    return ir, (; entry, compiled, gv_to_value)
+    return ir, (; entry, compiled, host_references)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
-                          format::LLVM.API.LLVMCodeGenFileType)
+                          refs::HostReferences, format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
     if job.config.strip
         @tracepoint "Debug info removal" strip_debuginfo!(ir)
     end
 
     @tracepoint "LLVM back-end" begin
-        @tracepoint "preparation" prepare_execution!(job, ir)
+        @tracepoint "preparation" prepare_execution!(job, ir, refs)
+        refs.embedded_pointer && mark_session_dependent!(job)
 
         code = @tracepoint "machine-code generation" mcgen(job, ir, format)
     end
