@@ -272,15 +272,10 @@ function cached_results(::Type{V}, job::CompilerJob) where {V}
 end
 
 
-## 1.10 session-dependent results
-#
-# Nothing to wipe: `legacy_job_results` never persists meaningfully across sessions (its
-# CodeInstance keys are session-specific, and our own image's entries are cleared in
-# `__init__`; entries written by a downstream package's workload don't make it into that
-# package's image at all, cf. cross-image mutation loss).
-mark_session_dependent!(@nospecialize(job::CompilerJob)) = nothing
-
 end # !HAS_INTEGRATED_CACHE
+
+# Compatibility shim for backends using the former dynamic cache-wiping API.
+mark_session_dependent!(@nospecialize(job::CompilerJob)) = nothing
 
 
 ## Legacy `cached_compilation` (1.10+)

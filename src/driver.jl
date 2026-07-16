@@ -402,9 +402,6 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    # Optimization may link runtime functions carrying embedded host pointers.
-    job.config.toplevel && host_references.embedded_pointer && mark_session_dependent!(job)
-
     if job.config.toplevel && job.config.validate
         @tracepoint "validation" begin
             check_ir(job, ir, host_references)
@@ -427,7 +424,6 @@ end
 
     @tracepoint "LLVM back-end" begin
         @tracepoint "preparation" prepare_execution!(job, ir, refs)
-        refs.embedded_pointer && mark_session_dependent!(job)
 
         code = @tracepoint "machine-code generation" mcgen(job, ir, format)
     end

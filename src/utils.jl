@@ -418,3 +418,10 @@ end
         return inits
     end
 end
+
+"""Whether Julia exposes enough global-variable metadata to emit relocatable IR."""
+supports_relocatable_ir() = @static if VERSION >= v"1.13.0-DEV.623"
+    true
+else
+    HAS_LLVM_GVS_GLOBALS
+end

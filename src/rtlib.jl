@@ -100,9 +100,7 @@ function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
-    prune_dead_host_reference_slots!(new_mod, meta.host_references)
-
-    meta.host_references.embedded_pointer && mark_session_dependent!(rt_job)
+    prune_dead_host_references!(new_mod, meta.host_references)
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
@@ -117,9 +115,11 @@ function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
     io = IOBuffer()
     write(io, new_mod)
     ci === nothing && (ci = runtime_code_instance(rt_job))
-    res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
-    res.bitcode = take!(io)
-    res.host_references = meta.host_references
+    if supports_relocatable_ir()
+        res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
+        res.bitcode = take!(io)
+        res.host_references = meta.host_references
+    end
 
     link_with_host_references!(mod, refs, new_mod, meta.host_references)
     return ci::CodeInstance

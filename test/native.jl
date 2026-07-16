@@ -217,21 +217,8 @@ end
         @test new_res !== res
         @test new_res.asm === nothing
 
-        @static if GPUCompiler.HAS_INTEGRATED_CACHE
-            # session-dependent results (e.g. artifacts with relocated GVs) are wiped
-            # before image serialization; emulate the atexit-driven wipe directly
-            new_res.asm = "session-dependent"
-            other_job, _ = Native.create_job(mod.kernel, (Int64,); name="other")
-            other_res = GPUCompiler.cached_results(mod.Results, other_job)
-            push!(GPUCompiler.session_dependent_jobs, new_job)
-            GPUCompiler.wipe_session_dependent_results()
-            @test isempty(GPUCompiler.session_dependent_jobs)
-            wiped_res = GPUCompiler.cached_results(mod.Results, new_job)
-            @test wiped_res !== new_res
-            @test wiped_res.asm === nothing
-            # ... without affecting other configs on the same CI
-            @test GPUCompiler.cached_results(mod.Results, other_job) === other_res
-        end
+        @test !isdefined(GPUCompiler, :session_dependent_jobs)
+        @test !isdefined(GPUCompiler, :wipe_session_dependent_results)
     end
 
     @testset "runtime cache invalidation" begin
@@ -387,8 +374,8 @@ end
             end
             refs = GPUCompiler.collect_julia_value_references!(
                 m, Dict{String, Ptr{Cvoid}}())
-            @test !refs.embedded_pointer
-            GPUCompiler.resolve_host_reference_slots!(m, refs)
+            @test isempty(refs.patches)
+            GPUCompiler.resolve_host_references!(m, refs)
             bool_ir = string(m)
             for name in ("jl_true", "jl_false")
                 @test haskey(globals(m), "$(name)_box")
@@ -402,26 +389,38 @@ end
                 # smalltag isbits: materialized, portable
                 m, map = slot_module(ptrs[1])
                 refs = GPUCompiler.collect_julia_value_references!(m, map)
-                @test !refs.embedded_pointer
-                GPUCompiler.resolve_host_reference_slots!(m, refs)
+                @test isempty(refs.patches)
+                GPUCompiler.resolve_host_references!(m, refs)
                 @test haskey(globals(m), "jl_global_0_box")
                 dispose(m)
 
-                # Float64: materialized, but the header carries a type pointer
+                # Float64: the non-smalltag header is an interior relocation.
                 m, map = slot_module(ptrs[2])
                 refs = GPUCompiler.collect_julia_value_references!(m, map)
-                @test refs.embedded_pointer
-                GPUCompiler.resolve_host_reference_slots!(m, refs)
-                @test haskey(globals(m), "jl_global_0_box")
+                @test length(refs.patches) == 1
+                (box_name, offset), ref = only(refs.patches)
+                @test offset == 0
+                @test ref.value === Float64
+                box = globals(m)[box_name]
+                @test isextinit(box)
+                @test linkage(box) == LLVM.API.LLVMExternalLinkage
+                header_idx = Int(element_at(datalayout(m), global_value_type(box), offset)) + 1
+                @test convert(UInt, collect(operands(initializer(box)))[header_idx]) == 0
+                GPUCompiler.resolve_host_references!(m, refs)
+                @test isempty(refs.patches)
+                @test !isextinit(box)
+                @test isconstant(box)
+                @test linkage(box) == LLVM.API.LLVMPrivateLinkage
+                @test convert(UInt, collect(operands(initializer(box)))[header_idx]) ==
+                      GPUCompiler.resolve_host_reference(ref)
                 dispose(m)
 
                 # Symbol: baked address
                 m, map = slot_module(ptrs[3])
                 refs = GPUCompiler.collect_julia_value_references!(m, map)
-                @test !refs.embedded_pointer
                 @test only(values(refs.slots)).value === objs[3]
-                GPUCompiler.resolve_host_reference_slots!(m, refs)
-                @test refs.embedded_pointer
+                GPUCompiler.resolve_host_references!(m, refs)
+                @test isempty(refs.slots)
                 @test !haskey(globals(m), "jl_global_0_box")
                 @test occursin("inttoptr", string(m))
                 dispose(m)
@@ -429,8 +428,10 @@ end
                 # 16-byte-aligned payloads get padded past the header word
                 m, map = slot_module(ptrs[4])
                 refs = GPUCompiler.collect_julia_value_references!(m, map)
-                GPUCompiler.resolve_host_reference_slots!(m, refs)
-                box = globals(m)["jl_global_0_box"]
+                (box_name, offset), _ = only(refs.patches)
+                @test offset == 8
+                GPUCompiler.resolve_host_references!(m, refs)
+                box = globals(m)[box_name]
                 @test length(elements(LLVM.global_value_type(box))) == 3
                 dispose(m)
             end
@@ -759,7 +760,6 @@ end
             refs = meta.host_references
             @test !isempty(refs.slots)
             @test all(ref -> ref isa GPUCompiler.JuliaValueRef, values(refs.slots))
-            @test !refs.embedded_pointer
             @test all(name -> isdeclaration(globals(meta.ir)[name]), keys(refs.slots))
 
             bytes = Vector{UInt8}(codeunits(obj))
@@ -877,7 +877,8 @@ end
         end
 
         refs(name, value) =
-            GPUCompiler.HostReferences(Dict(name => GPUCompiler.JuliaValueRef(value)), false)
+            GPUCompiler.HostReferences(Dict(name => GPUCompiler.JuliaValueRef(value)),
+                                       Dict{Tuple{String,Int},GPUCompiler.HostReference}())
 
         # Equal Julia identities deliberately share a single slot.
         dest = slot_module("slot", "first")
@@ -916,7 +917,7 @@ end
         src_refs = GPUCompiler.HostReferences(Dict(
             "used" => GPUCompiler.JuliaValueRef(:used),
             "unused" => GPUCompiler.JuliaValueRef(:unused),
-        ), false)
+        ), Dict{Tuple{String,Int},GPUCompiler.HostReference}())
         dest_refs = GPUCompiler.HostReferences()
         GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs;
                                                only_needed=true)

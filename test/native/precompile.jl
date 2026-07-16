@@ -38,21 +38,19 @@ precompile_test_harness("Inference caching") do load_path
         end
 
         portable_kernel(x) = x + 1
-        session_kernel(x) = x + 2
+        cached_kernel(x) = x + 2
 
-        # Attach representative back-end artifacts while the package image is built. The
-        # portable entry should survive serialization; the session-dependent one should be
-        # removed by GPUCompiler's pre-output atexit hook.
+        # Job results are serialized as-is. Backends are responsible for storing only
+        # artifacts allowed by the static relocatability contract.
         let
             job, _ = NativeCompiler.Native.create_job(portable_kernel, (Int,))
             precompile(job)
             NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "portable"
         end
         let
-            job, _ = NativeCompiler.Native.create_job(session_kernel, (Int,))
+            job, _ = NativeCompiler.Native.create_job(cached_kernel, (Int,))
             precompile(job)
-            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "session"
-            NativeCompiler.GPUCompiler.mark_session_dependent!(job)
+            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "cached"
         end
 
         let
@@ -116,10 +114,10 @@ precompile_test_harness("Inference caching") do load_path
         @test portable_res !== nothing
         @test portable_res.artifact == "portable"
 
-        session_job, _ = NativeCompiler.Native.create_job(NativeBackend.session_kernel, (Int,))
-        session_res = GPUCompiler.cached_results(NativeBackend.Results, session_job)
-        @test session_res !== nothing
-        @test session_res.artifact === nothing
+        cached_job, _ = NativeCompiler.Native.create_job(NativeBackend.cached_kernel, (Int,))
+        cached_res = GPUCompiler.cached_results(NativeBackend.Results, cached_job)
+        @test cached_res !== nothing
+        @test cached_res.artifact == "cached"
 
         # Check that kernel survived
         kernel_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel), Tuple{Vector{Int}, Int})

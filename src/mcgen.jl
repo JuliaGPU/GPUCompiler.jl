@@ -18,7 +18,7 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                             refs::HostReferences=HostReferences())
     # Clean up first so only live references get slots and get lowered.
     run_cleanup_pipeline!(job, mod)
-    prune_dead_host_reference_slots!(mod, refs)
+    prune_dead_host_references!(mod, refs)
 
     collect_runtime_global_references!(mod, refs)
     lower_host_references!(job, mod, refs)
@@ -26,7 +26,7 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # Fold constants exposed by eager lowering, and discard slots made dead by either
     # lowering strategy.
     run_cleanup_pipeline!(job, mod)
-    prune_dead_host_reference_slots!(mod, refs)
+    prune_dead_host_references!(mod, refs)
 
     has_unresolved_runtime_global_loads(mod, refs) &&
         error("Unresolved Julia runtime global load after host-reference lowering")

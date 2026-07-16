@@ -2,14 +2,15 @@
 #
 #   produce ──▶ merge (on link) ──▶ prune (after DCE) ──▶ lower (at emit_asm)
 #
-# Julia value globals and libjulia runtime globals are represented by symbolic slots until
-# the backend lowers them. A slot's LLVM name is globally unique and assigned exactly once:
-# the readable Julia name plus object identity for JuliaValueRef slots, and `gpu_` plus the
-# C symbol for CGlobalRef slots. Same name therefore means the same HostReference, so linking
-# can merge declarations and metadata without renaming either one.
+# Julia values produce two relocation kinds: word-sized declaration slots and patches at a
+# byte offset inside a defined global. Runtime globals produce slots. Names are globally
+# unique and assigned once, so linking can merge IR and metadata without renaming.
 #
 # The two producers are `collect_julia_value_references!` during IR generation and
 # `collect_runtime_global_references!` immediately before backend lowering.
+#
+# Generated code is portable only when `supports_relocatable_ir()` and the backend preserves
+# these relocations for its loader. The default eager lowering bakes current-session values.
 #
 # This mirrors Julia's own mechanisms: codegen's identity-keyed global_targets slots, the
 # sysimage jl_gvars table patched by jl_update_all_gvars, and JIT absoluteSymbols definitions.
@@ -51,19 +52,19 @@ A serializable source for a host-derived word: either a [`JuliaValueRef`](@ref) 
 const HostReference = Union{JuliaValueRef,CGlobalRef}
 
 """
-    HostReferences(slots, embedded_pointer)
+    HostReferences(slots, patches)
 
-Host-reference metadata accompanying a module. `slots` maps each object-code symbol to the
-source of the word that must be written there. `embedded_pointer` conservatively records that
-an unavoidable session pointer has been embedded, so the artifact cannot be serialized into a
-package image even if `slots` is empty.
+Host-reference metadata accompanying a module. `slots` maps word-sized declaration symbols to
+the word resolved by a loader. `patches` maps a global name and byte offset to a word patched
+after loading.
 """
-mutable struct HostReferences
+struct HostReferences
     slots::Dict{String,HostReference}
-    embedded_pointer::Bool
+    patches::Dict{Tuple{String,Int},HostReference}
 end
 
-HostReferences() = HostReferences(Dict{String,HostReference}(), false)
+HostReferences() = HostReferences(Dict{String,HostReference}(),
+                                  Dict{Tuple{String,Int},HostReference}())
 
 same_host_reference(a::JuliaValueRef, b::JuliaValueRef) = a.value === b.value
 same_host_reference(a::CGlobalRef, b::CGlobalRef) = a.symbol === b.symbol
@@ -93,10 +94,15 @@ Backend hook for lowering live host references before object emission.
 The default implementation resolves them in the current Julia process, making the result
 session-dependent. Loaders may instead emit module-owned definitions that are patched after
 loading, or external declarations that are defined before loading.
+
+Backends using eager lowering must not persist generated code in `cached_results`. Generated
+code is session-portable only when [`supports_relocatable_ir`](@ref) and the backend preserves
+all slots and patches with definition- or declaration-based lowering, then applies them at
+load time.
 """
 function lower_host_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 refs::HostReferences)
-    resolve_host_reference_slots!(mod, refs)
+    resolve_host_references!(mod, refs)
 end
 
 
@@ -109,7 +115,7 @@ function collect_julia_value_references!(mod::LLVM.Module,
         gv = mod_gvs[name]
         cur = initializer(gv)
         if !(cur === nothing || LLVM.isnull(cur))
-            refs.embedded_pointer = true
+            @assert !supports_relocatable_ir()
             continue
         end
 
@@ -118,10 +124,9 @@ function collect_julia_value_references!(mod::LLVM.Module,
         init == C_NULL && error("Missing Julia object for global '$name'")
         obj = Base.unsafe_pointer_to_objref(init)
         if isbitstype(typeof(obj)) && sizeof(obj) > 0 && !(obj isa Bool)
-            val, hdr = materialize_box!(mod, gv, obj, init)
+            val = materialize_box!(mod, refs, gv, obj, init)
             initializer!(gv, val)
             linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-            refs.embedded_pointer |= hdr >= UInt(64 << 4)
         else
             host_reference_slot_size(mod, gv, name)
             slot_name = safe_name(name) * "_" * string(objectid(obj); base=16)
@@ -138,19 +143,15 @@ function collect_julia_value_references!(mod::LLVM.Module,
         gv = mod_gvs[name]
         cur = initializer(gv)
         if !(cur === nothing || LLVM.isnull(cur))
-            # Existing definitions may contain session-specific addresses.
-            refs.embedded_pointer = true
+            @assert !supports_relocatable_ir()
             continue
         end
 
         init = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
-        val, hdr = materialize_box!(mod, gv, obj, init)
+        val = materialize_box!(mod, refs, gv, obj, init)
         initializer!(gv, val)
         constant!(gv, true)
         linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-
-        # Stay conservative if Bool stops using a smalltag.
-        refs.embedded_pointer |= hdr >= UInt(64 << 4)   # jl_max_tags << 4
     end
     return refs
 end
@@ -185,24 +186,62 @@ function foreach_host_reference_slot(f, mod::LLVM.Module, refs::HostReferences)
     return
 end
 
-function prune_dead_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
+function foreach_host_reference_patch(f, mod::LLVM.Module, refs::HostReferences)
     mod_gvs = globals(mod)
-    for name in collect(keys(refs.slots))
-        haskey(mod_gvs, name) || delete!(refs.slots, name)
+    for ((name, offset), ref) in refs.patches
+        haskey(mod_gvs, name) || error("Missing host reference patch global '$name'")
+        gv = mod_gvs[name]
+        init = initializer(gv)
+        init === nothing && error("Host reference patch global '$name' has no initializer")
+        T = value_type(init)
+        T isa LLVM.StructType ||
+            error("Host reference patch global '$name' has non-struct initializer $T")
+        size = abi_size(datalayout(mod), T)
+        0 <= offset && offset + sizeof(UInt) <= size ||
+            error("Host reference patch '$name+$offset' is outside its $size-byte global")
+        f(name, offset, gv, ref)
     end
     return
 end
 
-function resolve_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
+function prune_dead_host_references!(mod::LLVM.Module, refs::HostReferences)
+    mod_gvs = globals(mod)
+    for name in collect(keys(refs.slots))
+        haskey(mod_gvs, name) || delete!(refs.slots, name)
+    end
+    for ((name, offset), _) in collect(refs.patches)
+        if !haskey(mod_gvs, name)
+            delete!(refs.patches, (name, offset))
+        elseif isempty(uses(mod_gvs[name]))
+            delete!(refs.patches, (name, offset))
+            erase!(mod_gvs[name])
+        end
+    end
+    return
+end
+
+function resolve_host_references!(mod::LLVM.Module, refs::HostReferences)
     foreach_host_reference_slot(mod, refs) do name, gv, ref
         value = resolve_host_reference(ref)
         val = host_reference_slot_initializer(gv, value)
         initializer!(gv, val)
         linkage!(gv, LLVM.API.LLVMPrivateLinkage)
         constant!(gv, true)
-        refs.embedded_pointer = true
+    end
+    foreach_host_reference_patch(mod, refs) do name, offset, gv, ref
+        init = initializer(gv)
+        T = value_type(init)::LLVM.StructType
+        idx = Int(element_at(datalayout(mod), T, offset)) + 1
+        fields = LLVM.Constant[operands(init)...]
+        fields[idx] = ConstantInt(value_type(fields[idx]), resolve_host_reference(ref))
+        initializer!(gv, ConstantStruct(T, fields))
+        linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+        extinit!(gv, false)
+        constant!(gv, true)
+        unnamed_addr!(gv, true)
     end
     empty!(refs.slots)
+    empty!(refs.patches)
     return
 end
 
@@ -210,7 +249,8 @@ end
     emit_host_reference_definitions!(mod, refs)
 
 Emit host-reference slots as writable, null-initialized definitions. The loader must patch each
-definition after loading the object. This requires a per-object symbol namespace.
+definition and interior relocation after loading the object. This requires a per-object symbol
+namespace.
 """
 function emit_host_reference_definitions!(mod::LLVM.Module, refs::HostReferences)
     slots = GlobalVariable[]
@@ -219,6 +259,9 @@ function emit_host_reference_definitions!(mod::LLVM.Module, refs::HostReferences
         constant!(gv, false)
         linkage!(gv, LLVM.API.LLVMExternalLinkage)
         extinit!(gv, true)
+        push!(slots, gv)
+    end
+    foreach_host_reference_patch(mod, refs) do _, _, gv, _
         push!(slots, gv)
     end
     isempty(slots) || set_used!(mod, slots...)
@@ -232,15 +275,21 @@ Prepare host references for a loader that defines symbols before loading an obje
 
 Every slot remains an external word-sized declaration. The loader must define each symbol to
 point at a cell containing [`resolve_host_reference`](@ref), and keep the cell and any
-referenced Julia value alive while the code is executable.
+referenced Julia value alive while the code is executable. Interior patches cannot be defined
+before load and must always be written afterward.
 """
 function emit_host_reference_declarations!(mod::LLVM.Module, refs::HostReferences)
+    used = GlobalVariable[]
     foreach_host_reference_slot(mod, refs) do name, gv, _
         isdeclaration(gv) || error("Host reference slot '$name' must be a declaration")
         constant!(gv, false)
         linkage!(gv, LLVM.API.LLVMExternalLinkage)
         extinit!(gv, false)
     end
+    foreach_host_reference_patch(mod, refs) do _, _, gv, _
+        push!(used, gv)
+    end
+    isempty(used) || set_used!(mod, used...)
     return
 end
 
@@ -257,14 +306,21 @@ function link_with_host_references!(dest_mod::LLVM.Module, dest_refs::HostRefere
             error("Host reference slot '$name' refers to conflicting values")
         dest_refs.slots[name] = ref
     end
-    dest_refs.embedded_pointer |= src_refs.embedded_pointer
+    for ((name, offset), ref) in src_refs.patches
+        haskey(globals(dest_mod), name) || continue
+        key = (name, offset)
+        existing = get(dest_refs.patches, key, nothing)
+        existing === nothing || same_host_reference(existing, ref) ||
+            error("Host reference patch '$name+$offset' refers to conflicting values")
+        dest_refs.patches[key] = ref
+    end
     return
 end
 
 # emit a device-resident constant replica of the box holding `obj`; returns
 # the constant to store in the slot, and the (gcbits-masked) header word
-function materialize_box!(mod::LLVM.Module, gv::GlobalVariable, @nospecialize(obj),
-                          init::Ptr{Cvoid})
+function materialize_box!(mod::LLVM.Module, refs::HostReferences, gv::GlobalVariable,
+                          @nospecialize(obj), init::Ptr{Cvoid})
     @assert isbitstype(typeof(obj)) && sizeof(obj) > 0
 
     W = sizeof(Int)
@@ -278,28 +334,46 @@ function materialize_box!(mod::LLVM.Module, gv::GlobalVariable, @nospecialize(ob
 
     T_word = LLVM.IntType(8W)
     T_byte = LLVM.Int8Type()
-    fields = LLVM.Constant[ConstantInt(T_word, hdr), ConstantDataArray(T_byte, bytes)]
+    patch_header = hdr >= UInt(64 << 4)   # jl_max_tags << 4
+    fields = LLVM.Constant[ConstantInt(T_word, patch_header ? 0 : hdr),
+                           ConstantDataArray(T_byte, bytes)]
+    header_idx = 0
     payload_idx = 1
     if Base.datatype_alignment(typeof(obj)) > W
         # pad so the payload lands at a 16-byte offset (JL_HEAP_ALIGNMENT max)
         pushfirst!(fields, ConstantDataArray(T_byte, zeros(UInt8, 16 - W)))
+        header_idx = 1
         payload_idx = 2
     end
     boxinit = ConstantStruct(fields)
     boxty = value_type(boxinit)
 
-    box = GlobalVariable(mod, boxty, safe_name(LLVM.name(gv)) * "_box")
+    box_name = if patch_header
+        safe_name(LLVM.name(gv)) * "_" * string(objectid(obj); base=16) * "_box"
+    else
+        safe_name(LLVM.name(gv)) * "_box"
+    end
+    box = GlobalVariable(mod, boxty, box_name)
+    LLVM.name(box) == box_name || error("Host reference patch global '$box_name' is already in use")
     initializer!(box, boxinit)
-    constant!(box, true)
-    linkage!(box, LLVM.API.LLVMPrivateLinkage)
     alignment!(box, 16)
-    unnamed_addr!(box, true)
+    if patch_header
+        constant!(box, false)
+        linkage!(box, LLVM.API.LLVMExternalLinkage)
+        extinit!(box, true)
+        offset = Int(offsetof(datalayout(mod), boxty, header_idx))
+        refs.patches[(box_name, offset)] = JuliaValueRef(typeof(obj))
+    else
+        constant!(box, true)
+        linkage!(box, LLVM.API.LLVMPrivateLinkage)
+        unnamed_addr!(box, true)
+    end
 
     idx(i) = ConstantInt(LLVM.Int32Type(), i)
     payload = const_gep(boxty, box, LLVM.Constant[idx(0), idx(payload_idx)])
     slotty = global_value_type(gv)
     val = value_type(payload) == slotty ? payload : const_addrspacecast(payload, slotty)
-    return val, hdr
+    return val
 end
 
 
