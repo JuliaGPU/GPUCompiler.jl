@@ -2,6 +2,7 @@
 
 function irgen(@nospecialize(job::CompilerJob))
     mod, compiled, gv_to_value = @tracepoint "emission" compile_method_instance(job)
+    host_references = classify_gvs!(mod, gv_to_value)
     if job.config.entry_abi === :specfunc
         entry_fn = compiled[job.source].specfunc
     else
@@ -43,23 +44,12 @@ function irgen(@nospecialize(job::CompilerJob))
         end
     end
 
-    # Julia value globals can be declarations. Sanitize every definition as well as every
-    # mapped global, but leave unrelated external declarations alone because their names are
-    # part of their ABI.
+    # sanitize defined globals (external declaration names are part of their ABI)
     for val in collect(globals(mod))
-        old_name = LLVM.name(val)
-        mapped = haskey(gv_to_value, old_name)
-        isdeclaration(val) && !mapped && continue
-        new_name = safe_name(old_name)
-        if old_name != new_name
+        isdeclaration(val) && continue
+        new_name = safe_name(LLVM.name(val))
+        if LLVM.name(val) != new_name
             LLVM.name!(val, new_name)
-            actual_name = LLVM.name(val)
-            if mapped
-                init = pop!(gv_to_value, old_name)
-                haskey(gv_to_value, actual_name) &&
-                    error("Duplicate Julia value global '$actual_name'")
-                gv_to_value[actual_name] = init
-            end
         end
     end
 
@@ -160,7 +150,7 @@ function irgen(@nospecialize(job::CompilerJob))
         lower_alloca!(job, mod)
     end
 
-    return mod, compiled, gv_to_value
+    return mod, compiled, host_references
 end
 
 

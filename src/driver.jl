@@ -180,7 +180,7 @@ const __llvm_initialized = Ref(false)
     end
 
     @tracepoint "IR generation" begin
-        ir, compiled, gv_to_value = irgen(job)
+        ir, compiled, host_references = irgen(job)
         if job.config.entry_abi === :specfunc
             entry_fn = compiled[job.source].specfunc
         else
@@ -192,7 +192,6 @@ const __llvm_initialized = Ref(false)
     # finalize the current module. this needs to happen before linking deferred modules,
     # since those modules have been finalized themselves, and we don't want to re-finalize.
     entry = finish_module!(job, ir, entry)
-    host_references = classify_gvs!(ir, gv_to_value)
 
     # deferred code generation
     has_deferred_jobs = job.config.toplevel && !job.config.only_entry &&
@@ -334,7 +333,6 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
-            host_references.embedded_pointer |= !materialize_bool_singletons!(ir)
             host_references.embedded_pointer && mark_session_dependent!(job)
 
             if job.config.optimize

@@ -866,27 +866,6 @@ end
         refs(name, value) =
             GPUCompiler.HostReferences(Dict(name => GPUCompiler.JuliaValueRef(value)), false)
 
-        # Three unrelated values requested the same slot name. Each load keeps its own
-        # relocation after linking, including the second fresh-name suffix.
-        dest = slot_module("slot", "first")
-        dest_refs = refs("slot", :first)
-        for (entry, value) in (("second", :second), ("third", :third))
-            src = slot_module("slot", entry)
-            src_refs = refs("slot", value)
-            GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs)
-        end
-        @test Set(keys(dest_refs.slots)) ==
-              Set(("slot", "slot_gpucompiler", "slot_gpucompiler_1"))
-        @test Set(ref.value for ref in values(dest_refs.slots)) == Set((:first, :second, :third))
-
-        # A global outside the metadata table is still part of LLVM's namespace.
-        dest = slot_module("slot", "occupied")
-        dest_refs = GPUCompiler.HostReferences()
-        src = slot_module("slot", "source")
-        src_refs = refs("slot", :source)
-        GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs)
-        @test only(keys(dest_refs.slots)) == "slot_gpucompiler"
-
         # Equal Julia identities deliberately share a single slot.
         dest = slot_module("slot", "first")
         dest_refs = refs("slot", :shared)
@@ -895,6 +874,14 @@ end
         GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs)
         @test collect(keys(dest_refs.slots)) == ["slot"]
         @test occursin("@slot = external global i64", string(dest))
+
+        # The name is the slot identity, so conflicting metadata is an error.
+        dest = slot_module("slot", "first")
+        dest_refs = refs("slot", :first)
+        src = slot_module("slot", "second")
+        src_refs = refs("slot", :second)
+        @test_throws ErrorException GPUCompiler.link_with_host_references!(
+            dest, dest_refs, src, src_refs)
 
         # `only_needed` must keep metadata for imported slots and discard metadata for
         # source globals that the LLVM linker did not import.

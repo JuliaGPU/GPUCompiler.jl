@@ -84,9 +84,9 @@ function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
     # inference itself.
     ci, res = runtime_function_results(rt_job)
     if res !== nothing && res.bitcode !== nothing
-        cached_refs = copy_host_references(res.host_references)
         link_with_host_references!(mod, refs,
-                                   parse(LLVM.Module, MemoryBuffer(res.bitcode)), cached_refs)
+                                   parse(LLVM.Module, MemoryBuffer(res.bitcode)),
+                                   res.host_references)
         ci === nothing && (ci = runtime_code_instance(rt_job))
         return ci::CodeInstance
     end
@@ -119,7 +119,7 @@ function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
     ci === nothing && (ci = runtime_code_instance(rt_job))
     res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
     res.bitcode = take!(io)
-    res.host_references = copy_host_references(meta.host_references)
+    res.host_references = meta.host_references
 
     link_with_host_references!(mod, refs, new_mod, meta.host_references)
     return ci::CodeInstance
@@ -248,5 +248,5 @@ const runtime_libs_lock = ReentrantLock()
     end
 
     return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true),
-           copy_host_references(cached.host_references)
+           cached.host_references
 end
