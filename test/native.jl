@@ -795,6 +795,25 @@ end
         name = only(keys(refs.slots))
         @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
         @test occursin("@$name = external global i64", string(mod))
+        GPUCompiler.emit_host_reference_declarations!(mod, refs)
+        @test isempty(refs.slots)
+        @test !haskey(globals(mod), name)
+        @test occursin("load i64, $(function_word_ptr("jl_float32_type"))", string(mod))
+
+        mod = parse(LLVM.Module, """
+            @jl_float32_type = external global $word_ptr
+
+            define $word_ptr @entry() {
+                %value = load $word_ptr, $word_ptr_ptr @jl_float32_type
+                ret $word_ptr %value
+            }""")
+        refs = GPUCompiler.HostReferences()
+        @test GPUCompiler.collect_runtime_global_references!(job, mod, refs)
+        name = only(keys(refs.slots))
+        GPUCompiler.emit_host_reference_declarations!(mod, refs)
+        @test isempty(refs.slots)
+        @test !haskey(globals(mod), name)
+        @test occursin(r"load i64, .*@jl_float32_type", string(mod))
     end
 end
 

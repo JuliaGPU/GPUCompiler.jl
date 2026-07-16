@@ -860,6 +860,52 @@ function emit_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
     return
 end
 
+"""
+    emit_host_reference_declarations!(mod, refs)
+
+Lower host references for loaders that resolve symbols by name at link time. Julia runtime
+globals are folded back into direct references to their libjulia symbols. Julia value globals
+remain external, word-sized declarations; before loading the object, the loader must define
+each remaining symbol to point at a cell containing [`resolve_host_reference`](@ref), and keep
+the referenced values rooted while the code remains executable.
+"""
+function emit_host_reference_declarations!(mod::LLVM.Module, refs::HostReferences)
+    check_host_reference_slots!(mod, refs)
+    mod_gvs = globals(mod)
+    for (name, ref) in collect(refs.slots)
+        gv = mod_gvs[name]
+        host_reference_slot_size(mod, gv, name)
+
+        if ref isa CGlobalRef
+            symbol = String(ref.symbol)
+            if symbol == name
+                initializer!(gv, nothing)
+                constant!(gv, false)
+                linkage!(gv, LLVM.API.LLVMExternalLinkage)
+                extinit!(gv, false)
+            else
+                replacement = if haskey(globals(mod), symbol)
+                    globals(mod)[symbol]
+                elseif haskey(functions(mod), symbol)
+                    functions(mod)[symbol]
+                else
+                    GlobalVariable(mod, host_reference_word_type(), symbol)
+                end
+                replacement = value_type(replacement) == value_type(gv) ? replacement :
+                              const_pointercast(replacement, value_type(gv))
+                replace_uses!(gv, replacement)
+                erase!(gv)
+            end
+            delete!(refs.slots, name)
+        else
+            isdeclaration(gv) ||
+                error("Julia value host reference slot '$name' must be a declaration")
+            linkage!(gv, LLVM.API.LLVMExternalLinkage)
+        end
+    end
+    return
+end
+
 function link_with_host_references!(dest_mod::LLVM.Module, dest_refs::HostReferences,
                                     src_mod::LLVM.Module, src_refs::HostReferences;
                                     only_needed=false)

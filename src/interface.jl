@@ -507,9 +507,14 @@ end
     lower_host_references!(job, mod, refs)
 
 Lower compiler-managed Julia value globals and Julia runtime globals for `job`'s final
-backend representation. The default lowering resolves every live reference in the current
-Julia session. Backends with a loader relocation mechanism may call
-[`emit_host_reference_slots!`](@ref) instead, then resolve and patch those slots after loading.
+backend representation. The default [`resolve_host_reference_slots!`](@ref) lowering resolves
+every live reference in the current Julia session, making the result session-dependent.
+Backends with a per-module loader namespace, such as a `CuModule`, may call
+[`emit_host_reference_slots!`](@ref) and patch the resulting definitions after loading.
+Shared-namespace JIT loaders may call [`emit_host_reference_declarations!`](@ref), define the
+remaining declarations before loading, and resolve libjulia globals by name. Because slot names
+are unique only within one compilation, such a loader must use a fresh namespace per object or
+uniquify names at link time.
 """
 function lower_host_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 refs::HostReferences)
@@ -638,7 +643,8 @@ end # HAS_INTEGRATED_CACHE
 
 @public GPUCompilerCacheToken, cache_owner, cached_results
 @public JuliaValueRef, CGlobalRef, HostReference, HostReferences
-@public lower_host_references!, emit_host_reference_slots!, resolve_host_reference
+@public lower_host_references!, emit_host_reference_slots!, emit_host_reference_declarations!
+@public resolve_host_reference
 
 # the method table to use
 #
