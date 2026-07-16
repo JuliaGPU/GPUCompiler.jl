@@ -274,9 +274,6 @@ end
 
 end # !HAS_INTEGRATED_CACHE
 
-# Compatibility shim for backends using the former dynamic cache-wiping API.
-mark_session_dependent!(@nospecialize(job::CompilerJob)) = nothing
-
 
 ## Legacy `cached_compilation` (1.10+)
 
