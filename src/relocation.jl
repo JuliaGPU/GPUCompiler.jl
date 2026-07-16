@@ -121,10 +121,6 @@ function classify_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
         else
             host_reference_slot_size(mod, gv, name)
             slot_name = safe_name(name) * "_" * string(objectid(obj); base=16)
-            if slot_name != name &&
-               (haskey(globals(mod), slot_name) || haskey(functions(mod), slot_name))
-                error("Host reference slot name '$slot_name' is already in use")
-            end
             LLVM.name!(gv, slot_name)
             LLVM.name(gv) == slot_name ||
                 error("Host reference slot name '$slot_name' is already in use")
@@ -310,75 +306,67 @@ end
 # since those references are ephemeral, we can't eagerly resolve and emit them in the IR,
 # but at the same time the GPU can't resolve them at run-time.
 #
-# this pass performs that resolution at link time.
-struct CollectRuntimeGlobalReferences
-    job::CompilerJob
-    refs::HostReferences
+# this collection performs that resolution at object-emission time.
+function is_runtime_global_candidate(value, refs::HostReferences)
+    name = LLVM.name(value)
+    value isa LLVM.GlobalVariable && haskey(refs.slots, name) && return false
+    isdeclaration(value) || return false
+    value isa LLVM.Function && LLVM.isintrinsic(value) && return false
+    return startswith(name, "jl_")
 end
-function (self::CollectRuntimeGlobalReferences)(mod::LLVM.Module)
+
+function collect_runtime_global_references!(mod::LLVM.Module, refs::HostReferences)
     changed = false
 
     for f in [collect(functions(mod)); collect(globals(mod))]
+        is_runtime_global_candidate(f, refs) || continue
         fn = LLVM.name(f)
-        # Julia value globals are already represented by an identity in `refs`; they may
-        # use a `jl_*` spelling but are not exported libjulia runtime globals.
-        f isa LLVM.GlobalVariable && haskey(self.refs.slots, fn) && continue
-        if isdeclaration(f) && (!(f isa LLVM.Function) || !LLVM.isintrinsic(f)) &&
-           startswith(fn, "jl_")
-            slot = nothing
-            function runtime_global_slot()
-                if slot === nothing
-                    name = "gpu_" * fn
-                    (haskey(globals(mod), name) || haskey(functions(mod), name)) &&
-                        error("Julia runtime global slot name '$name' is already in use")
-                    slot = GlobalVariable(mod, host_reference_word_type(), name)
-                    LLVM.name(slot) == name ||
-                        error("Julia runtime global slot name '$name' is already in use")
-                    haskey(self.refs.slots, name) &&
-                        error("Duplicate Julia runtime global slot '$name'")
-                    self.refs.slots[name] = CGlobalRef(Symbol(fn))
-                end
-                slot
+        slot = nothing
+        function runtime_global_slot()
+            if slot === nothing
+                name = "gpu_" * fn
+                slot = GlobalVariable(mod, host_reference_word_type(), name)
+                LLVM.name(slot) == name ||
+                    error("Julia runtime global slot name '$name' is already in use")
+                refs.slots[name] = CGlobalRef(Symbol(fn))
             end
-
-            function replace_bindings!(value)
-                changed = false
-                for use in collect(uses(value))
-                    val = user(use)
-                    if isa(val, LLVM.ConstantExpr)
-                        # recurse
-                        changed |= replace_bindings!(val)
-                    elseif isa(val, LLVM.LoadInst)
-                        T = value_type(val)
-                        if !(T isa LLVM.PointerType ||
-                             (T isa LLVM.IntegerType && width(T) == 8sizeof(UInt)))
-                            error("Unsupported Julia runtime global '$fn' load of LLVM type $T")
-                        end
-                        @dispose builder=IRBuilder() begin
-                            position!(builder, val)
-                            replacement = load!(builder, host_reference_word_type(),
-                                                runtime_global_slot())
-                            if T isa LLVM.PointerType
-                                replacement = inttoptr!(builder, replacement, T)
-                            end
-                            replace_uses!(val, replacement)
-                        end
-                        erase!(val)
-                        changed = true
-                    end
-                end
-                changed
-            end
-
-            changed |= replace_bindings!(f)
+            slot
         end
+
+        function replace_bindings!(value)
+            changed = false
+            for use in collect(uses(value))
+                val = user(use)
+                if isa(val, LLVM.ConstantExpr)
+                    # recurse
+                    changed |= replace_bindings!(val)
+                elseif isa(val, LLVM.LoadInst)
+                    T = value_type(val)
+                    if !(T isa LLVM.PointerType ||
+                         (T isa LLVM.IntegerType && width(T) == 8sizeof(UInt)))
+                        error("Unsupported Julia runtime global '$fn' load of LLVM type $T")
+                    end
+                    @dispose builder=IRBuilder() begin
+                        position!(builder, val)
+                        replacement = load!(builder, host_reference_word_type(),
+                                            runtime_global_slot())
+                        if T isa LLVM.PointerType
+                            replacement = inttoptr!(builder, replacement, T)
+                        end
+                        replace_uses!(val, replacement)
+                    end
+                    erase!(val)
+                    changed = true
+                end
+            end
+            changed
+        end
+
+        changed |= replace_bindings!(f)
     end
 
     return changed
 end
-collect_runtime_global_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                   refs::HostReferences) =
-    CollectRuntimeGlobalReferences(job, refs)(mod)
 
 function has_unresolved_runtime_global_loads(mod::LLVM.Module, refs::HostReferences)
     function has_load(value)
@@ -391,11 +379,7 @@ function has_unresolved_runtime_global_loads(mod::LLVM.Module, refs::HostReferen
     end
 
     for value in [collect(functions(mod)); collect(globals(mod))]
-        name = LLVM.name(value)
-        value isa LLVM.GlobalVariable && haskey(refs.slots, name) && continue
-        isdeclaration(value) || continue
-        value isa LLVM.Function && LLVM.isintrinsic(value) && continue
-        startswith(name, "jl_") || continue
+        is_runtime_global_candidate(value, refs) || continue
         has_load(value) && return true
     end
     return false

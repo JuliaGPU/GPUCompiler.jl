@@ -820,7 +820,7 @@ end
                 ret $word_ptr %value
             }""")
         refs = GPUCompiler.HostReferences()
-        @test GPUCompiler.collect_runtime_global_references!(job, mod, refs)
+        @test GPUCompiler.collect_runtime_global_references!(mod, refs)
         name = only(keys(refs.slots))
         @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
         @test occursin("@$name = external global i64", string(mod))
@@ -835,7 +835,7 @@ end
                 ret i64 %value
             }""")
         refs = GPUCompiler.HostReferences()
-        @test GPUCompiler.collect_runtime_global_references!(job, mod, refs)
+        @test GPUCompiler.collect_runtime_global_references!(mod, refs)
         name = only(keys(refs.slots))
         @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
         @test occursin("@$name = external global i64", string(mod))
@@ -852,7 +852,7 @@ end
                 ret $word_ptr %value
             }""")
         refs = GPUCompiler.HostReferences()
-        @test GPUCompiler.collect_runtime_global_references!(job, mod, refs)
+        @test GPUCompiler.collect_runtime_global_references!(mod, refs)
         name = only(keys(refs.slots))
         GPUCompiler.emit_host_reference_declarations!(mod, refs)
         @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
