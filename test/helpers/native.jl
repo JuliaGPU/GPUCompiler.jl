@@ -35,6 +35,20 @@ function GPUCompiler.lower_host_references!(@nospecialize(job::NativeCompilerJob
     end
 end
 
+function GPUCompiler.mcgen(@nospecialize(job::NativeCompilerJob), mod::LLVM.Module,
+                           format=LLVM.API.LLVMAssemblyFile)
+    if job.config.params.relocatable
+        target = job.config.target
+        @dispose tm=JITTargetMachine(GPUCompiler.llvm_triple(target), target.cpu,
+                                     target.features) begin
+            return String(emit(tm, mod, format))
+        end
+    else
+        return invoke(GPUCompiler.mcgen, Tuple{CompilerJob,LLVM.Module,Any},
+                      job, mod, format)
+    end
+end
+
 function create_job(@nospecialize(func), @nospecialize(types);
                     entry_safepoint::Bool=false, method_table=test_method_table,
                     relocatable::Bool=false, kwargs...)
@@ -47,7 +61,7 @@ function create_job(@nospecialize(func), @nospecialize(types);
 end
 
 function load(obj::Vector{UInt8}, entry::String, refs::GPUCompiler.HostReferences)
-    lljit = LLJIT()
+    lljit = LLJIT(; tm=JITTargetMachine())
     try
         jd = JITDylib(lljit)
         prefix = LLVM.get_prefix(lljit)
