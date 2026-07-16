@@ -235,47 +235,20 @@ end
 
 Prepare host references for a loader that defines symbols before loading an object.
 
-Runtime-global slots are restored to direct references to their named libjulia globals. Julia
-value slots remain external word-sized declarations; the loader must define each symbol to
-point at a cell containing [`resolve_host_reference`](@ref) and keep the cell and referenced
-value alive while the code is executable.
-
-Slot names are unique only within one compilation. A shared JIT namespace must uniquify them
-or use a separate namespace for each object.
+Every slot remains an external word-sized declaration. The loader must define each symbol to
+point at a cell containing [`resolve_host_reference`](@ref), and keep the cell and any
+referenced Julia value alive while the code is executable.
 """
 function emit_host_reference_declarations!(mod::LLVM.Module, refs::HostReferences)
     check_host_reference_slots!(mod, refs)
     mod_gvs = globals(mod)
-    for (name, ref) in collect(refs.slots)
+    for name in keys(refs.slots)
         gv = mod_gvs[name]
         host_reference_slot_size(mod, gv, name)
-
-        if ref isa CGlobalRef
-            symbol = String(ref.symbol)
-            if symbol == name
-                initializer!(gv, nothing)
-                constant!(gv, false)
-                linkage!(gv, LLVM.API.LLVMExternalLinkage)
-                extinit!(gv, false)
-            else
-                replacement = if haskey(globals(mod), symbol)
-                    globals(mod)[symbol]
-                elseif haskey(functions(mod), symbol)
-                    functions(mod)[symbol]
-                else
-                    GlobalVariable(mod, host_reference_word_type(), symbol)
-                end
-                replacement = value_type(replacement) == value_type(gv) ? replacement :
-                              const_pointercast(replacement, value_type(gv))
-                replace_uses!(gv, replacement)
-                erase!(gv)
-            end
-            delete!(refs.slots, name)
-        else
-            isdeclaration(gv) ||
-                error("Julia value host reference slot '$name' must be a declaration")
-            linkage!(gv, LLVM.API.LLVMExternalLinkage)
-        end
+        isdeclaration(gv) || error("Host reference slot '$name' must be a declaration")
+        constant!(gv, false)
+        linkage!(gv, LLVM.API.LLVMExternalLinkage)
+        extinit!(gv, false)
     end
     return
 end
