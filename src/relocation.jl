@@ -174,10 +174,13 @@ function host_reference_slot_initializer(gv::GlobalVariable, value::UInt)
     error("Host reference slot '$(LLVM.name(gv))' has unsupported LLVM type $T")
 end
 
-function check_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
+function foreach_host_reference_slot(f, mod::LLVM.Module, refs::HostReferences)
     mod_gvs = globals(mod)
-    for name in keys(refs.slots)
+    for (name, ref) in refs.slots
         haskey(mod_gvs, name) || error("Missing host reference slot '$name'")
+        gv = mod_gvs[name]
+        host_reference_slot_size(mod, gv, name)
+        f(name, gv, ref)
     end
     return
 end
@@ -191,11 +194,7 @@ function prune_dead_host_reference_slots!(mod::LLVM.Module, refs::HostReferences
 end
 
 function resolve_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
-    check_host_reference_slots!(mod, refs)
-    mod_gvs = globals(mod)
-    for (name, ref) in refs.slots
-        gv = mod_gvs[name]
-        host_reference_slot_size(mod, gv, name)
+    foreach_host_reference_slot(mod, refs) do name, gv, ref
         value = resolve_host_reference(ref)
         val = host_reference_slot_initializer(gv, value)
         initializer!(gv, val)
@@ -214,12 +213,8 @@ Emit host-reference slots as writable, null-initialized definitions. The loader 
 definition after loading the object. This requires a per-object symbol namespace.
 """
 function emit_host_reference_definitions!(mod::LLVM.Module, refs::HostReferences)
-    check_host_reference_slots!(mod, refs)
-    mod_gvs = globals(mod)
     slots = GlobalVariable[]
-    for name in keys(refs.slots)
-        gv = mod_gvs[name]
-        host_reference_slot_size(mod, gv, name)
+    foreach_host_reference_slot(mod, refs) do _, gv, _
         initializer!(gv, null(global_value_type(gv)))
         constant!(gv, false)
         linkage!(gv, LLVM.API.LLVMExternalLinkage)
@@ -240,11 +235,7 @@ point at a cell containing [`resolve_host_reference`](@ref), and keep the cell a
 referenced Julia value alive while the code is executable.
 """
 function emit_host_reference_declarations!(mod::LLVM.Module, refs::HostReferences)
-    check_host_reference_slots!(mod, refs)
-    mod_gvs = globals(mod)
-    for name in keys(refs.slots)
-        gv = mod_gvs[name]
-        host_reference_slot_size(mod, gv, name)
+    foreach_host_reference_slot(mod, refs) do name, gv, _
         isdeclaration(gv) || error("Host reference slot '$name' must be a declaration")
         constant!(gv, false)
         linkage!(gv, LLVM.API.LLVMExternalLinkage)
