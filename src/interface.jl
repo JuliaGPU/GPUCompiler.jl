@@ -429,13 +429,12 @@ the check-and-compile sequence (all back-ends already do, e.g. `mtlfunction_lock
 """
 function cached_results end
 
-# Host-reference types and the backend lowering hook live in relocation.jl.
+# Relocation types and the backend lowering hook live in relocation.jl.
 #
 # Job results attached to CodeInstances are serialized into package images. Store only
 # session-portable data there. Generated code is portable iff `supports_relocatable_ir()`
-# and the backend preserves host references with definition- or declaration-based lowering,
-# then patches them at load time. Backends using eager lowering must keep generated code in a
-# session-local cache or recompile it.
+# and the backend preserves relocations with patchable- or imported-symbol lowering. Backends
+# using baked lowering must keep generated code in a session-local cache or recompile it.
 @static if HAS_INTEGRATED_CACHE
 
 """
@@ -513,11 +512,11 @@ end
 
 end # HAS_INTEGRATED_CACHE
 
-@public GPUCompilerCacheToken, cache_owner, cached_results, supports_relocatable_ir
-@public JuliaValueRef, CGlobalRef, HostReference, HostReferences
-@public lower_host_references!, emit_host_reference_definitions!
-@public emit_host_reference_declarations!
-@public resolve_host_reference, resolved_relocations
+@public JuliaValueRef, CGlobalRef, RelocationTarget, Relocations
+@public lower_relocations!, bake_relocations!
+@public emit_patchable_relocations!, emit_imported_relocations!
+@public resolve_relocation_target, resolved_relocations, supports_relocatable_ir
+@public GPUCompilerCacheToken, cache_owner, cached_results
 
 # the method table to use
 #

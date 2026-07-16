@@ -68,14 +68,14 @@ end
 # entirely. On 1.10 it is cached for the duration of the session.
 mutable struct RuntimeFunctionResults
     bitcode::Union{Nothing,Vector{UInt8}}
-    host_references::HostReferences
-    RuntimeFunctionResults() = new(nothing, HostReferences())
+    relocations::Relocations
+    RuntimeFunctionResults() = new(nothing, Relocations())
 end
 
 # Compile a single runtime function and link it into `mod`. The renamed bitcode is
 # memoized through `RuntimeFunctionResults`; the session-local `runtime_libs` cache
 # below additionally avoids repeating the parse-and-link work within a session.
-function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
+function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
                         source::MethodInstance, method, world::UInt)
     name = method.llvm_name
     rt_job = CompilerJob(source, config, world)
@@ -84,9 +84,9 @@ function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
     # inference itself.
     ci, res = runtime_function_results(rt_job)
     if res !== nothing && res.bitcode !== nothing
-        link_with_host_references!(mod, refs,
-                                   parse(LLVM.Module, MemoryBuffer(res.bitcode)),
-                                   res.host_references)
+        link_relocatable!(mod, relocs,
+                          parse(LLVM.Module, MemoryBuffer(res.bitcode)),
+                          res.relocations)
         ci === nothing && (ci = runtime_code_instance(rt_job))
         return ci::CodeInstance
     end
@@ -100,7 +100,7 @@ function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
-    prune_dead_host_references!(new_mod, meta.host_references)
+    prune_dead_relocations!(new_mod, meta.relocations)
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
@@ -118,10 +118,10 @@ function emit_function!(mod, refs::HostReferences, config::CompilerConfig,
     if supports_relocatable_ir()
         res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
         res.bitcode = take!(io)
-        res.host_references = meta.host_references
+        res.relocations = meta.relocations
     end
 
-    link_with_host_references!(mod, refs, new_mod, meta.host_references)
+    link_relocatable!(mod, relocs, new_mod, meta.relocations)
     return ci::CodeInstance
 end
 
@@ -170,14 +170,14 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     mod = LLVM.Module("GPUCompiler run-time library")
     sources = MethodInstance[]
     code_instances = CodeInstance[]
-    refs = HostReferences()
+    relocs = Relocations()
 
     for method in values(Runtime.methods)
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         source = resolved
         push!(sources, source)
-        push!(code_instances, emit_function!(mod, refs, config, source, method, job.world))
+        push!(code_instances, emit_function!(mod, relocs, config, source, method, job.world))
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again
@@ -185,7 +185,7 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     # removes Julia address spaces, which would then lead to type mismatches when using
     # functions from the runtime library from IR that has not been stripped of AS info.
 
-    return mod, sources, code_instances, refs
+    return mod, sources, code_instances, relocs
 end
 
 # Session-local cache of assembled runtime libraries, keyed by
@@ -204,7 +204,7 @@ mutable struct RuntimeLibrary
     sources::Vector{MethodInstance}
     code_instances::Vector{CodeInstance}
     validated_world::UInt
-    host_references::HostReferences
+    relocations::Relocations
 end
 
 function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob))
@@ -237,16 +237,16 @@ const runtime_libs_lock = ReentrantLock()
     cached = Base.@lock runtime_libs_lock begin
         cached = get(runtime_libs, key, nothing)
         if cached === nothing || !runtime_library_valid(cached, job)
-            lib, sources, code_instances, host_references = build_runtime(job, config)
+            lib, sources, code_instances, relocations = build_runtime(job, config)
             io = IOBuffer()
             write(io, lib)
             cached = RuntimeLibrary(take!(io), sources, code_instances, job.world,
-                                    host_references)
+                                    relocations)
             runtime_libs[key] = cached
         end
         cached
     end
 
     return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true),
-           cached.host_references
+           cached.relocations
 end

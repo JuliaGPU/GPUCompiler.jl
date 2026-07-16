@@ -162,8 +162,8 @@ end
 # `show` via `showerror`, avoiding the default field-dump that derefs disposed IR
 Base.show(io::IO, err::InvalidIRError) = showerror(io, err)
 
-function check_ir(job, mod::LLVM.Module, refs::HostReferences=HostReferences())
-    errors = check_ir!(job, IRError[], mod, refs)
+function check_ir(job, mod::LLVM.Module, relocs::Relocations=Relocations())
+    errors = check_ir!(job, IRError[], mod, relocs)
     unique!(errors)
     if !isempty(errors)
         throw(InvalidIRError(job, errors))
@@ -172,9 +172,9 @@ function check_ir(job, mod::LLVM.Module, refs::HostReferences=HostReferences())
     return
 end
 
-function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, refs::HostReferences)
+function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Relocations)
     for f in functions(mod)
-        check_ir!(job, errors, f, refs)
+        check_ir!(job, errors, f, relocs)
     end
 
     # custom validation
@@ -183,10 +183,10 @@ function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, refs::HostRef
     return errors
 end
 
-function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, refs::HostReferences)
+function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Relocations)
     for bb in blocks(f), inst in instructions(bb)
         if isa(inst, LLVM.CallInst)
-            check_ir!(job, errors, inst, refs)
+            check_ir!(job, errors, inst, relocs)
         elseif isa(inst, LLVM.LoadInst)
             check_ir!(job, errors, inst)
         end
@@ -221,7 +221,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
     return errors
 end
 
-function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, refs::HostReferences)
+function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Relocations)
     bt = backtrace(inst)
     dest = called_operand(inst)
     if isa(dest, LLVM.Function)
@@ -233,7 +233,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, refs::Host
         elseif fn == "jl_get_binding_or_error" || fn == "ijl_get_binding_or_error"
             try
                 m, sym = arguments(inst)
-                ref = referenced_object(sym, refs)
+                ref = referenced_object(sym, relocs)
                 ref === nothing && error("Unknown binding")
                 push!(errors, (DELAYED_BINDING, bt, something(ref)))
             catch e
@@ -244,7 +244,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, refs::Host
                fn == "jl_get_binding_value_seqcst" || fn == "ijl_get_binding_value_seqcst"
             try
                 # pry the binding from the IR
-                ref = referenced_object(arguments(inst)[1], refs)
+                ref = referenced_object(arguments(inst)[1], relocs)
                 ref === nothing && error("Unknown binding")
                 obj = something(ref)
                 push!(errors, (DELAYED_BINDING, bt, obj.globalref))
@@ -255,7 +255,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, refs::Host
         elseif startswith(fn, "tojlinvoke")
             try
                 fun, args, nargs = arguments(inst)
-                ref = referenced_object(fun, refs)
+                ref = referenced_object(fun, relocs)
                 ref === nothing && error("Unknown function")
                 fun = something(ref)::Base.Function
                 push!(errors, (DYNAMIC_CALL, bt, fun))
@@ -275,7 +275,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, refs::Host
             end
             try
                 fun, args, nargs, meth = arguments(inst)
-                ref = referenced_object(meth, refs)
+                ref = referenced_object(meth, relocs)
                 ref === nothing && error("Unknown method instance")
                 meth = something(ref)::Core.MethodInstance
                 push!(errors, (DYNAMIC_CALL, bt, meth.def))
@@ -286,7 +286,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, refs::Host
         elseif fn == "jl_apply_generic" || fn == "ijl_apply_generic"
             try
                 f, args, nargs = arguments(inst)
-                ref = referenced_object(f, refs)
+                ref = referenced_object(f, relocs)
                 ref === nothing && error("Unknown function")
                 f = something(ref)
                 push!(errors, (DYNAMIC_CALL, bt, f))

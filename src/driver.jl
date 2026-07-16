@@ -51,7 +51,7 @@ export compile
 Compile a `job` to one of the following formats as specified by the `target` argument:
 `:llvm` for LLVM IR, `:asm` for assembly, or `:obj` for object code.
 
-The returned `host_references` metadata is final only for `:asm` and `:obj`, after runtime
+The returned `relocations` metadata is final only for `:asm` and `:obj`, after runtime
 globals have been collected and the backend has lowered every live slot. The `:llvm` result
 still contains symbolic Julia-value slots and may contain raw `jl_*` runtime references.
 """
@@ -97,7 +97,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob))
     else
         error("Unknown assembly format $output")
     end
-    asm, asm_meta = emit_asm(job, ir, ir_meta.host_references, format)
+    asm, asm_meta = emit_asm(job, ir, ir_meta.relocations, format)
 
     if output == :asm || output == :obj
         return asm, (; asm_meta..., ir_meta..., ir)
@@ -184,7 +184,7 @@ const __llvm_initialized = Ref(false)
     end
 
     @tracepoint "IR generation" begin
-        ir, compiled, host_references = irgen(job)
+        ir, compiled, relocations = irgen(job)
         if job.config.entry_abi === :specfunc
             entry_fn = compiled[job.source].specfunc
         else
@@ -250,8 +250,8 @@ const __llvm_initialized = Ref(false)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
                     @assert context(dyn_ir) == context(ir)
-                    link_with_host_references!(ir, host_references, dyn_ir,
-                                               dyn_meta.host_references)
+                    link_relocatable!(ir, relocations, dyn_ir,
+                                      dyn_meta.relocations)
                     changed = true
                     dyn_entry_fn
                 end
@@ -294,7 +294,7 @@ const __llvm_initialized = Ref(false)
     if job.config.toplevel && job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
-            runtime, runtime_references = load_runtime(job)
+            runtime, runtime_relocs = load_runtime(job)
         end
 
         @tracepoint "Library linking" begin
@@ -303,8 +303,8 @@ const __llvm_initialized = Ref(false)
 
             # GPU run-time library
             if !uses_julia_runtime(job)
-                @tracepoint "runtime library" link_with_host_references!(
-                    ir, host_references, runtime, runtime_references; only_needed=true)
+                @tracepoint "runtime library" link_relocatable!(
+                    ir, relocations, runtime, runtime_relocs; only_needed=true)
             end
         end
     end
@@ -339,7 +339,7 @@ const __llvm_initialized = Ref(false)
 
             if job.config.optimize
                 @tracepoint "optimization" begin
-                    optimize!(job, ir, host_references; job.config.opt_level)
+                    optimize!(job, ir, relocations; job.config.opt_level)
 
                     # deferred codegen has some special optimization requirements,
                     # which also need to happen _after_ regular optimization.
@@ -404,7 +404,7 @@ const __llvm_initialized = Ref(false)
 
     if job.config.toplevel && job.config.validate
         @tracepoint "validation" begin
-            check_ir(job, ir, host_references)
+            check_ir(job, ir, relocations)
         end
     end
 
@@ -412,18 +412,18 @@ const __llvm_initialized = Ref(false)
         @tracepoint "verification" verify(ir)
     end
 
-    return ir, (; entry, compiled, host_references)
+    return ir, (; entry, compiled, relocations)
 end
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
-                          refs::HostReferences, format::LLVM.API.LLVMCodeGenFileType)
+                          relocs::Relocations, format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
     if job.config.strip
         @tracepoint "Debug info removal" strip_debuginfo!(ir)
     end
 
     @tracepoint "LLVM back-end" begin
-        @tracepoint "preparation" prepare_execution!(job, ir, refs)
+        @tracepoint "preparation" prepare_execution!(job, ir, relocs)
 
         code = @tracepoint "machine-code generation" mcgen(job, ir, format)
     end

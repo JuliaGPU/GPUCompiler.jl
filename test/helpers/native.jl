@@ -24,14 +24,14 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
-function GPUCompiler.lower_host_references!(@nospecialize(job::NativeCompilerJob),
+function GPUCompiler.lower_relocations!(@nospecialize(job::NativeCompilerJob),
                                             mod::LLVM.Module,
-                                            refs::GPUCompiler.HostReferences)
+                                            relocs::GPUCompiler.Relocations)
     if job.config.params.jit
-        GPUCompiler.emit_host_reference_declarations!(mod, refs)
+        GPUCompiler.emit_imported_relocations!(mod, relocs)
     else
-        invoke(GPUCompiler.lower_host_references!,
-               Tuple{CompilerJob,LLVM.Module,GPUCompiler.HostReferences}, job, mod, refs)
+        invoke(GPUCompiler.lower_relocations!,
+               Tuple{CompilerJob,LLVM.Module,GPUCompiler.Relocations}, job, mod, relocs)
     end
 end
 
@@ -60,14 +60,14 @@ function create_job(@nospecialize(func), @nospecialize(types);
     CompilerJob(source, config), kwargs
 end
 
-function load(obj::Vector{UInt8}, entry::String, refs::GPUCompiler.HostReferences)
+function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations)
     lljit = LLJIT(; tm=JITTargetMachine())
     try
         jd = JITDylib(lljit)
         prefix = LLVM.get_prefix(lljit)
         add!(jd, LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix))
 
-        relocations = GPUCompiler.resolved_relocations(refs)
+        relocations = GPUCompiler.resolved_relocations(relocs)
         cells = Vector{UInt}(undef, length(relocations.slots))
         pairs = LLVM.API.LLVMOrcCSymbolMapPair[]
         for (i, (name, value)) in enumerate(relocations.slots)
@@ -81,7 +81,7 @@ function load(obj::Vector{UInt8}, entry::String, refs::GPUCompiler.HostReference
         isempty(pairs) || LLVM.define(jd, LLVM.absolute_symbols(pairs))
 
         add!(lljit, jd, MemoryBuffer(obj))
-        for ((name, offset), value) in relocations.patches
+        for ((name, offset), value) in relocations.interior
             addr = lookup(lljit, name)
             unsafe_store!(Ptr{UInt}(pointer(addr) + offset), value)
         end

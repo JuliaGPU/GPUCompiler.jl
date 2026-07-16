@@ -600,7 +600,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # Strip the initializers so the IR we hand back is session-portable
         # (on 1.12 `jl_emit_native_impl` bakes pointers via
         # `literal_static_pointer_val`; on 1.13+ Julia nulls them itself);
-        # host-reference lowering writes the session-current value in. Demote
+        # relocation lowering writes the session-current value in. Demote
         # each GV to an external *declaration* rather than
         # giving it a null initializer: an internal global initialized to null
         # is fair game for optimization passes that run before relocation

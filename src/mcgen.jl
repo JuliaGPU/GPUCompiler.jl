@@ -15,21 +15,21 @@ end
 # Final preparations for the module to be compiled to machine code. These passes should not
 # be run when e.g. compiling to write to disk.
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                            refs::HostReferences=HostReferences())
-    # Clean up first so only live references get slots and get lowered.
+                            relocs::Relocations=Relocations())
+    # Clean up first so only live relocations get lowered.
     run_cleanup_pipeline!(job, mod)
-    prune_dead_host_references!(mod, refs)
+    prune_dead_relocations!(mod, relocs)
 
-    collect_runtime_global_references!(mod, refs)
-    lower_host_references!(job, mod, refs)
+    collect_cglobal_relocations!(mod, relocs)
+    lower_relocations!(job, mod, relocs)
 
     # Fold constants exposed by eager lowering, and discard slots made dead by either
     # lowering strategy.
     run_cleanup_pipeline!(job, mod)
-    prune_dead_host_references!(mod, refs)
+    prune_dead_relocations!(mod, relocs)
 
-    has_unresolved_runtime_global_loads(mod, refs) &&
-        error("Unresolved Julia runtime global load after host-reference lowering")
+    has_unresolved_cglobal_loads(mod, relocs) &&
+        error("Unresolved cglobal load after relocation lowering")
     return
 end
 

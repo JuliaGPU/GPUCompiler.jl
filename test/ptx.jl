@@ -30,7 +30,7 @@ end
 
 @testset "global variable relocation" begin
     # references to Julia objects (`julia.constgv` globals, e.g. Symbol literals) must
-    # survive as host-reference slots until backend lowering at object emission.
+    # survive as relocation slots until backend lowering at object emission.
     # they used to be kept alive as internal globals with a null initializer, which the
     # GlobalOpt run in `finish_module!` folded away, constant-folding any comparison
     # against them (JuliaGPU/CUDA.jl#3185: kernels specialized on Symbols misbehaved).

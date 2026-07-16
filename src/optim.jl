@@ -50,7 +50,7 @@ function aggressiveinstcombine_pass(@nospecialize(job::CompilerJob))
 end
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                   refs::HostReferences; opt_level=2)
+                   relocs::Relocations; opt_level=2)
     tm = llvm_machine(job.config.target)
     tti = llvm_targetinfo(job.config.target)
 
@@ -60,7 +60,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         register!(pb, GPULowerCPUFeaturesPass(job))
         register!(pb, GPULowerPTLSPass(job))
         register!(pb, GPULowerGCFramePass(job))
-        register!(pb, GPULinkRuntimePass(job, refs))
+        register!(pb, GPULinkRuntimePass(job, relocs))
         register!(pb, GPULinkLibrariesPass(job))
         register!(pb, GPUFinishRuntimeIntrinsicsPass(job))
         register!(pb, AddKernelStatePass(job))
@@ -327,7 +327,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         end
         if job.config.libraries
             # The pass builder resolves this name to the registered instance, which
-            # captures the HostReferences object owned by optimize!.
+            # captures the Relocations object owned by optimize!.
             add!(mpm, "GPULinkRuntime")
             add!(mpm, GPULinkLibrariesPass(job))
             add!(mpm, GPUFinishRuntimeIntrinsicsPass(job))
@@ -478,7 +478,7 @@ GPULowerCPUFeaturesPass(job) = NewPMModulePass("GPULowerCPUFeatures", CPUFeature
 
 struct LinkRuntime
     job::CompilerJob
-    refs::HostReferences
+    relocs::Relocations
 end
 function (self::LinkRuntime)(mod::LLVM.Module)
     self.job.config.libraries || return false
@@ -487,16 +487,16 @@ function (self::LinkRuntime)(mod::LLVM.Module)
     # GC lowering can introduce new calls to GPU runtime functions after the runtime
     # was linked initially. Link again now so those calls resolve to definitions before
     # later intrinsic-lowering passes inspect or rewrite the runtime call graph.
-    runtime, runtime_refs = load_runtime(self.job)
+    runtime, runtime_relocs = load_runtime(self.job)
     # `RemoveNIPass` stripped non-integral address spaces from `mod`'s datalayout, but the
     # cached runtime kept them; align it (as with target libraries) to avoid a warning.
     triple!(runtime, triple(mod))
     datalayout!(runtime, datalayout(mod))
-    link_with_host_references!(mod, self.refs, runtime, runtime_refs; only_needed=true)
+    link_relocatable!(mod, self.relocs, runtime, runtime_relocs; only_needed=true)
     return true
 end
-GPULinkRuntimePass(job, refs::HostReferences) =
-    NewPMModulePass("GPULinkRuntime", LinkRuntime(job, refs))
+GPULinkRuntimePass(job, relocs::Relocations) =
+    NewPMModulePass("GPULinkRuntime", LinkRuntime(job, relocs))
 
 struct LinkLibraries
     job::CompilerJob

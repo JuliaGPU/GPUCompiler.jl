@@ -2,7 +2,7 @@
 
 function irgen(@nospecialize(job::CompilerJob))
     mod, compiled, gv_to_value = @tracepoint "emission" compile_method_instance(job)
-    host_references = collect_julia_value_references!(mod, gv_to_value)
+    relocations = collect_julia_value_relocations!(mod, gv_to_value)
     if job.config.entry_abi === :specfunc
         entry_fn = compiled[job.source].specfunc
     else
@@ -150,7 +150,7 @@ function irgen(@nospecialize(job::CompilerJob))
         lower_alloca!(job, mod)
     end
 
-    return mod, compiled, host_references
+    return mod, compiled, relocations
 end
 
 
