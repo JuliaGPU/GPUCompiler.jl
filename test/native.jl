@@ -740,7 +740,7 @@ end
         mod = @eval module $(gensym())
             f() = UInt(pointer_from_objref(:host_ref_probe))
         end
-        job, _ = Native.create_job(mod.f, Tuple{}; relocatable=true)
+        job, _ = Native.create_job(mod.f, Tuple{}; jit=true)
         JuliaContext() do ctx
             obj, meta = GPUCompiler.compile(:obj, job)
             refs = meta.host_references

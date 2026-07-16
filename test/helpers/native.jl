@@ -10,11 +10,11 @@ Base.Experimental.@MethodTable(test_method_table)
 struct CompilerParams <: AbstractCompilerParams
     entry_safepoint::Bool
     method_table
-    relocatable::Bool
+    jit::Bool
 
     CompilerParams(entry_safepoint::Bool=false, method_table=test_method_table,
-                   relocatable::Bool=false) =
-        new(entry_safepoint, method_table, relocatable)
+                   jit::Bool=false) =
+        new(entry_safepoint, method_table, jit)
 end
 
 module Runtime end
@@ -27,7 +27,7 @@ GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.pa
 function GPUCompiler.lower_host_references!(@nospecialize(job::NativeCompilerJob),
                                             mod::LLVM.Module,
                                             refs::GPUCompiler.HostReferences)
-    if job.config.params.relocatable
+    if job.config.params.jit
         GPUCompiler.emit_host_reference_declarations!(mod, refs)
     else
         invoke(GPUCompiler.lower_host_references!,
@@ -37,7 +37,7 @@ end
 
 function GPUCompiler.mcgen(@nospecialize(job::NativeCompilerJob), mod::LLVM.Module,
                            format=LLVM.API.LLVMAssemblyFile)
-    if job.config.params.relocatable
+    if job.config.params.jit
         target = job.config.target
         @dispose tm=JITTargetMachine(GPUCompiler.llvm_triple(target), target.cpu,
                                      target.features) begin
@@ -51,11 +51,11 @@ end
 
 function create_job(@nospecialize(func), @nospecialize(types);
                     entry_safepoint::Bool=false, method_table=test_method_table,
-                    relocatable::Bool=false, kwargs...)
+                    jit::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget(;jlruntime=true)
-    params = CompilerParams(entry_safepoint, method_table, relocatable)
+    params = CompilerParams(entry_safepoint, method_table, jit)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end
