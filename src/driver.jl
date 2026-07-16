@@ -50,6 +50,10 @@ export compile
 
 Compile a `job` to one of the following formats as specified by the `target` argument:
 `:llvm` for LLVM IR, `:asm` for assembly, or `:obj` for object code.
+
+The returned `host_references` metadata is final only for `:asm` and `:obj`, after runtime
+globals have been collected and the backend has lowered every live slot. The `:llvm` result
+still contains symbolic Julia-value slots and may contain raw `jl_*` runtime references.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     if compile_hook[] !== nothing

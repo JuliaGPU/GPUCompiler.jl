@@ -261,12 +261,6 @@ function link_with_host_references!(dest_mod::LLVM.Module, dest_refs::HostRefere
     return
 end
 
-function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
-    refs = classify_gvs!(mod, gv_to_value)
-    resolve_host_reference_slots!(mod, refs)
-    return !refs.embedded_pointer
-end
-
 # emit a device-resident constant replica of the box holding `obj`; returns
 # the constant to store in the slot, and the (gcbits-masked) header word
 function materialize_box!(mod::LLVM.Module, gv::GlobalVariable, @nospecialize(obj),

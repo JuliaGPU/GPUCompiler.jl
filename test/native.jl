@@ -361,7 +361,8 @@ end
         Native.code_execution(mod.kernel, (Ptr{Int64}, Bool, Int32))
         Native.code_execution(mod.egal_kernel, (Ptr{Bool}, Bool, Int32))
 
-        # relocate_gvs! reports whether the module stayed session-portable
+        # Classification records whether the module stayed session-portable; eager
+        # lowering then resolves any remaining host-reference slots.
         JuliaContext() do ctx
             # Unlike Int128, vector-shaped tuples are 16-byte aligned on all
             # supported architectures and Julia versions.
@@ -384,7 +385,9 @@ end
                 gv = LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()), name)
                 constant!(gv, true)
             end
-            @test GPUCompiler.relocate_gvs!(m, Dict{String, Ptr{Cvoid}}())
+            refs = GPUCompiler.classify_gvs!(m, Dict{String, Ptr{Cvoid}}())
+            @test !refs.embedded_pointer
+            GPUCompiler.resolve_host_reference_slots!(m, refs)
             bool_ir = string(m)
             for name in ("jl_true", "jl_false")
                 @test haskey(globals(m), "$(name)_box")
@@ -397,26 +400,35 @@ end
             GC.@preserve objs begin
                 # smalltag isbits: materialized, portable
                 m, map = slot_module(ptrs[1])
-                @test GPUCompiler.relocate_gvs!(m, map)
+                refs = GPUCompiler.classify_gvs!(m, map)
+                @test !refs.embedded_pointer
+                GPUCompiler.resolve_host_reference_slots!(m, refs)
                 @test haskey(globals(m), "jl_global_0_box")
                 dispose(m)
 
                 # Float64: materialized, but the header carries a type pointer
                 m, map = slot_module(ptrs[2])
-                @test !GPUCompiler.relocate_gvs!(m, map)
+                refs = GPUCompiler.classify_gvs!(m, map)
+                @test refs.embedded_pointer
+                GPUCompiler.resolve_host_reference_slots!(m, refs)
                 @test haskey(globals(m), "jl_global_0_box")
                 dispose(m)
 
                 # Symbol: baked address
                 m, map = slot_module(ptrs[3])
-                @test !GPUCompiler.relocate_gvs!(m, map)
+                refs = GPUCompiler.classify_gvs!(m, map)
+                @test !refs.embedded_pointer
+                @test only(values(refs.slots)).value === objs[3]
+                GPUCompiler.resolve_host_reference_slots!(m, refs)
+                @test refs.embedded_pointer
                 @test !haskey(globals(m), "jl_global_0_box")
                 @test occursin("inttoptr", string(m))
                 dispose(m)
 
                 # 16-byte-aligned payloads get padded past the header word
                 m, map = slot_module(ptrs[4])
-                GPUCompiler.relocate_gvs!(m, map)
+                refs = GPUCompiler.classify_gvs!(m, map)
+                GPUCompiler.resolve_host_reference_slots!(m, refs)
                 box = globals(m)["jl_global_0_box"]
                 @test length(elements(LLVM.global_value_type(box))) == 3
                 dispose(m)
