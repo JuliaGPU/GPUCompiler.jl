@@ -312,10 +312,12 @@ end
     output = tempname(cleanup=false) * (filetype == "asm" ? ".ptx" : ".cubin")
     write(input, mod)
 
+    # Match nvcc by leaving eligible multiply-add pairs contractible for ptxas.
     cmd = `$(NVPTX_LLVM_Backend_jll.llc()) $input
               -mtriple=$(llvm_triple(target))
               -mcpu=$(cpu_name(target))
               -mattr=+ptx$(target.ptx.major)$(target.ptx.minor)
+              -nvptx-fma-level=1
               -filetype=$filetype
               -o $output`
     out = Pipe()

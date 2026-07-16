@@ -445,6 +445,21 @@ end
     PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
 end
 
+@testset "FMA contraction" begin
+    function contract(x)
+        for _ in 1:8
+            x = 2.001f0 * x - x
+        end
+        return x
+    end
+
+    ptx = sprint(PTX.code_native, contract, Tuple{Float32})
+    @test occursin("mul.f32", ptx)
+    @test occursin("sub.f32", ptx)
+    @test !occursin("mul.rn.f32", ptx)
+    @test !occursin("sub.rn.f32", ptx)
+end
+
 @testset "fastmath" begin
     # `fastmath=true` on the target calls `apply_fastmath!` from
     # `finish_linked_module!`, stamping `unsafe-fp-math` + fast-math flags on
