@@ -51,9 +51,6 @@ function (self::CollectRuntimeGlobalReferences)(mod::LLVM.Module)
                 if slot === nothing
                     name = safe_name("gpu_" * fn)
                     slot = GlobalVariable(mod, host_reference_word_type(), name)
-                    initializer!(slot, null(global_value_type(slot)))
-                    linkage!(slot, LLVM.API.LLVMExternalLinkage)
-                    extinit!(slot, true)
                     actual_name = LLVM.name(slot)
                     haskey(self.refs.slots, actual_name) &&
                         error("Duplicate Julia runtime global slot '$actual_name'")

@@ -779,6 +779,8 @@ end
         @test GPUCompiler.collect_runtime_global_references!(job, mod, refs)
         name = only(keys(refs.slots))
         @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test occursin("@$name = external global i64", string(mod))
+        GPUCompiler.emit_host_reference_slots!(mod, refs)
         @test occursin("externally_initialized global i64 0", string(mod))
 
         mod = parse(LLVM.Module, """
@@ -792,7 +794,7 @@ end
         @test GPUCompiler.collect_runtime_global_references!(job, mod, refs)
         name = only(keys(refs.slots))
         @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
-        @test occursin("externally_initialized global i64 0", string(mod))
+        @test occursin("@$name = external global i64", string(mod))
     end
 end
 
