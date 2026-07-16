@@ -198,6 +198,7 @@ end
 const libjulia = Ref{Ptr{Cvoid}}(C_NULL)
 
 function referenced_object(value, refs::HostReferences)
+    # This is best-effort: optimized shapes fall back to the unknown-binding error path.
     while value isa ConstantExpr &&
           opcode(value) in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)
         value = first(operands(value))

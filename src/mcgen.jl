@@ -64,7 +64,7 @@ function (self::CollectRuntimeGlobalReferences)(mod::LLVM.Module)
 
             function replace_bindings!(value)
                 changed = false
-                for use in uses(value)
+                for use in collect(uses(value))
                     val = user(use)
                     if isa(val, LLVM.ConstantExpr)
                         # recurse
@@ -85,7 +85,6 @@ function (self::CollectRuntimeGlobalReferences)(mod::LLVM.Module)
                             replace_uses!(val, replacement)
                         end
                         erase!(val)
-                        # FIXME: iterator invalidation?
                         changed = true
                     end
                 end

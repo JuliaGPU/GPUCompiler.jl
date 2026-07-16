@@ -768,6 +768,8 @@ function classify_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
             continue
         end
 
+        # jl_get_llvm_gvs and jl_get_llvm_gv_inits report an initializer for every
+        # mapped global, so a null here means those maps are out of sync.
         init == C_NULL && error("Missing Julia object for global '$name'")
         obj = Base.unsafe_pointer_to_objref(init)
         if isbitstype(typeof(obj)) && sizeof(obj) > 0 && !(obj isa Bool)
