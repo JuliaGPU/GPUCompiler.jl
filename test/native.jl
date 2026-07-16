@@ -385,7 +385,8 @@ end
                 gv = LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()), name)
                 constant!(gv, true)
             end
-            refs = GPUCompiler.classify_gvs!(m, Dict{String, Ptr{Cvoid}}())
+            refs = GPUCompiler.collect_julia_value_references!(
+                m, Dict{String, Ptr{Cvoid}}())
             @test !refs.embedded_pointer
             GPUCompiler.resolve_host_reference_slots!(m, refs)
             bool_ir = string(m)
@@ -400,7 +401,7 @@ end
             GC.@preserve objs begin
                 # smalltag isbits: materialized, portable
                 m, map = slot_module(ptrs[1])
-                refs = GPUCompiler.classify_gvs!(m, map)
+                refs = GPUCompiler.collect_julia_value_references!(m, map)
                 @test !refs.embedded_pointer
                 GPUCompiler.resolve_host_reference_slots!(m, refs)
                 @test haskey(globals(m), "jl_global_0_box")
@@ -408,7 +409,7 @@ end
 
                 # Float64: materialized, but the header carries a type pointer
                 m, map = slot_module(ptrs[2])
-                refs = GPUCompiler.classify_gvs!(m, map)
+                refs = GPUCompiler.collect_julia_value_references!(m, map)
                 @test refs.embedded_pointer
                 GPUCompiler.resolve_host_reference_slots!(m, refs)
                 @test haskey(globals(m), "jl_global_0_box")
@@ -416,7 +417,7 @@ end
 
                 # Symbol: baked address
                 m, map = slot_module(ptrs[3])
-                refs = GPUCompiler.classify_gvs!(m, map)
+                refs = GPUCompiler.collect_julia_value_references!(m, map)
                 @test !refs.embedded_pointer
                 @test only(values(refs.slots)).value === objs[3]
                 GPUCompiler.resolve_host_reference_slots!(m, refs)
@@ -427,7 +428,7 @@ end
 
                 # 16-byte-aligned payloads get padded past the header word
                 m, map = slot_module(ptrs[4])
-                refs = GPUCompiler.classify_gvs!(m, map)
+                refs = GPUCompiler.collect_julia_value_references!(m, map)
                 GPUCompiler.resolve_host_reference_slots!(m, refs)
                 box = globals(m)["jl_global_0_box"]
                 @test length(elements(LLVM.global_value_type(box))) == 3

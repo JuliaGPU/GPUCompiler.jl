@@ -2,7 +2,7 @@
 
 function irgen(@nospecialize(job::CompilerJob))
     mod, compiled, gv_to_value = @tracepoint "emission" compile_method_instance(job)
-    host_references = classify_gvs!(mod, gv_to_value)
+    host_references = collect_julia_value_references!(mod, gv_to_value)
     if job.config.entry_abi === :specfunc
         entry_fn = compiled[job.source].specfunc
     else

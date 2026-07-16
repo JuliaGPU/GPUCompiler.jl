@@ -8,6 +8,9 @@
 # C symbol for CGlobalRef slots. Same name therefore means the same HostReference, so linking
 # can merge declarations and metadata without renaming either one.
 #
+# The two producers are `collect_julia_value_references!` during IR generation and
+# `collect_runtime_global_references!` immediately before backend lowering.
+#
 # This mirrors Julia's own mechanisms: codegen's identity-keyed global_targets slots, the
 # sysimage jl_gvars table patched by jl_update_all_gvars, and JIT absoluteSymbols definitions.
 
@@ -97,7 +100,8 @@ function lower_host_references!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
 end
 
 
-function classify_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
+function collect_julia_value_references!(mod::LLVM.Module,
+                                         gv_to_value::Dict{String, Ptr{Cvoid}})
     refs = HostReferences()
     mod_gvs = globals(mod)
     for (name, init) in gv_to_value
