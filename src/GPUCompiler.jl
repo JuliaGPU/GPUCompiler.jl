@@ -54,6 +54,7 @@ include("mangling.jl")
 
 # compiler interface and implementations
 include("interface.jl")
+include("relocation.jl")
 include("error.jl")
 include("native.jl")
 include("ptx.jl")

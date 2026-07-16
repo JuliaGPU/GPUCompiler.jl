@@ -197,29 +197,6 @@ end
 
 const libjulia = Ref{Ptr{Cvoid}}(C_NULL)
 
-function referenced_object(value, refs::HostReferences)
-    # This is best-effort: optimized shapes fall back to the unknown-binding error path.
-    while value isa ConstantExpr &&
-          opcode(value) in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)
-        value = first(operands(value))
-    end
-    if value isa LLVM.LoadInst
-        source = first(operands(value))
-        while source isa ConstantExpr &&
-              opcode(source) in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)
-            source = first(operands(source))
-        end
-        if source isa GlobalVariable
-            ref = get(refs.slots, LLVM.name(source), nothing)
-            ref isa JuliaValueRef && return Some(ref.value)
-        end
-    elseif value isa ConstantExpr && opcode(value) == LLVM.API.LLVMIntToPtr
-        ptr = Ptr{Cvoid}(convert(Int, first(operands(value))))
-        return Some(Base.unsafe_pointer_to_objref(ptr))
-    end
-    return nothing
-end
-
 function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
     bt = backtrace(inst)
     src = operands(inst)[1]
