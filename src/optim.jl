@@ -68,7 +68,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         register!(pb, CleanupKernelStatePass(job))
 
         add!(pb, NewPMModulePassManager()) do mpm
-            buildNewPMPipeline!(mpm, job, refs, opt_level)
+            buildNewPMPipeline!(mpm, job, opt_level)
         end
         run!(pb, mod, tm)
     end
@@ -77,8 +77,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     return
 end
 
-function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), refs::HostReferences,
-                             opt_level)
+function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     buildEarlySimplificationPipeline(mpm, job, opt_level)
     add!(mpm, AlwaysInlinerPass())
     buildEarlyOptimizerPipeline(mpm, job, opt_level)
@@ -92,7 +91,7 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), refs::HostRef
             add!(fpm, WarnMissedTransformationsPass())
         end
     end
-    buildIntrinsicLoweringPipeline(mpm, job, refs, opt_level)
+    buildIntrinsicLoweringPipeline(mpm, job, opt_level)
     buildCleanupPipeline(mpm, job, opt_level)
 end
 
@@ -318,8 +317,7 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, InstSimplifyPass())
 end
 
-function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob),
-                                         refs::HostReferences, opt_level)
+function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     add!(mpm, RemoveNIPass())
 
     # lower GC intrinsics
@@ -328,7 +326,9 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob),
             add!(fpm, GPULowerGCFramePass(job))
         end
         if job.config.libraries
-            add!(mpm, GPULinkRuntimePass(job, refs))
+            # The pass builder resolves this name to the registered instance, which
+            # captures the HostReferences object owned by optimize!.
+            add!(mpm, "GPULinkRuntime")
             add!(mpm, GPULinkLibrariesPass(job))
             add!(mpm, GPUFinishRuntimeIntrinsicsPass(job))
         end
@@ -495,7 +495,7 @@ function (self::LinkRuntime)(mod::LLVM.Module)
     link_with_host_references!(mod, self.refs, runtime, runtime_refs; only_needed=true)
     return true
 end
-GPULinkRuntimePass(job, refs=HostReferences()) =
+GPULinkRuntimePass(job, refs::HostReferences) =
     NewPMModulePass("GPULinkRuntime", LinkRuntime(job, refs))
 
 struct LinkLibraries
