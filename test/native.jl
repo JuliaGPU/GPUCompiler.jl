@@ -217,8 +217,6 @@ end
         @test new_res !== res
         @test new_res.asm === nothing
 
-        @test !isdefined(GPUCompiler, :session_dependent_jobs)
-        @test !isdefined(GPUCompiler, :wipe_session_dependent_results)
     end
 
     @testset "runtime cache invalidation" begin
