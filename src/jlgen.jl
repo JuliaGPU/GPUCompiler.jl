@@ -828,6 +828,7 @@ function resolve_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
         val = host_reference_slot_initializer(gv, value)
         initializer!(gv, val)
         linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+        constant!(gv, true)
         refs.embedded_pointer = true
     end
     empty!(refs.slots)

@@ -754,6 +754,7 @@ end
             }""")
         GPUCompiler.prepare_execution!(job, mod)
         @test !occursin("load $word_ptr, $word_ptr_ptr @jl_float32_type", string(mod))
+        @test occursin(r"private .*constant", string(mod))
 
         mod = parse(LLVM.Module, """
             @jl_float32_type = external global $word_ptr
