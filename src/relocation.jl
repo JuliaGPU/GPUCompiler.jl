@@ -370,12 +370,15 @@ function (self::CollectRuntimeGlobalReferences)(mod::LLVM.Module)
             slot = nothing
             function runtime_global_slot()
                 if slot === nothing
-                    name = safe_name("gpu_" * fn)
+                    name = "gpu_" * fn
+                    (haskey(globals(mod), name) || haskey(functions(mod), name)) &&
+                        error("Julia runtime global slot name '$name' is already in use")
                     slot = GlobalVariable(mod, host_reference_word_type(), name)
-                    actual_name = LLVM.name(slot)
-                    haskey(self.refs.slots, actual_name) &&
-                        error("Duplicate Julia runtime global slot '$actual_name'")
-                    self.refs.slots[actual_name] = CGlobalRef(Symbol(fn))
+                    LLVM.name(slot) == name ||
+                        error("Julia runtime global slot name '$name' is already in use")
+                    haskey(self.refs.slots, name) &&
+                        error("Duplicate Julia runtime global slot '$name'")
+                    self.refs.slots[name] = CGlobalRef(Symbol(fn))
                 end
                 slot
             end
@@ -418,8 +421,27 @@ end
 collect_runtime_global_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                    refs::HostReferences) =
     CollectRuntimeGlobalReferences(job, refs)(mod)
-CollectRuntimeGlobalReferencesPass(job, refs=HostReferences()) =
-    NewPMModulePass("CollectRuntimeGlobalReferences", CollectRuntimeGlobalReferences(job, refs))
+
+function has_unresolved_runtime_global_loads(mod::LLVM.Module, refs::HostReferences)
+    function has_load(value)
+        for use in uses(value)
+            val = user(use)
+            val isa LLVM.LoadInst && return true
+            val isa LLVM.ConstantExpr && has_load(val) && return true
+        end
+        return false
+    end
+
+    for value in [collect(functions(mod)); collect(globals(mod))]
+        name = LLVM.name(value)
+        value isa LLVM.GlobalVariable && haskey(refs.slots, name) && continue
+        isdeclaration(value) || continue
+        value isa LLVM.Function && LLVM.isintrinsic(value) && continue
+        startswith(name, "jl_") || continue
+        has_load(value) && return true
+    end
+    return false
+end
 
 
 function referenced_object(value, refs::HostReferences)
