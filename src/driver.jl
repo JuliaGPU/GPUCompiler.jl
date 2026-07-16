@@ -337,8 +337,6 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
-            host_references.embedded_pointer && mark_session_dependent!(job)
-
             if job.config.optimize
                 @tracepoint "optimization" begin
                     optimize!(job, ir, host_references; job.config.opt_level)
@@ -403,6 +401,9 @@ const __llvm_initialized = Ref(false)
             end
         end
     end
+
+    # Optimization may link runtime functions carrying embedded host pointers.
+    job.config.toplevel && host_references.embedded_pointer && mark_session_dependent!(job)
 
     if job.config.toplevel && job.config.validate
         @tracepoint "validation" begin
