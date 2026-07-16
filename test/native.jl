@@ -735,6 +735,37 @@ end
     @test_throws ErrorException GPUCompiler.JuliaValueRef(1.5)
 end
 
+@testset "postponed relocation" begin
+    if VERSION >= v"1.12"
+        mod = @eval module $(gensym())
+            f(x::Symbol) = x === :host_ref_probe
+        end
+        job, _ = Native.create_job(mod.f, (Symbol,); relocatable=true)
+        JuliaContext() do ctx
+            obj, meta = GPUCompiler.compile(:obj, job)
+            refs = meta.host_references
+            @test !isempty(refs.slots)
+            @test all(ref -> ref isa GPUCompiler.JuliaValueRef, values(refs.slots))
+            @test !refs.embedded_pointer
+            @test all(name -> isdeclaration(globals(meta.ir)[name]), keys(refs.slots))
+
+            bytes = Vector{UInt8}(codeunits(obj))
+            entry = LLVM.name(meta.entry)
+            fptr, keepalive = Native.load(bytes, entry, refs)
+            try
+                GC.@preserve keepalive begin
+                    @test ccall(fptr, Bool, (Any,), :host_ref_probe)
+                    @test !ccall(fptr, Bool, (Any,), :other)
+                end
+            finally
+                dispose(first(keepalive))
+            end
+
+            @test_throws LLVMException Native.load(bytes, entry, GPUCompiler.HostReferences())
+        end
+    end
+end
+
 @testset "CPU reference resolution" begin
     # JIT-private symbols like `jl_get_pgcstack_resolved` (JuliaLang/julia#61527) cannot
     # be looked up using `jl_cglobal`, so we should only resolve bindings that are
