@@ -738,9 +738,9 @@ end
 @testset "postponed relocation" begin
     if VERSION >= v"1.12"
         mod = @eval module $(gensym())
-            f(x::Symbol) = x === :host_ref_probe
+            f() = UInt(pointer_from_objref(:host_ref_probe))
         end
-        job, _ = Native.create_job(mod.f, (Symbol,); relocatable=true)
+        job, _ = Native.create_job(mod.f, Tuple{}; relocatable=true)
         JuliaContext() do ctx
             obj, meta = GPUCompiler.compile(:obj, job)
             refs = meta.host_references
@@ -751,11 +751,12 @@ end
 
             bytes = Vector{UInt8}(codeunits(obj))
             entry = LLVM.name(meta.entry)
+            expected = GPUCompiler.resolve_host_reference(only(values(refs.slots)))
             fptr, keepalive = Native.load(bytes, entry, refs)
             try
                 GC.@preserve keepalive begin
-                    @test ccall(fptr, Bool, (Any,), :host_ref_probe)
-                    @test !ccall(fptr, Bool, (Any,), :other)
+                    actual = ccall(fptr, UInt, ())
+                    @test actual == expected
                 end
             finally
                 dispose(first(keepalive))
