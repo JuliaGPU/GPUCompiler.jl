@@ -432,12 +432,19 @@ function cached_results end
 """
     JuliaValueRef(value)
 
-A Julia value used as the serializable identity of a host reference. Resolve it in the active
-session with [`resolve_host_reference`](@ref); a loader that writes the resulting address into
-device storage must keep `value` rooted for as long as that storage remains reachable.
+A Julia value with a stable address (a heap object, symbol, or singleton), used as the
+serializable identity of a host reference. Resolve it in the active session with
+[`resolve_host_reference`](@ref); a loader that writes the resulting address into device
+storage must keep `value` rooted for as long as that storage remains reachable.
 """
 struct JuliaValueRef
     value::Any
+
+    function JuliaValueRef(value)
+        isbitstype(typeof(value)) && sizeof(value) > 0 &&
+            error("JuliaValueRef requires an object with a stable address")
+        new(value)
+    end
 end
 
 """
@@ -485,8 +492,12 @@ same_host_reference(::HostReference, ::HostReference) = false
 Resolve `ref` to its current-session word. Loader-based backends use this after loading the
 object and before exposing a callable function.
 """
-resolve_host_reference(ref::JuliaValueRef) =
-    UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), ref.value))
+function resolve_host_reference(ref::JuliaValueRef)
+    box = Any[ref.value]
+    GC.@preserve box begin
+        return unsafe_load(Base.unsafe_convert(Ptr{UInt}, pointer(box)))
+    end
+end
 function resolve_host_reference(ref::CGlobalRef)
     address = ccall(:jl_cglobal, Any, (Any, Any), String(ref.symbol), UInt)
     return unsafe_load(address)

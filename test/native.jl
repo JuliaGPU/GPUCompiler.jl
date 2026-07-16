@@ -723,6 +723,18 @@ end
     end
 end
 
+@testset "host reference resolution" begin
+    sym = :host_reference_probe
+    @test GPUCompiler.resolve_host_reference(GPUCompiler.JuliaValueRef(sym)) ==
+          UInt(pointer_from_objref(sym))
+
+    singleton = nothing
+    @test GPUCompiler.resolve_host_reference(GPUCompiler.JuliaValueRef(singleton)) ==
+          UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), singleton))
+
+    @test_throws ErrorException GPUCompiler.JuliaValueRef(1.5)
+end
+
 @testset "CPU reference resolution" begin
     # JIT-private symbols like `jl_get_pgcstack_resolved` (JuliaLang/julia#61527) cannot
     # be looked up using `jl_cglobal`, so we should only resolve bindings that are
