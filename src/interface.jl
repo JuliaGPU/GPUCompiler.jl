@@ -450,8 +450,8 @@ end
 """
     CGlobalRef(symbol)
 
-A libjulia C data global. Resolving this reference calls `jl_cglobal` for `symbol` and loads
-the word stored at that address.
+A named libjulia C data global. Resolution returns the word stored in that global in the
+current Julia process.
 """
 struct CGlobalRef
     symbol::Symbol
@@ -489,8 +489,7 @@ same_host_reference(::HostReference, ::HostReference) = false
 """
     resolve_host_reference(ref) -> UInt
 
-Resolve `ref` to its current-session word. Loader-based backends use this after loading the
-object and before exposing a callable function.
+Resolve a host reference to its word in the current Julia process.
 """
 function resolve_host_reference(ref::JuliaValueRef)
     box = Any[ref.value]
@@ -506,15 +505,11 @@ end
 """
     lower_host_references!(job, mod, refs)
 
-Lower compiler-managed Julia value globals and Julia runtime globals for `job`'s final
-backend representation. The default [`resolve_host_reference_slots!`](@ref) lowering resolves
-every live reference in the current Julia session, making the result session-dependent.
-Backends with a per-module loader namespace, such as a `CuModule`, may call
-[`emit_host_reference_slots!`](@ref) and patch the resulting definitions after loading.
-Shared-namespace JIT loaders may call [`emit_host_reference_declarations!`](@ref), define the
-remaining declarations before loading, and resolve libjulia globals by name. Because slot names
-are unique only within one compilation, such a loader must use a fresh namespace per object or
-uniquify names at link time.
+Backend hook for lowering live host references before object emission.
+
+The default implementation resolves them in the current Julia process, making the result
+session-dependent. Loaders may instead emit module-owned definitions that are patched after
+loading, or external declarations that are defined before loading.
 """
 function lower_host_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 refs::HostReferences)
@@ -643,7 +638,8 @@ end # HAS_INTEGRATED_CACHE
 
 @public GPUCompilerCacheToken, cache_owner, cached_results
 @public JuliaValueRef, CGlobalRef, HostReference, HostReferences
-@public lower_host_references!, emit_host_reference_slots!, emit_host_reference_declarations!
+@public lower_host_references!, emit_host_reference_definitions!
+@public emit_host_reference_declarations!
 @public resolve_host_reference
 
 # the method table to use

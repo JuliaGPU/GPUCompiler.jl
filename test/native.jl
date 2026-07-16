@@ -811,7 +811,7 @@ end
         name = only(keys(refs.slots))
         @test refs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
         @test occursin("@$name = external global i64", string(mod))
-        GPUCompiler.emit_host_reference_slots!(mod, refs)
+        GPUCompiler.emit_host_reference_definitions!(mod, refs)
         @test occursin("externally_initialized global i64 0", string(mod))
 
         mod = parse(LLVM.Module, """

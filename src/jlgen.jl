@@ -838,12 +838,12 @@ function resolve_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
 end
 
 """
-    emit_host_reference_slots!(mod, refs)
+    emit_host_reference_definitions!(mod, refs)
 
-Prepare the globals named by `refs.slots` for loader-based lowering. Each remains a writable,
-word-sized external symbol that the loader must resolve and patch after loading the object.
+Emit host-reference slots as writable, null-initialized definitions. The loader must patch each
+definition after loading the object. This requires a per-object symbol namespace.
 """
-function emit_host_reference_slots!(mod::LLVM.Module, refs::HostReferences)
+function emit_host_reference_definitions!(mod::LLVM.Module, refs::HostReferences)
     check_host_reference_slots!(mod, refs)
     mod_gvs = globals(mod)
     slots = GlobalVariable[]
@@ -863,11 +863,15 @@ end
 """
     emit_host_reference_declarations!(mod, refs)
 
-Lower host references for loaders that resolve symbols by name at link time. Julia runtime
-globals are folded back into direct references to their libjulia symbols. Julia value globals
-remain external, word-sized declarations; before loading the object, the loader must define
-each remaining symbol to point at a cell containing [`resolve_host_reference`](@ref), and keep
-the referenced values rooted while the code remains executable.
+Prepare host references for a loader that defines symbols before loading an object.
+
+Runtime-global slots are restored to direct references to their named libjulia globals. Julia
+value slots remain external word-sized declarations; the loader must define each symbol to
+point at a cell containing [`resolve_host_reference`](@ref) and keep the cell and referenced
+value alive while the code is executable.
+
+Slot names are unique only within one compilation. A shared JIT namespace must uniquify them
+or use a separate namespace for each object.
 """
 function emit_host_reference_declarations!(mod::LLVM.Module, refs::HostReferences)
     check_host_reference_slots!(mod, refs)
