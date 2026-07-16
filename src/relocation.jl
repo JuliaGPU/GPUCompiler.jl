@@ -87,6 +87,27 @@ function resolve_host_reference(ref::CGlobalRef)
 end
 
 """
+    resolved_relocations(refs)
+
+Resolve relocation metadata for a loader. Returns resolved `slots`, resolved `patches`, and
+Julia `roots` that must stay alive while the loaded code can access them.
+"""
+function resolved_relocations(refs::HostReferences)
+    slots = Pair{String,UInt}[]
+    patches = Pair{Tuple{String,Int},UInt}[]
+    roots = Any[]
+    for (name, ref) in refs.slots
+        push!(slots, name => resolve_host_reference(ref))
+        ref isa JuliaValueRef && push!(roots, ref.value)
+    end
+    for (key, ref) in refs.patches
+        push!(patches, key => resolve_host_reference(ref))
+        ref isa JuliaValueRef && push!(roots, ref.value)
+    end
+    return (; slots, patches, roots)
+end
+
+"""
     lower_host_references!(job, mod, refs)
 
 Backend hook for lowering live host references before object emission.
@@ -296,6 +317,24 @@ end
 function link_with_host_references!(dest_mod::LLVM.Module, dest_refs::HostReferences,
                                     src_mod::LLVM.Module, src_refs::HostReferences;
                                     only_needed=false)
+    # Patch globals are definitions, unlike slots. Make an identical source definition a
+    # declaration so LLVM can resolve it to the destination definition while linking.
+    for (key, ref) in src_refs.patches
+        existing = get(dest_refs.patches, key, nothing)
+        existing === nothing && continue
+        name, offset = key
+        same_host_reference(existing, ref) ||
+            error("Host reference patch '$name+$offset' refers to conflicting values")
+        haskey(globals(dest_mod), name) ||
+            error("Missing destination host reference patch global '$name'")
+        haskey(globals(src_mod), name) ||
+            error("Missing source host reference patch global '$name'")
+        gv = globals(src_mod)[name]
+        initializer!(gv, nothing)
+        extinit!(gv, false)
+        linkage!(gv, LLVM.API.LLVMExternalLinkage)
+    end
+
     link!(dest_mod, src_mod; only_needed)
     for (name, ref) in src_refs.slots
         # A slot absent from the linked module was dead (DCE'd or not imported under

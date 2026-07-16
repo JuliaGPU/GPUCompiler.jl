@@ -67,12 +67,11 @@ function load(obj::Vector{UInt8}, entry::String, refs::GPUCompiler.HostReference
         prefix = LLVM.get_prefix(lljit)
         add!(jd, LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix))
 
-        cells = Vector{UInt}(undef, length(refs.slots))
-        roots = Any[]
+        relocations = GPUCompiler.resolved_relocations(refs)
+        cells = Vector{UInt}(undef, length(relocations.slots))
         pairs = LLVM.API.LLVMOrcCSymbolMapPair[]
-        for (i, (name, ref)) in enumerate(refs.slots)
-            cells[i] = GPUCompiler.resolve_host_reference(ref)
-            ref isa GPUCompiler.JuliaValueRef && push!(roots, ref.value)
+        for (i, (name, value)) in enumerate(relocations.slots)
+            cells[i] = value
             symbol = LLVM.API.LLVMJITEvaluatedSymbol(
                 reinterpret(UInt, pointer(cells, i)),
                 LLVM.API.LLVMJITSymbolFlags(
@@ -82,8 +81,12 @@ function load(obj::Vector{UInt8}, entry::String, refs::GPUCompiler.HostReference
         isempty(pairs) || LLVM.define(jd, LLVM.absolute_symbols(pairs))
 
         add!(lljit, jd, MemoryBuffer(obj))
+        for ((name, offset), value) in relocations.patches
+            addr = lookup(lljit, name)
+            unsafe_store!(Ptr{UInt}(pointer(addr) + offset), value)
+        end
         addr = lookup(lljit, entry)
-        return pointer(addr), (lljit, cells, roots)
+        return pointer(addr), (lljit, cells, relocations.roots)
     catch
         dispose(lljit)
         rethrow()

@@ -517,7 +517,7 @@ end # HAS_INTEGRATED_CACHE
 @public JuliaValueRef, CGlobalRef, HostReference, HostReferences
 @public lower_host_references!, emit_host_reference_definitions!
 @public emit_host_reference_declarations!
-@public resolve_host_reference
+@public resolve_host_reference, resolved_relocations
 
 # the method table to use
 #

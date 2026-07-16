@@ -776,6 +776,32 @@ end
             end
 
             @test_throws LLVMException Native.load(bytes, entry, GPUCompiler.HostReferences())
+
+            # Interior relocations are applied after the object has been loaded.
+            ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
+            patch_mod = parse(LLVM.Module, """
+                @patched_box = externally_initialized global { i64, i64 } { i64 0, i64 42 }
+
+                define i64 @patched_header() {
+                    %value = load i64, $(ptr("i64")) getelementptr ({ i64, i64 }, $(ptr("{ i64, i64 }")) @patched_box, i32 0, i32 0)
+                    ret i64 %value
+                }""")
+            triple!(patch_mod, GPUCompiler.llvm_triple(job.config.target))
+            datalayout!(patch_mod, GPUCompiler.llvm_datalayout(job.config.target))
+            patch_refs = GPUCompiler.HostReferences()
+            patch_refs.patches[("patched_box", 0)] = GPUCompiler.JuliaValueRef(Float64)
+            patch_obj = GPUCompiler.mcgen(job, patch_mod, LLVM.API.LLVMObjectFile)
+            patch_ptr, patch_keepalive = Native.load(
+                Vector{UInt8}(codeunits(patch_obj)), "patched_header", patch_refs)
+            try
+                GC.@preserve patch_keepalive begin
+                    @test ccall(patch_ptr, UInt, ()) ==
+                          GPUCompiler.resolve_host_reference(
+                              GPUCompiler.JuliaValueRef(Float64))
+                end
+            finally
+                dispose(first(patch_keepalive))
+            end
         end
     end
 end
@@ -923,6 +949,54 @@ end
                                                only_needed=true)
         @test collect(keys(dest_refs.slots)) == ["used"]
         @test only(values(dest_refs.slots)).value === :used
+
+        function patch_module(name, entry)
+            parse(LLVM.Module, """
+                @$name = externally_initialized global { i64, i64 } { i64 0, i64 1 }
+
+                define i64 @$entry() {
+                    %value = load i64, $(ptr("i64")) getelementptr ({ i64, i64 }, $(ptr("{ i64, i64 }")) @$name, i32 0, i32 1)
+                    ret i64 %value
+                }""")
+        end
+        patch_refs(name, value) = GPUCompiler.HostReferences(
+            Dict{String,GPUCompiler.HostReference}(),
+            Dict((name, 0) => GPUCompiler.JuliaValueRef(value)))
+
+        # Identical patch identities merge; conflicting metadata does not.
+        dest = patch_module("patch", "first_patch")
+        dest_refs = patch_refs("patch", Float64)
+        src = patch_module("patch", "second_patch")
+        src_refs = patch_refs("patch", Float64)
+        GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs)
+        @test collect(keys(dest_refs.patches)) == [("patch", 0)]
+
+        dest = patch_module("patch", "first_patch")
+        dest_refs = patch_refs("patch", Float64)
+        src = patch_module("patch", "second_patch")
+        src_refs = patch_refs("patch", Int64)
+        @test_throws ErrorException GPUCompiler.link_with_host_references!(
+            dest, dest_refs, src, src_refs)
+
+        # Metadata for patch globals not imported under `only_needed` is discarded.
+        dest = parse(LLVM.Module, """
+            declare i64 @source_patch()
+            define i64 @entry_patch() {
+                %value = call i64 @source_patch()
+                ret i64 %value
+            }""")
+        src = patch_module("used_patch", "source_patch")
+        unused = GlobalVariable(src, LLVM.StructType([LLVM.Int64Type(), LLVM.Int64Type()]),
+                                "unused_patch")
+        initializer!(unused, ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(1)]))
+        src_refs = GPUCompiler.HostReferences(
+            Dict{String,GPUCompiler.HostReference}(),
+            Dict(("used_patch", 0) => GPUCompiler.JuliaValueRef(Float64),
+                 ("unused_patch", 0) => GPUCompiler.JuliaValueRef(Int64)))
+        dest_refs = GPUCompiler.HostReferences()
+        GPUCompiler.link_with_host_references!(dest, dest_refs, src, src_refs;
+                                               only_needed=true)
+        @test collect(keys(dest_refs.patches)) == [("used_patch", 0)]
     end
 end
 
