@@ -89,6 +89,19 @@ end
     end
 end
 
+@testset "boxed header relocation" begin
+    mod = @eval module $(gensym())
+        @noinline produce(cond::Bool, value::Int32) = cond ? value : 1.5
+        function consume(cond::Bool, value::Int32)
+            x = produce(cond, value)
+            x isa Float64 && return x
+            return 0.0
+        end
+    end
+    ir = sprint(io->PTX.code_llvm(io, mod.consume, Tuple{Bool,Int32}; dump_module=true))
+    @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir)
+end
+
 @testset "kernel functions" begin
 @testset "kernel argument attributes" begin
     mod = @eval module $(gensym())
