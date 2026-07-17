@@ -1,27 +1,31 @@
 # Relocation model
 #
 # A relocation is a site => target pair. Targets are Julia object identities
-# (`JuliaValueRef`, like codegen's identity-keyed `global_targets`) or named libjulia
-# globals (`CGlobalRef`, like JuliaVariables). Every site names a word at a byte offset in a
-# global. Dedicated sites use offset zero in a word-sized declaration (like
-# `jl_sysimg_gvars`); other sites are inside defined globals (like
-# `gctags_list`/`relocs_list`). Declarations can be baked, patched, or imported; sites in
-# definitions can only be baked or patched.
+# (`JuliaValueRef`, like codegen's identity-keyed `global_targets`) or named
+# libjulia globals (`CGlobalRef`, like JuliaVariables). Every site names a word
+# at a byte offset in a global. Dedicated sites use offset zero in a word-sized
+# declaration (like `jl_sysimg_gvars`); other sites are inside defined globals
+# (like `gctags_list`/`relocs_list`). Declarations can be baked, patched, or
+# imported; sites in definitions can only be baked or patched.
 #
 #   produce ──▶ merge (on link) ──▶ prune (after DCE) ──▶ lower (at emit_asm)
 #
-# Lowering strategy                  Loader contract                    Julia analog
-# `bake_relocations!`               none; current-session words baked  JIT address folding
-# `emit_patchable_relocations!`      patch named globals after load     sysimage gvars
+# Lowering strategy              Loader contract                    Julia analog
+# -----------------              ---------------                    ------------
+# `bake_relocations!`            none; current-session words baked  JIT address folding
+# `emit_patchable_relocations!`  patch named globals after load     sysimage gvars
 #
 # The producers are `collect_julia_value_relocations!` during IR generation and
-# `collect_cglobal_relocations!` immediately before backend lowering. Names are globally
-# unique and assigned once, so linking can merge IR and metadata without renaming.
+# `collect_cglobal_relocations!` immediately before backend lowering. Names are
+# globally unique and assigned once, so linking can merge IR and metadata
+# without renaming.
 #
-# Generated code is portable only when `supports_relocatable_ir()` and the backend preserves
-# these relocations for its loader. The default lowering bakes current-session values.
+# Generated code is portable only when `supports_relocatable_ir()` and the
+# backend preserves these relocations for its loader. The default lowering bakes
+# current-session values.
 
-## Targets
+
+## targets
 
 """
     JuliaValueRef(value)
@@ -79,7 +83,8 @@ function resolve_relocation_target(target::CGlobalRef)
     return unsafe_load(address)
 end
 
-## The table
+
+## the table
 
 """
     RelocationSite(name, offset)
@@ -172,7 +177,8 @@ function foreach_relocation(f, mod::LLVM.Module, relocs::Relocations)
     return
 end
 
-## Producers
+
+## producers
 
 function collect_julia_value_relocations!(mod::LLVM.Module,
                                          gv_to_value::Dict{String, Ptr{Cvoid}})
@@ -364,7 +370,8 @@ function has_unresolved_cglobal_loads(mod::LLVM.Module, relocs::Relocations)
     return false
 end
 
-## Bookkeeping
+
+## bookkeeping
 
 function link_relocatable!(dest_mod::LLVM.Module, dest_relocs::Relocations,
                             src_mod::LLVM.Module, src_relocs::Relocations;
@@ -422,7 +429,8 @@ function prune_dead_relocations!(mod::LLVM.Module, relocs::Relocations)
     return
 end
 
-## Lowering
+
+## lowering
 
 """
     lower_relocations!(job, mod, relocs)
@@ -487,7 +495,8 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
     return
 end
 
-## Introspection
+
+## introspection
 
 function referenced_object(value, relocs::Relocations)
     # This is best-effort: optimized shapes fall back to the unknown-binding error path.

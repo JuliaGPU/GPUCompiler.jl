@@ -429,12 +429,6 @@ the check-and-compile sequence (all back-ends already do, e.g. `mtlfunction_lock
 """
 function cached_results end
 
-# Relocation types and the backend lowering hook live in relocation.jl.
-#
-# Job results attached to CodeInstances are serialized into package images. Store only
-# session-portable data there. Generated code is portable iff `supports_relocatable_ir()`
-# and the backend preserves relocations with patchable- or imported-symbol lowering. Backends
-# using baked lowering must keep generated code in a session-local cache or recompile it.
 @static if HAS_INTEGRATED_CACHE
 
 """
