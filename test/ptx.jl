@@ -99,7 +99,14 @@ end
         end
     end
     ir = sprint(io->PTX.code_llvm(io, mod.consume, Tuple{Bool,Int32}; dump_module=true))
-    @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir)
+    # As with Symbol literals above, Julia 1.10 may bake the type pointer before
+    # GPUCompiler can represent it as a relocation.
+    @static if VERSION >= v"1.11"
+        @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir)
+    else
+        @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir) ||
+              occursin("inttoptr", ir)
+    end
 end
 
 @testset "kernel functions" begin
