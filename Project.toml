@@ -32,7 +32,7 @@ NVPTX_LLVM_Backend_jll = "ef6e0fe3-e6ef-59c0-bde6-4989574699e0"
 
 [compat]
 AMDGPU_LLVM_Backend_jll = "22"
-CompilerCaching = "0.3"
+CompilerCaching = "0.4"
 ExprTools = "0.1"
 Highlights = "0.6"
 InteractiveUtils = "1"
