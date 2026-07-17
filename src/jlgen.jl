@@ -423,9 +423,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         interp.code_cache
     end
 
-    # gather (CI, CodeInfo) pairs for jl_emit_native (1.12+)
+    # gather (CI, CodeInfo) pairs for jl_emit_native (1.12+).
     codeinfo_pairs = if VERSION >= v"1.12.0-DEV.1823" && root_ci !== nothing
-        CompilerCaching.get_codeinfos(root_ci)
+        CompilerCaching.get_codeinfos(interp, root_ci)
     else
         nothing
     end
