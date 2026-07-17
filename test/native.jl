@@ -73,8 +73,8 @@ end
             @test only(other_mis).def in methods(mod.inner)
 
             if VERSION >= v"1.12"
-                @test length(meta.relocations.slots) == 1
-                @test only(values(meta.relocations.slots)) isa GPUCompiler.JuliaValueRef
+                @test length(meta.relocations.sites) == 1
+                @test only(values(meta.relocations.sites)) isa GPUCompiler.JuliaValueRef
             end
         end
     end
@@ -269,7 +269,8 @@ end
                 used += 1
                 init = LLVM.initializer(gv)
                 @test init === nothing
-                @test haskey(lib.relocations.slots, LLVM.name(gv))
+                site = GPUCompiler.RelocationSite(LLVM.name(gv), 0)
+                @test haskey(lib.relocations.sites, site)
             end
             @static if VERSION >= v"1.12-"
                 # on older versions, Julia bakes addresses without tagging globals
@@ -372,7 +373,7 @@ end
             end
             relocs = GPUCompiler.collect_julia_value_relocations!(
                 m, Dict{String, Ptr{Cvoid}}())
-            @test isempty(relocs.interior)
+            @test isempty(relocs.sites)
             GPUCompiler.bake_relocations!(m, relocs)
             bool_ir = string(m)
             for name in ("jl_true", "jl_false")
@@ -387,7 +388,7 @@ end
                 # smalltag isbits: materialized, portable
                 m, map = slot_module(ptrs[1])
                 relocs = GPUCompiler.collect_julia_value_relocations!(m, map)
-                @test isempty(relocs.interior)
+                @test isempty(relocs.sites)
                 GPUCompiler.bake_relocations!(m, relocs)
                 @test haskey(globals(m), "jl_global_0_box")
                 dispose(m)
@@ -395,17 +396,18 @@ end
                 # Float64: the non-smalltag header is an interior relocation.
                 m, map = slot_module(ptrs[2])
                 relocs = GPUCompiler.collect_julia_value_relocations!(m, map)
-                @test length(relocs.interior) == 1
-                (box_name, offset), ref = only(relocs.interior)
-                @test offset == 0
+                @test length(relocs.sites) == 1
+                site, ref = only(relocs.sites)
+                @test site.offset == 0
                 @test ref.value === Float64
-                box = globals(m)[box_name]
+                box = globals(m)[site.name]
                 @test isextinit(box)
                 @test linkage(box) == LLVM.API.LLVMExternalLinkage
-                header_idx = Int(element_at(datalayout(m), global_value_type(box), offset)) + 1
+                header_idx = Int(element_at(datalayout(m), global_value_type(box),
+                                            site.offset)) + 1
                 @test convert(UInt, collect(operands(initializer(box)))[header_idx]) == 0
                 GPUCompiler.bake_relocations!(m, relocs)
-                @test isempty(relocs.interior)
+                @test isempty(relocs.sites)
                 @test !isextinit(box)
                 @test isconstant(box)
                 @test linkage(box) == LLVM.API.LLVMPrivateLinkage
@@ -416,9 +418,9 @@ end
                 # Symbol: baked address
                 m, map = slot_module(ptrs[3])
                 relocs = GPUCompiler.collect_julia_value_relocations!(m, map)
-                @test only(values(relocs.slots)).value === objs[3]
+                @test only(values(relocs.sites)).value === objs[3]
                 GPUCompiler.bake_relocations!(m, relocs)
-                @test isempty(relocs.slots)
+                @test isempty(relocs.sites)
                 @test !haskey(globals(m), "jl_global_0_box")
                 @test occursin("inttoptr", string(m))
                 dispose(m)
@@ -426,10 +428,10 @@ end
                 # 16-byte-aligned payloads get padded past the header word
                 m, map = slot_module(ptrs[4])
                 relocs = GPUCompiler.collect_julia_value_relocations!(m, map)
-                (box_name, offset), _ = only(relocs.interior)
-                @test offset == 8
+                site, _ = only(relocs.sites)
+                @test site.offset == 8
                 GPUCompiler.bake_relocations!(m, relocs)
-                box = globals(m)[box_name]
+                box = globals(m)[site.name]
                 @test length(elements(LLVM.global_value_type(box))) == 3
                 dispose(m)
             end
@@ -756,14 +758,14 @@ end
         JuliaContext() do ctx
             obj, meta = GPUCompiler.compile(:obj, job)
             relocs = meta.relocations
-            @test !isempty(relocs.slots)
-            @test all(ref -> ref isa GPUCompiler.JuliaValueRef, values(relocs.slots))
-            @test all(name -> isdeclaration(globals(meta.ir)[name]), keys(relocs.slots))
+            @test !isempty(relocs.sites)
+            @test all(ref -> ref isa GPUCompiler.JuliaValueRef, values(relocs.sites))
+            @test all(site -> isdeclaration(globals(meta.ir)[site.name]), keys(relocs.sites))
 
             bytes = Vector{UInt8}(codeunits(obj))
             entry = LLVM.name(meta.entry)
-            expected = GPUCompiler.resolve_relocation_target(only(values(relocs.slots)))
-            fptr, keepalive = Native.load(bytes, entry, relocs)
+            expected = GPUCompiler.resolve_relocation_target(only(values(relocs.sites)))
+            fptr, keepalive = Native.load(bytes, entry, relocs, meta.ir)
             try
                 GC.@preserve keepalive begin
                     actual = ccall(fptr, UInt, ())
@@ -773,9 +775,10 @@ end
                 dispose(first(keepalive))
             end
 
-            @test_throws LLVMException Native.load(bytes, entry, GPUCompiler.Relocations())
+            @test_throws LLVMException Native.load(bytes, entry, GPUCompiler.Relocations(),
+                                                   meta.ir)
 
-            # Interior relocations are applied after the object has been loaded.
+            # Sites in definitions are applied after the object has been loaded.
             ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
             patch_mod = parse(LLVM.Module, """
                 @patched_box = externally_initialized global { i64, i64 } { i64 0, i64 42 }
@@ -786,11 +789,13 @@ end
                 }""")
             triple!(patch_mod, GPUCompiler.llvm_triple(job.config.target))
             datalayout!(patch_mod, GPUCompiler.llvm_datalayout(job.config.target))
-            interior_relocs = GPUCompiler.Relocations()
-            interior_relocs.interior[("patched_box", 0)] = GPUCompiler.JuliaValueRef(Float64)
+            patch_relocs = GPUCompiler.Relocations()
+            site = GPUCompiler.RelocationSite("patched_box", 0)
+            patch_relocs.sites[site] = GPUCompiler.JuliaValueRef(Float64)
             patch_obj = GPUCompiler.mcgen(job, patch_mod, LLVM.API.LLVMObjectFile)
             patch_ptr, patch_keepalive = Native.load(
-                Vector{UInt8}(codeunits(patch_obj)), "patched_header", interior_relocs)
+                Vector{UInt8}(codeunits(patch_obj)), "patched_header", patch_relocs,
+                patch_mod)
             try
                 GC.@preserve patch_keepalive begin
                     @test ccall(patch_ptr, UInt, ()) ==
@@ -846,9 +851,10 @@ end
             }""")
         relocs = GPUCompiler.Relocations()
         @test GPUCompiler.collect_cglobal_relocations!(mod, relocs)
-        name = only(keys(relocs.slots))
-        @test relocs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
-        @test occursin("@$name = external global i64", string(mod))
+        site = only(keys(relocs.sites))
+        @test relocs.sites[site] == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test site.offset == 0
+        @test occursin("@$(site.name) = external global i64", string(mod))
         GPUCompiler.emit_patchable_relocations!(mod, relocs)
         @test occursin("externally_initialized global i64 0", string(mod))
 
@@ -861,13 +867,13 @@ end
             }""")
         relocs = GPUCompiler.Relocations()
         @test GPUCompiler.collect_cglobal_relocations!(mod, relocs)
-        name = only(keys(relocs.slots))
-        @test relocs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
-        @test occursin("@$name = external global i64", string(mod))
+        site = only(keys(relocs.sites))
+        @test relocs.sites[site] == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test occursin("@$(site.name) = external global i64", string(mod))
         GPUCompiler.emit_imported_relocations!(mod, relocs)
-        @test relocs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
-        @test isdeclaration(globals(mod)[name])
-        @test occursin("@$name = external global i64", string(mod))
+        @test relocs.sites[site] == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test isdeclaration(globals(mod)[site.name])
+        @test occursin("@$(site.name) = external global i64", string(mod))
 
         mod = parse(LLVM.Module, """
             @jl_float32_type = external global $word_ptr
@@ -878,11 +884,11 @@ end
             }""")
         relocs = GPUCompiler.Relocations()
         @test GPUCompiler.collect_cglobal_relocations!(mod, relocs)
-        name = only(keys(relocs.slots))
+        site = only(keys(relocs.sites))
         GPUCompiler.emit_imported_relocations!(mod, relocs)
-        @test relocs.slots[name] == GPUCompiler.CGlobalRef(:jl_float32_type)
-        @test isdeclaration(globals(mod)[name])
-        @test occursin("@$name = external global i64", string(mod))
+        @test relocs.sites[site] == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test isdeclaration(globals(mod)[site.name])
+        @test occursin("@$(site.name) = external global i64", string(mod))
     end
 end
 
@@ -900,9 +906,9 @@ end
                 }""")
         end
 
-        slot_relocs(name, value) =
-            GPUCompiler.Relocations(Dict(name => GPUCompiler.JuliaValueRef(value)),
-                                    Dict{Tuple{String,Int},GPUCompiler.RelocationTarget}())
+        site(name, offset=0) = GPUCompiler.RelocationSite(name, offset)
+        slot_relocs(name, value) = GPUCompiler.Relocations(
+            Dict(site(name) => GPUCompiler.JuliaValueRef(value)))
 
         # Equal Julia identities deliberately share a single slot.
         dest = slot_module("slot", "first")
@@ -910,7 +916,7 @@ end
         src = slot_module("slot", "second")
         src_relocs = slot_relocs("slot", :shared)
         GPUCompiler.link_relocatable!(dest, dest_relocs, src, src_relocs)
-        @test collect(keys(dest_relocs.slots)) == ["slot"]
+        @test collect(keys(dest_relocs.sites)) == [site("slot")]
         @test occursin("@slot = external global i64", string(dest))
 
         # The name is the slot identity, so conflicting metadata is an error.
@@ -939,14 +945,14 @@ end
                 ret i64 %value
             }""")
         src_relocs = GPUCompiler.Relocations(Dict(
-            "used" => GPUCompiler.JuliaValueRef(:used),
-            "unused" => GPUCompiler.JuliaValueRef(:unused),
-        ), Dict{Tuple{String,Int},GPUCompiler.RelocationTarget}())
+            site("used") => GPUCompiler.JuliaValueRef(:used),
+            site("unused") => GPUCompiler.JuliaValueRef(:unused),
+        ))
         dest_relocs = GPUCompiler.Relocations()
         GPUCompiler.link_relocatable!(dest, dest_relocs, src, src_relocs;
                                        only_needed=true)
-        @test collect(keys(dest_relocs.slots)) == ["used"]
-        @test only(values(dest_relocs.slots)).value === :used
+        @test collect(keys(dest_relocs.sites)) == [site("used")]
+        @test only(values(dest_relocs.sites)).value === :used
 
         function interior_module(name, entry)
             parse(LLVM.Module, """
@@ -958,8 +964,7 @@ end
                 }""")
         end
         interior_relocs(name, value) = GPUCompiler.Relocations(
-            Dict{String,GPUCompiler.RelocationTarget}(),
-            Dict((name, 0) => GPUCompiler.JuliaValueRef(value)))
+            Dict(site(name) => GPUCompiler.JuliaValueRef(value)))
 
         # Identical interior relocation identities merge; conflicting metadata does not.
         dest = interior_module("patch", "first_patch")
@@ -967,7 +972,7 @@ end
         src = interior_module("patch", "second_patch")
         src_relocs = interior_relocs("patch", Float64)
         GPUCompiler.link_relocatable!(dest, dest_relocs, src, src_relocs)
-        @test collect(keys(dest_relocs.interior)) == [("patch", 0)]
+        @test collect(keys(dest_relocs.sites)) == [site("patch")]
 
         dest = interior_module("patch", "first_patch")
         dest_relocs = interior_relocs("patch", Float64)
@@ -987,14 +992,13 @@ end
         unused = GlobalVariable(src, LLVM.StructType([LLVM.Int64Type(), LLVM.Int64Type()]),
                                 "unused_patch")
         initializer!(unused, ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(1)]))
-        src_relocs = GPUCompiler.Relocations(
-            Dict{String,GPUCompiler.RelocationTarget}(),
-            Dict(("used_patch", 0) => GPUCompiler.JuliaValueRef(Float64),
-                 ("unused_patch", 0) => GPUCompiler.JuliaValueRef(Int64)))
+        src_relocs = GPUCompiler.Relocations(Dict(
+            site("used_patch") => GPUCompiler.JuliaValueRef(Float64),
+            site("unused_patch") => GPUCompiler.JuliaValueRef(Int64)))
         dest_relocs = GPUCompiler.Relocations()
         GPUCompiler.link_relocatable!(dest, dest_relocs, src, src_relocs;
                                        only_needed=true)
-        @test collect(keys(dest_relocs.interior)) == [("used_patch", 0)]
+        @test collect(keys(dest_relocs.sites)) == [site("used_patch")]
     end
 end
 

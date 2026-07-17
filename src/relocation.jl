@@ -2,18 +2,19 @@
 #
 # A relocation is a site => target pair. Targets are Julia object identities
 # (`JuliaValueRef`, like codegen's identity-keyed `global_targets`) or named libjulia
-# globals (`CGlobalRef`, like JuliaVariables). Sites are either dedicated word-sized
-# `slots` (like `jl_sysimg_gvars`) or word-sized `interior` locations inside defined
-# globals (like `gctags_list`/`relocs_list`). Slots can be baked, patched, or imported;
-# interior sites can only be baked or patched.
+# globals (`CGlobalRef`, like JuliaVariables). Every site names a word at a byte offset in a
+# global. Dedicated sites use offset zero in a word-sized declaration (like
+# `jl_sysimg_gvars`); other sites are inside defined globals (like
+# `gctags_list`/`relocs_list`). Declarations can be baked, patched, or imported; sites in
+# definitions can only be baked or patched.
 #
 #   produce ──▶ merge (on link) ──▶ prune (after DCE) ──▶ lower (at emit_asm)
 #
 # Lowering strategy                  Loader contract                    Julia analog
 # `bake_relocations!`               none; current-session words baked  JIT address folding
 # `emit_patchable_relocations!`      patch named globals after load     sysimage gvars
-# `emit_imported_relocations!`       import slots before load; patch    ORC absoluteSymbols
-#                                     interior sites afterward
+# `emit_imported_relocations!`       import declarations before load;  ORC absoluteSymbols
+#                                     patch definitions afterward
 #
 # The producers are `collect_julia_value_relocations!` during IR generation and
 # `collect_cglobal_relocations!` immediately before backend lowering. Names are globally
@@ -83,39 +84,44 @@ end
 ## The table
 
 """
-    Relocations(slots, interior)
+    RelocationSite(name, offset)
 
-Relocation metadata accompanying a module. `slots` maps dedicated word-sized global names
-to targets. `interior` maps a defined global name and byte offset to targets. See
-[`resolved_relocations`](@ref) for resolving both site kinds for a loader.
+The location of a word to relocate: a global name and a byte offset within that global.
+The global's IR shape determines how the site is lowered. A declaration denotes an
+importable word-sized slot and must have offset zero; a definition denotes a post-load
+patch within its initializer.
 """
-struct Relocations
-    slots::Dict{String,RelocationTarget}
-    interior::Dict{Tuple{String,Int},RelocationTarget}
+struct RelocationSite
+    name::String
+    offset::Int
 end
 
-Relocations() = Relocations(Dict{String,RelocationTarget}(),
-                            Dict{Tuple{String,Int},RelocationTarget}())
+"""
+    Relocations(sites)
+
+Relocation metadata accompanying a module. `sites` maps [`RelocationSite`](@ref)s to
+targets. See [`resolved_relocations`](@ref) for resolving sites for a loader.
+"""
+struct Relocations
+    sites::Dict{RelocationSite,RelocationTarget}
+end
+
+Relocations() = Relocations(Dict{RelocationSite,RelocationTarget}())
 
 """
     resolved_relocations(relocs)
 
-Resolve relocation metadata for a loader. Returns resolved `slots`, resolved `interior`, and
-Julia `roots` that must stay alive while the loaded code can access them.
+Resolve relocation metadata for a loader. Returns resolved `sites` and Julia `roots` that
+must stay alive while the loaded code can access them.
 """
 function resolved_relocations(relocs::Relocations)
-    slots = Pair{String,UInt}[]
-    interior = Pair{Tuple{String,Int},UInt}[]
+    sites = Pair{RelocationSite,UInt}[]
     roots = Any[]
-    for (name, ref) in relocs.slots
-        push!(slots, name => resolve_relocation_target(ref))
+    for (site, ref) in relocs.sites
+        push!(sites, site => resolve_relocation_target(ref))
         ref isa JuliaValueRef && push!(roots, ref.value)
     end
-    for (key, ref) in relocs.interior
-        push!(interior, key => resolve_relocation_target(ref))
-        ref isa JuliaValueRef && push!(roots, ref.value)
-    end
-    return (; slots, interior, roots)
+    return (; sites, roots)
 end
 
 relocation_word_type() = LLVM.IntType(8sizeof(UInt))
@@ -137,31 +143,28 @@ function slot_initializer(gv::GlobalVariable, value::UInt)
     error("Relocation slot '$(LLVM.name(gv))' has unsupported LLVM type $T")
 end
 
-function foreach_slot_relocation(f, mod::LLVM.Module, relocs::Relocations)
+function foreach_relocation(f, mod::LLVM.Module, relocs::Relocations)
     mod_gvs = globals(mod)
-    for (name, ref) in relocs.slots
-        haskey(mod_gvs, name) || error("Missing relocation slot '$name'")
+    for (site, ref) in relocs.sites
+        name = site.name
+        offset = site.offset
+        haskey(mod_gvs, name) || error("Missing relocation global '$name'")
         gv = mod_gvs[name]
-        check_slot_size(mod, gv, name)
-        f(name, gv, ref)
-    end
-    return
-end
-
-function foreach_interior_relocation(f, mod::LLVM.Module, relocs::Relocations)
-    mod_gvs = globals(mod)
-    for ((name, offset), ref) in relocs.interior
-        haskey(mod_gvs, name) || error("Missing interior relocation global '$name'")
-        gv = mod_gvs[name]
-        init = initializer(gv)
-        init === nothing && error("Interior relocation global '$name' has no initializer")
-        T = value_type(init)
-        T isa LLVM.StructType ||
-            error("Interior relocation global '$name' has non-struct initializer $T")
-        size = abi_size(datalayout(mod), T)
-        0 <= offset && offset + sizeof(UInt) <= size ||
-            error("Interior relocation '$name+$offset' is outside its $size-byte global")
-        f(name, offset, gv, ref)
+        if isdeclaration(gv)
+            offset == 0 ||
+                error("Relocation declaration '$name' has nonzero offset $offset")
+            check_slot_size(mod, gv, name)
+        else
+            init = initializer(gv)
+            init === nothing && error("Relocation global '$name' has no initializer")
+            T = value_type(init)
+            T isa LLVM.StructType ||
+                error("Relocation global '$name' has non-struct initializer $T")
+            size = abi_size(datalayout(mod), T)
+            0 <= offset && offset + sizeof(UInt) <= size ||
+                error("Relocation '$name+$offset' is outside its $size-byte global")
+        end
+        f(site, gv, ref)
     end
     return
 end
@@ -195,7 +198,7 @@ function collect_julia_value_relocations!(mod::LLVM.Module,
             LLVM.name!(gv, slot_name)
             LLVM.name(gv) == slot_name ||
                 error("Relocation slot name '$slot_name' is already in use")
-            relocs.slots[slot_name] = JuliaValueRef(obj)
+            relocs.sites[RelocationSite(slot_name, 0)] = JuliaValueRef(obj)
         end
     end
 
@@ -263,7 +266,7 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, gv::GlobalVaria
         linkage!(box, LLVM.API.LLVMExternalLinkage)
         extinit!(box, true)
         offset = Int(offsetof(datalayout(mod), boxty, header_idx))
-        relocs.interior[(box_name, offset)] = JuliaValueRef(typeof(obj))
+        relocs.sites[RelocationSite(box_name, offset)] = JuliaValueRef(typeof(obj))
     else
         constant!(box, true)
         linkage!(box, LLVM.API.LLVMPrivateLinkage)
@@ -278,10 +281,11 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, gv::GlobalVaria
 end
 
 # Some Julia code loads words from libjulia C globals, for example type tags. Record those
-# loads as slot relocations immediately before object emission.
+# loads as dedicated zero-offset relocations immediately before object emission.
 function is_cglobal_candidate(value, relocs::Relocations)
     name = LLVM.name(value)
-    value isa LLVM.GlobalVariable && haskey(relocs.slots, name) && return false
+    value isa LLVM.GlobalVariable &&
+        haskey(relocs.sites, RelocationSite(name, 0)) && return false
     isdeclaration(value) || return false
     value isa LLVM.Function && LLVM.isintrinsic(value) && return false
     return startswith(name, "jl_")
@@ -300,7 +304,7 @@ function collect_cglobal_relocations!(mod::LLVM.Module, relocs::Relocations)
                 slot = GlobalVariable(mod, relocation_word_type(), name)
                 LLVM.name(slot) == name ||
                     error("cglobal slot name '$name' is already in use")
-                relocs.slots[name] = CGlobalRef(Symbol(fn))
+                relocs.sites[RelocationSite(name, 0)] = CGlobalRef(Symbol(fn))
             end
             slot
         end
@@ -362,55 +366,51 @@ end
 function link_relocatable!(dest_mod::LLVM.Module, dest_relocs::Relocations,
                             src_mod::LLVM.Module, src_relocs::Relocations;
                             only_needed=false)
-    # Interior relocation globals are definitions, unlike slots. Make an identical source
-    # definition a declaration so LLVM can resolve it to the destination while linking.
-    for (key, ref) in src_relocs.interior
-        existing = get(dest_relocs.interior, key, nothing)
+    # Make an identical source definition a declaration so LLVM can resolve it to the
+    # destination while linking. Declaration sites already merge without modification.
+    for (site, ref) in src_relocs.sites
+        existing = get(dest_relocs.sites, site, nothing)
         existing === nothing && continue
-        name, offset = key
+        name = site.name
+        offset = site.offset
         same_relocation_target(existing, ref) ||
-            error("Interior relocation '$name+$offset' refers to conflicting values")
-        haskey(globals(dest_mod), name) ||
-            error("Missing destination interior relocation global '$name'")
+            error("Relocation '$name+$offset' refers to conflicting values")
         haskey(globals(src_mod), name) ||
-            error("Missing source interior relocation global '$name'")
+            error("Missing source relocation global '$name'")
         gv = globals(src_mod)[name]
+        isdeclaration(gv) && continue
+        haskey(globals(dest_mod), name) ||
+            error("Missing destination relocation global '$name'")
         initializer!(gv, nothing)
         extinit!(gv, false)
         linkage!(gv, LLVM.API.LLVMExternalLinkage)
     end
 
     link!(dest_mod, src_mod; only_needed)
-    for (name, ref) in src_relocs.slots
-        # A slot absent from the linked module was dead (DCE'd or not imported under
+    for (site, ref) in src_relocs.sites
+        name = site.name
+        # A site absent from the linked module was dead (DCE'd or not imported under
         # `only_needed`); its relocation dies with it.
         haskey(globals(dest_mod), name) || continue
-        existing = get(dest_relocs.slots, name, nothing)
+        existing = get(dest_relocs.sites, site, nothing)
         existing === nothing || same_relocation_target(existing, ref) ||
-            error("Relocation slot '$name' refers to conflicting values")
-        dest_relocs.slots[name] = ref
-    end
-    for ((name, offset), ref) in src_relocs.interior
-        haskey(globals(dest_mod), name) || continue
-        key = (name, offset)
-        existing = get(dest_relocs.interior, key, nothing)
-        existing === nothing || same_relocation_target(existing, ref) ||
-            error("Interior relocation '$name+$offset' refers to conflicting values")
-        dest_relocs.interior[key] = ref
+            error("Relocation '$(site.name)+$(site.offset)' refers to conflicting values")
+        dest_relocs.sites[site] = ref
     end
     return
 end
 
 function prune_dead_relocations!(mod::LLVM.Module, relocs::Relocations)
     mod_gvs = globals(mod)
-    for name in collect(keys(relocs.slots))
-        haskey(mod_gvs, name) || delete!(relocs.slots, name)
-    end
-    for ((name, offset), _) in collect(relocs.interior)
+    for name in unique(site.name for site in keys(relocs.sites))
         if !haskey(mod_gvs, name)
-            delete!(relocs.interior, (name, offset))
-        elseif isempty(uses(mod_gvs[name]))
-            delete!(relocs.interior, (name, offset))
+            for site in collect(keys(relocs.sites))
+                site.name == name && delete!(relocs.sites, site)
+            end
+        elseif !isdeclaration(mod_gvs[name]) && isempty(uses(mod_gvs[name]))
+            for site in collect(keys(relocs.sites))
+                site.name == name && delete!(relocs.sites, site)
+            end
             erase!(mod_gvs[name])
         end
     end
@@ -429,7 +429,7 @@ Backends may instead emit patchable globals or imported slot symbols for their l
 
 Backends using baked lowering must not persist generated code in `cached_results`. Generated
 code is session-portable only when [`supports_relocatable_ir`](@ref) and the backend preserves
-all slot and interior relocations for its loader.
+all relocations for its loader.
 """
 function lower_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                             relocs::Relocations)
@@ -437,46 +437,45 @@ function lower_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 end
 
 function bake_relocations!(mod::LLVM.Module, relocs::Relocations)
-    foreach_slot_relocation(mod, relocs) do name, gv, ref
-        value = resolve_relocation_target(ref)
-        val = slot_initializer(gv, value)
-        initializer!(gv, val)
-        linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-        constant!(gv, true)
+    foreach_relocation(mod, relocs) do site, gv, ref
+        if isdeclaration(gv)
+            value = resolve_relocation_target(ref)
+            val = slot_initializer(gv, value)
+            initializer!(gv, val)
+            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+            constant!(gv, true)
+        else
+            init = initializer(gv)
+            T = value_type(init)::LLVM.StructType
+            idx = Int(element_at(datalayout(mod), T, site.offset)) + 1
+            fields = LLVM.Constant[operands(init)...]
+            fields[idx] = ConstantInt(value_type(fields[idx]), resolve_relocation_target(ref))
+            initializer!(gv, ConstantStruct(T, fields))
+            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+            extinit!(gv, false)
+            constant!(gv, true)
+            unnamed_addr!(gv, true)
+        end
     end
-    foreach_interior_relocation(mod, relocs) do name, offset, gv, ref
-        init = initializer(gv)
-        T = value_type(init)::LLVM.StructType
-        idx = Int(element_at(datalayout(mod), T, offset)) + 1
-        fields = LLVM.Constant[operands(init)...]
-        fields[idx] = ConstantInt(value_type(fields[idx]), resolve_relocation_target(ref))
-        initializer!(gv, ConstantStruct(T, fields))
-        linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-        extinit!(gv, false)
-        constant!(gv, true)
-        unnamed_addr!(gv, true)
-    end
-    empty!(relocs.slots)
-    empty!(relocs.interior)
+    empty!(relocs.sites)
     return
 end
 
 """
     emit_patchable_relocations!(mod, relocs)
 
-Emit slots as writable, null-initialized definitions. The loader must patch each definition
-and interior relocation after loading the object. This requires a per-object symbol namespace.
+Emit declarations as writable, null-initialized definitions. The loader must patch every
+relocation after loading the object. This requires a per-object symbol namespace.
 """
 function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
     used = GlobalVariable[]
-    foreach_slot_relocation(mod, relocs) do _, gv, _
-        initializer!(gv, null(global_value_type(gv)))
-        constant!(gv, false)
-        linkage!(gv, LLVM.API.LLVMExternalLinkage)
-        extinit!(gv, true)
-        push!(used, gv)
-    end
-    foreach_interior_relocation(mod, relocs) do _, _, gv, _
+    foreach_relocation(mod, relocs) do _, gv, _
+        if isdeclaration(gv)
+            initializer!(gv, null(global_value_type(gv)))
+            constant!(gv, false)
+            linkage!(gv, LLVM.API.LLVMExternalLinkage)
+            extinit!(gv, true)
+        end
         push!(used, gv)
     end
     isempty(used) || set_used!(mod, used...)
@@ -486,23 +485,23 @@ end
 """
     emit_imported_relocations!(mod, relocs)
 
-Prepare relocations for a loader that imports slot symbols before loading an object.
+Prepare relocations for a loader that imports declaration symbols before loading an object.
 
-Every slot remains an external word-sized declaration. The loader must define each symbol to
-point at a cell containing [`resolve_relocation_target`](@ref), and keep the cell and any
-referenced Julia value alive while the code is executable. Interior sites cannot be imported
-before load and must always be written afterward.
+Every declaration remains an external word-sized declaration. The loader must define its
+symbol to point at a cell containing [`resolve_relocation_target`](@ref), and keep the cell
+and any referenced Julia value alive while the code is executable. Sites in definitions
+cannot be imported before load and must always be written afterward.
 """
 function emit_imported_relocations!(mod::LLVM.Module, relocs::Relocations)
     used = GlobalVariable[]
-    foreach_slot_relocation(mod, relocs) do name, gv, _
-        isdeclaration(gv) || error("Relocation slot '$name' must be a declaration")
-        constant!(gv, false)
-        linkage!(gv, LLVM.API.LLVMExternalLinkage)
-        extinit!(gv, false)
-    end
-    foreach_interior_relocation(mod, relocs) do _, _, gv, _
-        push!(used, gv)
+    foreach_relocation(mod, relocs) do site, gv, _
+        if isdeclaration(gv)
+            constant!(gv, false)
+            linkage!(gv, LLVM.API.LLVMExternalLinkage)
+            extinit!(gv, false)
+        else
+            push!(used, gv)
+        end
     end
     isempty(used) || set_used!(mod, used...)
     return
@@ -523,7 +522,7 @@ function referenced_object(value, relocs::Relocations)
             source = first(operands(source))
         end
         if source isa GlobalVariable
-            ref = get(relocs.slots, LLVM.name(source), nothing)
+            ref = get(relocs.sites, RelocationSite(LLVM.name(source), 0), nothing)
             ref isa JuliaValueRef && return Some(ref.value)
         end
     elseif value isa ConstantExpr && opcode(value) == LLVM.API.LLVMIntToPtr

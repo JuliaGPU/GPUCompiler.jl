@@ -512,7 +512,7 @@ end
 
 end # HAS_INTEGRATED_CACHE
 
-@public JuliaValueRef, CGlobalRef, RelocationTarget, Relocations
+@public JuliaValueRef, CGlobalRef, RelocationTarget, RelocationSite, Relocations
 @public lower_relocations!, bake_relocations!
 @public emit_patchable_relocations!, emit_imported_relocations!
 @public resolve_relocation_target, resolved_relocations, supports_relocatable_ir

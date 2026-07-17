@@ -60,7 +60,8 @@ function create_job(@nospecialize(func), @nospecialize(types);
     CompilerJob(source, config), kwargs
 end
 
-function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations)
+function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations,
+              ir::LLVM.Module)
     lljit = LLJIT(; tm=JITTargetMachine())
     try
         jd = JITDylib(lljit)
@@ -68,22 +69,25 @@ function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations
         add!(jd, LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix))
 
         relocations = GPUCompiler.resolved_relocations(relocs)
-        cells = Vector{UInt}(undef, length(relocations.slots))
+        declarations = [(site, value) for (site, value) in relocations.sites
+                        if isdeclaration(globals(ir)[site.name])]
+        cells = Vector{UInt}(undef, length(declarations))
         pairs = LLVM.API.LLVMOrcCSymbolMapPair[]
-        for (i, (name, value)) in enumerate(relocations.slots)
+        for (i, (site, value)) in enumerate(declarations)
             cells[i] = value
             symbol = LLVM.API.LLVMJITEvaluatedSymbol(
                 reinterpret(UInt, pointer(cells, i)),
                 LLVM.API.LLVMJITSymbolFlags(
                     LLVM.API.LLVMJITSymbolGenericFlagsExported, 0))
-            push!(pairs, LLVM.API.LLVMOrcCSymbolMapPair(mangle(lljit, name), symbol))
+            push!(pairs, LLVM.API.LLVMOrcCSymbolMapPair(mangle(lljit, site.name), symbol))
         end
         isempty(pairs) || LLVM.define(jd, LLVM.absolute_symbols(pairs))
 
         add!(lljit, jd, MemoryBuffer(obj))
-        for ((name, offset), value) in relocations.interior
-            addr = lookup(lljit, name)
-            unsafe_store!(Ptr{UInt}(pointer(addr) + offset), value)
+        for (site, value) in relocations.sites
+            isdeclaration(globals(ir)[site.name]) && continue
+            addr = lookup(lljit, site.name)
+            unsafe_store!(Ptr{UInt}(pointer(addr) + site.offset), value)
         end
         addr = lookup(lljit, entry)
         return pointer(addr), (lljit, cells, relocations.roots)
