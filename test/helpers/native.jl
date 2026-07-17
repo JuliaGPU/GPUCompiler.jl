@@ -24,11 +24,29 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
+
+# ORC needs declarations imported before loading and sites in definitions patched afterward.
+# Keep that policy local to the JIT test back-end.
+function emit_imported_relocations!(mod::LLVM.Module, relocs::GPUCompiler.Relocations)
+    used = GlobalVariable[]
+    GPUCompiler.foreach_relocation(mod, relocs) do _, gv, _
+        if isdeclaration(gv)
+            constant!(gv, false)
+            linkage!(gv, LLVM.API.LLVMExternalLinkage)
+            extinit!(gv, false)
+        else
+            push!(used, gv)
+        end
+    end
+    isempty(used) || set_used!(mod, used...)
+    return
+end
+
 function GPUCompiler.lower_relocations!(@nospecialize(job::NativeCompilerJob),
                                             mod::LLVM.Module,
                                             relocs::GPUCompiler.Relocations)
     if job.config.params.jit
-        GPUCompiler.emit_imported_relocations!(mod, relocs)
+        emit_imported_relocations!(mod, relocs)
     else
         invoke(GPUCompiler.lower_relocations!,
                Tuple{CompilerJob,LLVM.Module,GPUCompiler.Relocations}, job, mod, relocs)

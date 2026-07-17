@@ -738,6 +738,8 @@ end
 end
 
 @testset "relocation target resolution" begin
+    @test_throws ArgumentError GPUCompiler.RelocationSite("invalid", -1)
+
     sym = :relocation_target_probe
     @test GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(sym)) ==
           UInt(pointer_from_objref(sym))
@@ -870,7 +872,7 @@ end
         site = only(keys(relocs.sites))
         @test relocs.sites[site] == GPUCompiler.CGlobalRef(:jl_float32_type)
         @test occursin("@$(site.name) = external global i64", string(mod))
-        GPUCompiler.emit_imported_relocations!(mod, relocs)
+        Native.emit_imported_relocations!(mod, relocs)
         @test relocs.sites[site] == GPUCompiler.CGlobalRef(:jl_float32_type)
         @test isdeclaration(globals(mod)[site.name])
         @test occursin("@$(site.name) = external global i64", string(mod))
@@ -885,7 +887,7 @@ end
         relocs = GPUCompiler.Relocations()
         @test GPUCompiler.collect_cglobal_relocations!(mod, relocs)
         site = only(keys(relocs.sites))
-        GPUCompiler.emit_imported_relocations!(mod, relocs)
+        Native.emit_imported_relocations!(mod, relocs)
         @test relocs.sites[site] == GPUCompiler.CGlobalRef(:jl_float32_type)
         @test isdeclaration(globals(mod)[site.name])
         @test occursin("@$(site.name) = external global i64", string(mod))

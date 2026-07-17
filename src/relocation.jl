@@ -13,8 +13,6 @@
 # Lowering strategy                  Loader contract                    Julia analog
 # `bake_relocations!`               none; current-session words baked  JIT address folding
 # `emit_patchable_relocations!`      patch named globals after load     sysimage gvars
-# `emit_imported_relocations!`       import declarations before load;  ORC absoluteSymbols
-#                                     patch definitions afterward
 #
 # The producers are `collect_julia_value_relocations!` during IR generation and
 # `collect_cglobal_relocations!` immediately before backend lowering. Names are globally
@@ -94,6 +92,11 @@ patch within its initializer.
 struct RelocationSite
     name::String
     offset::Int
+
+    function RelocationSite(name::String, offset::Int)
+        offset >= 0 || throw(ArgumentError("relocation offset must be nonnegative"))
+        new(name, offset)
+    end
 end
 
 """
@@ -161,7 +164,7 @@ function foreach_relocation(f, mod::LLVM.Module, relocs::Relocations)
             T isa LLVM.StructType ||
                 error("Relocation global '$name' has non-struct initializer $T")
             size = abi_size(datalayout(mod), T)
-            0 <= offset && offset + sizeof(UInt) <= size ||
+            offset + sizeof(UInt) <= size ||
                 error("Relocation '$name+$offset' is outside its $size-byte global")
         end
         f(site, gv, ref)
@@ -402,17 +405,19 @@ end
 
 function prune_dead_relocations!(mod::LLVM.Module, relocs::Relocations)
     mod_gvs = globals(mod)
-    for name in unique(site.name for site in keys(relocs.sites))
-        if !haskey(mod_gvs, name)
-            for site in collect(keys(relocs.sites))
-                site.name == name && delete!(relocs.sites, site)
-            end
-        elseif !isdeclaration(mod_gvs[name]) && isempty(uses(mod_gvs[name]))
-            for site in collect(keys(relocs.sites))
-                site.name == name && delete!(relocs.sites, site)
-            end
-            erase!(mod_gvs[name])
+    dead_names = Set{String}()
+    for site in keys(relocs.sites)
+        gv = haskey(mod_gvs, site.name) ? mod_gvs[site.name] : nothing
+        if gv === nothing || (!isdeclaration(gv) && isempty(uses(gv)))
+            push!(dead_names, site.name)
         end
+    end
+    for site in collect(keys(relocs.sites))
+        site.name in dead_names && delete!(relocs.sites, site)
+    end
+    for name in dead_names
+        gv = haskey(mod_gvs, name) ? mod_gvs[name] : nothing
+        gv === nothing || isdeclaration(gv) || erase!(gv)
     end
     return
 end
@@ -425,7 +430,7 @@ end
 Backend hook for lowering live relocations before object emission.
 
 The default implementation bakes them into the module using the current Julia process.
-Backends may instead emit patchable globals or imported slot symbols for their loaders.
+Backends may instead emit patchable globals or implement custom lowering for their loaders.
 
 Backends using baked lowering must not persist generated code in `cached_results`. Generated
 code is session-portable only when [`supports_relocatable_ir`](@ref) and the backend preserves
@@ -477,31 +482,6 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
             extinit!(gv, true)
         end
         push!(used, gv)
-    end
-    isempty(used) || set_used!(mod, used...)
-    return
-end
-
-"""
-    emit_imported_relocations!(mod, relocs)
-
-Prepare relocations for a loader that imports declaration symbols before loading an object.
-
-Every declaration remains an external word-sized declaration. The loader must define its
-symbol to point at a cell containing [`resolve_relocation_target`](@ref), and keep the cell
-and any referenced Julia value alive while the code is executable. Sites in definitions
-cannot be imported before load and must always be written afterward.
-"""
-function emit_imported_relocations!(mod::LLVM.Module, relocs::Relocations)
-    used = GlobalVariable[]
-    foreach_relocation(mod, relocs) do site, gv, _
-        if isdeclaration(gv)
-            constant!(gv, false)
-            linkage!(gv, LLVM.API.LLVMExternalLinkage)
-            extinit!(gv, false)
-        else
-            push!(used, gv)
-        end
     end
     isempty(used) || set_used!(mod, used...)
     return

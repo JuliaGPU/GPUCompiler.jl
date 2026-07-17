@@ -512,10 +512,10 @@ end
 
 end # HAS_INTEGRATED_CACHE
 
-@public JuliaValueRef, CGlobalRef, RelocationTarget, RelocationSite, Relocations
+@public RelocationSite, Relocations
 @public lower_relocations!, bake_relocations!
-@public emit_patchable_relocations!, emit_imported_relocations!
-@public resolve_relocation_target, resolved_relocations, supports_relocatable_ir
+@public emit_patchable_relocations!
+@public resolved_relocations, supports_relocatable_ir
 @public GPUCompilerCacheToken, cache_owner, cached_results
 
 # the method table to use
