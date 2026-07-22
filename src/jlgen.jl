@@ -796,8 +796,11 @@ function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
         val = nothing
         if init != C_NULL
             obj = Base.unsafe_pointer_to_objref(init)
-            # Zero-sized objects remain identity tokens.
-            if isbitstype(typeof(obj)) && sizeof(obj) > 0 && !(obj isa Bool)
+            # Zero-sized objects remain identity tokens. Type objects also stay
+            # identity tokens: some are isbits singletons (e.g. `Union{}`, whose
+            # `typeof` is the isbits singleton `Core.TypeofBottom`), but `sizeof`
+            # is undefined for uninhabited types and would throw here.
+            if isbitstype(typeof(obj)) && !(obj isa Type) && sizeof(obj) > 0 && !(obj isa Bool)
                 val, hdr = materialize_box!(mod, gv, obj, init)
                 # non-smalltag headers carry a host DataType pointer
                 portable &= hdr < UInt(64 << 4)   # jl_max_tags << 4

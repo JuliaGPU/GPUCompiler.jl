@@ -429,6 +429,19 @@ end
                 @test length(elements(LLVM.global_value_type(box))) == 3
                 dispose(m)
             end
+
+            # Type objects stay identity tokens rather than being materialized.
+            # `Union{}` is the tricky case: `typeof(Union{})` is the isbits
+            # singleton `Core.TypeofBottom`, so the `isbitstype` guard passes,
+            # but `sizeof(Union{})` throws (uninhabited type). It must be baked
+            # as an address, not fed to `materialize_box!`.
+            let ptr = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), Union{})
+                m, map = slot_module(ptr)
+                @test !GPUCompiler.relocate_gvs!(m, map)
+                @test !haskey(globals(m), "jl_global_0_box")
+                @test occursin("inttoptr", string(m))
+                dispose(m)
+            end
         end
     end
 
