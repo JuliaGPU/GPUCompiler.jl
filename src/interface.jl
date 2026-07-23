@@ -302,32 +302,20 @@ can_vectorize(@nospecialize(job::CompilerJob)) = false
 # Should emit PTLS lookup that can be relocated
 dump_native(@nospecialize(job::CompilerJob)) = false
 
-# How this back-end lowers relocations (host references) before object emission. One of:
-#
-# - `:bake` (default): resolve the references in the current session and materialize them
-#   into the IR. The `:llvm` result is execution-ready and no loader is needed. Baked code
-#   embeds session-local addresses, so it must not be persisted in `cached_results`.
-#
-# - `:patch`: keep references symbolic through optimization and emit every site as a
-#   patchable (null-init, externally-initialized) definition. The loader writes each
-#   resolved word at `global + offset` after loading the object.
-#
-# - `:import`: keep references symbolic and leave declaration slots external for the loader
-#   to resolve at link time (e.g. ORC `absoluteSymbols`); interior definition sites are
-#   still patched after loading.
-#
-# - `:defer`: keep references symbolic; the consumer takes the `:llvm` result (typically
-#   caching its bitcode plus the `relocations` metadata) and resolves the sites itself with
-#   [`apply_relocations!`](@ref) before executing the code. Object emission is unsupported
-#   while live relocations remain. This is the strategy for session JITs that feed IR into
-#   a single long-lived symbol namespace (Enzyme- or AllocCheck-style), where the
-#   per-object namespaces required by `:patch`/`:import` do not exist.
-#
-# The value also fixes lowering *timing*: `:bake` resolves eagerly during `emit_llvm`,
-# other strategies defer past optimization. `:patch`/`:import` loaders must keep the
-# `roots` returned by [`resolved_relocations`](@ref) alive while the code can run (for
-# `:defer`, `apply_relocations!` returns them). Generated code is session-portable only
-# when [`supports_relocatable_ir`](@ref) and a non-baking strategy is used.
+"""
+    relocation_lowering(job) -> Symbol
+
+Select how a back-end lowers relocations:
+
+- `:bake` resolves them in `emit_llvm`.
+- `:patch` emits definitions for the loader to patch.
+- `:import` emits declarations for the loader to resolve; interior sites still need patching.
+- `:defer` leaves the `:llvm` result for [`apply_relocations!`](@ref). Object emission
+  requires all relocations to have been applied.
+
+Relocatable output requires [`supports_relocatable_ir`](@ref). Loaders must retain the roots
+returned by [`resolved_relocations`](@ref) or [`apply_relocations!`](@ref).
+"""
 relocation_lowering(@nospecialize(job::CompilerJob)) = :bake
 
 # the Julia module to look up target-specific runtime functions in (this includes both
@@ -404,6 +392,33 @@ else
         cache_owner(job.config.target, job.config.params, job.config.always_inline)
 end
 
+struct SessionJobResultEntry
+    config::CompilerConfig
+    value::Any
+end
+
+const session_job_results = IdDict{CodeInstance,Vector{SessionJobResultEntry}}()
+const session_job_results_lock = ReentrantLock()
+
+function session_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
+    Base.@lock session_job_results_lock begin
+        entries = get!(session_job_results, ci) do
+            SessionJobResultEntry[]
+        end
+        for entry in entries
+            entry.config === config && entry.value isa V && return entry.value::V
+        end
+        value = V()
+        push!(entries, SessionJobResultEntry(config, value))
+        return value
+    end
+end
+
+function can_persist_results(@nospecialize(job::CompilerJob))
+    supports_relocatable_ir() &&
+        relocation_lowering(job) in (:patch, :import, :defer)
+end
+
 """
     cached_results(::Type{V}, job::CompilerJob) -> Union{Nothing,V}
 
@@ -435,21 +450,13 @@ post-compile lookup in the example is guaranteed to succeed. To attach results w
 generating code — e.g. from an inference-only precompilation workload — run
 `precompile(job)` first.
 
-Results are keyed by the *full* compiler job: its method instance, world age, and entire
-`CompilerConfig` (two jobs differing only in, say, the kernel `name` get distinct
-structs). Storage differs per Julia version, transparently to the back-end:
+Results are keyed by the method instance, world age, and full `CompilerConfig`. On Julia
+1.11+, results persist with the `CodeInstance` only when the back-end selects `:patch`,
+`:import`, or `:defer` and [`supports_relocatable_ir`](@ref) is true. Other results use a
+session-local store. Julia 1.10 always uses the session-local store.
 
-- On Julia 1.11+, the struct lives on the `CodeInstance`'s `analysis_results` chain in
-  Julia's integrated code cache, partitioned by [`cache_owner`](@ref) and keyed by
-  config within the per-CI [`JobResults`](@ref) container. Method redefinition
-  invalidates the CI — and with it the attached results. Artifacts stored during
-  precompilation are serialized into the package image along with the CI: populate only
-  session-portable values (bytes, strings) during precompile workloads, and keep
-  session-local handles (device modules, pipeline objects) in fields that remain empty
-  until first use at run time.
-
-- On Julia 1.10, the struct lives in a session-local store keyed by the foreign
-  `CodeInstance` and config. Nothing persists across sessions.
+Persistent result structs may contain session-local handles, but back-ends must leave those
+fields empty during precompilation.
 
 Thread safety: concurrent calls for the same job return the same struct, but
 GPUCompiler does not serialize back-end *compilation*; take a back-end lock around
@@ -489,7 +496,7 @@ const cached_results_lock = ReentrantLock()
 
 # NOTE: like `cache_owner`, specialized for the launch hot path (bounded number of
 #       instantiations: one per back-end and results type).
-function job_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
+function persistent_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
     jr = CompilerCaching.results(JobResults, ci)
     Base.@lock cached_results_lock begin
         for entry in jr.entries
@@ -529,15 +536,16 @@ end
 function cached_results(::Type{V}, job::CompilerJob) where {V}
     ci = job_code_instance(job)
     ci === nothing && return nothing
-    return job_results(V, ci, job.config)
+    if can_persist_results(job)
+        return persistent_results(V, ci, job.config)
+    else
+        return session_results(V, ci, job.config)
+    end
 end
 
 end # HAS_INTEGRATED_CACHE
 
-# The relocation API surface: data types, the strategy trait, the capability probe, and
-# one loader entry point per consumer style (`resolved_relocations` for `:patch`/`:import`
-# loaders, `apply_relocations!` for `:defer` consumers). The per-strategy lowering
-# primitives (`bake_relocations!` etc.) are internal, reached through the trait.
+# Public relocation interface.
 @public RelocationSite, Relocations, relocation_lowering
 @public apply_relocations!, resolved_relocations, supports_relocatable_ir
 @public GPUCompilerCacheToken, cache_owner, cached_results

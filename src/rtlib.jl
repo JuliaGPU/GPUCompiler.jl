@@ -60,12 +60,9 @@ end
 
 ## functionality to build the runtime library
 
-# Per-function compilation results for the GPU runtime library, cached through the
-# same `cached_results` mechanism back-ends use for kernels. On 1.11+ the bitcode
-# thus lives on the runtime function's `CodeInstance` — possibly alongside a
-# back-end's own results struct — and persists through precompilation, so sessions
-# loading a back-end that compiled its runtime during precompile skip codegen
-# entirely. On 1.10 it is cached for the duration of the session.
+# Per-function relocatable bitcode for the GPU runtime library. When Julia exposes the
+# required relocation metadata, this persists with the function's `CodeInstance`.
+# `runtime_libs` below provides the session cache on older Julia versions.
 mutable struct RuntimeFunctionResults
     bitcode::Union{Nothing,Vector{UInt8}}
     relocations::Relocations
@@ -91,7 +88,9 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
         return ci::CodeInstance
     end
 
-    new_mod, meta = compile_unhooked(:llvm, rt_job)
+    # Keep this intermediate module relocatable even when the final back-end resolves
+    # relocations eagerly. The caller links a fresh copy and lowers the merged sites.
+    new_mod, meta = compile_unhooked(:llvm, rt_job; resolve_relocations=false)
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
     if return_type(ft) != return_type(expected_ft)
@@ -116,7 +115,7 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     write(io, new_mod)
     ci === nothing && (ci = runtime_code_instance(rt_job))
     if supports_relocatable_ir()
-        res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
+        res === nothing && (res = runtime_results(RuntimeFunctionResults, ci, rt_job.config))
         res.bitcode = take!(io)
         res.relocations = meta.relocations
     end
@@ -125,10 +124,19 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     return ci::CodeInstance
 end
 
+function runtime_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
+    @static if HAS_INTEGRATED_CACHE
+        if supports_relocatable_ir()
+            return persistent_results(V, ci, config)
+        end
+    end
+    return session_results(V, ci, config)
+end
+
 function runtime_function_results(@nospecialize(job::CompilerJob))
     ci = job_code_instance(job)
     ci === nothing && return nothing, nothing
-    return ci, job_results(RuntimeFunctionResults, ci, job.config)
+    return ci, runtime_results(RuntimeFunctionResults, ci, job.config)
 end
 
 function runtime_method_instance(@nospecialize(job::CompilerJob), method)
@@ -190,8 +198,8 @@ end
 
 # Session-local cache of assembled runtime libraries, keyed by
 # `(runtime_config(job), opaque_pointers)`: the derived runtime config covers every
-# codegen-relevant setting (e.g. the debug level, which is baked into the runtime IR
-# as a constant), while cosmetic kernel-job fields are normalized away. Cross-session
+# codegen-relevant setting (e.g. the debug level stored in the runtime IR), while
+# cosmetic kernel-job fields are normalized away. Cross-session
 # persistence happens at the per-function level (see `RuntimeFunctionResults`):
 # reassemble on first use of each session, then reuse within the session.
 #

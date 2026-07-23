@@ -27,9 +27,8 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
-# The object-emitting non-baking modes drive an ORC loader (see `load`): `jit` imports
-# declarations at link time, `patch` emits patchable definitions to write after loading.
-# `defer` stops at `:llvm` for the consumer to `apply_relocations!`. Plain jobs bake.
+# Object-emitting modes drive an ORC loader (see `load`): `jit` imports declarations,
+# while `patch` emits definitions to write after loading. `defer` stops at `:llvm`.
 GPUCompiler.relocation_lowering(@nospecialize(job::NativeCompilerJob)) =
     job.config.params.defer ? :defer :
     job.config.params.patch ? :patch :

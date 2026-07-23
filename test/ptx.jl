@@ -29,19 +29,16 @@ end
 end
 
 @testset "global variable relocation" begin
-    # references to Julia objects (`julia.constgv` globals, e.g. Symbol literals) must
-    # survive as relocation slots until backend lowering at object emission.
-    # they used to be kept alive as internal globals with a null initializer, which the
-    # GlobalOpt run in `finish_module!` folded away, constant-folding any comparison
-    # against them (JuliaGPU/CUDA.jl#3185: kernels specialized on Symbols misbehaved).
+    # Julia-object references must remain declarations until relocation lowering. Null
+    # definitions would let GlobalOpt fold comparisons against them.
     mod = @eval module $(gensym())
         kernel(name::Symbol) = name === :var ? 1 : 2
     end
-    # `patch=true` keeps the slot symbolic (a baking back-end would resolve and fold it away).
+    # `patch=true` keeps the slot symbolic instead of resolving it into the IR.
     ir = sprint() do io
         PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; dump_module=true, patch=true)
     end
-    # Julia bakes the Symbol pointer into the IR before exposing it to GPUCompiler when it
+    # Julia embeds the Symbol pointer before exposing the IR to GPUCompiler when it
     # can't emit relocatable global metadata; otherwise it stays a symbolic slot we preserve.
     if GPUCompiler.supports_relocatable_ir()
         @test occursin("@jl_sym_var_", ir)
@@ -102,7 +99,7 @@ end
     # `patch=true` keeps the interior header relocation symbolic (externally_initialized).
     ir = sprint(io->PTX.code_llvm(io, mod.consume, Tuple{Bool,Int32};
                                   dump_module=true, patch=true))
-    # As with Symbol literals above, Julia bakes the type pointer when it can't emit
+    # As with Symbol literals above, Julia embeds the type pointer when it can't emit
     # relocatable global metadata; otherwise GPUCompiler represents it as a relocation.
     if GPUCompiler.supports_relocatable_ir()
         @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir)

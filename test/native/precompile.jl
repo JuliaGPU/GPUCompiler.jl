@@ -37,20 +37,21 @@ precompile_test_harness("Inference caching") do load_path
             Results() = new(nothing)
         end
 
-        portable_kernel(x) = x + 1
-        cached_kernel(x) = x + 2
+        persistent_kernel(x) = x + 1
+        session_kernel(x) = x + 2
 
-        # Job results are serialized as-is. Backends are responsible for storing only
-        # artifacts allowed by the static relocatability contract.
+        # A back-end implementing relocation keeps results across sessions.
         let
-            job, _ = NativeCompiler.Native.create_job(portable_kernel, (Int,))
+            job, _ = NativeCompiler.Native.create_job(persistent_kernel, (Int,); jit=true)
             precompile(job)
-            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "portable"
+            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "persistent"
         end
+
+        # Default back-ends use the session-local store.
         let
-            job, _ = NativeCompiler.Native.create_job(cached_kernel, (Int,))
+            job, _ = NativeCompiler.Native.create_job(session_kernel, (Int,))
             precompile(job)
-            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "cached"
+            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "session"
         end
 
         let
@@ -109,15 +110,20 @@ precompile_test_harness("Inference caching") do load_path
 
         using NativeBackend
 
-        portable_job, _ = NativeCompiler.Native.create_job(NativeBackend.portable_kernel, (Int,))
-        portable_res = GPUCompiler.cached_results(NativeBackend.Results, portable_job)
-        @test portable_res !== nothing
-        @test portable_res.artifact == "portable"
+        persistent_job, _ = NativeCompiler.Native.create_job(
+            NativeBackend.persistent_kernel, (Int,); jit=true)
+        persistent_res = GPUCompiler.cached_results(NativeBackend.Results, persistent_job)
+        @test persistent_res !== nothing
+        if GPUCompiler.supports_relocatable_ir()
+            @test persistent_res.artifact == "persistent"
+        else
+            @test persistent_res.artifact === nothing
+        end
 
-        cached_job, _ = NativeCompiler.Native.create_job(NativeBackend.cached_kernel, (Int,))
-        cached_res = GPUCompiler.cached_results(NativeBackend.Results, cached_job)
-        @test cached_res !== nothing
-        @test cached_res.artifact == "cached"
+        session_job, _ = NativeCompiler.Native.create_job(NativeBackend.session_kernel, (Int,))
+        session_res = GPUCompiler.cached_results(NativeBackend.Results, session_job)
+        @test session_res !== nothing
+        @test session_res.artifact === nothing
 
         # Check that kernel survived
         kernel_mi = GPUCompiler.methodinstance(typeof(NativeBackend.kernel), Tuple{Vector{Int}, Int})

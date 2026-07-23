@@ -10,8 +10,7 @@ end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
 
-# `patch=true` keeps relocations symbolic (as CUDA.jl does) so tests can observe them
-# surviving to the `:llvm`/`:asm` output; otherwise bake in-session like a plain compilation.
+# `patch=true` keeps relocations symbolic (as CUDA.jl does); plain jobs resolve them in IR.
 GPUCompiler.relocation_lowering(@nospecialize(job::PTXCompilerJob)) =
     job.config.params.patch ? :patch : :bake
 

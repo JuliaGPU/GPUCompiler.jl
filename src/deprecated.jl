@@ -229,35 +229,6 @@ function CC.findsup(@nospecialize(sig::Type), table::StackedMethodTable)
 end
 
 
-## 1.10 `cached_results`
-#
-# Session-local storage for the per-job results structs; on 1.11+ these live on the
-# `CodeInstance`s of Julia's integrated cache instead (see `interface.jl`). Keep the
-# same identity here by associating results with a foreign `CodeInstance`: unrelated
-# world-age advances can reuse a still-valid CI, while invalidation makes the lookup
-# resolve to a new CI and therefore a new results struct.
-struct LegacyJobResultEntry
-    config::CompilerConfig
-    value::Any
-end
-
-const legacy_job_results = IdDict{CodeInstance,Vector{LegacyJobResultEntry}}()
-const job_results_lock = ReentrantLock()
-
-function job_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
-    Base.@lock job_results_lock begin
-        entries = get!(legacy_job_results, ci) do
-            LegacyJobResultEntry[]
-        end
-        for entry in entries
-            entry.config === config && entry.value isa V && return entry.value::V
-        end
-        v = V()
-        push!(entries, LegacyJobResultEntry(config, v))
-        return v
-    end
-end
-
 function job_code_instance(@nospecialize(job::CompilerJob))
     cache = WorldView(get_code_cache(job), job.world, job.world)
     CC.get(cache, job.source, nothing)
@@ -268,9 +239,8 @@ end
 function cached_results(::Type{V}, job::CompilerJob) where {V}
     ci = job_code_instance(job)
     ci === nothing && return nothing
-    return job_results(V, ci, job.config)
+    return session_results(V, ci, job.config)
 end
-
 
 end # !HAS_INTEGRATED_CACHE
 

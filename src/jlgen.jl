@@ -563,14 +563,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
     end
 
-    # Maintain a map from global variables to their initialized Julia values. The
-    # objects pointed to are perma-rooted during codegen. We *don't* bake these
-    # addresses into the IR yet, so that we can cache it across sessions.
+    # Map global variables to their rooted Julia values without embedding addresses in IR.
     gv_to_value = Dict{String, Ptr{Cvoid}}()
     if gvs === nothing
-        # No reliable GV table on this Julia — best-effort discovery from the module.
-        # On these older versions Julia's own emit may have already baked in absolute
-        # pointer values; we recover them by reading existing initializers.
+        # Without a reliable GV table, recover addresses from existing initializers.
         for gv in globals(llvm_mod)
             if !haskey(metadata(gv), "julia.constgv")
                 continue
@@ -597,15 +593,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             gv = GlobalVariable(gv_ref)
             gv_to_value[LLVM.name(gv)] = init
         end
-        # Strip the initializers so the IR we hand back is session-portable
-        # (on 1.12 `jl_emit_native_impl` bakes pointers via
-        # `literal_static_pointer_val`; on 1.13+ Julia nulls them itself);
-        # relocation lowering writes the session-current value in. Demote
-        # each GV to an external *declaration* rather than
-        # giving it a null initializer: an internal global initialized to null
-        # is fair game for optimization passes that run before relocation
-        # (e.g. GlobalOpt in the PTX back-end's `finish_module!`), which would
-        # fold loads of it to null and delete the global.
+        # Discard session addresses. Declarations survive optimization until relocation
+        # lowering; null definitions could be folded away first.
         for gv in globals(llvm_mod)
             haskey(gv_to_value, LLVM.name(gv)) || continue
             initializer!(gv, nothing)

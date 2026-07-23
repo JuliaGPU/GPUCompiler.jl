@@ -59,7 +59,7 @@ end
             end
         end
 
-        # a non-baking (JIT) back-end keeps the Symbol reference symbolic in `:llvm`.
+        # A JIT back-end keeps the Symbol reference symbolic in `:llvm`.
         job, _ = Native.create_job(mod.outer, (Int, Symbol); validate=false, jit=true)
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job)
@@ -274,7 +274,7 @@ end
                 @test haskey(lib.relocations.sites, site)
             end
             if GPUCompiler.supports_relocatable_ir()
-                # otherwise Julia bakes addresses without tagging globals
+                # otherwise Julia embeds addresses without tagging globals
                 @test used > 0
             end
         end
@@ -416,7 +416,7 @@ end
                       GPUCompiler.resolve_relocation_target(ref)
                 dispose(m)
 
-                # Symbol: baked address
+                # Symbol: resolved address
                 m, map = slot_module(ptrs[3])
                 relocs = GPUCompiler.collect_julia_value_relocations!(m, map)
                 @test only(values(relocs.sites)).value === objs[3]
@@ -815,10 +815,8 @@ end
     end
 end
 
-@testset "eager relocation baking" begin
-    # The default (baking) back-end resolves host references into the IR during `emit_llvm`,
-    # so the `:llvm` result carries no relocation metadata and needs no loader — the contract
-    # that lets Metal.jl and unmodified AllocCheck consume it directly.
+@testset "eager relocation resolution" begin
+    # Eager resolution in `emit_llvm` leaves nothing for a loader.
     mod = @eval module $(gensym())
         probe() = UInt(pointer_from_objref(:eager_probe))
     end
@@ -829,8 +827,7 @@ end
         # nothing is left for a loader to patch or import
         @test !any(GPUCompiler.isextinit, globals(ir))
 
-        # back-ends like Metal.jl drive object emission themselves, without threading
-        # relocation metadata through; that only works because of the baking above.
+        # This back-end can emit objects without threading relocation metadata.
         code, _ = GPUCompiler.emit_asm(job, ir, LLVM.API.LLVMObjectFile)
         @test !isempty(code)
     end
@@ -966,9 +963,9 @@ end
     end
 end
 
-@testset "bake zeroinitializer box" begin
+@testset "resolve zeroinitializer box" begin
     # An all-zero box (a patchable header over a zero payload) is folded by LLVM to a
-    # `zeroinitializer`, a ConstantAggregateZero that reports no operands; baking must still
+    # `zeroinitializer`, a ConstantAggregateZero that reports no operands; resolution must
     # resolve its header word. Regresses JuliaGPU/oneAPI.jl's "#55: invalid integers created
     # by alloc_opt", where `SVector(0f0, 0f0)` boxed a zero payload.
     JuliaContext() do ctx
@@ -1560,7 +1557,7 @@ end
         end
     end
 
-    # a non-baking job keeps the merged relocation symbolic so we can inspect it.
+    # Keep the merged relocation symbolic so we can inspect it.
     job, _ = Native.create_job(mod.parent, (Symbol,); jit=true, validate=false)
     JuliaContext() do ctx
         ir, meta = GPUCompiler.compile(:llvm, job)

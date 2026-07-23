@@ -51,12 +51,9 @@ export compile
 Compile a `job` to one of the following formats as specified by the `target` argument:
 `:llvm` for LLVM IR, `:asm` for assembly, or `:obj` for object code.
 
-For the default `:bake` [`relocation_lowering`](@ref) strategy the `:llvm` result is
-execution-ready: Julia-value references are resolved into the IR during `emit_llvm` (it may
-still contain raw `jl_*` runtime references, collected and resolved at object emission).
-Non-baking back-ends keep those references symbolic in the `:llvm` result: `:patch` and
-`:import` return final `relocations` metadata for `:asm`/`:obj`, while `:defer` consumers
-stop at `:llvm` and resolve the sites themselves with [`apply_relocations!`](@ref).
+The default [`relocation_lowering`](@ref) strategy resolves Julia-value relocations in the
+`:llvm` result. Other strategies retain relocation metadata for their loader; `:defer`
+consumers resolve it with [`apply_relocations!`](@ref).
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     if compile_hook[] !== nothing
@@ -65,7 +62,8 @@ function compile(target::Symbol, @nospecialize(job::CompilerJob))
     return compile_unhooked(target, job)
 end
 
-function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob))
+function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);
+                          resolve_relocations::Bool=true)
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
@@ -80,7 +78,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob))
 
     ## LLVM IR
 
-    ir, ir_meta = emit_llvm(job)
+    ir, ir_meta = emit_llvm(job; resolve_relocations)
 
     if output == :llvm
         if job.config.strip
@@ -176,7 +174,8 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob))
+@locked function emit_llvm(@nospecialize(job::CompilerJob);
+                           resolve_relocations::Bool=true)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -340,12 +339,9 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
-            # Baking back-ends (the default) resolve host references into the IR here —
-            # before optimization, where `relocate_gvs!` used to run — so the optimizer sees
-            # concrete values and the `:llvm` result is execution-ready. Other strategies
-            # keep relocations symbolic for their loader, lowering them at object emission.
-            bake_relocations = relocation_lowering(job) === :bake
-            if bake_relocations
+            # Resolve early so optimization sees concrete values.
+            resolve_early = resolve_relocations && relocation_lowering(job) === :bake
+            if resolve_early
                 prune_dead_relocations!(ir, relocations)
                 bake_relocations!(ir, relocations)
             end
@@ -374,11 +370,8 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
-            # Runtime linking during optimization can introduce further relocations (GC
-            # lowering materializes runtime calls that reference Julia globals). Bake those
-            # too, so a baking back-end's module is fully resolved before object emission
-            # even when the caller drives `emit_asm` without relocation metadata (Metal.jl).
-            if bake_relocations && !isempty(relocations.sites)
+            # Runtime linking during optimization can add relocations.
+            if resolve_early && !isempty(relocations.sites)
                 prune_dead_relocations!(ir, relocations)
                 bake_relocations!(ir, relocations)
             end
@@ -396,10 +389,8 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
-            # Non-baking strategies hand the `:llvm` result and its metadata to a loader
-            # or `:defer` consumer; drop sites that optimization killed so they don't see
-            # (or cache) dead entries.
-            bake_relocations || prune_dead_relocations!(ir, relocations)
+            # Do not expose dead sites to loaders.
+            resolve_early || prune_dead_relocations!(ir, relocations)
 
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
@@ -442,9 +433,7 @@ const __llvm_initialized = Ref(false)
     return ir, (; entry, compiled, relocations)
 end
 
-# Forwarding method for back-ends that drive emission directly (e.g. Metal.jl's
-# `emit_llvm` + `emit_asm`). Correct for baking back-ends: their relocations were resolved
-# during `emit_llvm`, so no metadata needs threading through here.
+# Compatibility for back-ends that resolve relocations during `emit_llvm`.
 emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
          format::LLVM.API.LLVMCodeGenFileType) =
     emit_asm(job, ir, Relocations(), format)

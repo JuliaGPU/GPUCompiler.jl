@@ -326,11 +326,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
             add!(fpm, GPULowerGCFramePass(job))
         end
         if job.config.libraries
-            # Add GPULinkRuntime *by name* so the pass builder resolves it to the instance
-            # registered in `optimize!`: that instance holds the `Relocations` object owned
-            # by `optimize!`, and relinking the runtime here must merge new sites into it.
-            # The other two passes are stateless with respect to that object, so fresh
-            # job-capturing instances are equivalent.
+            # Use the registered pass because it owns `relocs`; the others only capture `job`.
             add!(mpm, "GPULinkRuntime")
             add!(mpm, GPULinkLibrariesPass(job))
             add!(mpm, GPUFinishRuntimeIntrinsicsPass(job))

@@ -1,35 +1,11 @@
-# Relocation model
-#
-# A relocation is a site => target pair. Targets are Julia object identities
-# (`JuliaValueRef`, like codegen's identity-keyed `global_targets`) or named
-# libjulia globals (`CGlobalRef`, like JuliaVariables). Every site names a word
-# at a byte offset in a global. Dedicated sites use offset zero in a word-sized
-# declaration (like `jl_sysimg_gvars`); other sites are inside defined globals
-# (like `gctags_list`/`relocs_list`). A declaration can be baked, patched, or
-# resolved by a loader; a word inside a definition can only be baked or patched.
+# Relocations map words in globals to Julia values or named C globals. Declarations can be
+# resolved, patched, or imported; sites inside definitions can only be resolved or patched.
 #
 #   produce ──▶ merge (on link) ──▶ prune (after DCE) ──▶ lower
 #
-# The back-end's `relocation_lowering` strategy picks how (and when) sites lower:
-#
-# Strategy    Lowering                       Loader contract                    Julia analog
-# --------    --------                       ---------------                    ------------
-# `:bake`     `bake_relocations!`            none; current-session words baked  JIT address folding
-# `:patch`    `emit_patchable_relocations!`  patch every site after load        sysimage gvars
-# `:import`   `emit_imported_relocations!`   resolve declarations at link time  sysimg symbol import
-# `:defer`    none (`:llvm` only)            `apply_relocations!` before use    n/a (session JIT)
-#
-# `:patch` and `:import` require a symbol namespace per loaded object (a GPU module, or a
-# fresh JIT dylib): site names are only unique per compilation, and shared sites like the
-# runtime library's recur verbatim across modules. Consumers that feed IR into one
-# long-lived JIT namespace (Enzyme- or AllocCheck-style session JITs) use `:defer` and
-# resolve sites into each parsed module with `apply_relocations!`, which needs no symbols
-# at all. The producers are `collect_julia_value_relocations!` during IR generation and
-# `collect_cglobal_relocations!` immediately before back-end lowering. Names are globally
-# unique and assigned once, so linking can merge IR and metadata without renaming.
-#
-# Generated code is portable only when `supports_relocatable_ir()` and a non-baking strategy
-# preserves these relocations for its loader. The default (`:bake`) resolves in-session.
+# `:patch` and `:import` need a symbol namespace per object. `:defer` instead applies sites
+# directly to each parsed module. Site names are fixed at creation so IR and metadata can be
+# linked without renaming.
 
 
 ## targets
@@ -55,11 +31,9 @@ end
 """
     CGlobalRef(symbol, library=nothing)
 
-A named C data global. With `library === nothing` (the default) it names a libjulia global,
-resolved with `jl_cglobal`'s process-wide symbol lookup; an explicit `library` names a
-shared object to load and look the symbol up in. Resolution returns the word stored in that
-global in the current Julia process. Both fields are plain data, so serialized metadata
-stays portable.
+A named C data global. With `library === nothing`, resolution uses `jl_cglobal`'s
+process-wide lookup. Otherwise it looks up `symbol` in `library`. Resolution returns the
+word stored in the global.
 """
 struct CGlobalRef
     symbol::Symbol
@@ -86,10 +60,7 @@ same_relocation_target(::RelocationTarget, ::RelocationTarget) = false
 Resolve a relocation target to its word in the current Julia process.
 """
 function resolve_relocation_target(target::JuliaValueRef)
-    box = Any[target.value]
-    GC.@preserve box begin
-        return unsafe_load(Base.unsafe_convert(Ptr{UInt}, pointer(box)))
-    end
+    UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), target.value))
 end
 function resolve_relocation_target(target::CGlobalRef)
     if target.library === nothing
@@ -135,9 +106,7 @@ end
 
 Relocations() = Relocations(Dict{RelocationSite,RelocationTarget}())
 
-# A loader that bakes from cached metadata consumes the sites (baking empties them), so it
-# needs a fresh copy per link. The site keys and targets are immutable, so a shallow copy of
-# the dict suffices.
+# Resolving into IR consumes the site table; loaders copy cached metadata first.
 Base.copy(relocs::Relocations) = Relocations(copy(relocs.sites))
 
 """
@@ -484,10 +453,9 @@ end
 """
     bake_relocations!(mod, relocs)
 
-Resolve every site in the current Julia process and materialize the resulting words into
-the IR, leaving `relocs` empty. The module is execution-ready but embeds session-local
-addresses, so it must not be persisted across sessions. Dead sites must be dropped first
-with [`prune_dead_relocations!`](@ref); baking errors on a site whose global is gone.
+Resolve every site in the current Julia process and write the resulting words into the IR,
+leaving `relocs` empty. The module then embeds session-local addresses and must not be
+persisted across sessions. Drop dead sites first with [`prune_dead_relocations!`](@ref).
 """
 function bake_relocations!(mod::LLVM.Module, relocs::Relocations)
     foreach_relocation(mod, relocs) do site, gv, ref
@@ -567,13 +535,12 @@ end
 """
     apply_relocations!(mod, relocs) -> roots
 
-Loader entry point for `:defer` back-ends: resolve every live site in the current Julia
-process and materialize the words into `mod`, like [`bake_relocations!`](@ref), but without
-consuming `relocs` — cached metadata can be applied again to a freshly parsed module in a
-future session. Sites whose global was optimized away are skipped.
+Loader entry point for `:defer` back-ends. Resolves every live site into `mod` without
+consuming `relocs`, so cached metadata can be reused. Sites whose global was optimized away
+are skipped.
 
 Returns the Julia `roots` that must stay alive for as long as the module's code can run.
-Apply once per parsed module: the baked module has no relocations left to apply.
+Apply once per parsed module.
 """
 function apply_relocations!(mod::LLVM.Module, relocs::Relocations)
     live = copy(relocs)
