@@ -316,11 +316,18 @@ dump_native(@nospecialize(job::CompilerJob)) = false
 #   to resolve at link time (e.g. ORC `absoluteSymbols`); interior definition sites are
 #   still patched after loading.
 #
+# - `:defer`: keep references symbolic; the consumer takes the `:llvm` result (typically
+#   caching its bitcode plus the `relocations` metadata) and resolves the sites itself with
+#   [`apply_relocations!`](@ref) before executing the code. Object emission is unsupported
+#   while live relocations remain. This is the strategy for session JITs that feed IR into
+#   a single long-lived symbol namespace (Enzyme- or AllocCheck-style), where the
+#   per-object namespaces required by `:patch`/`:import` do not exist.
+#
 # The value also fixes lowering *timing*: `:bake` resolves eagerly during `emit_llvm`,
-# other strategies defer to object emission. `:patch`/`:import` loaders must keep the
-# `roots` returned by [`resolved_relocations`](@ref) alive while the code can run. Generated
-# code is session-portable only when [`supports_relocatable_ir`](@ref) and a non-baking
-# strategy is used.
+# other strategies defer past optimization. `:patch`/`:import` loaders must keep the
+# `roots` returned by [`resolved_relocations`](@ref) alive while the code can run (for
+# `:defer`, `apply_relocations!` returns them). Generated code is session-portable only
+# when [`supports_relocatable_ir`](@ref) and a non-baking strategy is used.
 relocation_lowering(@nospecialize(job::CompilerJob)) = :bake
 
 # the Julia module to look up target-specific runtime functions in (this includes both
@@ -529,7 +536,7 @@ end # HAS_INTEGRATED_CACHE
 
 @public RelocationSite, Relocations, relocation_lowering
 @public bake_relocations!, emit_patchable_relocations!, emit_imported_relocations!
-@public prune_dead_relocations!
+@public apply_relocations!, prune_dead_relocations!
 @public resolved_relocations, supports_relocatable_ir
 @public GPUCompilerCacheToken, cache_owner, cached_results
 

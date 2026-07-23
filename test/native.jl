@@ -877,6 +877,40 @@ end
     end
 end
 
+@testset "deferred relocation" begin
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            f() = UInt(pointer_from_objref(:defer_probe))
+        end
+        job, _ = Native.create_job(mod.f, Tuple{}; defer=true)
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job)
+            relocs = meta.relocations
+            @test !isempty(relocs.sites)
+
+            # a deferring consumer caches the bitcode and the relocation metadata...
+            bitcode = let io = IOBuffer()
+                write(io, ir)
+                take!(io)
+            end
+
+            # ...and every session applies the metadata to a freshly parsed module
+            for _ in 1:2
+                session_mod = parse(LLVM.Module, MemoryBuffer(bitcode))
+                roots = GPUCompiler.apply_relocations!(session_mod, relocs)
+                @test :defer_probe in roots
+                @test !isempty(relocs.sites)   # the metadata is not consumed
+                for site in keys(relocs.sites)
+                    @test !isdeclaration(globals(session_mod)[site.name])
+                end
+            end
+
+            # emitting an object while relocations are live is a consumer error
+            @test_throws "defers relocation lowering" GPUCompiler.compile(:obj, job)
+        end
+    end
+end
+
 @testset "relocation validation errors" begin
     JuliaContext() do ctx
         word() = GPUCompiler.relocation_word_type()

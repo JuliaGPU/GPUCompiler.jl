@@ -53,9 +53,10 @@ Compile a `job` to one of the following formats as specified by the `target` arg
 
 For the default `:bake` [`relocation_lowering`](@ref) strategy the `:llvm` result is
 execution-ready: Julia-value references are resolved into the IR during `emit_llvm` (it may
-still contain raw `jl_*` runtime references, collected and resolved at object emission). A
-back-end that defers relocation lowering keeps those references symbolic in the `:llvm`
-result and returns final `relocations` metadata only for `:asm`/`:obj`.
+still contain raw `jl_*` runtime references, collected and resolved at object emission).
+Non-baking back-ends keep those references symbolic in the `:llvm` result: `:patch` and
+`:import` return final `relocations` metadata for `:asm`/`:obj`, while `:defer` consumers
+stop at `:llvm` and resolve the sites themselves with [`apply_relocations!`](@ref).
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     if compile_hook[] !== nothing

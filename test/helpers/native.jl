@@ -12,10 +12,11 @@ struct CompilerParams <: AbstractCompilerParams
     method_table
     jit::Bool
     patch::Bool
+    defer::Bool
 
     CompilerParams(entry_safepoint::Bool=false, method_table=test_method_table,
-                   jit::Bool=false, patch::Bool=false) =
-        new(entry_safepoint, method_table, jit, patch)
+                   jit::Bool=false, patch::Bool=false, defer::Bool=false) =
+        new(entry_safepoint, method_table, jit, patch, defer)
 end
 
 module Runtime end
@@ -26,9 +27,11 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
-# Both non-baking modes drive an ORC loader (see `load`): `jit` imports declarations at
-# link time, `patch` emits patchable definitions to write after loading. Plain jobs bake.
+# The object-emitting non-baking modes drive an ORC loader (see `load`): `jit` imports
+# declarations at link time, `patch` emits patchable definitions to write after loading.
+# `defer` stops at `:llvm` for the consumer to `apply_relocations!`. Plain jobs bake.
 GPUCompiler.relocation_lowering(@nospecialize(job::NativeCompilerJob)) =
+    job.config.params.defer ? :defer :
     job.config.params.patch ? :patch :
     job.config.params.jit   ? :import : :bake
 
@@ -48,11 +51,11 @@ end
 
 function create_job(@nospecialize(func), @nospecialize(types);
                     entry_safepoint::Bool=false, method_table=test_method_table,
-                    jit::Bool=false, patch::Bool=false, kwargs...)
+                    jit::Bool=false, patch::Bool=false, defer::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget(;jlruntime=true)
-    params = CompilerParams(entry_safepoint, method_table, jit, patch)
+    params = CompilerParams(entry_safepoint, method_table, jit, patch, defer)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end

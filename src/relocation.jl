@@ -17,12 +17,16 @@
 # `:bake`     `bake_relocations!`            none; current-session words baked  JIT address folding
 # `:patch`    `emit_patchable_relocations!`  patch every site after load        sysimage gvars
 # `:import`   `emit_imported_relocations!`   resolve declarations at link time  sysimg symbol import
+# `:defer`    none (`:llvm` only)            `apply_relocations!` before use    n/a (session JIT)
 #
-# Back-ends may also implement custom lowerings on top of these primitives (see the native
-# test helper's JIT loader). The producers are `collect_julia_value_relocations!` during IR
-# generation and `collect_cglobal_relocations!` immediately before back-end lowering. Names
-# are globally unique and assigned once, so linking can merge IR and metadata without
-# renaming.
+# `:patch` and `:import` require a symbol namespace per loaded object (a GPU module, or a
+# fresh JIT dylib): site names are only unique per compilation, and shared sites like the
+# runtime library's recur verbatim across modules. Consumers that feed IR into one
+# long-lived JIT namespace (Enzyme- or AllocCheck-style session JITs) use `:defer` and
+# resolve sites into each parsed module with `apply_relocations!`, which needs no symbols
+# at all. The producers are `collect_julia_value_relocations!` during IR generation and
+# `collect_cglobal_relocations!` immediately before back-end lowering. Names are globally
+# unique and assigned once, so linking can merge IR and metadata without renaming.
 #
 # Generated code is portable only when `supports_relocatable_ir()` and a non-baking strategy
 # preserves these relocations for its loader. The default (`:bake`) resolves in-session.
@@ -464,6 +468,13 @@ function lower_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         emit_patchable_relocations!(mod, relocs)
     elseif strategy === :import
         emit_imported_relocations!(mod, relocs)
+    elseif strategy === :defer
+        # the consumer resolves relocations itself at the `:llvm` level; emitting an
+        # object here would leave its sites permanently unresolved
+        isempty(relocs.sites) ||
+            error("Job defers relocation lowering to its consumer, so code with live " *
+                  "relocations cannot be emitted. Use `apply_relocations!` on the " *
+                  "`:llvm` result, or a `:patch`/`:import` lowering strategy.")
     else
         error("Unknown relocation lowering strategy :$strategy")
     end
@@ -544,6 +555,25 @@ function emit_imported_relocations!(mod::LLVM.Module, relocs::Relocations)
     end
     isempty(used) || set_used!(mod, used...)
     return
+end
+
+"""
+    apply_relocations!(mod, relocs) -> roots
+
+Loader entry point for `:defer` back-ends: resolve every live site in the current Julia
+process and materialize the words into `mod`, like [`bake_relocations!`](@ref), but without
+consuming `relocs` — cached metadata can be applied again to a freshly parsed module in a
+future session. Sites whose global was optimized away are skipped.
+
+Returns the Julia `roots` that must stay alive for as long as the module's code can run.
+Apply once per parsed module: the baked module has no relocations left to apply.
+"""
+function apply_relocations!(mod::LLVM.Module, relocs::Relocations)
+    live = copy(relocs)
+    prune_dead_relocations!(mod, live)
+    roots = Any[ref.value for ref in values(live.sites) if ref isa JuliaValueRef]
+    bake_relocations!(mod, live)
+    return roots
 end
 
 
