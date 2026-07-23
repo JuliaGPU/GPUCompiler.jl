@@ -894,8 +894,7 @@ end
             # ...and every session applies the metadata to a freshly parsed module
             for _ in 1:2
                 session_mod = parse(LLVM.Module, MemoryBuffer(bitcode))
-                roots = GPUCompiler.apply_relocations!(session_mod, relocs)
-                @test :defer_probe in roots
+                GPUCompiler.apply_relocations!(session_mod, relocs)
                 @test !isempty(relocs.sites)   # the metadata is not consumed
                 for site in keys(relocs.sites)
                     @test !isdeclaration(globals(session_mod)[site.name])

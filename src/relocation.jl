@@ -15,8 +15,8 @@
 
 A Julia value with a stable address (a heap object, symbol, or singleton), used as the
 serializable identity of a relocation target. Resolve it in the active session with
-[`resolve_relocation_target`](@ref); a loader that writes the resulting address into device
-storage must keep `value` rooted for as long as that storage remains reachable.
+[`resolve_relocation_target`](@ref), which permanently roots the value in the process so
+the resolved address stays valid for as long as the session lives.
 """
 struct JuliaValueRef
     value::Any
@@ -54,13 +54,31 @@ same_relocation_target(a::CGlobalRef, b::CGlobalRef) =
     a.symbol === b.symbol && a.library == b.library
 same_relocation_target(::RelocationTarget, ::RelocationTarget) = false
 
+# Permanently root a value in the current process and return the canonical rooted
+# instance, exactly as Julia's own codegen does for values referenced from native code
+# (`jl_ensure_rooted` on 1.10/1.11, `aot_optimize_roots` on 1.12+). Values compiled in
+# this session are already rooted this way, making this a cheap lookup; it matters for
+# metadata deserialized from a cache, whose values codegen never saw. Rooting by egal
+# identity also folds such duplicates onto the instance native code already uses.
+function root_relocation_target(target::JuliaValueRef)
+    @static if VERSION >= v"1.11-"
+        ccall(:jl_as_global_root, Any, (Any, Cint), target.value, 1)
+    else
+        ccall(:jl_as_global_root, Any, (Any,), target.value)
+    end
+end
+
+value_pointer(@nospecialize(value)) = UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), value))
+
 """
     resolve_relocation_target(target) -> UInt
 
-Resolve a relocation target to its word in the current Julia process.
+Resolve a relocation target to its word in the current Julia process. Julia values are
+permanently rooted (and canonicalized by egal identity) as part of resolution, so the
+returned address cannot dangle.
 """
 function resolve_relocation_target(target::JuliaValueRef)
-    UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), target.value))
+    value_pointer(root_relocation_target(target))
 end
 function resolve_relocation_target(target::CGlobalRef)
     if target.library === nothing
@@ -110,19 +128,18 @@ Relocations() = Relocations(Dict{RelocationSite,RelocationTarget}())
 Base.copy(relocs::Relocations) = Relocations(copy(relocs.sites))
 
 """
-    resolved_relocations(relocs)
+    resolved_relocations(relocs) -> Vector{Pair{RelocationSite,UInt}}
 
-Resolve relocation metadata for a loader. Returns resolved `sites` and Julia `roots` that
-must stay alive while the loaded code can access them.
+Resolve relocation metadata for a loader, returning each site with its resolved word.
+Resolution permanently roots referenced Julia values in the process, so the addresses
+stay valid for the lifetime of the session.
 """
 function resolved_relocations(relocs::Relocations)
     sites = Pair{RelocationSite,UInt}[]
-    roots = Any[]
     for (site, ref) in relocs.sites
         push!(sites, site => resolve_relocation_target(ref))
-        ref isa JuliaValueRef && push!(roots, ref.value)
     end
-    return (; sites, roots)
+    return sites
 end
 
 relocation_word_type() = LLVM.IntType(8sizeof(UInt))
@@ -533,21 +550,18 @@ function emit_imported_relocations!(mod::LLVM.Module, relocs::Relocations)
 end
 
 """
-    apply_relocations!(mod, relocs) -> roots
+    apply_relocations!(mod, relocs)
 
 Loader entry point for `:defer` back-ends. Resolves every live site into `mod` without
 consuming `relocs`, so cached metadata can be reused. Sites whose global was optimized away
-are skipped.
-
-Returns the Julia `roots` that must stay alive for as long as the module's code can run.
+are skipped. Resolution permanently roots referenced Julia values in the process.
 Apply once per parsed module.
 """
 function apply_relocations!(mod::LLVM.Module, relocs::Relocations)
     live = copy(relocs)
     prune_dead_relocations!(mod, live)
-    roots = Any[ref.value for ref in values(live.sites) if ref isa JuliaValueRef]
     bake_relocations!(mod, live)
-    return roots
+    return
 end
 
 

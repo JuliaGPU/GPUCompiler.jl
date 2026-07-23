@@ -313,8 +313,9 @@ Select how a back-end lowers relocations:
 - `:defer` leaves the `:llvm` result for [`apply_relocations!`](@ref). Object emission
   requires all relocations to have been applied.
 
-Relocatable output requires [`supports_relocatable_ir`](@ref). Loaders must retain the roots
-returned by [`resolved_relocations`](@ref) or [`apply_relocations!`](@ref).
+Relocatable output requires [`supports_relocatable_ir`](@ref). Resolving relocations
+permanently roots the referenced Julia values in the process (mirroring Julia's own
+codegen), so loaders need no GC bookkeeping of their own.
 """
 relocation_lowering(@nospecialize(job::CompilerJob)) = :bake
 

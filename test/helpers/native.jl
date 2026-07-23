@@ -68,7 +68,7 @@ function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations
         add!(jd, LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix))
 
         relocations = GPUCompiler.resolved_relocations(relocs)
-        declarations = [(site, value) for (site, value) in relocations.sites
+        declarations = [(site, value) for (site, value) in relocations
                         if isdeclaration(globals(ir)[site.name])]
         cells = Vector{UInt}(undef, length(declarations))
         pairs = LLVM.API.LLVMOrcCSymbolMapPair[]
@@ -83,13 +83,13 @@ function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations
         isempty(pairs) || LLVM.define(jd, LLVM.absolute_symbols(pairs))
 
         add!(lljit, jd, MemoryBuffer(obj))
-        for (site, value) in relocations.sites
+        for (site, value) in relocations
             isdeclaration(globals(ir)[site.name]) && continue
             addr = lookup(lljit, site.name)
             unsafe_store!(Ptr{UInt}(pointer(addr) + site.offset), value)
         end
         addr = lookup(lljit, entry)
-        return pointer(addr), (lljit, cells, relocations.roots)
+        return pointer(addr), (lljit, cells)
     catch
         dispose(lljit)
         rethrow()
