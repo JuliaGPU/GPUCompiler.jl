@@ -29,19 +29,34 @@ end
 end
 
 @testset "global variable relocation" begin
-    # references to Julia objects (`julia.constgv` globals, e.g. Symbol literals) must
-    # survive until `relocate_gvs!` bakes in their addresses at the toplevel link step.
-    # they used to be kept alive as internal globals with a null initializer, which the
-    # GlobalOpt run in `finish_module!` folded away, constant-folding any comparison
-    # against them (JuliaGPU/CUDA.jl#3185: kernels specialized on Symbols misbehaved).
+    # Julia-object references must remain declarations until relocation lowering. Null
+    # definitions would let GlobalOpt fold comparisons against them.
     mod = @eval module $(gensym())
         kernel(name::Symbol) = name === :var ? 1 : 2
     end
+    # `patch=true` keeps the slot symbolic instead of resolving it into the IR.
     ir = sprint() do io
-        PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; dump_module=true)
+        PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; dump_module=true, patch=true)
     end
-    addr = UInt64(pointer_from_objref(:var))
-    @test occursin(string(addr), ir)
+    # Julia embeds the Symbol pointer before exposing the IR to GPUCompiler when it
+    # can't emit relocatable global metadata; otherwise it stays a symbolic slot we preserve.
+    if GPUCompiler.supports_relocatable_ir()
+        @test occursin("@jl_sym_var_", ir)
+    else
+        @test occursin("@jl_sym_var_", ir) || occursin("inttoptr", ir)
+    end
+    @test !occursin("@\"jl_sym#", ir)
+end
+
+@testset "Julia value global names" begin
+    # Julia's external codegen can name the declaration for this Symbol with `#`.
+    # The final PTX path must see the sanitized Julia value global, not the original
+    # declaration name rejected by NVPTX.
+    mod = @eval module $(gensym())
+        const unusual_symbol = Symbol("value#global")
+        kernel(name::Symbol) = (name === unusual_symbol; return)
+    end
+    @test PTX.code_execution(mod.kernel, Tuple{Symbol}) !== nothing
 end
 
 @testset "boxed Bool singleton relocation" begin
@@ -69,6 +84,28 @@ end
             @test !occursin("@$name = external", ir)
             @test !occursin("inttoptr", ir)
         end
+    end
+end
+
+@testset "boxed header relocation" begin
+    mod = @eval module $(gensym())
+        @noinline produce(cond::Bool, value::Int32) = cond ? value : 1.5
+        function consume(cond::Bool, value::Int32)
+            x = produce(cond, value)
+            x isa Float64 && return x
+            return 0.0
+        end
+    end
+    # `patch=true` keeps the interior header relocation symbolic (externally_initialized).
+    ir = sprint(io->PTX.code_llvm(io, mod.consume, Tuple{Bool,Int32};
+                                  dump_module=true, patch=true))
+    # As with Symbol literals above, Julia embeds the type pointer when it can't emit
+    # relocatable global metadata; otherwise GPUCompiler represents it as a relocation.
+    if GPUCompiler.supports_relocatable_ir()
+        @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir)
+    else
+        @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir) ||
+              occursin("inttoptr", ir)
     end
 end
 
@@ -197,6 +234,24 @@ if :NVPTX in LLVM.backends()
                                          dump_module=true))
         @test occursin("jl_true_box", ptx)
         @test !occursin(r"(?m)^\.extern .*\bjl_true\b", ptx)
+    end
+end
+
+@testset "patchable relocation" begin
+    # A patching back-end (like CUDA.jl) keeps relocations symbolic; the patchable box must
+    # survive lowering into the generated PTX as a `.global` for the loader to write.
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            @noinline produce(cond::Bool, value::Int32) = cond ? value : 1.5
+            function consume(cond::Bool, value::Int32)
+                x = produce(cond, value)
+                x isa Float64 && return x
+                return 0.0
+            end
+        end
+        ptx = sprint(io->PTX.code_native(io, mod.consume, Tuple{Bool,Int32};
+                                         dump_module=true, patch=true))
+        @test occursin(r"\.global .*_box", ptx)
     end
 end
 

@@ -1,6 +1,7 @@
 module Native
 
 using ..GPUCompiler
+using LLVM
 import ..TestRuntime
 
 # local method table for device functions
@@ -9,9 +10,13 @@ Base.Experimental.@MethodTable(test_method_table)
 struct CompilerParams <: AbstractCompilerParams
     entry_safepoint::Bool
     method_table
+    jit::Bool
+    patch::Bool
+    defer::Bool
 
-    CompilerParams(entry_safepoint::Bool=false, method_table=test_method_table) =
-        new(entry_safepoint, method_table)
+    CompilerParams(entry_safepoint::Bool=false, method_table=test_method_table,
+                   jit::Bool=false, patch::Bool=false, defer::Bool=false) =
+        new(entry_safepoint, method_table, jit, patch, defer)
 end
 
 module Runtime end
@@ -22,14 +27,73 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
+# Object-emitting modes drive an ORC loader (see `load`): `jit` imports declarations,
+# while `patch` emits definitions to write after loading. `defer` stops at `:llvm`.
+GPUCompiler.relocation_lowering(@nospecialize(job::NativeCompilerJob)) =
+    job.config.params.defer ? :defer :
+    job.config.params.patch ? :patch :
+    job.config.params.jit   ? :import : :bake
+
+function GPUCompiler.mcgen(@nospecialize(job::NativeCompilerJob), mod::LLVM.Module,
+                           format=LLVM.API.LLVMAssemblyFile)
+    if job.config.params.jit || job.config.params.patch
+        target = job.config.target
+        @dispose tm=JITTargetMachine(GPUCompiler.llvm_triple(target), target.cpu,
+                                     target.features) begin
+            return String(emit(tm, mod, format))
+        end
+    else
+        return invoke(GPUCompiler.mcgen, Tuple{CompilerJob,LLVM.Module,Any},
+                      job, mod, format)
+    end
+end
+
 function create_job(@nospecialize(func), @nospecialize(types);
-                    entry_safepoint::Bool=false, method_table=test_method_table, kwargs...)
+                    entry_safepoint::Bool=false, method_table=test_method_table,
+                    jit::Bool=false, patch::Bool=false, defer::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget(;jlruntime=true)
-    params = CompilerParams(entry_safepoint, method_table)
+    params = CompilerParams(entry_safepoint, method_table, jit, patch, defer)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
+end
+
+function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations,
+              ir::LLVM.Module)
+    lljit = LLJIT(; tm=JITTargetMachine())
+    try
+        jd = JITDylib(lljit)
+        prefix = LLVM.get_prefix(lljit)
+        add!(jd, LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix))
+
+        relocations = GPUCompiler.resolved_relocations(relocs)
+        declarations = [(site, value) for (site, value) in relocations
+                        if isdeclaration(globals(ir)[site.name])]
+        cells = Vector{UInt}(undef, length(declarations))
+        pairs = LLVM.API.LLVMOrcCSymbolMapPair[]
+        for (i, (site, value)) in enumerate(declarations)
+            cells[i] = value
+            symbol = LLVM.API.LLVMJITEvaluatedSymbol(
+                reinterpret(UInt, pointer(cells, i)),
+                LLVM.API.LLVMJITSymbolFlags(
+                    LLVM.API.LLVMJITSymbolGenericFlagsExported, 0))
+            push!(pairs, LLVM.API.LLVMOrcCSymbolMapPair(mangle(lljit, site.name), symbol))
+        end
+        isempty(pairs) || LLVM.define(jd, LLVM.absolute_symbols(pairs))
+
+        add!(lljit, jd, MemoryBuffer(obj))
+        for (site, value) in relocations
+            isdeclaration(globals(ir)[site.name]) && continue
+            addr = lookup(lljit, site.name)
+            unsafe_store!(Ptr{UInt}(pointer(addr) + site.offset), value)
+        end
+        addr = lookup(lljit, entry)
+        return pointer(addr), (lljit, cells)
+    catch
+        dispose(lljit)
+        rethrow()
+    end
 end
 
 function code_typed(@nospecialize(func), @nospecialize(types); kwargs...)

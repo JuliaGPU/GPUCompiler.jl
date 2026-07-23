@@ -2,6 +2,7 @@
 
 function irgen(@nospecialize(job::CompilerJob))
     mod, compiled, gv_to_value = @tracepoint "emission" compile_method_instance(job)
+    relocations = collect_julia_value_relocations!(mod, gv_to_value)
     if job.config.entry_abi === :specfunc
         entry_fn = compiled[job.source].specfunc
     else
@@ -43,18 +44,22 @@ function irgen(@nospecialize(job::CompilerJob))
         end
     end
 
-    # sanitize global values (Julia doesn't when using the external codegen policy)
-    for val in [collect(globals(mod)); collect(functions(mod))]
+    # sanitize defined globals (external declaration names are part of their ABI)
+    for val in collect(globals(mod))
+        isdeclaration(val) && continue
+        new_name = safe_name(LLVM.name(val))
+        if LLVM.name(val) != new_name
+            LLVM.name!(val, new_name)
+        end
+    end
+
+    # sanitize defined functions (Julia doesn't when using the external codegen policy)
+    for val in collect(functions(mod))
         isdeclaration(val) && continue
         old_name = LLVM.name(val)
         new_name = safe_name(old_name)
         if old_name != new_name
             LLVM.name!(val, new_name)
-            val = get(gv_to_value, old_name, nothing)
-            if val !== nothing
-                delete!(gv_to_value, old_name)
-                gv_to_value[new_name] = val
-            end
         end
     end
 
@@ -145,7 +150,7 @@ function irgen(@nospecialize(job::CompilerJob))
         lower_alloca!(job, mod)
     end
 
-    return mod, compiled, gv_to_value
+    return mod, compiled, relocations
 end
 
 

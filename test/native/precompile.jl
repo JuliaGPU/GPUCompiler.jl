@@ -37,22 +37,21 @@ precompile_test_harness("Inference caching") do load_path
             Results() = new(nothing)
         end
 
-        portable_kernel(x) = x + 1
+        persistent_kernel(x) = x + 1
         session_kernel(x) = x + 2
 
-        # Attach representative back-end artifacts while the package image is built. The
-        # portable entry should survive serialization; the session-dependent one should be
-        # removed by GPUCompiler's pre-output atexit hook.
+        # A back-end implementing relocation keeps results across sessions.
         let
-            job, _ = NativeCompiler.Native.create_job(portable_kernel, (Int,))
+            job, _ = NativeCompiler.Native.create_job(persistent_kernel, (Int,); jit=true)
             precompile(job)
-            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "portable"
+            NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "persistent"
         end
+
+        # Default back-ends use the session-local store.
         let
             job, _ = NativeCompiler.Native.create_job(session_kernel, (Int,))
             precompile(job)
             NativeCompiler.GPUCompiler.cached_results(Results, job).artifact = "session"
-            NativeCompiler.GPUCompiler.mark_session_dependent!(job)
         end
 
         let
@@ -111,10 +110,15 @@ precompile_test_harness("Inference caching") do load_path
 
         using NativeBackend
 
-        portable_job, _ = NativeCompiler.Native.create_job(NativeBackend.portable_kernel, (Int,))
-        portable_res = GPUCompiler.cached_results(NativeBackend.Results, portable_job)
-        @test portable_res !== nothing
-        @test portable_res.artifact == "portable"
+        persistent_job, _ = NativeCompiler.Native.create_job(
+            NativeBackend.persistent_kernel, (Int,); jit=true)
+        persistent_res = GPUCompiler.cached_results(NativeBackend.Results, persistent_job)
+        @test persistent_res !== nothing
+        if GPUCompiler.supports_relocatable_ir()
+            @test persistent_res.artifact == "persistent"
+        else
+            @test persistent_res.artifact === nothing
+        end
 
         session_job, _ = NativeCompiler.Native.create_job(NativeBackend.session_kernel, (Int,))
         session_res = GPUCompiler.cached_results(NativeBackend.Results, session_job)

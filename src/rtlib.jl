@@ -60,22 +60,20 @@ end
 
 ## functionality to build the runtime library
 
-# Per-function compilation results for the GPU runtime library, cached through the
-# same `cached_results` mechanism back-ends use for kernels. On 1.11+ the bitcode
-# thus lives on the runtime function's `CodeInstance` — possibly alongside a
-# back-end's own results struct — and persists through precompilation, so sessions
-# loading a back-end that compiled its runtime during precompile skip codegen
-# entirely. On 1.10 it is cached for the duration of the session.
+# Per-function relocatable bitcode for the GPU runtime library. When Julia exposes the
+# required relocation metadata, this persists with the function's `CodeInstance`.
+# `runtime_libs` below provides the session cache on older Julia versions.
 mutable struct RuntimeFunctionResults
     bitcode::Union{Nothing,Vector{UInt8}}
-    RuntimeFunctionResults() = new(nothing)
+    relocations::Relocations
+    RuntimeFunctionResults() = new(nothing, Relocations())
 end
 
 # Compile a single runtime function and link it into `mod`. The renamed bitcode is
 # memoized through `RuntimeFunctionResults`; the session-local `runtime_libs` cache
 # below additionally avoids repeating the parse-and-link work within a session.
-function emit_function!(mod, config::CompilerConfig, source::MethodInstance, method,
-                        world::UInt)
+function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
+                        source::MethodInstance, method, world::UInt)
     name = method.llvm_name
     rt_job = CompilerJob(source, config, world)
 
@@ -83,12 +81,16 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
     # inference itself.
     ci, res = runtime_function_results(rt_job)
     if res !== nothing && res.bitcode !== nothing
-        link!(mod, parse(LLVM.Module, MemoryBuffer(res.bitcode)))
+        link_relocatable!(mod, relocs,
+                          parse(LLVM.Module, MemoryBuffer(res.bitcode)),
+                          res.relocations)
         ci === nothing && (ci = runtime_code_instance(rt_job))
         return ci::CodeInstance
     end
 
-    new_mod, meta = compile_unhooked(:llvm, rt_job)
+    # Keep this intermediate module relocatable even when the final back-end resolves
+    # relocations eagerly. The caller links a fresh copy and lowers the merged sites.
+    new_mod, meta = compile_unhooked(:llvm, rt_job; resolve_relocations=false)
     ft = function_type(meta.entry)
     expected_ft = convert(LLVM.FunctionType, method)
     if return_type(ft) != return_type(expected_ft)
@@ -97,13 +99,7 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
     run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
-
-    # Resolve constgv mappings before their metadata is discarded. Dedicated Bool
-    # globals are resolved after linking into the toplevel module.
-    if !isempty(meta.gv_to_value)
-        portable = relocate_gvs!(new_mod, meta.gv_to_value)
-        portable || mark_session_dependent!(rt_job)
-    end
+    prune_dead_relocations!(new_mod, meta.relocations)
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
@@ -118,17 +114,29 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
     io = IOBuffer()
     write(io, new_mod)
     ci === nothing && (ci = runtime_code_instance(rt_job))
-    res === nothing && (res = job_results(RuntimeFunctionResults, ci, rt_job.config))
-    res.bitcode = take!(io)
+    if supports_relocatable_ir()
+        res === nothing && (res = runtime_results(RuntimeFunctionResults, ci, rt_job.config))
+        res.bitcode = take!(io)
+        res.relocations = meta.relocations
+    end
 
-    link!(mod, new_mod)
+    link_relocatable!(mod, relocs, new_mod, meta.relocations)
     return ci::CodeInstance
+end
+
+function runtime_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
+    @static if HAS_INTEGRATED_CACHE
+        if supports_relocatable_ir()
+            return persistent_results(V, ci, config)
+        end
+    end
+    return session_results(V, ci, config)
 end
 
 function runtime_function_results(@nospecialize(job::CompilerJob))
     ci = job_code_instance(job)
     ci === nothing && return nothing, nothing
-    return ci, job_results(RuntimeFunctionResults, ci, job.config)
+    return ci, runtime_results(RuntimeFunctionResults, ci, job.config)
 end
 
 function runtime_method_instance(@nospecialize(job::CompilerJob), method)
@@ -170,13 +178,14 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     mod = LLVM.Module("GPUCompiler run-time library")
     sources = MethodInstance[]
     code_instances = CodeInstance[]
+    relocs = Relocations()
 
     for method in values(Runtime.methods)
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         source = resolved
         push!(sources, source)
-        push!(code_instances, emit_function!(mod, config, source, method, job.world))
+        push!(code_instances, emit_function!(mod, relocs, config, source, method, job.world))
     end
 
     # we cannot optimize the runtime library, because the code would then be optimized again
@@ -184,13 +193,13 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     # removes Julia address spaces, which would then lead to type mismatches when using
     # functions from the runtime library from IR that has not been stripped of AS info.
 
-    return mod, sources, code_instances
+    return mod, sources, code_instances, relocs
 end
 
 # Session-local cache of assembled runtime libraries, keyed by
 # `(runtime_config(job), opaque_pointers)`: the derived runtime config covers every
-# codegen-relevant setting (e.g. the debug level, which is baked into the runtime IR
-# as a constant), while cosmetic kernel-job fields are normalized away. Cross-session
+# codegen-relevant setting (e.g. the debug level stored in the runtime IR), while
+# cosmetic kernel-job fields are normalized away. Cross-session
 # persistence happens at the per-function level (see `RuntimeFunctionResults`):
 # reassemble on first use of each session, then reuse within the session.
 #
@@ -203,6 +212,7 @@ mutable struct RuntimeLibrary
     sources::Vector{MethodInstance}
     code_instances::Vector{CodeInstance}
     validated_world::UInt
+    relocations::Relocations
 end
 
 function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob))
@@ -235,14 +245,16 @@ const runtime_libs_lock = ReentrantLock()
     cached = Base.@lock runtime_libs_lock begin
         cached = get(runtime_libs, key, nothing)
         if cached === nothing || !runtime_library_valid(cached, job)
-            lib, sources, code_instances = build_runtime(job, config)
+            lib, sources, code_instances, relocations = build_runtime(job, config)
             io = IOBuffer()
             write(io, lib)
-            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world)
+            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world,
+                                    relocations)
             runtime_libs[key] = cached
         end
         cached
     end
 
-    return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true)
+    return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true),
+           cached.relocations
 end

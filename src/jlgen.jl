@@ -563,14 +563,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
     end
 
-    # Maintain a map from global variables to their initialized Julia values. The
-    # objects pointed to are perma-rooted during codegen. We *don't* bake these
-    # addresses into the IR yet, so that we can cache it across sessions.
+    # Map global variables to their rooted Julia values without embedding addresses in IR.
     gv_to_value = Dict{String, Ptr{Cvoid}}()
     if gvs === nothing
-        # No reliable GV table on this Julia — best-effort discovery from the module.
-        # On these older versions Julia's own emit may have already baked in absolute
-        # pointer values; we recover them by reading existing initializers.
+        # Without a reliable GV table, recover addresses from existing initializers.
         for gv in globals(llvm_mod)
             if !haskey(metadata(gv), "julia.constgv")
                 continue
@@ -597,15 +593,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             gv = GlobalVariable(gv_ref)
             gv_to_value[LLVM.name(gv)] = init
         end
-        # Strip the initializers so the IR we hand back is session-portable
-        # (on 1.12 `jl_emit_native_impl` bakes pointers via
-        # `literal_static_pointer_val`; on 1.13+ Julia nulls them itself);
-        # `relocate_gvs!` at the toplevel link step writes the session-current
-        # value in. Demote each GV to an external *declaration* rather than
-        # giving it a null initializer: an internal global initialized to null
-        # is fair game for optimization passes that run before relocation
-        # (e.g. GlobalOpt in the PTX back-end's `finish_module!`), which would
-        # fold loads of it to null and delete the global.
+        # Discard session addresses. Declarations survive optimization until relocation
+        # lowering; null definitions could be folded away first.
         for gv in globals(llvm_mod)
             haskey(gv_to_value, LLVM.name(gv)) || continue
             initializer!(gv, nothing)
@@ -756,131 +745,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     return llvm_mod, compiled, gv_to_value
 end
 
-"""
-    relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
-
-Resolve globals that refer to Julia objects. `jl_true`/`jl_false`, which are
-absent from `gv_to_value`, become canonical module-local boxes. Ordinary
-non-ghost isbits objects are also materialized; other objects keep their host
-address as an opaque identity token.
-
-Only GVs that are declarations (as produced by `compile_method_instance`,
-which strips the initializers for session portability) or still have a null
-initializer are touched: preserving existing initializers covers the
-older-Julia path where Julia itself emits pointer values directly.
-
-Apart from the dedicated Bool globals, GVs present in `mod` but missing from
-`gv_to_value` remain declarations, which back-ends will reject loudly
-(undefined symbol) rather than silently folding to null.
-
-Returns `true` if the module is session-portable afterwards: no absolute host
-address was written (neither a baked slot nor a materialized header carrying
-a non-smalltag type pointer).
-"""
-function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
-    portable = materialize_bool_singletons!(mod)
-    mod_gvs = globals(mod)
-    for (name, init) in gv_to_value
-        # Bools are resolved by name above.
-        name in ("jl_true", "jl_false") && continue
-
-        haskey(mod_gvs, name) || continue
-        gv = mod_gvs[name]
-        cur = initializer(gv)
-        if !(cur === nothing || LLVM.isnull(cur))
-            # pre-baked by Julia itself (pre-1.13): also session-absolute
-            portable = false
-            continue
-        end
-
-        val = nothing
-        if init != C_NULL
-            obj = Base.unsafe_pointer_to_objref(init)
-            # Zero-sized objects remain identity tokens.
-            if isbitstype(typeof(obj)) && sizeof(obj) > 0 && !(obj isa Bool)
-                val, hdr = materialize_box!(mod, gv, obj, init)
-                # non-smalltag headers carry a host DataType pointer
-                portable &= hdr < UInt(64 << 4)   # jl_max_tags << 4
-            end
-        end
-        if val === nothing
-            val = const_inttoptr(ConstantInt(Int64(init)), global_value_type(gv))
-            portable = false
-        end
-        initializer!(gv, val)
-        # re-internalize what compile_method_instance demoted to an external
-        # declaration; with the value in place, the optimizer can now fold it
-        linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-    end
-    return portable
-end
-
-# Bool JuliaVariables are absent from `gv_to_value`; define one device box per name.
-function materialize_bool_singletons!(mod::LLVM.Module)
-    portable = true
-    mod_gvs = globals(mod)
-    for (name, obj) in ("jl_true" => true, "jl_false" => false)
-        haskey(mod_gvs, name) || continue
-        gv = mod_gvs[name]
-        cur = initializer(gv)
-        if !(cur === nothing || LLVM.isnull(cur))
-            # Existing definitions may contain session-specific addresses.
-            portable = false
-            continue
-        end
-
-        init = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
-        val, hdr = materialize_box!(mod, gv, obj, init)
-        initializer!(gv, val)
-        constant!(gv, true)
-        linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-
-        # Stay conservative if Bool stops using a smalltag.
-        portable &= hdr < UInt(64 << 4)   # jl_max_tags << 4
-    end
-    return portable
-end
-
-# emit a device-resident constant replica of the box holding `obj`; returns
-# the constant to store in the slot, and the (gcbits-masked) header word
-function materialize_box!(mod::LLVM.Module, gv::GlobalVariable, @nospecialize(obj),
-                          init::Ptr{Cvoid})
-    @assert isbitstype(typeof(obj)) && sizeof(obj) > 0
-
-    W = sizeof(Int)
-    hdr, bytes = GC.@preserve obj begin
-        # the header word transparently yields the smalltag immediate for
-        # smalltag types and the host type pointer otherwise; drop the gcbits
-        hdr = unsafe_load(Ptr{UInt}(init - W)) & ~UInt(15)
-        bytes = [unsafe_load(Ptr{UInt8}(init), i) for i in 1:sizeof(obj)]
-        hdr, bytes
-    end
-
-    T_word = LLVM.IntType(8W)
-    T_byte = LLVM.Int8Type()
-    fields = LLVM.Constant[ConstantInt(T_word, hdr), ConstantDataArray(T_byte, bytes)]
-    payload_idx = 1
-    if Base.datatype_alignment(typeof(obj)) > W
-        # pad so the payload lands at a 16-byte offset (JL_HEAP_ALIGNMENT max)
-        pushfirst!(fields, ConstantDataArray(T_byte, zeros(UInt8, 16 - W)))
-        payload_idx = 2
-    end
-    boxinit = ConstantStruct(fields)
-    boxty = value_type(boxinit)
-
-    box = GlobalVariable(mod, boxty, safe_name(LLVM.name(gv)) * "_box")
-    initializer!(box, boxinit)
-    constant!(box, true)
-    linkage!(box, LLVM.API.LLVMPrivateLinkage)
-    alignment!(box, 16)
-    unnamed_addr!(box, true)
-
-    idx(i) = ConstantInt(LLVM.Int32Type(), i)
-    payload = const_gep(boxty, box, LLVM.Constant[idx(0), idx(payload_idx)])
-    slotty = global_value_type(gv)
-    val = value_type(payload) == slotty ? payload : const_addrspacecast(payload, slotty)
-    return val, hdr
-end
 
 # partially revert JuliaLang/julia#49391 — see #527
 @static if v"1.11.0-DEV.1603" <= VERSION < v"1.12.0-DEV.347" && # reverted on master

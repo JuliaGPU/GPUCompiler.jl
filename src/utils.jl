@@ -418,3 +418,14 @@ end
         return inits
     end
 end
+
+"""Whether Julia exposes enough global-variable metadata to emit relocatable IR."""
+supports_relocatable_ir() = @static if VERSION >= v"1.13.0-DEV.623"
+    true
+else
+    # `jl_get_llvm_gvs_globals` was backported to 1.10, so the symbol alone is not enough:
+    # 1.10's codegen still embeds Julia addresses (as `inttoptr` constants) in the JIT
+    # (non-imaging) mode we compile in, instead of emitting the relocatable global
+    # declarations the relocation machinery collects. Only 1.11+ emits those declarations.
+    VERSION >= v"1.11-" && HAS_LLVM_GVS_GLOBALS
+end
