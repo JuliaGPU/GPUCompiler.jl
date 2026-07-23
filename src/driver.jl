@@ -51,9 +51,11 @@ export compile
 Compile a `job` to one of the following formats as specified by the `target` argument:
 `:llvm` for LLVM IR, `:asm` for assembly, or `:obj` for object code.
 
-The returned `relocations` metadata is final only for `:asm` and `:obj`, after runtime
-globals have been collected and the backend has lowered every live slot. The `:llvm` result
-still contains symbolic Julia-value slots and may contain raw `jl_*` runtime references.
+For the default `:bake` [`relocation_lowering`](@ref) strategy the `:llvm` result is
+execution-ready: Julia-value references are resolved into the IR during `emit_llvm` (it may
+still contain raw `jl_*` runtime references, collected and resolved at object emission). A
+back-end that defers relocation lowering keeps those references symbolic in the `:llvm`
+result and returns final `relocations` metadata only for `:asm`/`:obj`.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     if compile_hook[] !== nothing
@@ -337,6 +339,16 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
+            # Baking back-ends (the default) resolve host references into the IR here —
+            # before optimization, where `relocate_gvs!` used to run — so the optimizer sees
+            # concrete values and the `:llvm` result is execution-ready. Other strategies
+            # keep relocations symbolic for their loader, lowering them at object emission.
+            bake_relocations = relocation_lowering(job) === :bake
+            if bake_relocations
+                prune_dead_relocations!(ir, relocations)
+                bake_relocations!(ir, relocations)
+            end
+
             if job.config.optimize
                 @tracepoint "optimization" begin
                     optimize!(job, ir, relocations; job.config.opt_level)
@@ -359,6 +371,15 @@ const __llvm_initialized = Ref(false)
                         end
                     end
                 end
+            end
+
+            # Runtime linking during optimization can introduce further relocations (GC
+            # lowering materializes runtime calls that reference Julia globals). Bake those
+            # too, so a baking back-end's module is fully resolved before object emission
+            # even when the caller drives `emit_asm` without relocation metadata (Metal.jl).
+            if bake_relocations && !isempty(relocations.sites)
+                prune_dead_relocations!(ir, relocations)
+                bake_relocations!(ir, relocations)
             end
 
             if job.config.cleanup
@@ -414,6 +435,13 @@ const __llvm_initialized = Ref(false)
 
     return ir, (; entry, compiled, relocations)
 end
+
+# Forwarding method for back-ends that drive emission directly (e.g. Metal.jl's
+# `emit_llvm` + `emit_asm`). Correct for baking back-ends: their relocations were resolved
+# during `emit_llvm`, so no metadata needs threading through here.
+emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
+         format::LLVM.API.LLVMCodeGenFileType) =
+    emit_asm(job, ir, Relocations(), format)
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
                           relocs::Relocations, format::LLVM.API.LLVMCodeGenFileType)

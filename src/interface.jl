@@ -302,6 +302,27 @@ can_vectorize(@nospecialize(job::CompilerJob)) = false
 # Should emit PTLS lookup that can be relocated
 dump_native(@nospecialize(job::CompilerJob)) = false
 
+# How this back-end lowers relocations (host references) before object emission. One of:
+#
+# - `:bake` (default): resolve the references in the current session and materialize them
+#   into the IR. The `:llvm` result is execution-ready and no loader is needed. Baked code
+#   embeds session-local addresses, so it must not be persisted in `cached_results`.
+#
+# - `:patch`: keep references symbolic through optimization and emit every site as a
+#   patchable (null-init, externally-initialized) definition. The loader writes each
+#   resolved word at `global + offset` after loading the object.
+#
+# - `:import`: keep references symbolic and leave declaration slots external for the loader
+#   to resolve at link time (e.g. ORC `absoluteSymbols`); interior definition sites are
+#   still patched after loading.
+#
+# The value also fixes lowering *timing*: `:bake` resolves eagerly during `emit_llvm`,
+# other strategies defer to object emission. `:patch`/`:import` loaders must keep the
+# `roots` returned by [`resolved_relocations`](@ref) alive while the code can run. Generated
+# code is session-portable only when [`supports_relocatable_ir`](@ref) and a non-baking
+# strategy is used.
+relocation_lowering(@nospecialize(job::CompilerJob)) = :bake
+
 # the Julia module to look up target-specific runtime functions in (this includes both
 # target-specific functions from the GPU runtime library, like `malloc`, but also
 # replacements functions for operations like `Base.sin`)
@@ -506,9 +527,9 @@ end
 
 end # HAS_INTEGRATED_CACHE
 
-@public RelocationSite, Relocations
-@public lower_relocations!, bake_relocations!
-@public emit_patchable_relocations!
+@public RelocationSite, Relocations, relocation_lowering
+@public bake_relocations!, emit_patchable_relocations!, emit_imported_relocations!
+@public prune_dead_relocations!
 @public resolved_relocations, supports_relocatable_ir
 @public GPUCompilerCacheToken, cache_owner, cached_results
 

@@ -5,24 +5,27 @@
 # libjulia globals (`CGlobalRef`, like JuliaVariables). Every site names a word
 # at a byte offset in a global. Dedicated sites use offset zero in a word-sized
 # declaration (like `jl_sysimg_gvars`); other sites are inside defined globals
-# (like `gctags_list`/`relocs_list`). Declarations can be baked, patched, or
-# imported; sites in definitions can only be baked or patched.
+# (like `gctags_list`/`relocs_list`). A declaration can be baked, patched, or
+# resolved by a loader; a word inside a definition can only be baked or patched.
 #
-#   produce ──▶ merge (on link) ──▶ prune (after DCE) ──▶ lower (at emit_asm)
+#   produce ──▶ merge (on link) ──▶ prune (after DCE) ──▶ lower
 #
-# Lowering strategy              Loader contract                    Julia analog
-# -----------------              ---------------                    ------------
-# `bake_relocations!`            none; current-session words baked  JIT address folding
-# `emit_patchable_relocations!`  patch named globals after load     sysimage gvars
+# The back-end's `relocation_lowering` strategy picks how (and when) sites lower:
 #
-# The producers are `collect_julia_value_relocations!` during IR generation and
-# `collect_cglobal_relocations!` immediately before backend lowering. Names are
-# globally unique and assigned once, so linking can merge IR and metadata
-# without renaming.
+# Strategy    Lowering                       Loader contract                    Julia analog
+# --------    --------                       ---------------                    ------------
+# `:bake`     `bake_relocations!`            none; current-session words baked  JIT address folding
+# `:patch`    `emit_patchable_relocations!`  patch every site after load        sysimage gvars
+# `:import`   `emit_imported_relocations!`   resolve declarations at link time  sysimg symbol import
 #
-# Generated code is portable only when `supports_relocatable_ir()` and the
-# backend preserves these relocations for its loader. The default lowering bakes
-# current-session values.
+# Back-ends may also implement custom lowerings on top of these primitives (see the native
+# test helper's JIT loader). The producers are `collect_julia_value_relocations!` during IR
+# generation and `collect_cglobal_relocations!` immediately before back-end lowering. Names
+# are globally unique and assigned once, so linking can merge IR and metadata without
+# renaming.
+#
+# Generated code is portable only when `supports_relocatable_ir()` and a non-baking strategy
+# preserves these relocations for its loader. The default (`:bake`) resolves in-session.
 
 
 ## targets
@@ -115,6 +118,11 @@ struct Relocations
 end
 
 Relocations() = Relocations(Dict{RelocationSite,RelocationTarget}())
+
+# A loader that bakes from cached metadata consumes the sites (baking empties them), so it
+# needs a fresh copy per link. The site keys and targets are immutable, so a shallow copy of
+# the dict suffices.
+Base.copy(relocs::Relocations) = Relocations(copy(relocs.sites))
 
 """
     resolved_relocations(relocs)
@@ -432,23 +440,32 @@ end
 
 ## lowering
 
-"""
-    lower_relocations!(job, mod, relocs)
-
-Backend hook for lowering live relocations before object emission.
-
-The default implementation bakes them into the module using the current Julia process.
-Backends may instead emit patchable globals or implement custom lowering for their loaders.
-
-Backends using baked lowering must not persist generated code in `cached_results`. Generated
-code is session-portable only when [`supports_relocatable_ir`](@ref) and the backend preserves
-all relocations for its loader.
-"""
+# Lower live relocations before object emission, dispatching on the back-end's
+# `relocation_lowering` strategy. Internal: back-ends select a strategy through the trait
+# rather than overriding this.
 function lower_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                             relocs::Relocations)
-    bake_relocations!(mod, relocs)
+    strategy = relocation_lowering(job)
+    if strategy === :bake
+        bake_relocations!(mod, relocs)
+    elseif strategy === :patch
+        emit_patchable_relocations!(mod, relocs)
+    elseif strategy === :import
+        emit_imported_relocations!(mod, relocs)
+    else
+        error("Unknown relocation lowering strategy :$strategy")
+    end
+    return
 end
 
+"""
+    bake_relocations!(mod, relocs)
+
+Resolve every site in the current Julia process and materialize the resulting words into
+the IR, leaving `relocs` empty. The module is execution-ready but embeds session-local
+addresses, so it must not be persisted across sessions. Dead sites must be dropped first
+with [`prune_dead_relocations!`](@ref); baking errors on a site whose global is gone.
+"""
 function bake_relocations!(mod::LLVM.Module, relocs::Relocations)
     foreach_relocation(mod, relocs) do site, gv, ref
         if isdeclaration(gv)
@@ -490,6 +507,28 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
             extinit!(gv, true)
         end
         push!(used, gv)
+    end
+    isempty(used) || set_used!(mod, used...)
+    return
+end
+
+"""
+    emit_imported_relocations!(mod, relocs)
+
+Leave declaration slots external so a JIT loader resolves them at link time (e.g. ORC
+`absoluteSymbols`); a word inside a definition cannot be imported, so those sites stay
+`llvm.used` for the loader to patch after loading. Requires a per-object symbol namespace.
+"""
+function emit_imported_relocations!(mod::LLVM.Module, relocs::Relocations)
+    used = GlobalVariable[]
+    foreach_relocation(mod, relocs) do _, gv, _
+        if isdeclaration(gv)
+            constant!(gv, false)
+            linkage!(gv, LLVM.API.LLVMExternalLinkage)
+            extinit!(gv, false)
+        else
+            push!(used, gv)
+        end
     end
     isempty(used) || set_used!(mod, used...)
     return
