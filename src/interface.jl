@@ -534,10 +534,12 @@ end
 
 end # HAS_INTEGRATED_CACHE
 
+# The relocation API surface: data types, the strategy trait, the capability probe, and
+# one loader entry point per consumer style (`resolved_relocations` for `:patch`/`:import`
+# loaders, `apply_relocations!` for `:defer` consumers). The per-strategy lowering
+# primitives (`bake_relocations!` etc.) are internal, reached through the trait.
 @public RelocationSite, Relocations, relocation_lowering
-@public bake_relocations!, emit_patchable_relocations!, emit_imported_relocations!
-@public apply_relocations!, prune_dead_relocations!
-@public resolved_relocations, supports_relocatable_ir
+@public apply_relocations!, resolved_relocations, supports_relocatable_ir
 @public GPUCompilerCacheToken, cache_owner, cached_results
 
 # the method table to use

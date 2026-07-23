@@ -396,6 +396,11 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
+            # Non-baking strategies hand the `:llvm` result and its metadata to a loader
+            # or `:defer` consumer; drop sites that optimization killed so they don't see
+            # (or cache) dead entries.
+            bake_relocations || prune_dead_relocations!(ir, relocations)
+
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
 
