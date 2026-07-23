@@ -767,7 +767,10 @@ end
 
             bytes = Vector{UInt8}(codeunits(obj))
             entry = LLVM.name(meta.entry)
-            expected = GPUCompiler.resolve_relocation_target(only(values(relocs.sites)))
+            probe_site = findfirst(ref -> ref isa GPUCompiler.JuliaValueRef &&
+                                          ref.value === :relocation_probe, relocs.sites)
+            @test probe_site !== nothing
+            expected = GPUCompiler.resolve_relocation_target(relocs.sites[probe_site])
             fptr, keepalive = Native.load(bytes, entry, relocs, meta.ir)
             try
                 GC.@preserve keepalive begin
@@ -825,6 +828,11 @@ end
         @test isempty(meta.relocations.sites)
         # nothing is left for a loader to patch or import
         @test !any(GPUCompiler.isextinit, globals(ir))
+
+        # back-ends like Metal.jl drive object emission themselves, without threading
+        # relocation metadata through; that only works because of the baking above.
+        code, _ = GPUCompiler.emit_asm(job, ir, LLVM.API.LLVMObjectFile)
+        @test !isempty(code)
     end
 end
 
@@ -853,7 +861,10 @@ end
 
             bytes = Vector{UInt8}(codeunits(obj))
             entry = LLVM.name(meta.entry)
-            expected = GPUCompiler.resolve_relocation_target(only(values(relocs.sites)))
+            probe_site = findfirst(ref -> ref isa GPUCompiler.JuliaValueRef &&
+                                          ref.value === :patch_probe, relocs.sites)
+            @test probe_site !== nothing
+            expected = GPUCompiler.resolve_relocation_target(relocs.sites[probe_site])
             fptr, keepalive = Native.load(bytes, entry, relocs, meta.ir)
             try
                 GC.@preserve keepalive begin
