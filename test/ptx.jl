@@ -240,6 +240,24 @@ if :NVPTX in LLVM.backends()
     end
 end
 
+@testset "patchable relocation" begin
+    # A patching back-end (like CUDA.jl) keeps relocations symbolic; the patchable box must
+    # survive lowering into the generated PTX as a `.global` for the loader to write.
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            @noinline produce(cond::Bool, value::Int32) = cond ? value : 1.5
+            function consume(cond::Bool, value::Int32)
+                x = produce(cond, value)
+                x isa Float64 && return x
+                return 0.0
+            end
+        end
+        ptx = sprint(io->PTX.code_native(io, mod.consume, Tuple{Bool,Int32};
+                                         dump_module=true, patch=true))
+        @test occursin(r"\.global .*_box", ptx)
+    end
+end
+
 @testset "child functions" begin
     # we often test using @noinline child functions, so test whether these survive
     # (despite not having side-effects)

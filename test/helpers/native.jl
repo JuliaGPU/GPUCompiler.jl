@@ -11,10 +11,11 @@ struct CompilerParams <: AbstractCompilerParams
     entry_safepoint::Bool
     method_table
     jit::Bool
+    patch::Bool
 
     CompilerParams(entry_safepoint::Bool=false, method_table=test_method_table,
-                   jit::Bool=false) =
-        new(entry_safepoint, method_table, jit)
+                   jit::Bool=false, patch::Bool=false) =
+        new(entry_safepoint, method_table, jit, patch)
 end
 
 module Runtime end
@@ -25,14 +26,15 @@ GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
-# The JIT mode drives an ORC loader (see `load`), so keep relocations symbolic and import
-# them at link time; otherwise bake in-session like a plain compilation.
+# Both non-baking modes drive an ORC loader (see `load`): `jit` imports declarations at
+# link time, `patch` emits patchable definitions to write after loading. Plain jobs bake.
 GPUCompiler.relocation_lowering(@nospecialize(job::NativeCompilerJob)) =
-    job.config.params.jit ? :import : :bake
+    job.config.params.patch ? :patch :
+    job.config.params.jit   ? :import : :bake
 
 function GPUCompiler.mcgen(@nospecialize(job::NativeCompilerJob), mod::LLVM.Module,
                            format=LLVM.API.LLVMAssemblyFile)
-    if job.config.params.jit
+    if job.config.params.jit || job.config.params.patch
         target = job.config.target
         @dispose tm=JITTargetMachine(GPUCompiler.llvm_triple(target), target.cpu,
                                      target.features) begin
@@ -46,11 +48,11 @@ end
 
 function create_job(@nospecialize(func), @nospecialize(types);
                     entry_safepoint::Bool=false, method_table=test_method_table,
-                    jit::Bool=false, kwargs...)
+                    jit::Bool=false, patch::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget(;jlruntime=true)
-    params = CompilerParams(entry_safepoint, method_table, jit)
+    params = CompilerParams(entry_safepoint, method_table, jit, patch)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end

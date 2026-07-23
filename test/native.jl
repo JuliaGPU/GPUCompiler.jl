@@ -812,6 +812,115 @@ end
     end
 end
 
+@testset "eager relocation baking" begin
+    # The default (baking) back-end resolves host references into the IR during `emit_llvm`,
+    # so the `:llvm` result carries no relocation metadata and needs no loader — the contract
+    # that lets Metal.jl and unmodified AllocCheck consume it directly.
+    mod = @eval module $(gensym())
+        probe() = UInt(pointer_from_objref(:eager_probe))
+    end
+    job, _ = Native.create_job(mod.probe, Tuple{})
+    JuliaContext() do ctx
+        ir, meta = GPUCompiler.compile(:llvm, job)
+        @test isempty(meta.relocations.sites)
+        # nothing is left for a loader to patch or import
+        @test !any(GPUCompiler.isextinit, globals(ir))
+    end
+end
+
+@testset "patchable relocation" begin
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            f() = UInt(pointer_from_objref(:patch_probe))
+        end
+        job, _ = Native.create_job(mod.f, Tuple{}; patch=true)
+        JuliaContext() do ctx
+            obj, meta = GPUCompiler.compile(:obj, job)
+            relocs = meta.relocations
+            @test !isempty(relocs.sites)
+
+            # every declaration slot became a null-init, externally-initialized definition
+            # kept alive by `llvm.used`; the loader patches each site after loading.
+            @test haskey(globals(meta.ir), "llvm.used")
+            for site in keys(relocs.sites)
+                gv = globals(meta.ir)[site.name]
+                @test !isdeclaration(gv)
+                @test isextinit(gv)
+                @test !isconstant(gv)
+                @test linkage(gv) == LLVM.API.LLVMExternalLinkage
+                @test LLVM.isnull(initializer(gv))
+            end
+
+            bytes = Vector{UInt8}(codeunits(obj))
+            entry = LLVM.name(meta.entry)
+            expected = GPUCompiler.resolve_relocation_target(only(values(relocs.sites)))
+            fptr, keepalive = Native.load(bytes, entry, relocs, meta.ir)
+            try
+                GC.@preserve keepalive begin
+                    @test ccall(fptr, UInt, ()) == expected
+                end
+            finally
+                dispose(first(keepalive))
+            end
+        end
+    end
+end
+
+@testset "relocation validation errors" begin
+    JuliaContext() do ctx
+        word() = GPUCompiler.relocation_word_type()
+        nop = (_site, _gv, _ref) -> nothing
+        ref = GPUCompiler.JuliaValueRef(:probe)
+        reloc(name, offset=0) =
+            GPUCompiler.Relocations(Dict(GPUCompiler.RelocationSite(name, offset) => ref))
+
+        # a site whose global is absent from the module
+        mod = LLVM.Module("errors")
+        @test_throws "Missing relocation global" GPUCompiler.foreach_relocation(
+            nop, mod, reloc("absent"))
+
+        # a declaration slot may only carry a zero offset
+        mod = LLVM.Module("errors")
+        GlobalVariable(mod, word(), "slot")
+        @test_throws "nonzero offset" GPUCompiler.foreach_relocation(
+            nop, mod, reloc("slot", 8))
+
+        # a declaration slot must be word-sized
+        mod = LLVM.Module("errors")
+        GlobalVariable(mod, LLVM.Int32Type(), "narrow")
+        @test_throws "has size" GPUCompiler.foreach_relocation(nop, mod, reloc("narrow"))
+
+        # an interior site must land within its global
+        mod = LLVM.Module("errors")
+        gv = GlobalVariable(mod, LLVM.StructType([LLVM.Int64Type(), LLVM.Int64Type()]), "box")
+        initializer!(gv, ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(0)]))
+        @test_throws "outside its" GPUCompiler.foreach_relocation(nop, mod, reloc("box", 16))
+    end
+end
+
+@testset "prune dead relocations" begin
+    JuliaContext() do ctx
+        ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
+        mod = parse(LLVM.Module, """
+            @live = external global i64
+            @dead = internal global { i64, i64 } { i64 0, i64 0 }
+            define i64 @use() {
+                %v = load i64, $(ptr("i64")) @live
+                ret i64 %v
+            }""")
+        site(name, offset=0) = GPUCompiler.RelocationSite(name, offset)
+        relocs = GPUCompiler.Relocations(Dict(
+            site("live")   => GPUCompiler.JuliaValueRef(:live),
+            site("dead")   => GPUCompiler.JuliaValueRef(:dead),   # unused definition
+            site("absent") => GPUCompiler.JuliaValueRef(:absent), # global already gone
+        ))
+        GPUCompiler.prune_dead_relocations!(mod, relocs)
+        @test collect(keys(relocs.sites)) == [site("live")]
+        @test haskey(globals(mod), "live")     # a used declaration survives
+        @test !haskey(globals(mod), "dead")    # the dead definition is erased
+    end
+end
+
 @testset "cglobal relocation" begin
     # JIT-private symbols like `jl_get_pgcstack_resolved` (JuliaLang/julia#61527) cannot
     # be looked up using `jl_cglobal`, so we should only resolve bindings that are
@@ -1002,6 +1111,22 @@ end
         GPUCompiler.link_relocatable!(dest, dest_relocs, src, src_relocs;
                                        only_needed=true)
         @test collect(keys(dest_relocs.sites)) == [site("used_patch")]
+
+        # A shared site whose source global is missing is an inconsistency, as is a source
+        # definition with no matching destination global to link against.
+        dest = slot_module("slot", "first")
+        dest_relocs = slot_relocs("slot", :shared)
+        src = LLVM.Module("empty")
+        src_relocs = slot_relocs("slot", :shared)
+        @test_throws "Missing source relocation global" GPUCompiler.link_relocatable!(
+            dest, dest_relocs, src, src_relocs)
+
+        dest = LLVM.Module("empty")
+        dest_relocs = interior_relocs("patch", Float64)
+        src = interior_module("patch", "second_patch")
+        src_relocs = interior_relocs("patch", Float64)
+        @test_throws "Missing destination relocation global" GPUCompiler.link_relocatable!(
+            dest, dest_relocs, src, src_relocs)
     end
 end
 
@@ -1354,6 +1479,31 @@ end
     ir = sprint(io->Native.code_llvm(io, dkernel, Tuple{Vector{Float64}}; debuginfo=:none))
     @test !occursin("deferred_codegen", ir)
     @test occursin("call void @julia_kernel", ir)
+end
+
+@testset "Mock Enzyme deferred relocations" begin
+    # A deferred child that references a Julia value produces its own relocations; those
+    # must merge into the parent's metadata when the child module is linked in.
+    mod = @eval module $(gensym())
+        import ..Enzyme
+        child(sym::Symbol) = sym === :deferred_reloc ? 1 : 2
+        function parent(sym::Symbol)
+            ptr = Enzyme.deferred_codegen(typeof(child), Tuple{Symbol})
+            return ccall(ptr, Int, (Symbol,), sym)
+        end
+    end
+
+    # a non-baking job keeps the merged relocation symbolic so we can inspect it.
+    job, _ = Native.create_job(mod.parent, (Symbol,); jit=true, validate=false)
+    JuliaContext() do ctx
+        ir, meta = GPUCompiler.compile(:llvm, job)
+        @test !occursin("deferred_codegen", string(ir))
+        if GPUCompiler.supports_relocatable_ir()
+            @test any(values(meta.relocations.sites)) do ref
+                ref isa GPUCompiler.JuliaValueRef && ref.value === :deferred_reloc
+            end
+        end
+    end
 end
 
 @testset "stack allocation intrinsic" begin
