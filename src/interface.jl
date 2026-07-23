@@ -392,24 +392,24 @@ else
         cache_owner(job.config.target, job.config.params, job.config.always_inline)
 end
 
-struct SessionJobResultEntry
+struct SessionResultEntry
     config::CompilerConfig
     value::Any
 end
 
-const session_job_results = IdDict{CodeInstance,Vector{SessionJobResultEntry}}()
-const session_job_results_lock = ReentrantLock()
+const session_results_cache = IdDict{CodeInstance,Vector{SessionResultEntry}}()
+const session_results_lock = ReentrantLock()
 
 function session_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
-    Base.@lock session_job_results_lock begin
-        entries = get!(session_job_results, ci) do
-            SessionJobResultEntry[]
+    Base.@lock session_results_lock begin
+        entries = get!(session_results_cache, ci) do
+            SessionResultEntry[]
         end
         for entry in entries
             entry.config === config && entry.value isa V && return entry.value::V
         end
         value = V()
-        push!(entries, SessionJobResultEntry(config, value))
+        push!(entries, SessionResultEntry(config, value))
         return value
     end
 end
@@ -467,7 +467,7 @@ function cached_results end
 @static if HAS_INTEGRATED_CACHE
 
 """
-    JobResults
+    PersistentJobResults
 
 Per-CodeInstance container mapping a `CompilerConfig` to the back-end's results struct.
 
@@ -482,28 +482,28 @@ from package images.
 # `CompilerConfig` is an abstract UnionAll here. Keeping it in a tuple stored inline in a
 # Vector boxes the config again on every iteration. A non-isbits entry object is stored by
 # reference, so both fields are boxed once and hot-path scans allocate nothing.
-struct JobResultEntry
+struct PersistentResultEntry
     config::CompilerConfig
     value::Any
 end
 
-mutable struct JobResults
-    entries::Vector{JobResultEntry}
-    JobResults() = new(JobResultEntry[])
+mutable struct PersistentJobResults
+    entries::Vector{PersistentResultEntry}
+    PersistentJobResults() = new(PersistentResultEntry[])
 end
 
-const cached_results_lock = ReentrantLock()
+const persistent_results_lock = ReentrantLock()
 
 # NOTE: like `cache_owner`, specialized for the launch hot path (bounded number of
 #       instantiations: one per back-end and results type).
 function persistent_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
-    jr = CompilerCaching.results(JobResults, ci)
-    Base.@lock cached_results_lock begin
-        for entry in jr.entries
+    results = CompilerCaching.results(PersistentJobResults, ci)
+    Base.@lock persistent_results_lock begin
+        for entry in results.entries
             entry.config === config && entry.value isa V && return entry.value::V
         end
         v = V()
-        push!(jr.entries, JobResultEntry(config, v))
+        push!(results.entries, PersistentResultEntry(config, v))
         return v
     end
 end
@@ -511,7 +511,7 @@ end
 function cache_view(@nospecialize(job::CompilerJob))
     # `cache_owner` is deliberately stored as Any on CompilerConfig: preserve that box in the
     # CacheView instead of re-specializing and re-boxing the immutable token for the ccall.
-    CompilerCaching.CacheView{Any,JobResults}(cache_owner(job), job.world)
+    CompilerCaching.CacheView{Any,PersistentJobResults}(cache_owner(job), job.world)
 end
 
 # Fetch the CodeInstance backing `job` from the integrated cache. On 1.14+, inference

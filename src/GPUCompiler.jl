@@ -85,7 +85,7 @@ include("precompile.jl")
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
-    empty!(session_job_results)
+    empty!(session_results_cache)
 
     @static if !HAS_INTEGRATED_CACHE
         # CodeInstances created by GPUCompiler's precompile workload are process-local.
