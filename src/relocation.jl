@@ -501,7 +501,14 @@ function bake_relocations!(mod::LLVM.Module, relocs::Relocations)
             init = initializer(gv)
             T = value_type(init)::LLVM.StructType
             idx = Int(element_at(datalayout(mod), T, site.offset)) + 1
-            fields = LLVM.Constant[operands(init)...]
+            # An all-zero box (e.g. a patchable header over a zero payload) is folded to a
+            # `zeroinitializer`, a `ConstantAggregateZero` that reports no operands; rebuild
+            # the explicit per-field constants from the struct's element types.
+            fields = if init isa LLVM.ConstantAggregateZero
+                LLVM.Constant[null(elty) for elty in elements(T)]
+            else
+                LLVM.Constant[operands(init)...]
+            end
             fields[idx] = ConstantInt(value_type(fields[idx]), resolve_relocation_target(ref))
             initializer!(gv, ConstantStruct(T, fields))
             linkage!(gv, LLVM.API.LLVMPrivateLinkage)

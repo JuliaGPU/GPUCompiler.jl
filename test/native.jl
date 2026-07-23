@@ -966,6 +966,28 @@ end
     end
 end
 
+@testset "bake zeroinitializer box" begin
+    # An all-zero box (a patchable header over a zero payload) is folded by LLVM to a
+    # `zeroinitializer`, a ConstantAggregateZero that reports no operands; baking must still
+    # resolve its header word. Regresses JuliaGPU/oneAPI.jl's "#55: invalid integers created
+    # by alloc_opt", where `SVector(0f0, 0f0)` boxed a zero payload.
+    JuliaContext() do ctx
+        mod = parse(LLVM.Module,
+                    "@zero_box = private global { i64, [8 x i8] } zeroinitializer")
+        gv = globals(mod)["zero_box"]
+        @test initializer(gv) isa LLVM.ConstantAggregateZero   # the folded shape
+        relocs = GPUCompiler.Relocations(Dict(
+            GPUCompiler.RelocationSite("zero_box", 0) => GPUCompiler.JuliaValueRef(Float64)))
+        GPUCompiler.bake_relocations!(mod, relocs)
+        init = initializer(gv)
+        @test !(init isa LLVM.ConstantAggregateZero)   # rebuilt into explicit fields
+        header = convert(UInt, LLVM.Constant[operands(init)...][1])
+        @test header == GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(Float64))
+        @test isconstant(gv)
+        @test isempty(relocs.sites)
+    end
+end
+
 @testset "cglobal relocation" begin
     # JIT-private symbols like `jl_get_pgcstack_resolved` (JuliaLang/julia#61527) cannot
     # be looked up using `jl_cglobal`, so we should only resolve bindings that are
