@@ -49,14 +49,19 @@ struct JuliaValueRef
 end
 
 """
-    CGlobalRef(symbol)
+    CGlobalRef(symbol, library=nothing)
 
-A named libjulia C data global. Resolution returns the word stored in that global in the
-current Julia process.
+A named C data global. With `library === nothing` (the default) it names a libjulia global,
+resolved with `jl_cglobal`'s process-wide symbol lookup; an explicit `library` names a
+shared object to load and look the symbol up in. Resolution returns the word stored in that
+global in the current Julia process. Both fields are plain data, so serialized metadata
+stays portable.
 """
 struct CGlobalRef
     symbol::Symbol
+    library::Union{Nothing,String}
 end
+CGlobalRef(symbol::Symbol) = CGlobalRef(symbol, nothing)
 
 """
     RelocationTarget
@@ -67,7 +72,8 @@ A serializable target for a relocated word: either a [`JuliaValueRef`](@ref) or 
 const RelocationTarget = Union{JuliaValueRef,CGlobalRef}
 
 same_relocation_target(a::JuliaValueRef, b::JuliaValueRef) = a.value === b.value
-same_relocation_target(a::CGlobalRef, b::CGlobalRef) = a.symbol === b.symbol
+same_relocation_target(a::CGlobalRef, b::CGlobalRef) =
+    a.symbol === b.symbol && a.library == b.library
 same_relocation_target(::RelocationTarget, ::RelocationTarget) = false
 
 """
@@ -82,8 +88,14 @@ function resolve_relocation_target(target::JuliaValueRef)
     end
 end
 function resolve_relocation_target(target::CGlobalRef)
-    address = ccall(:jl_cglobal, Any, (Any, Any), String(target.symbol), UInt)
-    return unsafe_load(address)
+    if target.library === nothing
+        # `jl_cglobal` accepts the symbol directly and does the process-wide `jl_dlfind`.
+        address = ccall(:jl_cglobal, Any, (Any, Any), target.symbol, UInt)
+        return unsafe_load(address)
+    end
+    handle = Libdl.dlopen(target.library)
+    address = Libdl.dlsym(handle, target.symbol)
+    return unsafe_load(Ptr{UInt}(address))
 end
 
 
