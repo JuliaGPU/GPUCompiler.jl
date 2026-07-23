@@ -59,7 +59,8 @@ end
             end
         end
 
-        job, _ = Native.create_job(mod.outer, (Int, Symbol); validate=false)
+        # a non-baking (JIT) back-end keeps the Symbol reference symbolic in `:llvm`.
+        job, _ = Native.create_job(mod.outer, (Int, Symbol); validate=false, jit=true)
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job)
 
@@ -72,7 +73,7 @@ end
             @test length(other_mis) == 1
             @test only(other_mis).def in methods(mod.inner)
 
-            if VERSION >= v"1.12"
+            if GPUCompiler.supports_relocatable_ir()
                 @test length(meta.relocations.sites) == 1
                 @test only(values(meta.relocations.sites)) isa GPUCompiler.JuliaValueRef
             end
@@ -272,8 +273,8 @@ end
                 site = GPUCompiler.RelocationSite(LLVM.name(gv), 0)
                 @test haskey(lib.relocations.sites, site)
             end
-            @static if VERSION >= v"1.12-"
-                # on older versions, Julia bakes addresses without tagging globals
+            if GPUCompiler.supports_relocatable_ir()
+                # otherwise Julia bakes addresses without tagging globals
                 @test used > 0
             end
         end
@@ -752,7 +753,7 @@ end
 end
 
 @testset "postponed relocation" begin
-    if VERSION >= v"1.12"
+    if GPUCompiler.supports_relocatable_ir()
         mod = @eval module $(gensym())
             f() = UInt(pointer_from_objref(:relocation_probe))
         end

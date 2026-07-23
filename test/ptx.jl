@@ -37,12 +37,13 @@ end
     mod = @eval module $(gensym())
         kernel(name::Symbol) = name === :var ? 1 : 2
     end
+    # `patch=true` keeps the slot symbolic (a baking back-end would resolve and fold it away).
     ir = sprint() do io
-        PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; dump_module=true)
+        PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; dump_module=true, patch=true)
     end
-    # Julia 1.10 may bake the Symbol pointer into the generated IR before exposing it to
-    # GPUCompiler. Newer versions provide a symbolic global that we can preserve and relocate.
-    @static if VERSION >= v"1.11"
+    # Julia bakes the Symbol pointer into the IR before exposing it to GPUCompiler when it
+    # can't emit relocatable global metadata; otherwise it stays a symbolic slot we preserve.
+    if GPUCompiler.supports_relocatable_ir()
         @test occursin("@jl_sym_var_", ir)
     else
         @test occursin("@jl_sym_var_", ir) || occursin("inttoptr", ir)
@@ -98,10 +99,12 @@ end
             return 0.0
         end
     end
-    ir = sprint(io->PTX.code_llvm(io, mod.consume, Tuple{Bool,Int32}; dump_module=true))
-    # As with Symbol literals above, Julia 1.10 may bake the type pointer before
-    # GPUCompiler can represent it as a relocation.
-    @static if VERSION >= v"1.11"
+    # `patch=true` keeps the interior header relocation symbolic (externally_initialized).
+    ir = sprint(io->PTX.code_llvm(io, mod.consume, Tuple{Bool,Int32};
+                                  dump_module=true, patch=true))
+    # As with Symbol literals above, Julia bakes the type pointer when it can't emit
+    # relocatable global metadata; otherwise GPUCompiler represents it as a relocation.
+    if GPUCompiler.supports_relocatable_ir()
         @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir)
     else
         @test occursin(r"@[A-Za-z0-9_]+_box = externally_initialized global", ir) ||
