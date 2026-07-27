@@ -757,7 +757,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 end
 
 """
-    relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
+    relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}};
+                  materialize::Bool = true)
 
 Resolve globals that refer to Julia objects. `jl_true`/`jl_false`, which are
 absent from `gv_to_value`, become canonical module-local boxes. Ordinary
@@ -773,12 +774,20 @@ Apart from the dedicated Bool globals, GVs present in `mod` but missing from
 `gv_to_value` remain declarations, which back-ends will reject loudly
 (undefined symbol) rather than silently folding to null.
 
+Pass `materialize = false` for code that executes against the live Julia
+runtime (see `uses_julia_runtime`). A materialized box is a *replica* of the
+object living in the module's read-only data, not a heap object: as soon as
+such a pointer is stored into GC-tracked memory the collector will try to set
+mark bits in it and crash. Host code therefore has to keep referring to the
+real, GC-rooted object by its address.
+
 Returns `true` if the module is session-portable afterwards: no absolute host
 address was written (neither a baked slot nor a materialized header carrying
 a non-smalltag type pointer).
 """
-function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
-    portable = materialize_bool_singletons!(mod)
+function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}};
+                       materialize::Bool = true)
+    portable = materialize_bool_singletons!(mod; materialize)
     mod_gvs = globals(mod)
     for (name, init) in gv_to_value
         # Bools are resolved by name above.
@@ -796,8 +805,10 @@ function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
         val = nothing
         if init != C_NULL
             obj = Base.unsafe_pointer_to_objref(init)
-            # Zero-sized objects remain identity tokens.
-            if isbitstype(typeof(obj)) && sizeof(obj) > 0 && !(obj isa Bool)
+            # Zero-sized objects remain identity tokens. Type objects (e.g.
+            # `Union{}`, whose `Core.TypeofBottom` is an isbits singleton) also
+            # stay identity tokens: `sizeof` is undefined for uninhabited types.
+            if materialize && isbitstype(typeof(obj)) && !(obj isa Type) && sizeof(obj) > 0 && !(obj isa Bool)
                 val, hdr = materialize_box!(mod, gv, obj, init)
                 # non-smalltag headers carry a host DataType pointer
                 portable &= hdr < UInt(64 << 4)   # jl_max_tags << 4
@@ -816,7 +827,9 @@ function relocate_gvs!(mod::LLVM.Module, gv_to_value::Dict{String, Ptr{Cvoid}})
 end
 
 # Bool JuliaVariables are absent from `gv_to_value`; define one device box per name.
-function materialize_bool_singletons!(mod::LLVM.Module)
+# With `materialize = false` the host's `jl_true`/`jl_false` are referenced directly
+# instead, so that the pointers stay GC-legal.
+function materialize_bool_singletons!(mod::LLVM.Module; materialize::Bool = true)
     portable = true
     mod_gvs = globals(mod)
     for (name, obj) in ("jl_true" => true, "jl_false" => false)
@@ -830,13 +843,17 @@ function materialize_bool_singletons!(mod::LLVM.Module)
         end
 
         init = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
-        val, hdr = materialize_box!(mod, gv, obj, init)
+        if materialize
+            val, hdr = materialize_box!(mod, gv, obj, init)
+            # Stay conservative if Bool stops using a smalltag.
+            portable &= hdr < UInt(64 << 4)   # jl_max_tags << 4
+        else
+            val = const_inttoptr(ConstantInt(Int64(init)), global_value_type(gv))
+            portable = false
+        end
         initializer!(gv, val)
         constant!(gv, true)
         linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-
-        # Stay conservative if Bool stops using a smalltag.
-        portable &= hdr < UInt(64 << 4)   # jl_max_tags << 4
     end
     return portable
 end

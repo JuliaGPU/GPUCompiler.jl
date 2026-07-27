@@ -335,7 +335,11 @@ const __llvm_initialized = Ref(false)
             finish_linked_module!(job, ir)
 
             # Materialize isbits and Bool boxes; bake addresses for other objects.
-            portable = relocate_gvs!(ir, gv_to_value)
+            # Code running against the live Julia runtime must keep referring to the
+            # real GC-rooted objects: a materialized box is read-only module data, and
+            # the collector crashes if such a pointer reaches GC-tracked memory.
+            portable = relocate_gvs!(ir, gv_to_value;
+                                     materialize = !uses_julia_runtime(job))
             portable || mark_session_dependent!(job)
 
             if job.config.optimize

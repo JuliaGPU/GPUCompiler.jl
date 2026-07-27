@@ -101,7 +101,8 @@ function emit_function!(mod, config::CompilerConfig, source::MethodInstance, met
     # Resolve constgv mappings before their metadata is discarded. Dedicated Bool
     # globals are resolved after linking into the toplevel module.
     if !isempty(meta.gv_to_value)
-        portable = relocate_gvs!(new_mod, meta.gv_to_value)
+        portable = relocate_gvs!(new_mod, meta.gv_to_value;
+                                 materialize = !uses_julia_runtime(rt_job))
         portable || mark_session_dependent!(rt_job)
     end
 
