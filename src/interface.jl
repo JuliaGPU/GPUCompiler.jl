@@ -487,7 +487,7 @@ end
 function job_code_instance(@nospecialize(job::CompilerJob))
     cache = cache_view(job)
     ci = get(cache, job.source, nothing)
-    @static if VERSION >= v"1.14-"
+    @static if VERSION >= v"1.14.0-DEV.2337"
         if ci === nothing
             mi = ccall(:jl_normalize_to_compilable_mi, Any, (Any,),
                        job.source)::MethodInstance
