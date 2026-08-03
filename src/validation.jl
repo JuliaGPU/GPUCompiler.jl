@@ -25,7 +25,7 @@ function typeinf_type(mi::MethodInstance; interp::CC.AbstractInterpreter)
 end
 
 function check_method(@nospecialize(job::CompilerJob))
-    ft = job.source.specTypes.parameters[1]
+    ft = abi_signature(job.source).parameters[1]
     ft <: Core.Builtin && error("$(unsafe_function_from_type(ft)) is not a generic function")
 
     for sparam in job.source.sparam_vals
@@ -73,7 +73,7 @@ function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
 end
 
 function check_invocation(@nospecialize(job::CompilerJob))
-    sig = job.source.specTypes
+    sig = abi_signature(job.source)
     ft = sig.parameters[1]
     tt = Tuple{sig.parameters[2:end]...}
 

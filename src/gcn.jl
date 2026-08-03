@@ -97,9 +97,11 @@ function add_kernarg_address_spaces!(
     )
     ft = function_type(f)
 
-    # find the byref parameters by checking for the byref attribute directly,
-    # rather than re-classifying arguments (which can fail on typed-pointer LLVM
-    # due to element type mismatches in classify_arguments assertions).
+    # find the byref parameters by checking for the byref attribute directly.
+    # This pass runs after optimization, so the parameter list is no longer the
+    # one Julia emitted; reading the attributes we ourselves applied in `irgen`
+    # is the only thing that stays valid. (It also sidesteps the assertions in
+    # `_classify_arguments_legacy`, which fire on typed-pointer LLVM.)
     byref_kind = LLVM.API.LLVMGetEnumAttributeKindForName("byref", 5)
     byref_mask = BitVector(undef, length(parameters(ft)))
     for i in 1:length(parameters(ft))
