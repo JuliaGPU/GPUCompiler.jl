@@ -168,6 +168,8 @@ end
     inf_cache::INFERENCE_CACHE_TYPE
     inf_params::CC.InferenceParams
     opt_params::CC.OptimizationParams
+
+    always_inline::Bool
 end
 
 @static if HAS_INTEGRATED_CACHE
@@ -175,11 +177,12 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         method_table_view::CC.MethodTableView,
                         owner::Any,
                         inf_params::CC.InferenceParams,
-                        opt_params::CC.OptimizationParams)
+                        opt_params::CC.OptimizationParams,
+                        always_inline::Bool=false)
     @assert world <= Base.get_world_counter()
     return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, owner, INFERENCE_CACHE_TYPE(),
-        inf_params, opt_params)
+        inf_params, opt_params, always_inline)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
@@ -188,10 +191,11 @@ function GPUInterpreter(interp::GPUInterpreter;
                         owner::Any=interp.owner,
                         inf_cache::INFERENCE_CACHE_TYPE=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
-                        opt_params::CC.OptimizationParams=interp.opt_params)
+                        opt_params::CC.OptimizationParams=interp.opt_params,
+                        always_inline::Bool=interp.always_inline)
     return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, owner, inf_cache,
-        inf_params, opt_params)
+        inf_params, opt_params, always_inline)
 end
 
 CC.cache_owner(interp::GPUInterpreter) = interp.owner
@@ -202,11 +206,12 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         method_table_view::CC.MethodTableView,
                         code_cache::CodeCache,
                         inf_params::CC.InferenceParams,
-                        opt_params::CC.OptimizationParams)
+                        opt_params::CC.OptimizationParams,
+                        always_inline::Bool=false)
     @assert world <= Base.get_world_counter()
     return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, code_cache, Vector{CC.InferenceResult}(),
-        inf_params, opt_params)
+        inf_params, opt_params, always_inline)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
@@ -215,10 +220,11 @@ function GPUInterpreter(interp::GPUInterpreter;
                         code_cache::CodeCache=interp.code_cache,
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
-                        opt_params::CC.OptimizationParams=interp.opt_params)
+                        opt_params::CC.OptimizationParams=interp.opt_params,
+                        always_inline::Bool=interp.always_inline)
     return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, code_cache, inf_cache,
-        inf_params, opt_params)
+        inf_params, opt_params, always_inline)
 end
 
 CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
@@ -262,6 +268,49 @@ function CC.concrete_eval_eligible(interp::GPUInterpreter,
         f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo)
     ret === false && return nothing
     return ret
+end
+
+# Costs saturate at `MAX_INLINE_COST`, so raising the threshold cannot implement
+# `always_inline`. Mark eligible sources cheap instead. Unlike #795's source-policy
+# override, this preserves call-site guards and constant propagation (#797).
+function force_inlineable(interp::GPUInterpreter, mi::MethodInstance,
+                          declared_inline::Bool, declared_noinline::Bool,
+                          @nospecialize(rt))
+    interp.always_inline || return false
+    declared_noinline && return false
+    isa(mi.def, Method) || return false
+    sig = Base.unwrap_unionall(mi.specTypes)
+    (isa(sig, DataType) && sig.name === Tuple.name) || return false
+    (declared_inline || rt !== Union{}) || return false
+    return true
+end
+@static if isdefined(CC, :compute_inlining_cost)
+    # 1.13+
+    function CC.inline_cost_model(interp::GPUInterpreter, result::CC.InferenceResult,
+                                  inline_flag::UInt8, ir::CC.IRCode)
+        if force_inlineable(interp, result.linfo,
+                            inline_flag === CC.SRC_FLAG_DECLARED_INLINE,
+                            inline_flag === CC.SRC_FLAG_DECLARED_NOINLINE,
+                            CC.widenslotwrapper(result.result))
+            return CC.MIN_INLINE_COST
+        end
+        return @invoke CC.inline_cost_model(interp::CC.AbstractInterpreter,
+            result::CC.InferenceResult, inline_flag::UInt8, ir::CC.IRCode)
+    end
+else
+    # 1.10-1.12
+    function CC.finish(interp::GPUInterpreter, opt::CC.OptimizationState,
+                       ir::CC.IRCode, caller::CC.InferenceResult)
+        ret = @invoke CC.finish(interp::CC.AbstractInterpreter, opt::CC.OptimizationState,
+                                ir::CC.IRCode, caller::CC.InferenceResult)
+        src = opt.src
+        if src isa CodeInfo &&
+           force_inlineable(interp, opt.linfo, CC.is_declared_inline(src),
+                            CC.is_declared_noinline(src), CC.widenslotwrapper(caller.result))
+            CC.set_inlineable!(src, true)
+        end
+        return ret
+    end
 end
 
 

@@ -317,7 +317,8 @@ function get_interpreter(@nospecialize(job::CompilerJob))
                    method_table_view=maybe_cached(method_table_view(job)),
                    owner=cache_owner(job),
                    inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
+                   opt_params=optimization_params(job),
+                   always_inline=job.config.always_inline)
 end
 else
 function get_interpreter(@nospecialize(job::CompilerJob))
@@ -325,7 +326,8 @@ function get_interpreter(@nospecialize(job::CompilerJob))
                    method_table_view=maybe_cached(method_table_view(job)),
                    code_cache=get_code_cache(job),
                    inf_params=inference_params(job),
-                   opt_params=optimization_params(job))
+                   opt_params=optimization_params(job),
+                   always_inline=job.config.always_inline)
 end
 end
 
@@ -570,15 +572,7 @@ function inference_params(@nospecialize(job::CompilerJob))
 end
 
 # the optimization parameters to use when constructing the GPUInterpreter
-function optimization_params(@nospecialize(job::CompilerJob))
-    kwargs = NamedTuple()
-
-    if job.config.always_inline
-        kwargs = (kwargs..., inline_cost_threshold=Int(CC.MAX_INLINE_COST))
-    end
-
-    return CC.OptimizationParams(;kwargs...)
-end
+optimization_params(@nospecialize(job::CompilerJob)) = CC.OptimizationParams()
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))

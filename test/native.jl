@@ -663,10 +663,6 @@ end
 end
 
 @testset "always_inline" begin
-    # XXX: broken by JuliaLang/julia#51599, see JuliaGPU/GPUCompiler.jl#527.
-    #      yet somehow this works on 1.12?
-    broken = VERSION >= v"1.13-"
-
     mod = @eval module $(gensym())
         import ..sink
         expensive(x) = $(foldl((e, _) -> :($sink($e) + $sink(x)), 1:100; init=:x))
@@ -678,6 +674,13 @@ end
             expensive(x)
             return
         end
+
+        @noinline never(x) = sink(x)
+        function i(x)
+            expensive(x)
+            never(x)
+            return
+        end
     end
 
     @test @filecheck begin
@@ -685,27 +688,26 @@ end
         Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
-    # suppress FileCheck diagnostics when the failure is known and expected
-    quiet(f) = broken ? redirect_stderr(f, devnull) : f()
-
-    @test quiet() do
-        @filecheck begin
-            @check_not "@{{(julia|j)_expensive_[0-9]+}}"
-            Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
-        end
-    end broken=broken
+    @test @filecheck begin
+        @check_not "@{{(julia|j)_expensive_[0-9]+}}"
+        Native.code_llvm(mod.g, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
+    end
 
     @test @filecheck begin
         @check "@{{(julia|j)_expensive_[0-9]+}}"
         Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true)
     end
 
-    @test quiet() do
-        @filecheck begin
-            @check_not "@{{(julia|j)_expensive_[0-9]+}}"
-            Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
-        end
-    end broken=broken
+    @test @filecheck begin
+        @check_not "@{{(julia|j)_expensive_[0-9]+}}"
+        Native.code_llvm(mod.h, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
+    end
+
+    @test @filecheck begin
+        @check_not "@{{(julia|j)_expensive_[0-9]+}}"
+        @check "@{{(julia|j)_never_[0-9]+}}"
+        Native.code_llvm(mod.i, Tuple{Int64}; dump_module=true, kernel=true, always_inline=true)
+    end
 end
 
 @testset "function attributes" begin
