@@ -39,8 +39,8 @@ end
 
 ## job
 
-const gcn_intrinsics = () # TODO: ("vprintf", "__assertfail", "malloc", "free")
-isintrinsic(::CompilerJob{GCNCompilerTarget}, fn::String) = in(fn, gcn_intrinsics)
+isintrinsic(@nospecialize(job::CompilerJob{GCNCompilerTarget}), fn::String) =
+    return startswith(fn, "llvm.amdgcn.")
 
 pass_by_ref(@nospecialize(job::CompilerJob{GCNCompilerTarget})) = true
 
