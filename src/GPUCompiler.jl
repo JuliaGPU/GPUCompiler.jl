@@ -54,6 +54,7 @@ include("mangling.jl")
 
 # compiler interface and implementations
 include("interface.jl")
+include("relocation.jl")
 include("error.jl")
 include("native.jl")
 include("ptx.jl")
@@ -84,13 +85,10 @@ include("precompile.jl")
 
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
+    empty!(session_results_cache)
 
     @static if !HAS_INTEGRATED_CACHE
-        # session-local results keyed by CodeInstance; entries serialized during
-        # GPUCompiler's own precompilation can never be valid in a later session
-        empty!(legacy_job_results)
-        # ditto for the in-process CodeCaches: CIs deposited by our own precompile
-        # workload carry world ages from the precompilation process
+        # CodeInstances created by GPUCompiler's precompile workload are process-local.
         empty!(GLOBAL_CI_CACHES)
     end
 

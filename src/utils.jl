@@ -274,6 +274,33 @@ function prune_constexpr_uses!(root::LLVM.Value)
     end
 end
 
+## replacing a global with a runtime value
+
+# Replace every use of `gv` with the function-local value `replacement(f)`, then erase it.
+# Plain `replace_uses!` can't do this: an instruction is not a valid operand of the constant
+# expressions/aggregates the global's address may be folded into (a `getelementptr` onto it,
+# an isbits union's `{ptr, i8}` return value), so those constants are expanded into
+# instructions first (phi operands materialize in their incoming block). `replacement` is
+# invoked once per using function (memoize per-function state such as an entry-block alloca
+# in the callback).
+function replace_global_with_local!(gv::LLVM.GlobalVariable, replacement)
+    convert_users_to_instructions!([gv])
+    for use in collect(uses(gv))
+        inst = user(use)
+        inst isa LLVM.Instruction ||
+            error("Unexpected use of global '$(LLVM.name(gv))': $inst")
+        f = LLVM.parent(LLVM.parent(inst))
+        ops = operands(inst)
+        for i in 1:length(ops)
+            ops[i] == gv || continue
+            ops[i] = replacement(f)
+        end
+    end
+    @assert isempty(uses(gv)) "global '$(LLVM.name(gv))' still has uses after replacement"
+    erase!(gv)
+    return
+end
+
 
 ## function-signature rewriting
 
@@ -417,4 +444,15 @@ end
         end
         return inits
     end
+end
+
+"""Whether Julia exposes enough global-variable metadata to emit relocatable IR."""
+supports_relocatable_ir() = @static if VERSION >= v"1.13.0-DEV.623"
+    true
+else
+    # `jl_get_llvm_gvs_globals` was backported to 1.10, so the symbol alone is not enough:
+    # 1.10's codegen still embeds Julia addresses (as `inttoptr` constants) in the JIT
+    # (non-imaging) mode we compile in, instead of emitting the relocatable global
+    # declarations the relocation machinery collects. Only 1.11+ emits those declarations.
+    VERSION >= v"1.11-" && HAS_LLVM_GVS_GLOBALS
 end

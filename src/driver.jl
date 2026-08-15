@@ -50,6 +50,9 @@ export compile
 
 Compile a `job` to one of the following formats as specified by the `target` argument:
 `:llvm` for LLVM IR, `:asm` for assembly, or `:obj` for object code.
+
+The default [`relocation_lowering`](@ref) strategy resolves Julia-value relocations in the
+`:llvm` result. Other strategies retain relocation metadata for their loader.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     if compile_hook[] !== nothing
@@ -58,7 +61,8 @@ function compile(target::Symbol, @nospecialize(job::CompilerJob))
     return compile_unhooked(target, job)
 end
 
-function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob))
+function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);
+                          resolve_relocations::Bool=true)
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
@@ -73,7 +77,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob))
 
     ## LLVM IR
 
-    ir, ir_meta = emit_llvm(job)
+    ir, ir_meta = emit_llvm(job; resolve_relocations)
 
     if output == :llvm
         if job.config.strip
@@ -93,7 +97,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob))
     else
         error("Unknown assembly format $output")
     end
-    asm, asm_meta = emit_asm(job, ir, format)
+    asm, asm_meta = emit_asm(job, ir, ir_meta.relocations, format)
 
     if output == :asm || output == :obj
         return asm, (; asm_meta..., ir_meta..., ir)
@@ -169,7 +173,8 @@ end
 
 const __llvm_initialized = Ref(false)
 
-@locked function emit_llvm(@nospecialize(job::CompilerJob))
+@locked function emit_llvm(@nospecialize(job::CompilerJob);
+                           resolve_relocations::Bool=true)
     if !__llvm_initialized[]
         InitializeAllTargets()
         InitializeAllTargetInfos()
@@ -180,7 +185,7 @@ const __llvm_initialized = Ref(false)
     end
 
     @tracepoint "IR generation" begin
-        ir, compiled, gv_to_value = irgen(job)
+        ir, compiled, relocations = irgen(job)
         if job.config.entry_abi === :specfunc
             entry_fn = compiled[job.source].specfunc
         else
@@ -245,11 +250,9 @@ const __llvm_initialized = Ref(false)
                     dyn_ir, dyn_meta = @invokelatest deferred_codegen(dyn_job, job)
                     dyn_entry_fn = LLVM.name(dyn_meta.entry)
                     merge!(compiled, dyn_meta.compiled)
-                    if haskey(dyn_meta, :gv_to_value)
-                        merge!(gv_to_value, dyn_meta.gv_to_value)
-                    end
                     @assert context(dyn_ir) == context(ir)
-                    link!(ir, dyn_ir)
+                    link_relocatable!(ir, relocations, dyn_ir,
+                                      dyn_meta.relocations)
                     changed = true
                     dyn_entry_fn
                 end
@@ -292,7 +295,7 @@ const __llvm_initialized = Ref(false)
     if job.config.toplevel && job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
-            runtime = load_runtime(job)
+            runtime, runtime_relocs = load_runtime(job)
         end
 
         @tracepoint "Library linking" begin
@@ -301,7 +304,8 @@ const __llvm_initialized = Ref(false)
 
             # GPU run-time library
             if !uses_julia_runtime(job)
-                @tracepoint "runtime library" link!(ir, runtime; only_needed=true)
+                @tracepoint "runtime library" link_relocatable!(
+                    ir, relocations, runtime, runtime_relocs; only_needed=true)
             end
         end
     end
@@ -334,13 +338,16 @@ const __llvm_initialized = Ref(false)
 
             finish_linked_module!(job, ir)
 
-            # Materialize isbits and Bool boxes; bake addresses for other objects.
-            portable = relocate_gvs!(ir, gv_to_value)
-            portable || mark_session_dependent!(job)
+            # Resolve early so optimization sees concrete values.
+            resolve_early = resolve_relocations && relocation_lowering(job) === :bake
+            if resolve_early
+                prune_dead_relocations!(ir, relocations)
+                bake_relocations!(ir, relocations)
+            end
 
             if job.config.optimize
                 @tracepoint "optimization" begin
-                    optimize!(job, ir; job.config.opt_level)
+                    optimize!(job, ir, relocations; job.config.opt_level)
 
                     # deferred codegen has some special optimization requirements,
                     # which also need to happen _after_ regular optimization.
@@ -362,6 +369,12 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
+            # Runtime linking during optimization can add relocations.
+            if resolve_early && !isempty(relocations)
+                prune_dead_relocations!(ir, relocations)
+                bake_relocations!(ir, relocations)
+            end
+
             if job.config.cleanup
                 @tracepoint "clean-up" begin
                     @dispose pb=NewPMPassBuilder() begin
@@ -374,6 +387,9 @@ const __llvm_initialized = Ref(false)
                     end
                 end
             end
+
+            # Do not expose dead sites to loaders.
+            resolve_early || prune_dead_relocations!(ir, relocations)
 
             # optimization may have replaced functions, so look the entry point up again
             entry = functions(ir)[entry_fn]
@@ -405,7 +421,20 @@ const __llvm_initialized = Ref(false)
 
     if job.config.toplevel && job.config.validate
         @tracepoint "validation" begin
-            check_ir(job, ir)
+            check_ir(job, ir, relocations)
+        end
+    end
+
+    # Collect cglobal loads as relocation records now (after validation, which wants to see
+    # the original loads), so the `:llvm`-level relocation metadata is complete for loaders
+    # and for consumers that apply it themselves. Not under `:bake`, whose contract is a
+    # fully-resolved `:llvm` result; its loads are collected and resolved in
+    # `prepare_execution!`, which remains an idempotent safety net for the other strategies
+    # (and for direct `emit_asm` callers).
+    if job.config.toplevel && relocation_lowering(job) !== :bake
+        @tracepoint "cglobal relocations" begin
+            collect_cglobal_relocations!(job, ir, relocations)
+            prune_dead_relocations!(ir, relocations)
         end
     end
 
@@ -413,21 +442,26 @@ const __llvm_initialized = Ref(false)
         @tracepoint "verification" verify(ir)
     end
 
-    return ir, (; entry, compiled, gv_to_value)
+    return ir, (; entry, compiled, relocations)
 end
 
+# Compatibility for back-ends that resolve relocations during `emit_llvm`.
+emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
+         format::LLVM.API.LLVMCodeGenFileType) =
+    emit_asm(job, ir, Relocations(), format)
+
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
-                          format::LLVM.API.LLVMCodeGenFileType)
+                          relocs::Relocations, format::LLVM.API.LLVMCodeGenFileType)
     # NOTE: strip after validation to get better errors
     if job.config.strip
         @tracepoint "Debug info removal" strip_debuginfo!(ir)
     end
 
     @tracepoint "LLVM back-end" begin
-        @tracepoint "preparation" prepare_execution!(job, ir)
+        @tracepoint "preparation" prepare_execution!(job, ir, relocs)
 
         code = @tracepoint "machine-code generation" mcgen(job, ir, format)
     end
 
-    return code, ()
+    return code, (;)
 end

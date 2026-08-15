@@ -26,6 +26,37 @@ end
 ThreadedRuntimeCompilerJob = CompilerJob{MetalCompilerTarget,ThreadedRuntimeCompilerParams}
 GPUCompiler.runtime_module(::ThreadedRuntimeCompilerJob) = ThreadedRuntime
 
+# Selects the `:table` relocation strategy, as Metal.jl does, so relocation words are read out
+# of a table reached through the kernel state instead of being baked. Used to test that delivery
+# path (and the Metal target's `relocation_table_pointer`) without depending on Metal.jl.
+struct TableKernelState
+    reloc_table::Core.LLVMPtr{UInt64, 1}
+end
+
+struct TableCompilerParams <: AbstractCompilerParams end
+TableCompilerJob = CompilerJob{MetalCompilerTarget,TableCompilerParams}
+GPUCompiler.runtime_module(::TableCompilerJob) = TestRuntime
+# as Metal.jl does: only a kernel has the state a table can be reached through, so reflection
+# on a plain device function falls back to session-local resolution
+GPUCompiler.relocation_lowering(job::TableCompilerJob) =
+    job.config.kernel ? (:table) : (:bake)
+GPUCompiler.kernel_state_type(::TableCompilerJob) = TableKernelState
+
+function create_table_job(@nospecialize(func), @nospecialize(types); kwargs...)
+    config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
+    source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    config = CompilerConfig(target, TableCompilerParams(); kernel=false, config_kwargs...)
+    CompilerJob(source, config), kwargs
+end
+
+function code_native_table(io::IO, @nospecialize(func), @nospecialize(types); kwargs...)
+    job, kwargs = create_table_job(func, types; kwargs...)
+    GPUCompiler.code_native(io, job; kwargs...)
+end
+code_native_table(@nospecialize(func), @nospecialize(types); kwargs...) =
+    code_native_table(stdout, func, types; kwargs...)
+
 function create_job(@nospecialize(func), @nospecialize(types); kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())

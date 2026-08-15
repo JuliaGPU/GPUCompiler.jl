@@ -187,6 +187,163 @@ function promote_bf16_intrinsics!(mod::LLVM.Module)
     return changed
 end
 
+# Does `gv` look like a boxed-constant replica created by `materialize_box!`? Its `_box` name
+# and layout distinguish it from other private constants: `{ i64 header, [payload bytes] }`,
+# optionally with leading alignment padding. Relocatable boxes are external and mutable, so
+# `isconstant` excludes them (they are delivered through the relocation table instead).
+function is_boxed_constant(@nospecialize(gv::LLVM.GlobalVariable))
+    isdeclaration(gv) && return false
+    endswith(LLVM.name(gv), "_box") || return false
+    linkage(gv) == LLVM.API.LLVMPrivateLinkage || return false
+    (isconstant(gv) && unnamed_addr(gv)) || return false
+    addrspace(value_type(gv)) == 0 || return false
+    T = global_value_type(gv)
+    T isa LLVM.StructType || return false
+    els = elements(T)
+    is_hdr(t) = t isa LLVM.IntegerType && width(t) == 8sizeof(UInt)
+    is_pad(t) = t isa LLVM.ArrayType && eltype(t) == LLVM.Int8Type()
+    return (length(els) >= 1 && is_hdr(els[1])) ||
+           (length(els) >= 2 && is_pad(els[1]) && is_hdr(els[2]))
+end
+
+# Are all (transitive constant) users of `gv` instructions, i.e. does the box escape only
+# through function bodies? A box reachable from another global's *initializer* is the
+# `jl_true`/`jl_false` slot→box indirection, which lives fine in the constant space
+# (`add_global_address_spaces!`); demoting it would strand the slot's constant pointer. Only
+# the isbits-union interior boxes — whose payload address flows through a body `phi`/`select`
+# — need demotion, and those have instruction users exclusively.
+function box_used_only_by_instructions(@nospecialize(gv::LLVM.GlobalVariable))
+    ok = true
+    function walk(@nospecialize(v))
+        for use in uses(v)
+            u = user(use)
+            if u isa LLVM.Instruction
+                # a body use: fine
+            elseif u isa LLVM.GlobalVariable
+                ok = false   # initializer reference (slot→box)
+            elseif u isa LLVM.Constant
+                walk(u)
+            else
+                ok = false
+            end
+        end
+    end
+    walk(gv)
+    return ok
+end
+
+# Demote materialized boxed-constant globals to per-function stack allocas.
+#
+# Motivation: an isbits `Union` return is lowered as `{ptr, i8}` whose payload pointer
+# `phi`/`select`s the box global against the caller's `sret` alloca. AIR has no generic
+# address space — AS 0 *is* thread memory — so once `add_global_address_spaces!` sinks the
+# box into AS 2 (constant), the `addrspacecast` back to AS 0 at the use only works where the
+# back-end can statically fold it away; across the union's call return or aggregate phi it
+# cannot, and the load silently reads thread memory instead of the constant. Copying the box
+# to a thread `alloca` is the sanctioned lowering (MSL rejects mixing `thread` and `constant`
+# pointers outright); it is sound because box addresses carry no identity (isbits egal is by
+# content) and Metal fully inlines device functions.
+#
+# Runs from `finish_ir!`: post-opt (the box only escapes its `materialize_box!` pointer slot
+# once GlobalOpt folds it — still-slotted boxes like `jl_true`/`jl_false` are skipped and
+# stay in constant space) and pre-`add_global_address_spaces!`. Relocatable boxes (external
+# + `extinit`) are demoted by the `:table` lowering instead, which also fills their header.
+function demote_boxed_constants!(mod::LLVM.Module)
+    changed = false
+    for gv in collect(globals(mod))
+        (is_boxed_constant(gv) && box_used_only_by_instructions(gv)) || continue
+        if LLVM.version() < v"17"
+            # `replace_global_with_local!` needs LLVM.jl's `convert_users_to_instructions!`
+            # (LLVM 17+). Without demotion the kernel would compile but read thread memory
+            # instead of the boxed constant, so refuse loudly rather than miscompile.
+            error("Metal kernels embedding boxed union constants require Julia 1.12 or later")
+        end
+        boxty = global_value_type(gv)
+        init = initializer(gv)
+        # keep the box's alignment, but at least Julia's heap alignment (16 B), which is what
+        # `materialize_box!` gives these boxes and what the payload's `isbits` layout assumes
+        align = max(alignment(gv), 16)
+        slots = Dict{LLVM.Function, LLVM.Value}()
+        function slot(f::LLVM.Function)
+            get!(slots, f) do
+                @dispose builder=IRBuilder() begin
+                    position!(builder, first(instructions(first(blocks(f)))))
+                    ptr = alloca!(builder, boxty)
+                    alignment!(ptr, align)
+                    store!(builder, init, ptr)
+                    ptr
+                end
+            end
+        end
+        replace_global_with_local!(gv, slot)
+        changed = true
+    end
+    return changed
+end
+
+
+## relocations as a kernel-state word table
+#
+# Metal gives a loader no access at all to loaded code: there is no post-load symbol patching
+# (no ORC `absoluteSymbols`, no writable program-scope globals to `:patch`). So relocation words
+# are delivered as ordinary *run-time data*: the loader resolves them in its session, writes
+# `resolved_relocation_table` into a small buffer, and passes that buffer's device address in the
+# kernel state at every dispatch. GPUCompiler's `:table` lowering rewrites each record into an
+# indexed load off the base this hook returns.
+#
+# Nothing session-local ends up in the metallib, so it is byte-stable even for
+# relocation-carrying kernels — which is what makes them persistable across sessions and
+# content-keyable by `MTLBinaryArchive`.
+#
+# The contract with the back-end is one kernel-state field:
+#
+#     reloc_table::Core.LLVMPtr{UInt64, AS.Device}
+#
+# always present (null for relocation-free kernels, which never read it) so that the state
+# layout does not depend on what a kernel happens to reference.
+const RELOCATION_TABLE_FIELD = :reloc_table
+
+function relocation_table_pointer(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                                  builder::IRBuilder, fun::LLVM.Function)
+    state = kernel_state_type(job)
+    field = state === Nothing ? nothing :
+            findfirst(isequal(RELOCATION_TABLE_FIELD), fieldnames(state))
+    field === nothing &&
+        error("""Metal delivers relocations through the kernel state, so its type must have a
+                 `$(RELOCATION_TABLE_FIELD)::Core.LLVMPtr{UInt64, 1}` field; got $state.""")
+
+    # The state arrives as the leading by-reference argument (`kernel_state_to_reference!`,
+    # then `add_parameter_address_spaces!`), so it is available on entry and dominates every
+    # use. Only a kernel has one, and Metal fully inlines device code, so only the kernel can
+    # be holding a relocation by now; insist on that rather than mistaking some other
+    # function's first pointer argument for the state.
+    (job.config.kernel && fun in kernels(LLVM.parent(fun))) ||
+        error("""Metal delivers relocations through the kernel state, which only a kernel has.
+                 Function `$(LLVM.name(fun))` is not one, so it cannot carry relocations;
+                 compile it as a kernel, or select the `:bake` lowering.""")
+    state_ptr = parameters(fun)[1]
+    value_type(state_ptr) isa LLVM.PointerType ||
+        error("Expected a kernel-state pointer argument, got $(value_type(state_ptr))")
+
+    # Reach the field by its Julia byte offset rather than by a struct element index: Julia
+    # renders a struct as an LLVM array when all its fields share a type, and inserts explicit
+    # padding elements when they don't, so no element numbering matches the Julia one.
+    T_byte = LLVM.Int8Type()
+    T_table = convert(LLVMType, fieldtype(state, field))
+    as = addrspace(value_type(state_ptr))
+    typed = supports_typed_pointers(context())
+
+    base = typed ? bitcast!(builder, state_ptr, LLVM.PointerType(T_byte, as)) : state_ptr
+    field_ptr = inbounds_gep!(builder, T_byte, base,
+                              [ConstantInt(LLVM.Int32Type(), fieldoffset(state, field))])
+    typed && (field_ptr = bitcast!(builder, field_ptr, LLVM.PointerType(T_table, as)))
+
+    table = load!(builder, T_table, field_ptr, "reloc_table")
+    alignment!(table, sizeof(UInt))
+    return table
+end
+
+
 function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
     # propagate `target.fastmath` as `@fastmath`-everywhere semantics, so the math-intrinsic
     # lowering in `finish_ir!` picks the relaxed `air.fast_*` functions. done here (post-link,
@@ -447,6 +604,11 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
 
     # add kernel metadata
     if job.config.kernel
+        # demote escaped boxed-constant globals to stack allocas before the address-space
+        # passes move constants into AS 2 (which would produce downgrade-incompatible IR for
+        # the ones whose address escapes an isbits union return; see above)
+        demote_boxed_constants!(mod)
+
         entry = add_parameter_address_spaces!(job, mod, entry)
         entry = add_global_address_spaces!(job, mod, entry)
 
@@ -548,11 +710,102 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     return
 end
 
+# Julia names each generated LLVM function `julia_<name>_<counter>`, where the counter is
+# drawn from a process-global codegen sequence and so differs from one session to the next.
+# Left anywhere in the emitted bitcode it makes the AIR (and the metallib wrapping it)
+# non-reproducible across sessions, defeating byte-stable caching and content-keyed binary
+# archives. And a symbol name is not the only place it appears: inlining a Julia function
+# leaves its name behind in the block labels the inliner synthesizes, in the (now orphaned)
+# `DISubprogram` its debug locations still point at, and in the alias-scope strings Julia's
+# codegen derived from it.
+#
+# So rewrite every occurrence, wherever it appears: map each distinct codegen name to a
+# deterministic module-local form (its rank in a fixed traversal), then substitute that map
+# into symbol names, value names, and metadata strings. A subprogram belonging to a function
+# instead adopts that function's current name, so the entry — already renamed to a stable
+# mangled symbol in `irgen.jl` — keeps a `linkageName` matching the symbol it describes.
+# Runs on the final (post-`lower_air!`) module, just before the bitcode goes to the downgrader.
+function normalize_julia_symbol_names!(mod::LLVM.Module)
+    # The counter is the trailing digit group, so match the name part lazily. The word
+    # boundaries keep the pattern from biting into a longer token: `myjulia_foo_1` is a user
+    # symbol that merely ends this way, and `julia_foo_12bar` is one that merely contains it.
+    # The name part must cover Julia's full method-name alphabet, not just `\w`: mutating
+    # functions carry `!` (`julia_record_exception!_18521`) and closures carry `#`
+    # (`julia_#kernel#123_456`), and a missed name leaks the per-session counter into the
+    # bitcode — exactly the byte-instability this pass exists to prevent.
+    codegen_name = r"(?<!\w)julia_[\w!#]*?_[0-9]+(?!\w)"
+    renames = Dict{String,String}()
+    deterministic(match::AbstractString) = get!(renames, match) do
+        replace(match, r"_[0-9]+$" => "") * "_$(length(renames) + 1)"
+    end
+    normalize(str::AbstractString) = replace(str, codegen_name => deterministic)
+    rename!(value) = let str = LLVM.name(value)
+        occursin(codegen_name, str) && LLVM.name!(value, normalize(str))
+    end
+
+    # Metadata forms a graph (a debug location points at its subprogram, an alias scope at its
+    # domain), so walk it, replacing every string that carries a name. Only nodes reachable
+    # from a function or an instruction are visited, which is where inlining leaves its traces.
+    visited = Set{LLVM.API.LLVMMetadataRef}()
+    function normalize_metadata!(@nospecialize(md), replacement=nothing)
+        md isa LLVM.MDNode || return
+        md.ref in visited && return
+        push!(visited, md.ref)
+        for (i, op) in enumerate(operands(md))
+            if op isa LLVM.MDString
+                str = convert(String, op)
+                occursin(codegen_name, str) || continue
+                new = replacement === nothing ? normalize(str) : replacement
+                new == str || LLVM.replace_operand(md, i, LLVM.MDString(new))
+            elseif op isa LLVM.MDNode
+                normalize_metadata!(op)
+            end
+        end
+    end
+
+    # the instruction metadata that can name a function: a debug location points at the
+    # subprogram it came from (orphaned once that function is inlined away), and Julia's alias
+    # scopes are labelled with the function they were derived for
+    md_kinds = (LLVM.MD_dbg, LLVM.MD_alias_scope, LLVM.MD_noalias, LLVM.MD_tbaa,
+                LLVM.MD_tbaa_struct, LLVM.MD_loop)
+
+    # Symbols first, so that a subprogram can adopt its function's final name...
+    for f in functions(mod)
+        isdeclaration(f) || rename!(f)
+    end
+    # ...and every surviving function adopts before any instruction walk runs, since a walk
+    # can reach another function's subprogram through an inlined debug location and would
+    # otherwise give it a rank name instead of that function's symbol.
+    for f in functions(mod)
+        isdeclaration(f) && continue
+        sp = LLVM.subprogram(f)
+        sp === nothing || normalize_metadata!(sp, LLVM.name(f))
+    end
+    for f in functions(mod)
+        isdeclaration(f) && continue
+        for bb in blocks(f)
+            rename!(bb)
+            for inst in instructions(bb)
+                rename!(inst)
+                md = metadata(inst)
+                for kind in md_kinds
+                    haskey(md, kind) && normalize_metadata!(md[kind])
+                end
+            end
+        end
+    end
+    return
+end
+
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMObjectFile)
     # lower LLVM constructs that the AIR back-end does not support; this takes the place
     # of instruction selection, as our LLVM does not have a Metal target machine.
     lower_air!(job, mod)
+
+    # scrub process-global Julia codegen counters from symbol / debug names, so the emitted
+    # bitcode is reproducible across sessions
+    normalize_julia_symbol_names!(mod)
 
     if !isavailable(LLVMDowngrader_jll)
         error("Metal machine-code generation requires the LLVMDowngrader_jll package, which should be installed and loaded first.")
@@ -594,13 +847,22 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
     ft = function_type(f)
 
     # find the byref parameters
-    byref = BitVector(undef, length(parameters(ft)))
+    byref = falses(length(parameters(ft)))
+    # ... and among those, the boxed ones: an argument that survived `check_invocation`
+    # despite not being a bitstype has no fields, so it can only be used by identity (an
+    # interned `Symbol` being the typical case). Rather than a buffer, the host passes its
+    # address as a bare word, which this pass turns back into the pointer the body expects.
+    identity_word = falses(length(parameters(ft)))
     args = classify_arguments(job, ft; post_optimization=job.config.optimize)
     filter!(args) do arg
         arg.cc != GHOST
     end
     for arg in args
-        byref[arg.idx] = (arg.cc == BITS_REF || arg.cc == KERNEL_STATE)
+        param = parameters(ft)[arg.idx]
+        identity_word[arg.idx] = arg.cc == MUT_REF && param isa LLVM.PointerType &&
+                                 addrspace(param) == 0
+        byref[arg.idx] = arg.cc == BITS_REF || arg.cc == KERNEL_STATE ||
+                         identity_word[arg.idx]
     end
 
     function remapType(src)
@@ -648,7 +910,16 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
 
         # perform argument conversions
         for (i, param) in enumerate(parameters(ft))
-            if byref[i]
+            if identity_word[i]
+                # recover the boxed argument's address from the word the host passed
+                T_word = convert(LLVMType, UInt)
+                slot = parameters(new_f)[i]
+                if supports_typed_pointers(context())
+                    slot = bitcast!(builder, slot,
+                                    LLVM.PointerType(T_word, addrspace(value_type(slot))))
+                end
+                push!(new_args, inttoptr!(builder, load!(builder, T_word, slot), param))
+            elseif byref[i]
                 # load the argument in a stack slot
                 llvm_typ = convert(LLVMType, args[i].typ)
                 val = load!(builder, llvm_typ, parameters(new_f)[i])
@@ -1334,7 +1605,11 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(md, MDString("air.address_space"))
         push!(md, Metadata(ConstantInt(Int32(addrspace(parameters(entry_ft)[arg.idx])))))
 
-        arg_type = if arg.typ <: Core.LLVMPtr
+        # A fieldless boxed argument (e.g. an interned `Symbol`) is passed as its bare address
+        # word, so describe that word: its Julia type has no size to report.
+        arg_type = if arg.cc == MUT_REF
+            UInt
+        elseif arg.typ <: Core.LLVMPtr
             arg.typ.parameters[1]
         else
             arg.typ

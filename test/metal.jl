@@ -388,9 +388,198 @@ end
                             Tuple{Core.LLVMPtr{Int32,1}, Bool, Int32};
                             dump_module=true, kernel=true)
         end
-        @test occursin("@jl_true_box = private unnamed_addr addrspace(2) constant", ir)
+        # Either codegen references `jl_true` as a named global and we materialize it as a
+        # device-resident box, or (newer 1.14-DEV) codegen constructs the smalltag box on
+        # the stack itself and no `jl_true` reference exists at all. Both satisfy the
+        # invariant this testset guards: no unresolved `jl_true` reaches the back-end.
+        @test occursin("@jl_true_box = private unnamed_addr addrspace(2) constant", ir) ||
+              !occursin("jl_true", ir)
         @test !occursin("@jl_true = external", ir)
     end
+end
+
+@testset "relocations through the kernel state" begin
+    # Under the `:table` strategy (Metal.jl's choice), GPUCompiler rewrites each relocation
+    # into an indexed load from a word table the loader passes in the kernel state, rather
+    # than baking a session address into the module. Compile a relocation-carrying kernel and
+    # check the emitted AIR reads its words that way (no device needed — this runs through
+    # the LLVM downgrader).
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
+        mod = @eval module $(gensym())
+            function kernel(ptr::Core.LLVMPtr{UInt,1})
+                Base.unsafe_store!(ptr, UInt(pointer_from_objref(:table_probe)))
+                return
+            end
+        end
+
+        # the relocation records the kernel carries (at the `:llvm` level, before lowering)
+        job, _ = Metal.create_table_job(mod.kernel, (Core.LLVMPtr{UInt,1},); kernel=true)
+        relocs = JuliaContext() do ctx
+            _, meta = GPUCompiler.compile_unhooked(:llvm, job; resolve_relocations=false)
+            meta.relocations
+        end
+        @test !isempty(relocs)
+        @test any(rec -> rec.target isa GPUCompiler.JuliaValueRef, relocs.records)
+
+        air = sprint() do io
+            Metal.code_native_table(io, mod.kernel, (Core.LLVMPtr{UInt,1},); kernel=true)
+        end
+        # the table base is loaded out of the kernel-state argument, and the words out of the
+        # table -- a bake would instead leave a private constant holding the resolved address
+        @test occursin("reloc_table", air)
+        @test occursin(r"load i64, i64 addrspace\(1\)\*", air)
+        # nothing is left of the site globals the records named
+        for rec in relocs.records
+            @test !occursin("@$(rec.name) ", air)
+        end
+    end
+end
+
+@testset "codegen counter normalization" begin
+    # Julia's per-session codegen counter has to be scrubbed from everything that reaches the
+    # bitcode, or the metallib is not reproducible: symbol names, the block labels inlining
+    # synthesizes from them, and the metadata strings (orphaned `DISubprogram` linkage names,
+    # Julia's alias scopes) that mention them. The rewrite is deterministic but it must not
+    # reach into names that merely resemble the pattern.
+    JuliaContext() do ctx
+        m = parse(LLVM.Module, """
+            define void @julia_probe_4242() {
+            julia_inlinee_77.exit:
+              ret void, !alias.scope !0
+            }
+
+            define void @myjulia_probe_4242() {
+              ret void
+            }
+
+            define void @julia_probe_12bar() {
+              ret void
+            }
+
+            define void @"julia_record_exception!_18521"() {
+              ret void, !alias.scope !2
+            }
+
+            define void @"julia_#closure#42_777"() {
+              ret void
+            }
+
+            !0 = !{!1}
+            !1 = distinct !{!1, !"julia_inlinee_77: %union_bytes_return"}
+            !2 = !{!3}
+            !3 = distinct !{!3, !"julia_record_exception!_18521"}""")
+        GPUCompiler.normalize_julia_symbol_names!(m)
+        ir = string(m)
+
+        # a codegen name is replaced by a deterministic module-local rank, wherever it sits
+        @test !occursin("@julia_probe_4242", ir)
+        @test !occursin("julia_inlinee_77", ir)
+        @test occursin("@julia_probe_1(", ir)
+        @test occursin(r"julia_inlinee_[0-9]+\.exit", ir)
+        @test occursin(r"!\"julia_inlinee_[0-9]+: %union_bytes_return\"", ir)
+
+        # names outside `\w` — mutating `!`, closure `#` — are codegen names too
+        @test !occursin("julia_record_exception!_18521", ir)
+        @test !occursin("julia_#closure#42_777", ir)
+        @test occursin(r"@\"julia_record_exception!_[0-9]+\"", ir)
+        @test occursin(r"!\"julia_record_exception!_[0-9]+\"", ir)
+        @test occursin(r"@\"julia_#closure#42_[0-9]+\"", ir)
+
+        # ...but a user symbol that merely ends or contains the pattern is left alone
+        @test occursin("@myjulia_probe_4242", ir)
+        @test occursin("@julia_probe_12bar", ir)
+        dispose(m)
+    end
+end
+
+@testset "identity kernel arguments" begin
+    # A boxed argument that gets past `check_invocation` has no fields, so it can only be used
+    # by identity (`sym === :foo`, whose comparison target is itself a relocation). Metal cannot
+    # pass a heap reference, so `add_parameter_address_spaces!` lowers the parameter to a buffer
+    # holding the object's bare address word — which the host supplies — and the body turns that
+    # word back into the pointer Julia's comparison expects.
+    mod = @eval module $(gensym())
+        function kernel(ptr, sym::Symbol)
+            unsafe_store!(ptr, sym === :identity_arg_probe ? 1 : 2)
+            return
+        end
+    end
+    tt = (Core.LLVMPtr{Int,1}, Symbol)
+
+    ir = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; kernel=true))
+    # the body loads the word and compares it against the (here: baked) target. On LLVM 20+
+    # the comparison against the pointer constant folds down to the bare words (`icmp eq
+    # i64`); older LLVM keeps the pointer-typed compare. Both mean the same thing.
+    @test occursin("load i64", ir)
+    @test occursin(r"icmp eq (i64|ptr|\{\}\*)", ir)
+    # nothing is left in a Julia address space, which AIR has no equivalent for
+    @test !occursin("addrspace(10)", ir)
+
+    # A `Symbol` has no size of its own, so the AIR metadata must describe the address word.
+    air = sprint(io -> Metal.code_native(io, mod.kernel, tt; kernel=true))
+    sym_arg = only(filter(l -> occursin("!\"air.arg_name\", !\"sym\"", l), split(air, '\n')))
+    @test occursin("!\"air.arg_type_name\", !\"Symbol\"", sym_arg)
+    @test occursin("!\"air.arg_type_size\", i32 $(sizeof(UInt))", sym_arg)
+    @test occursin("!\"air.arg_type_align_size\", i32 $(sizeof(UInt))", sym_arg)
+    # read-only: unlike a data pointer, the slot is never written back through
+    @test occursin("!\"air.read\"", sym_arg)
+end
+
+@testset "boxed constant classification" begin
+    JuliaContext() do ctx
+        mod = LLVM.Module("boxed-constant-classification")
+        T = LLVM.StructType([LLVM.Int64Type(), LLVM.Int64Type()])
+
+        function private_constant(name)
+            gv = GlobalVariable(mod, T, name)
+            initializer!(gv, ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(0)]))
+            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+            constant!(gv, true)
+            unnamed_addr!(gv, true)
+            return gv
+        end
+
+        @test GPUCompiler.is_boxed_constant(private_constant("value_box"))
+        @test !GPUCompiler.is_boxed_constant(private_constant("ordinary_constant"))
+    end
+end
+
+@testset "smalltag boxed union constant demotion" begin
+    # A non-relocatable, smalltag-header isbits-`Union` constant is materialized as a private
+    # constant box. When its payload address escapes the `{ptr, i8}` union return, the box must
+    # be demoted to a stack `alloca` (`demote_boxed_constants!`), or `add_global_address_spaces!`
+    # sinks it into addrspace(2), whose payload the kernel then misreads at run time (AIR has
+    # no generic address space, so the addrspacecast to AS 0 folded into the returned aggregate
+    # makes the load read thread memory). This is independent of relocations — the kernel
+    # carries none — and regresses easily since neither the native tests (a different target) nor
+    # the other metal tests exercise this exact demotion path.
+    mod = @eval module $(gensym())
+        @noinline produce(cond::Bool, a::Int32) = cond ? a : Int64(7)
+        function kernel(ptr::Core.LLVMPtr{Int64,1}, cond::Bool, a::Int32)
+            x = produce(cond, a)
+            Base.unsafe_store!(ptr, x isa Int64 ? x : Int64(x))
+            return
+        end
+    end
+    if LLVM.version() >= v"17"
+        # the box must be demoted, leaving a stack alloca rather than an addrspace(2) constant
+        air = sprint() do io
+            Metal.code_native(io, mod.kernel, (Core.LLVMPtr{Int64,1}, Bool, Int32); kernel=true)
+        end
+        @test occursin("alloca", air)
+        @test !occursin("addrspace(2) constant", air)
+    elseif GPUCompiler.supports_relocatable_ir()
+        # demotion needs LLVM.jl's `convert_users_to_instructions!` (LLVM 17+); the kernel
+        # must be rejected rather than silently miscompiled
+        @test_throws "require Julia 1.12" begin
+            sprint() do io
+                Metal.code_native(io, mod.kernel, (Core.LLVMPtr{Int64,1}, Bool, Int32);
+                                  kernel=true)
+            end
+        end
+    end
+    # on 1.10 codegen embeds the box as a raw host address instead of a module global,
+    # so there is nothing to demote (or to reject)
 end
 
 # Tuples with a dynamic index are lowered to an addrspace(2) constant plus a

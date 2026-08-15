@@ -45,6 +45,24 @@ end
         SPIRV.code_llvm(mod.kernel, Tuple{}; backend, kernel=true)
     end
 end
+
+@testset "baked boxed relocation cleanup" begin
+    mod = @eval module $(gensym())
+        @noinline produce(cond::Bool, value::Int32) = cond ? value : 1.5
+        function kernel(out::Core.LLVMPtr{UInt,1}, cond::Bool, value::Int32)
+            x = produce(cond, value)
+            Base.unsafe_store!(out, UInt(x isa Float64))
+            return
+        end
+    end
+
+    # Baking an interior relocation can expose a dead pointer component of an isbits-union
+    # result. It must be folded before SPIR-V translation, which otherwise emits a reference
+    # to the now-unused box without defining it.
+    _, meta = SPIRV.code_execution(
+        mod.kernel, (Core.LLVMPtr{UInt,1}, Bool, Int32); backend)
+    @test all(!endswith(LLVM.name(gv), "_box") for gv in globals(meta.ir))
+end
 end
 
 @testset "unsupported type detection" begin

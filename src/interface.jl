@@ -302,6 +302,63 @@ can_vectorize(@nospecialize(job::CompilerJob)) = false
 # Should emit PTLS lookup that can be relocated
 dump_native(@nospecialize(job::CompilerJob)) = false
 
+"""
+    relocation_lowering(job) -> Symbol
+
+Select how a back-end lowers relocations. There is one strategy per class of platform
+capability, distinguished by what the platform lets you do to code *after* compiling it:
+
+- `:bake` (the default): the compiler resolves every record during `emit_llvm`, embedding
+  session-local addresses. Nothing is left for the loader, but the result cannot persist
+  across sessions.
+- `:patch`: the platform has a symbol table and writable data after load. The compiler
+  emits each slot as a named global *definition* (interior records stay `extinit`
+  definitions); the loader looks up each record's `name`, adds its `offset`, and writes the
+  resolved word ([`resolved_relocations`](@ref)). Fits CUDA (`cuModuleGetGlobal` +
+  `cuMemcpyHtoD`) and equally an ORC consumer caching objects rather than IR.
+- `:table`: the platform gives the loader no access to loaded code at all. The compiler
+  rewrites every record into an indexed load from a table of words supplied as run-time
+  data, obtained through [`relocation_table_pointer`](@ref); the loader materializes
+  [`resolved_relocation_table`](@ref) and hands over its base address at dispatch. Fits
+  Metal (the table travels in the kernel state).
+
+Both relocatable strategies produce session-portable results, enabling persistent caching
+(`can_persist_results`); they require [`supports_relocatable_ir`](@ref). Resolving
+relocations permanently roots the referenced Julia values in the process (mirroring Julia's
+own codegen), so loaders need no GC bookkeeping of their own.
+
+When [`supports_relocatable_ir`](@ref) is false, Julia may still embed unrecorded addresses.
+A back-end may lower the records it does receive with any strategy, but the result remains
+session-local regardless.
+
+A loader may hold several compiled functions in one symbol namespace without renaming
+anything: record names are namespaced per compiler job, and where two objects do define one
+record — a relocation-carrying runtime-library function keeps its own namespace in every
+kernel it is linked into — `:patch` defines it weakly, so the definitions coalesce and
+patching the survivor serves both.
+
+The manifest is frozen once lowered: it then describes emitted code, so adding, dropping or
+reordering a record errors. Take a [`copy`](@ref) to work on one afterwards, as
+[`apply_relocations!`](@ref) does.
+"""
+relocation_lowering(@nospecialize(job::CompilerJob)) = :bake
+
+"""
+    relocation_table_pointer(job, builder, fun) -> LLVM.Value
+
+Emit, at `builder`'s current position inside `fun`, a pointer to the base of this job's
+relocation table: an array of host words the loader fills from
+[`resolved_relocation_table`](@ref). Required by back-ends selecting the `:table`
+[`relocation_lowering`](@ref) strategy.
+
+The pointer must dominate the whole function, so it has to derive from something available
+on entry — a kernel-state argument, typically.
+"""
+relocation_table_pointer(@nospecialize(job::CompilerJob), builder::IRBuilder,
+                         fun::LLVM.Function) =
+    error("The `:table` relocation lowering requires " *
+          "$(nameof(typeof(job.config.target))) to implement `relocation_table_pointer`")
+
 # the Julia module to look up target-specific runtime functions in (this includes both
 # target-specific functions from the GPU runtime library, like `malloc`, but also
 # replacements functions for operations like `Base.sin`)
@@ -378,6 +435,32 @@ else
         cache_owner(job.config.target, job.config.params, job.config.always_inline)
 end
 
+struct SessionResultEntry
+    config::CompilerConfig
+    value::Any
+end
+
+const session_results_cache = IdDict{CodeInstance,Vector{SessionResultEntry}}()
+const session_results_lock = ReentrantLock()
+
+function session_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
+    Base.@lock session_results_lock begin
+        entries = get!(session_results_cache, ci) do
+            SessionResultEntry[]
+        end
+        for entry in entries
+            entry.config === config && entry.value isa V && return entry.value::V
+        end
+        value = V()
+        push!(entries, SessionResultEntry(config, value))
+        return value
+    end
+end
+
+function can_persist_results(@nospecialize(job::CompilerJob))
+    supports_relocatable_ir() && relocation_lowering(job) in (:patch, :table)
+end
+
 """
     cached_results(::Type{V}, job::CompilerJob) -> Union{Nothing,V}
 
@@ -409,21 +492,13 @@ post-compile lookup in the example is guaranteed to succeed. To attach results w
 generating code — e.g. from an inference-only precompilation workload — run
 `precompile(job)` first.
 
-Results are keyed by the *full* compiler job: its method instance, world age, and entire
-`CompilerConfig` (two jobs differing only in, say, the kernel `name` get distinct
-structs). Storage differs per Julia version, transparently to the back-end:
+Results are keyed by the method instance, world age, and full `CompilerConfig`. On Julia
+1.11+, results persist with the `CodeInstance` only when the back-end selects `:patch` or
+`:table` and [`supports_relocatable_ir`](@ref) is true. Other results use a session-local
+store. Julia 1.10 always uses the session-local store.
 
-- On Julia 1.11+, the struct lives on the `CodeInstance`'s `analysis_results` chain in
-  Julia's integrated code cache, partitioned by [`cache_owner`](@ref) and keyed by
-  config within the per-CI [`JobResults`](@ref) container. Method redefinition
-  invalidates the CI — and with it the attached results. Artifacts stored during
-  precompilation are serialized into the package image along with the CI: populate only
-  session-portable values (bytes, strings) during precompile workloads, and keep
-  session-local handles (device modules, pipeline objects) in fields that remain empty
-  until first use at run time.
-
-- On Julia 1.10, the struct lives in a session-local store keyed by the foreign
-  `CodeInstance` and config. Nothing persists across sessions.
+Persistent result structs may contain session-local handles, but back-ends must leave those
+fields empty during precompilation.
 
 Thread safety: concurrent calls for the same job return the same struct, but
 GPUCompiler does not serialize back-end *compilation*; take a back-end lock around
@@ -434,7 +509,7 @@ function cached_results end
 @static if HAS_INTEGRATED_CACHE
 
 """
-    JobResults
+    PersistentJobResults
 
 Per-CodeInstance container mapping a `CompilerConfig` to the back-end's results struct.
 
@@ -449,28 +524,28 @@ from package images.
 # `CompilerConfig` is an abstract UnionAll here. Keeping it in a tuple stored inline in a
 # Vector boxes the config again on every iteration. A non-isbits entry object is stored by
 # reference, so both fields are boxed once and hot-path scans allocate nothing.
-struct JobResultEntry
+struct PersistentResultEntry
     config::CompilerConfig
     value::Any
 end
 
-mutable struct JobResults
-    entries::Vector{JobResultEntry}
-    JobResults() = new(JobResultEntry[])
+mutable struct PersistentJobResults
+    entries::Vector{PersistentResultEntry}
+    PersistentJobResults() = new(PersistentResultEntry[])
 end
 
-const cached_results_lock = ReentrantLock()
+const persistent_results_lock = ReentrantLock()
 
 # NOTE: like `cache_owner`, specialized for the launch hot path (bounded number of
 #       instantiations: one per back-end and results type).
-function job_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
-    jr = CompilerCaching.results(JobResults, ci)
-    Base.@lock cached_results_lock begin
-        for entry in jr.entries
+function persistent_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
+    results = CompilerCaching.results(PersistentJobResults, ci)
+    Base.@lock persistent_results_lock begin
+        for entry in results.entries
             entry.config === config && entry.value isa V && return entry.value::V
         end
         v = V()
-        push!(jr.entries, JobResultEntry(config, v))
+        push!(results.entries, PersistentResultEntry(config, v))
         return v
     end
 end
@@ -478,7 +553,7 @@ end
 function cache_view(@nospecialize(job::CompilerJob))
     # `cache_owner` is deliberately stored as Any on CompilerConfig: preserve that box in the
     # CacheView instead of re-specializing and re-boxing the immutable token for the ccall.
-    CompilerCaching.CacheView{Any,JobResults}(cache_owner(job), job.world)
+    CompilerCaching.CacheView{Any,PersistentJobResults}(cache_owner(job), job.world)
 end
 
 # Fetch the CodeInstance backing `job` from the integrated cache. On 1.14+, inference
@@ -503,54 +578,20 @@ end
 function cached_results(::Type{V}, job::CompilerJob) where {V}
     ci = job_code_instance(job)
     ci === nothing && return nothing
-    return job_results(V, ci, job.config)
-end
-
-## session-dependent results
-#
-# Some compilation results embed session-specific data: `relocate_gvs!` bakes absolute
-# pointers into the IR of toplevel jobs that reference `julia.constgv` globals (except
-# for slots it can materialize as session-portable device constants), and any
-# artifact a back-end derives from that IR (metallib, SPIR-V, ...) inherits them. Such
-# results must not survive into a package image, while remaining available for
-# within-session lookups during the precompilation process itself. Julia wipes its own
-# session-dependent CodeInstance state during serialization (staticdata.c); we
-# approximate that with an `atexit` hook, which the runtime invokes *before*
-# `jl_write_compiler_output`: right before the image is written, the entries of jobs
-# marked session-dependent are deleted from their `JobResults` container, so a later
-# session simply recompiles them.
-
-const session_dependent_jobs = Vector{CompilerJob}()
-const session_dependent_lock = ReentrantLock()
-
-function mark_session_dependent!(@nospecialize(job::CompilerJob))
-    ccall(:jl_generating_output, Cint, ()) == 1 || return
-    Base.@lock session_dependent_lock begin
-        if isempty(session_dependent_jobs)
-            atexit(wipe_session_dependent_results)
-        end
-        push!(session_dependent_jobs, job)
+    if can_persist_results(job)
+        return persistent_results(V, ci, job.config)
+    else
+        return session_results(V, ci, job.config)
     end
-    return
-end
-
-function wipe_session_dependent_results()
-    Base.@lock session_dependent_lock begin
-        for job in session_dependent_jobs
-            ci = job_code_instance(job)
-            ci === nothing && continue
-            jr = CompilerCaching.results(JobResults, ci)
-            Base.@lock cached_results_lock begin
-                filter!(entry -> entry.config !== job.config, jr.entries)
-            end
-        end
-        empty!(session_dependent_jobs)
-    end
-    return
 end
 
 end # HAS_INTEGRATED_CACHE
 
+# Public relocation interface.
+@public Relocation, RelocationSiteKind, SlotSite, InteriorSite, Relocations
+@public relocation_lowering, relocation_table_pointer
+@public apply_relocations!, resolved_relocations, resolved_relocation_table
+@public supports_relocatable_ir
 @public GPUCompilerCacheToken, cache_owner, cached_results
 
 # the method table to use

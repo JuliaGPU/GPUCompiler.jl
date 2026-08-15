@@ -162,8 +162,8 @@ end
 # `show` via `showerror`, avoiding the default field-dump that derefs disposed IR
 Base.show(io::IO, err::InvalidIRError) = showerror(io, err)
 
-function check_ir(job, args...)
-    errors = check_ir!(job, IRError[], args...)
+function check_ir(job, mod::LLVM.Module, relocs::Relocations=Relocations())
+    errors = check_ir!(job, IRError[], mod, relocs)
     unique!(errors)
     if !isempty(errors)
         throw(InvalidIRError(job, errors))
@@ -172,9 +172,9 @@ function check_ir(job, args...)
     return
 end
 
-function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module)
+function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Relocations)
     for f in functions(mod)
-        check_ir!(job, errors, f)
+        check_ir!(job, errors, f, relocs)
     end
 
     # custom validation
@@ -183,10 +183,10 @@ function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module)
     return errors
 end
 
-function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function)
+function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Relocations)
     for bb in blocks(f), inst in instructions(bb)
         if isa(inst, LLVM.CallInst)
-            check_ir!(job, errors, inst)
+            check_ir!(job, errors, inst, relocs)
         elseif isa(inst, LLVM.LoadInst)
             check_ir!(job, errors, inst)
         end
@@ -221,7 +221,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
     return errors
 end
 
-function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
+function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Relocations)
     bt = backtrace(inst)
     dest = called_operand(inst)
     if isa(dest, LLVM.Function)
@@ -233,11 +233,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
         elseif fn == "jl_get_binding_or_error" || fn == "ijl_get_binding_or_error"
             try
                 m, sym = arguments(inst)
-                sym = first(operands(sym::ConstantExpr))::ConstantInt
-                sym = convert(Int, sym)
-                sym = Ptr{Cvoid}(sym)
-                sym = Base.unsafe_pointer_to_objref(sym)
-                push!(errors, (DELAYED_BINDING, bt, sym))
+                ref = referenced_object(sym, relocs)
+                ref === nothing && error("Unknown binding")
+                push!(errors, (DELAYED_BINDING, bt, something(ref)))
             catch e
                 @safe_debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=LLVM.parent(inst)
                 push!(errors, (DELAYED_BINDING, bt, nothing))
@@ -246,10 +244,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
                fn == "jl_get_binding_value_seqcst" || fn == "ijl_get_binding_value_seqcst"
             try
                 # pry the binding from the IR
-                expr = arguments(inst)[1]::ConstantExpr
-                expr = first(operands(expr))::ConstantInt # get rid of inttoptr
-                ptr = Ptr{Any}(convert(Int, expr))
-                obj = Base.unsafe_pointer_to_objref(ptr)
+                ref = referenced_object(arguments(inst)[1], relocs)
+                ref === nothing && error("Unknown binding")
+                obj = something(ref)
                 push!(errors, (DELAYED_BINDING, bt, obj.globalref))
             catch e
                 @safe_debug "Decoding arguments to jl_reresolve_binding_value_seqcst failed" inst bb=LLVM.parent(inst)
@@ -258,10 +255,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
         elseif startswith(fn, "tojlinvoke")
             try
                 fun, args, nargs = arguments(inst)
-                fun = first(operands(fun::ConstantExpr))::ConstantInt
-                fun = convert(Int, fun)
-                fun = Ptr{Cvoid}(fun)
-                fun = Base.unsafe_pointer_to_objref(fun)::Base.Function
+                ref = referenced_object(fun, relocs)
+                ref === nothing && error("Unknown function")
+                fun = something(ref)::Base.Function
                 push!(errors, (DYNAMIC_CALL, bt, fun))
                 # XXX: an invoke trampoline happens when codegen doesn't have access to code
                 #      which suggests a GPUCompiler.jl bug. throw an error instead?
@@ -279,10 +275,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
             end
             try
                 fun, args, nargs, meth = arguments(inst)
-                meth = first(operands(meth::ConstantExpr))::ConstantInt
-                meth = convert(Int, meth)
-                meth = Ptr{Cvoid}(meth)
-                meth = Base.unsafe_pointer_to_objref(meth)::Core.MethodInstance
+                ref = referenced_object(meth, relocs)
+                ref === nothing && error("Unknown method instance")
+                meth = something(ref)::Core.MethodInstance
                 push!(errors, (DYNAMIC_CALL, bt, meth.def))
             catch e
                 @safe_debug "Decoding arguments to jl_invoke failed" inst bb=LLVM.parent(inst)
@@ -291,10 +286,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst)
         elseif fn == "jl_apply_generic" || fn == "ijl_apply_generic"
             try
                 f, args, nargs = arguments(inst)
-                f = first(operands(f))::ConstantInt # get rid of inttoptr
-                f = convert(Int, f)
-                f = Ptr{Cvoid}(f)
-                f = Base.unsafe_pointer_to_objref(f)
+                ref = referenced_object(f, relocs)
+                ref === nothing && error("Unknown function")
+                f = something(ref)
                 push!(errors, (DYNAMIC_CALL, bt, f))
             catch e
                 @safe_debug "Decoding arguments to jl_apply_generic failed" inst bb=LLVM.parent(inst)
