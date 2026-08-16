@@ -62,7 +62,7 @@ function irgen(@nospecialize(job::CompilerJob))
     if job.config.name !== nothing
         LLVM.name!(entry, safe_name(job.config.name))
     elseif job.config.kernel
-        LLVM.name!(entry, mangle_sig(job.source.specTypes))
+        LLVM.name!(entry, mangle_sig(abi_signature(job.source)))
     end
     if job.config.entry_abi === :specfunc
         func = compiled[job.source].func
@@ -547,30 +547,90 @@ end
 # - `name`: the name of the argument
 # - `idx`: the index of the argument in the LLVM function type, or `nothing` if the argument
 #          is not passed at the LLVM level.
+# - `roots_idx`: the index of the extra `.roots.` shadow parameter codegen emits for an
+#          aggregate holding some-but-not-all tracked pointers, or `nothing`.
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType;
                             post_optimization::Bool=false)
-    source_sig = job.source.specTypes
+    # `post_optimization` asks a different question: by then our own passes have
+    # rewritten the parameter list (`lower_byval`, Metal's `pass_by_reference!`,
+    # ...), and callers want the convention of the function *as it now stands*.
+    # Only the untouched entry point is described by Julia's specsig ABI.
+    if HAS_ABI_LAYOUT && !post_optimization
+        return _classify_arguments_abi(job)
+    else
+        return _classify_arguments_legacy(job, codegen_ft; post_optimization)
+    end
+end
+
+# argument names come from the method, not from Julia's codegen: the back-ends
+# (Metal in particular) want the names a user would recognize, and codegen only
+# reports the CodeInfo slot names.
+function source_argnames(@nospecialize(job::CompilerJob), nargs::Int)
+    names = Base.method_argnames(job.source.def)
+    while length(names) < nargs
+        # this is probably due to a trailing vararg; repeat its name
+        push!(names, names[end])
+    end
+    return names
+end
+
+function _classify_arguments_abi(@nospecialize(job::CompilerJob))
+    layout, arginfos = abi_layout(job)
+    layout.specsig != 0 ||
+        error("$(job.source) does not use the specialized signature; cannot classify arguments")
+    # GPUCompiler always requests gcstack_arg=false, so the only leading
+    # parameters that can appear are the return slots (kernels return nothing
+    # and so have none, but `:specfunc` entry points for ordinary functions do)
+    @assert layout.pgcstack_idx == -1
+
+    names = source_argnames(job, Int(layout.nargs))
+
+    # `param_idx` already counts the leading return slots; the kernel-state
+    # parameter only exists after optimization, which this path does not serve
+    args = []
+    for (i, info) in enumerate(arginfos)
+        typ = unsafe_pointer_to_objref(info.typ)
+        cc = if info.cc == JL_ABI_ARG_ELIDED
+            GHOST
+        elseif info.cc == JL_ABI_ARG_VALUE
+            BITS_VALUE
+        elseif info.cc == JL_ABI_ARG_INDIRECT
+            BITS_REF
+        else
+            MUT_REF
+        end
+        idx = info.param_idx < 0 ? nothing : Int(info.param_idx) + 1
+        roots_idx = info.roots_idx < 0 ? nothing : Int(info.roots_idx) + 1
+        push!(args, (cc=cc, typ=typ, name=names[i], idx=idx, roots_idx=roots_idx))
+    end
+    return args
+end
+
+# The pre-`jl_get_specsig_layout` implementation: reconstruct the mapping by
+# walking the signature in lockstep with the LLVM function type codegen produced.
+# Kept for older Julia versions, and as the differential-test reference.
+function _classify_arguments_legacy(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType;
+                                    post_optimization::Bool=false)
+    source_sig = abi_signature(job.source)
     source_types = [source_sig.parameters...]
 
-    source_argnames = Base.method_argnames(job.source.def)
-    while length(source_argnames) < length(source_types)
-        # this is probably due to a trailing vararg; repeat its name
-        push!(source_argnames, source_argnames[end])
-    end
+    argnames = source_argnames(job, length(source_types))
 
     codegen_types = parameters(codegen_ft)
 
     if post_optimization && kernel_state_type(job) !== Nothing
         args = []
-        push!(args, (cc=KERNEL_STATE, typ=kernel_state_type(job), name=:kernel_state, idx=1))
+        push!(args, (cc=KERNEL_STATE, typ=kernel_state_type(job), name=:kernel_state,
+                     idx=1, roots_idx=nothing))
         codegen_i = 2
     else
         args = []
         codegen_i = 1
     end
-    for (source_typ, source_name) in zip(source_types, source_argnames)
+    for (source_typ, source_name) in zip(source_types, argnames)
         if isghosttype(source_typ) || Core.Compiler.isconstType(source_typ)
-            push!(args, (cc=GHOST, typ=source_typ, name=source_name, idx=nothing))
+            push!(args, (cc=GHOST, typ=source_typ, name=source_name, idx=nothing,
+                         roots_idx=nothing))
             continue
         end
 
@@ -582,19 +642,23 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
             # - literal pointer values
             if source_typ <: Ptr || source_typ <: Core.LLVMPtr
                 @assert llvm_source_typ == codegen_typ
-                push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name, idx=codegen_i))
+                push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name, idx=codegen_i,
+                             roots_idx=nothing))
             # - boxed values
             #   XXX: use `deserves_retbox` instead?
             elseif llvm_source_typ isa LLVM.PointerType
                 @assert llvm_source_typ == codegen_typ
-                push!(args, (cc=MUT_REF, typ=source_typ, name=source_name, idx=codegen_i))
+                push!(args, (cc=MUT_REF, typ=source_typ, name=source_name, idx=codegen_i,
+                             roots_idx=nothing))
             # - references to aggregates
             else
                 @assert llvm_source_typ != codegen_typ
-                push!(args, (cc=BITS_REF, typ=source_typ, name=source_name, idx=codegen_i))
+                push!(args, (cc=BITS_REF, typ=source_typ, name=source_name, idx=codegen_i,
+                             roots_idx=nothing))
             end
         else
-            push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name, idx=codegen_i))
+            push!(args, (cc=BITS_VALUE, typ=source_typ, name=source_name, idx=codegen_i,
+                         roots_idx=nothing))
         end
 
         codegen_i += 1
@@ -608,18 +672,9 @@ function is_immutable_datatype(T::Type)
 end
 
 function is_inlinealloc(T::Type)
-    mayinlinealloc = (T.name.flags >> 2) & 1 == true
-    # FIXME: To simple
-    if mayinlinealloc
-        if !Base.datatype_pointerfree(T)
-            t_name(dt::DataType)=dt.name
-            if t_name(T).n_uninitialized != 0
-                return false
-            end
-        end
-        return true
-    end
-    return false
+    # jl_datatype_isinlinealloc has been exported for a long time; no need to
+    # reimplement the mayinlinealloc/n_uninitialized/fielddesc rules here
+    ccall(:jl_datatype_isinlinealloc, Cint, (Any, Cint), T, 0) != 0
 end
 
 function is_concrete_immutable(T::Type)
@@ -634,14 +689,17 @@ function is_pointerfree(T::Type)
 end
 
 function deserves_stack(@nospecialize(T))
+    if HAS_DESERVES_CCALL
+        return ccall(:jl_deserves_stack, Cint, (Any,), T) != 0
+    end
     if !is_concrete_immutable(T)
         return false
     end
     return is_inlinealloc(T)
 end
 
-deserves_argbox(T) = !deserves_stack(T)
-deserves_retbox(T) = deserves_argbox(T)
+deserves_argbox(@nospecialize(T)) = !deserves_stack(T)
+deserves_retbox(@nospecialize(T)) = deserves_argbox(T)
 function deserves_sret(T, llvmT)
     @assert isa(T,DataType)
     sizeof(T) > sizeof(Ptr{Cvoid}) && !isa(llvmT, LLVM.FloatingPointType) && !isa(llvmT, LLVM.VectorType)

@@ -456,6 +456,32 @@ function lookup_ci(cache::CodeCache, mi::MethodInstance, min_world::UInt, max_wo
 end
 end
 
+"""
+    codegen_params(job; lookup_cb=nothing)
+
+The `Base.CodegenParams` this job compiles with. Anything that needs to reason
+about the ABI Julia will emit (see `classify_arguments`) has to use exactly
+these: `gcstack_arg=false` in particular removes a leading LLVM parameter, which
+shifts every parameter index relative to the host defaults.
+"""
+function codegen_params(@nospecialize(job::CompilerJob); lookup_cb=nothing)
+    cgparams = (;
+        track_allocations  = false,
+        code_coverage      = false,
+        prefer_specsig     = true,
+        gnu_pubnames       = false,
+        debug_info_kind    = Cint(llvm_debug_info(job)),
+        safepoint_on_entry = can_safepoint(job),
+        gcstack_arg        = false)
+    if VERSION < v"1.12.0-DEV.1667" && lookup_cb !== nothing
+        cgparams = (; lookup = Base.unsafe_convert(Ptr{Nothing}, lookup_cb), cgparams...)
+    end
+    if v"1.12.0-DEV.2126" <= VERSION < v"1.13-" || VERSION >= v"1.13.0-DEV.285"
+        cgparams = (; force_emit_all = true, cgparams...)
+    end
+    return Base.CodegenParams(; cgparams...)
+end
+
 function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.source.def.primary_world > job.world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
@@ -503,22 +529,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     end
 
     # set-up the compiler interface
-    debug_info_kind = llvm_debug_info(job)
-    cgparams = (;
-        track_allocations  = false,
-        code_coverage      = false,
-        prefer_specsig     = true,
-        gnu_pubnames       = false,
-        debug_info_kind    = Cint(debug_info_kind),
-        safepoint_on_entry = can_safepoint(job),
-        gcstack_arg        = false)
-    if VERSION < v"1.12.0-DEV.1667"
-        cgparams = (; lookup = Base.unsafe_convert(Ptr{Nothing}, lookup_cb), cgparams... )
-    end
-    if v"1.12.0-DEV.2126" <= VERSION < v"1.13-" || VERSION >= v"1.13.0-DEV.285"
-        cgparams = (; force_emit_all = true , cgparams...)
-    end
-    params = Base.CodegenParams(; cgparams...)
+    params = codegen_params(job; lookup_cb)
 
     # generate IR
     GC.@preserve lookup_cb begin

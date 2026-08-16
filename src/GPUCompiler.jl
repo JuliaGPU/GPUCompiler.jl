@@ -67,6 +67,7 @@ include("runtime.jl")
 # compiler implementation
 include("deprecated.jl")
 include("jlgen.jl")
+include("abi.jl")
 include("irgen.jl")
 include("optim.jl")
 include("validation.jl")
