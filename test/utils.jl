@@ -1,3 +1,6 @@
+# loading Highlights activates the HighlightsExt extension providing the renderer
+import Highlights
+
 @testset "split_kwargs" begin
     kwargs = [:(a=1), :(b=2), :(c=3), :(d=4)]
     groups = GPUCompiler.split_kwargs(kwargs, [:a], [:b, :c])
