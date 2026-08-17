@@ -59,7 +59,9 @@ end
             end
         end
 
-        job, _ = Native.create_job(mod.outer, (Int, Symbol); validate=false)
+        # A relocatable back-end keeps the Symbol reference symbolic in `:llvm`.
+        job, _ = Native.create_job(mod.outer, (Int, Symbol); validate=false,
+                                   relocations=:patch)
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job)
 
@@ -72,18 +74,10 @@ end
             @test length(other_mis) == 1
             @test only(other_mis).def in methods(mod.inner)
 
-            if VERSION >= v"1.12"
-                @test length(meta.gv_to_value) == 1
-                for (k, v) in meta.gv_to_value
-                    @test v != C_NULL
-                end
+            if GPUCompiler.supports_relocatable_ir()
+                @test length(meta.relocations) == 1
+                @test only(meta.relocations.records).target isa GPUCompiler.JuliaValueRef
             end
-            # TODO: Global values get privatized, so we can't find them by name anymore.
-            # %.not = icmp eq ptr %"sym::Symbol", inttoptr (i64 140096668482288 to ptr), !dbg !38
-            # for (name, v) in meta.gv_to_value
-            #     gv = globals(ir)[name]
-            #     @test LLVM.initializer(gv) === v
-            # end
         end
     end
 
@@ -225,21 +219,6 @@ end
         @test new_res !== res
         @test new_res.asm === nothing
 
-        @static if GPUCompiler.HAS_INTEGRATED_CACHE
-            # session-dependent results (e.g. artifacts with relocated GVs) are wiped
-            # before image serialization; emulate the atexit-driven wipe directly
-            new_res.asm = "session-dependent"
-            other_job, _ = Native.create_job(mod.kernel, (Int64,); name="other")
-            other_res = GPUCompiler.cached_results(mod.Results, other_job)
-            push!(GPUCompiler.session_dependent_jobs, new_job)
-            GPUCompiler.wipe_session_dependent_results()
-            @test isempty(GPUCompiler.session_dependent_jobs)
-            wiped_res = GPUCompiler.cached_results(mod.Results, new_job)
-            @test wiped_res !== new_res
-            @test wiped_res.asm === nothing
-            # ... without affecting other configs on the same CI
-            @test GPUCompiler.cached_results(mod.Results, other_job) === other_res
-        end
     end
 
     @testset "runtime cache invalidation" begin
@@ -273,11 +252,10 @@ end
         end
     end
 
-    @testset "runtime constgv relocation" begin
+    @testset "runtime relocations" begin
         # runtime functions like `box_bool` may reference Julia singletons through
-        # `julia.constgv` globals. Their session-absolute addresses must be baked into
-        # the cached runtime bitcode when it is built: only kernel modules go through
-        # `relocate_gvs!`, so a slot left null here would stay null on the device.
+        # `julia.constgv` globals. Keep their Julia identities with the cached bitcode
+        # so the final kernel can resolve them in its own session.
         job, _ = Native.create_job(identity, (Nothing,))
         JuliaContext() do ctx
             GPUCompiler.load_runtime(job)
@@ -292,10 +270,12 @@ end
                 isempty(uses(gv)) && continue
                 used += 1
                 init = LLVM.initializer(gv)
-                @test init !== nothing && !LLVM.isnull(init)
+                @test init === nothing
+                rec = GPUCompiler.find_relocation(lib.relocations, LLVM.name(gv))
+                @test rec !== nothing && rec.kind === GPUCompiler.SlotSite
             end
-            @static if VERSION >= v"1.12-"
-                # on older versions, Julia bakes addresses without tagging globals
+            if GPUCompiler.supports_relocatable_ir()
+                # otherwise Julia embeds addresses without tagging globals
                 @test used > 0
             end
         end
@@ -369,13 +349,17 @@ end
         Native.code_execution(mod.kernel, (Ptr{Int64}, Bool, Int32))
         Native.code_execution(mod.egal_kernel, (Ptr{Bool}, Bool, Int32))
 
-        # relocate_gvs! reports whether the module stayed session-portable
+        # Classification records whether the module stayed session-portable; eager
+        # lowering then resolves any remaining relocation slots.
+        collect_job, _ = Native.create_job(mod.kernel, (Ptr{Int64}, Bool, Int32))
+        namespace = GPUCompiler.relocation_namespace(collect_job)
+        collect!(m, map) = GPUCompiler.collect_julia_value_relocations!(collect_job, m, map)
         JuliaContext() do ctx
             # Unlike Int128, vector-shaped tuples are 16-byte aligned on all
             # supported architectures and Julia versions.
             aligned = (VecElement(Int64(1)), VecElement(Int64(2)))
             @test Base.datatype_alignment(typeof(aligned)) > sizeof(Int)
-            objs = Any[Int64(42), 1.25, :sym, aligned]
+            objs = Any[Int64(42), 1.25, :sym, aligned, Union{}]
             # pointers to the heap boxes rooted in `objs` (passing an element
             # through a specialized function would re-box, possibly on the stack)
             ptrs = [ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x) for x in objs]
@@ -392,9 +376,12 @@ end
                 gv = LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()), name)
                 constant!(gv, true)
             end
-            @test GPUCompiler.relocate_gvs!(m, Dict{String, Ptr{Cvoid}}())
+            relocs = collect!(m, Dict{String, Ptr{Cvoid}}())
+            @test isempty(relocs)
+            GPUCompiler.bake_relocations!(m, relocs)
             bool_ir = string(m)
             for name in ("jl_true", "jl_false")
+                # a fully-materialized box is private, so it needs no per-job namespace
                 @test haskey(globals(m), "$(name)_box")
                 @test occursin("@$name = private constant", bool_ir)
             end
@@ -405,28 +392,80 @@ end
             GC.@preserve objs begin
                 # smalltag isbits: materialized, portable
                 m, map = slot_module(ptrs[1])
-                @test GPUCompiler.relocate_gvs!(m, map)
+                relocs = collect!(m, map)
+                @test isempty(relocs)
+                GPUCompiler.bake_relocations!(m, relocs)
                 @test haskey(globals(m), "jl_global_0_box")
                 dispose(m)
 
-                # Float64: materialized, but the header carries a type pointer
+                # Float64: the non-smalltag header is an interior relocation.
                 m, map = slot_module(ptrs[2])
-                @test !GPUCompiler.relocate_gvs!(m, map)
-                @test haskey(globals(m), "jl_global_0_box")
+                relocs = collect!(m, map)
+                @test length(relocs) == 1
+                rec = only(relocs.records)
+                @test rec.kind === GPUCompiler.InteriorSite
+                @test rec.offset == 0
+                @test rec.target.value === Float64
+                # a relocatable box is addressed by name, so its name carries the namespace
+                @test startswith(rec.name, namespace)
+                box = globals(m)[rec.name]
+                @test isextinit(box)
+                @test linkage(box) == LLVM.API.LLVMExternalLinkage
+                header_idx = Int(element_at(datalayout(m), global_value_type(box),
+                                            rec.offset)) + 1
+                @test convert(UInt, collect(operands(initializer(box)))[header_idx]) == 0
+                GPUCompiler.bake_relocations!(m, relocs)
+                @test isempty(relocs)
+                @test !isextinit(box)
+                @test isconstant(box)
+                @test linkage(box) == LLVM.API.LLVMPrivateLinkage
+                @test convert(UInt, collect(operands(initializer(box)))[header_idx]) ==
+                      GPUCompiler.resolve_relocation_target(rec.target)
                 dispose(m)
 
-                # Symbol: baked address
+                # Symbol: resolved address
                 m, map = slot_module(ptrs[3])
-                @test !GPUCompiler.relocate_gvs!(m, map)
+                relocs = collect!(m, map)
+                rec = only(relocs.records)
+                @test rec.kind === GPUCompiler.SlotSite
+                @test rec.target.value === objs[3]
+                @test startswith(rec.name, namespace)
+                GPUCompiler.bake_relocations!(m, relocs)
+                @test isempty(relocs)
                 @test !haskey(globals(m), "jl_global_0_box")
                 @test occursin("inttoptr", string(m))
                 dispose(m)
 
+                # Empty type objects have a zero-sized singleton representation.
+                m, map = slot_module(ptrs[5])
+                relocs = collect!(m, map)
+                rec = only(relocs.records)
+                @test rec.kind === GPUCompiler.SlotSite
+                @test rec.target.value === Union{}
+                dispose(m)
+
                 # 16-byte-aligned payloads get padded past the header word
                 m, map = slot_module(ptrs[4])
-                GPUCompiler.relocate_gvs!(m, map)
-                box = globals(m)["jl_global_0_box"]
+                relocs = collect!(m, map)
+                rec = only(relocs.records)
+                @test rec.offset == 8
+                GPUCompiler.bake_relocations!(m, relocs)
+                box = globals(m)[rec.name]
                 @test length(elements(LLVM.global_value_type(box))) == 3
+                dispose(m)
+
+                # Codegen can emit several slots for one value in a module (observed on
+                # 1.11, whose backported GV API does not deduplicate); their
+                # content-derived names collide, so later slots must alias the first.
+                m = LLVM.Module("duplicate slots")
+                gvs = [LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()),
+                                           "jl_global#$i") for i in 1:2]
+                relocs = collect!(m, Dict("jl_global#1" => ptrs[3],
+                                          "jl_global#2" => ptrs[3]))
+                rec = only(relocs.records)
+                @test rec.target.value === objs[3]
+                @test count(gv -> startswith(LLVM.name(gv), namespace), globals(m)) == 1
+                @test !any(gv -> startswith(LLVM.name(gv), "jl_global#"), globals(m))
                 dispose(m)
             end
         end
@@ -733,12 +772,416 @@ end
     end
 end
 
-@testset "CPU reference resolution" begin
+@testset "relocation target resolution" begin
+    ref = GPUCompiler.JuliaValueRef(:probe)
+    @test_throws ArgumentError GPUCompiler.Relocation(GPUCompiler.SlotSite, "invalid", -1, ref)
+    # a slot is a whole word, so only an interior record may carry an offset
+    @test_throws ArgumentError GPUCompiler.Relocation(GPUCompiler.SlotSite, "slot", 8, ref)
+
+    sym = :relocation_target_probe
+    @test GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(sym)) ==
+          UInt(pointer_from_objref(sym))
+
+    singleton = nothing
+    @test GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(singleton)) ==
+          UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), singleton))
+
+    @test_throws ErrorException GPUCompiler.JuliaValueRef(1.5)
+end
+
+@testset "applied relocation execution" begin
+    # A consumer that resolves the metadata into a module of its own instead of letting a
+    # loader do it: it caches the `:llvm` result plus the relocation metadata, and in every
+    # later session re-parses, `apply_relocations!`s, and emits an object with nothing left
+    # symbolic. AllocCheck does exactly this for the module it analyzes.
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            # the boxed `1.0` alternative of the isbits union is an *interior* record (its
+            # header word is a `Float64` type tag), while the Symbol is a whole-word slot;
+            # `apply_relocations!` must handle both kinds
+            @noinline produce(cond::Bool, a::Int32) = cond ? a : 1.0
+            function f(cond::Bool)
+                x = produce(cond, Int32(7))
+                word = x isa Float64 ? reinterpret(UInt64, x) : UInt64(0)
+                return word + UInt(pointer_from_objref(:applied_probe))
+            end
+        end
+        job, _ = Native.create_job(mod.f, (Bool,); relocations=:patch)
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job)
+            relocs = meta.relocations
+            @test all(rec -> rec.target isa GPUCompiler.JuliaValueRef, relocs.records)
+            # both record kinds are exercised
+            @test any(rec -> rec.kind === GPUCompiler.SlotSite, relocs.records)
+            @test any(rec -> rec.kind === GPUCompiler.InteriorSite, relocs.records)
+
+            # the cache artifact: session-portable bitcode + relocation metadata
+            bitcode = let io = IOBuffer()
+                write(io, ir)
+                take!(io)
+            end
+            entry = LLVM.name(meta.entry)
+
+            # a fresh session resolves the records into its own copy of the module, and only
+            # then emits an object
+            session_mod = parse(LLVM.Module, MemoryBuffer(bitcode))
+            GPUCompiler.apply_relocations!(session_mod, relocs)
+            @test !isempty(relocs)   # the metadata is not consumed
+            obj, _ = GPUCompiler.emit_asm(job, session_mod, LLVM.API.LLVMObjectFile)
+
+            expected = reinterpret(UInt64, 1.0) +
+                       GPUCompiler.resolve_relocation_target(
+                           GPUCompiler.JuliaValueRef(:applied_probe))
+            fptr, lljit, _table = Native.load(Vector{UInt8}(codeunits(obj)), entry,
+                                              GPUCompiler.Relocations())
+            try
+                # the boxed alternative: its header tag decides the `isa`, so a stranded
+                # interior record would show up as a wrong result rather than a crash
+                @test ccall(fptr, UInt, (Bool,), false) == expected
+                @test ccall(fptr, UInt, (Bool,), false) == mod.f(false)
+                # ...and the inline alternative, which only reads the Symbol slot
+                @test ccall(fptr, UInt, (Bool,), true) == mod.f(true)
+            finally
+                dispose(lljit)
+            end
+        end
+    end
+end
+
+@testset "eager relocation resolution" begin
+    # Eager resolution in `emit_llvm` leaves nothing for a loader.
+    mod = @eval module $(gensym())
+        probe() = UInt(pointer_from_objref(:eager_probe))
+    end
+    job, _ = Native.create_job(mod.probe, Tuple{})
+    JuliaContext() do ctx
+        ir, meta = GPUCompiler.compile(:llvm, job)
+        @test isempty(meta.relocations)
+        # nothing is left for a loader to patch or import
+        @test !any(GPUCompiler.isextinit, globals(ir))
+
+        # This back-end can emit objects without threading relocation metadata.
+        code, _ = GPUCompiler.emit_asm(job, ir, LLVM.API.LLVMObjectFile)
+        @test !isempty(code)
+    end
+end
+
+@testset "patchable relocation" begin
+    # An object-caching consumer: the words are written into the loaded image, so a cached
+    # object needs no compiler at all in a later session. CUDA does this with
+    # `cuModuleGetGlobal` + `cuMemcpyHtoD`; the ORC JIT below proves the same works under
+    # JITLink on macOS aarch64, the strictest W^X environment (only code pages are hardened).
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            f() = UInt(pointer_from_objref(:patch_probe))
+        end
+        job, _ = Native.create_job(mod.f, Tuple{}; relocations=:patch)
+        JuliaContext() do ctx
+            obj, meta = GPUCompiler.compile(:obj, job)
+            relocs = meta.relocations
+            @test !isempty(relocs)
+
+            # every slot became a null-init, externally-initialized definition kept alive by
+            # `llvm.used`; the loader patches each record after loading. Definitions are weak
+            # so that two objects defining one record coalesce (see "shared patchable record").
+            @test haskey(globals(meta.ir), "llvm.used")
+            for rec in relocs.records
+                gv = globals(meta.ir)[rec.name]
+                @test !isdeclaration(gv)
+                @test isextinit(gv)
+                @test !isconstant(gv)
+                @test linkage(gv) == LLVM.API.LLVMWeakODRLinkage
+                rec.kind === GPUCompiler.SlotSite && @test LLVM.isnull(initializer(gv))
+            end
+
+            bytes = Vector{UInt8}(codeunits(obj))
+            entry = LLVM.name(meta.entry)
+            probe = only(filter(rec -> rec.target isa GPUCompiler.JuliaValueRef &&
+                                       rec.target.value === :patch_probe, relocs.records))
+            expected = GPUCompiler.resolve_relocation_target(probe.target)
+            fptr, lljit, _table = Native.load(bytes, entry, relocs)
+            try
+                @test ccall(fptr, UInt, ()) == expected
+            finally
+                dispose(lljit)
+            end
+
+            # The manifest now describes an emitted object, so dropping a record would leave
+            # its definition holding a zero and mis-branch silently. Refuse instead.
+            @test_throws "already been lowered" GPUCompiler.prune_dead_relocations!(
+                meta.ir, relocs)
+            @test_throws "already been lowered" GPUCompiler.add_relocation!(
+                relocs, GPUCompiler.SlotSite, "late", 0, probe.target)
+
+            # A consumer that also wants a session-resolved copy to analyze (AllocCheck reads
+            # type tags out of one) applies the manifest *after* `emit_asm` froze it. That
+            # works because resolution goes into a copy — which freezing could easily break.
+            GPUCompiler.apply_relocations!(meta.ir, relocs)
+            @test !isempty(relocs)
+        end
+    end
+end
+
+@testset "shared patchable record" begin
+    # One record can be defined by two objects at once: a relocation-carrying runtime-library
+    # function keeps its own job's namespace in every kernel it is linked into. An
+    # AllocCheck-shaped loader puts every object in one JITDylib, where two definitions of a
+    # symbol is an error unless they are weak. Construct the collision directly so this does
+    # not depend on which runtime functions the test kernel happens to import.
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            f() = 0
+        end
+        job, _ = Native.create_job(mod.f, Tuple{}; relocations=:patch)
+        JuliaContext() do ctx
+            ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
+            ref = GPUCompiler.JuliaValueRef(:shared_probe)
+            function shared_object(entry)
+                m = parse(LLVM.Module, """
+                    @shared_reloc = external global i64
+
+                    define i64 @$entry() {
+                        %value = load i64, $(ptr("i64")) @shared_reloc
+                        ret i64 %value
+                    }""")
+                relocs = GPUCompiler.Relocations(
+                    [GPUCompiler.Relocation(GPUCompiler.SlotSite, "shared_reloc", 0, ref)])
+                asm, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.API.LLVMObjectFile)
+                @test linkage(globals(m)["shared_reloc"]) == LLVM.API.LLVMWeakODRLinkage
+                return Vector{UInt8}(codeunits(asm)), relocs
+            end
+
+            obj_a, relocs_a = shared_object("shared_entry_a")
+            obj_b, _ = shared_object("shared_entry_b")
+            expected = GPUCompiler.resolve_relocation_target(ref)
+
+            lljit = LLJIT(; tm=JITTargetMachine())
+            try
+                jd = JITDylib(lljit)
+                add!(lljit, jd, MemoryBuffer(obj_a))
+                add!(lljit, jd, MemoryBuffer(obj_b))   # the duplicate definition
+
+                # patching the one surviving definition serves both objects
+                for (rec, word) in GPUCompiler.resolved_relocations(relocs_a)
+                    addr = lookup(lljit, rec.name)
+                    unsafe_store!(Ptr{UInt}(pointer(addr) + rec.offset), word)
+                end
+                for entry in ("shared_entry_a", "shared_entry_b")
+                    @test ccall(pointer(lookup(lljit, entry)), UInt, ()) == expected
+                end
+            finally
+                dispose(lljit)
+            end
+        end
+    end
+end
+
+@testset "tabulated relocation" begin
+    # A consumer with no access at all to loaded code: every record is rewritten into an
+    # indexed load from a table of words the loader delivers as run-time data. Metal does
+    # this through the kernel state; the test back-end reaches the table through a single
+    # patchable global, so the strategy is covered off-device.
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
+        mod = @eval module $(gensym())
+            # both record kinds: an interior box header (the `Float64` tag) and a slot
+            @noinline produce(cond::Bool, a::Int32) = cond ? a : 2.0
+            function f(cond::Bool)
+                x = produce(cond, Int32(7))
+                word = x isa Float64 ? reinterpret(UInt64, x) : UInt64(0)
+                return word + UInt(pointer_from_objref(:table_probe))
+            end
+        end
+        job, _ = Native.create_job(mod.f, (Bool,); relocations=:table)
+        JuliaContext() do ctx
+            obj, meta = GPUCompiler.compile(:obj, job)
+            relocs = meta.relocations
+            @test !isempty(relocs)
+            @test any(rec -> rec.kind === GPUCompiler.SlotSite, relocs.records)
+            @test any(rec -> rec.kind === GPUCompiler.InteriorSite, relocs.records)
+
+            # every record's global is gone: slots are erased, boxes demoted to allocas
+            for rec in relocs.records
+                @test !haskey(globals(meta.ir), rec.name)
+            end
+            # the words are read out of the table, not baked into the module
+            @test haskey(globals(meta.ir), Native.RELOC_TABLE_BASE)
+
+            expected = reinterpret(UInt64, 2.0) +
+                       GPUCompiler.resolve_relocation_target(
+                           GPUCompiler.JuliaValueRef(:table_probe))
+            fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)),
+                                             LLVM.name(meta.entry), relocs; table=true)
+            try
+                GC.@preserve table begin
+                    @test ccall(fptr, UInt, (Bool,), false) == expected
+                    @test ccall(fptr, UInt, (Bool,), false) == mod.f(false)
+                    @test ccall(fptr, UInt, (Bool,), true) == mod.f(true)
+                end
+            finally
+                dispose(lljit)
+            end
+
+            # A record's index is its rank in the manifest, and that index is baked into the
+            # emitted code — so recompiling the same kernel must produce the same manifest in
+            # the same order, or a cached object and a freshly-resolved table would disagree.
+            # (This is what makes a relocation-carrying kernel's *bytes* stable, which the
+            # Metal.jl suite asserts on a real cache key.)
+            _, again = GPUCompiler.compile(:obj, job)
+            @test [(rec.kind, rec.name, rec.offset) for rec in again.relocations.records] ==
+                  [(rec.kind, rec.name, rec.offset) for rec in relocs.records]
+
+            # The delivered words follow the order the lowering fixed, not the record vector,
+            # so losing records can no longer renumber the table. Pruning a copy drops *every*
+            # record here (the lowering erased all their globals) and the words still stand.
+            mutated = copy(relocs)
+            GPUCompiler.prune_dead_relocations!(meta.ir, mutated)
+            @test isempty(mutated)
+            @test GPUCompiler.resolved_relocation_table(mutated) ==
+                  GPUCompiler.resolved_relocation_table(relocs)
+
+            # And the manifest itself refuses to be renumbered at all.
+            @test_throws "already been lowered" GPUCompiler.prune_dead_relocations!(
+                meta.ir, relocs)
+        end
+    end
+end
+
+@testset "unlowered relocation table" begin
+    # Emitting a `:table` module through the 3-argument `emit_asm` hands the lowering an
+    # empty manifest, leaving the real one unlowered and the module's slots stranded. The
+    # loader is the first thing to notice, so it must say so rather than deliver no words.
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
+        mod = @eval module $(gensym())
+            f() = UInt(pointer_from_objref(:unlowered_probe))
+        end
+        job, _ = Native.create_job(mod.f, Tuple{}; relocations=:table)
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job)
+            @test !isempty(meta.relocations)
+            GPUCompiler.emit_asm(job, ir, LLVM.API.LLVMObjectFile)   # the 3-arg form
+            @test_throws "never rewritten" GPUCompiler.resolved_relocation_table(
+                meta.relocations)
+        end
+    end
+end
+
+@testset "relocation-free tabulated module" begin
+    # A module without relocations must not gain any table access at all: the strategy is
+    # free for the (overwhelmingly common) relocation-free kernel.
+    if LLVM.version() >= v"17"
+        mod = @eval module $(gensym())
+            f(x::Int) = x + 1
+        end
+        job, _ = Native.create_job(mod.f, (Int,); relocations=:table)
+        JuliaContext() do ctx
+            _, meta = GPUCompiler.compile(:obj, job)
+            @test isempty(meta.relocations)
+            @test !haskey(globals(meta.ir), Native.RELOC_TABLE_BASE)
+        end
+    end
+end
+
+@testset "relocation validation errors" begin
+    JuliaContext() do ctx
+        word() = GPUCompiler.relocation_word_type()
+        nop = (_rec, _gv) -> nothing
+        ref = GPUCompiler.JuliaValueRef(:probe)
+        reloc(kind, name, offset=0) = GPUCompiler.Relocations(
+            [GPUCompiler.Relocation(kind, name, offset, ref)])
+        slot(name) = reloc(GPUCompiler.SlotSite, name)
+        interior(name, offset) = reloc(GPUCompiler.InteriorSite, name, offset)
+
+        # a record whose global is absent from the module
+        mod = LLVM.Module("errors")
+        @test_throws "Missing relocation global" GPUCompiler.foreach_relocation(
+            nop, mod, slot("absent"))
+
+        # a slot must be word-sized
+        mod = LLVM.Module("errors")
+        GlobalVariable(mod, LLVM.Int32Type(), "narrow")
+        @test_throws "has size" GPUCompiler.foreach_relocation(nop, mod, slot("narrow"))
+
+        # an interior record must name a definition...
+        mod = LLVM.Module("errors")
+        GlobalVariable(mod, word(), "decl")
+        @test_throws "is a declaration" GPUCompiler.foreach_relocation(
+            nop, mod, interior("decl", 0))
+
+        # ...whose initializer is a struct...
+        mod = LLVM.Module("errors")
+        gv = GlobalVariable(mod, word(), "flat")
+        initializer!(gv, ConstantInt(word(), 0))
+        @test_throws "non-struct initializer" GPUCompiler.foreach_relocation(
+            nop, mod, interior("flat", 0))
+
+        # ...and it must land within that global
+        mod = LLVM.Module("errors")
+        gv = GlobalVariable(mod, LLVM.StructType([LLVM.Int64Type(), LLVM.Int64Type()]), "box")
+        initializer!(gv, ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(0)]))
+        @test_throws "outside its" GPUCompiler.foreach_relocation(
+            nop, mod, interior("box", 16))
+    end
+end
+
+@testset "prune dead relocations" begin
+    JuliaContext() do ctx
+        ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
+        mod = parse(LLVM.Module, """
+            @live = external global i64
+            @dead = internal global { i64, i64 } { i64 0, i64 0 }
+            define i64 @use() {
+                %v = load i64, $(ptr("i64")) @live
+                ret i64 %v
+            }""")
+        relocs = GPUCompiler.Relocations()
+        for (name, kind) in ("live"   => GPUCompiler.SlotSite,
+                             "dead"   => GPUCompiler.InteriorSite,  # unused definition
+                             "absent" => GPUCompiler.SlotSite)      # global already gone
+            GPUCompiler.add_relocation!(relocs, kind, name, 0,
+                                        GPUCompiler.JuliaValueRef(Symbol(name)))
+        end
+        GPUCompiler.prune_dead_relocations!(mod, relocs)
+        @test [rec.name for rec in relocs.records] == ["live"]
+        @test haskey(globals(mod), "live")     # a used declaration survives
+        @test !haskey(globals(mod), "dead")    # the dead definition is erased
+    end
+end
+
+@testset "resolve zeroinitializer box" begin
+    # An all-zero box (a patchable header over a zero payload) is folded by LLVM to a
+    # `zeroinitializer`, a ConstantAggregateZero that reports no operands; resolution must
+    # resolve its header word. Regresses JuliaGPU/oneAPI.jl's "#55: invalid integers created
+    # by alloc_opt", where `SVector(0f0, 0f0)` boxed a zero payload.
+    JuliaContext() do ctx
+        mod = parse(LLVM.Module,
+                    "@zero_box = private global { i64, [8 x i8] } zeroinitializer")
+        gv = globals(mod)["zero_box"]
+        @test initializer(gv) isa LLVM.ConstantAggregateZero   # the folded shape
+        relocs = GPUCompiler.Relocations(
+            [GPUCompiler.Relocation(GPUCompiler.InteriorSite, "zero_box", 0,
+                                    GPUCompiler.JuliaValueRef(Float64))])
+        GPUCompiler.bake_relocations!(mod, relocs)
+        init = initializer(gv)
+        @test !(init isa LLVM.ConstantAggregateZero)   # rebuilt into explicit fields
+        header = convert(UInt, LLVM.Constant[operands(init)...][1])
+        @test header == GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(Float64))
+        @test isconstant(gv)
+        @test isempty(relocs)
+    end
+end
+
+@testset "cglobal relocation" begin
     # JIT-private symbols like `jl_get_pgcstack_resolved` (JuliaLang/julia#61527) cannot
     # be looked up using `jl_cglobal`, so we should only resolve bindings that are
     # actually loaded from, leaving called functions alone.
     job, _ = Native.create_job(identity, (Nothing,))
     JuliaContext() do ctx
+        ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
+        word_ptr = ptr("i8")
+        word_ptr_ptr = ptr(word_ptr)
+        function_word_ptr(name) = GPUCompiler.supports_typed_pointers(ctx) ?
+            "i64* bitcast (i64 ()* @$name to i64*)" : "ptr @$name"
+
         mod = parse(LLVM.Module, """
             declare void @jl_get_pgcstack_resolved()
 
@@ -748,6 +1191,155 @@ end
             }""")
         GPUCompiler.prepare_execution!(job, mod)
         @test haskey(functions(mod), "jl_get_pgcstack_resolved")
+
+        mod = parse(LLVM.Module, """
+            @jl_float32_type = external global $word_ptr
+
+            define $word_ptr @entry() {
+                %value = load $word_ptr, $word_ptr_ptr @jl_float32_type
+                ret $word_ptr %value
+            }""")
+        GPUCompiler.prepare_execution!(job, mod)
+        ir = string(mod)
+        @test !occursin("load $word_ptr, $word_ptr_ptr @jl_float32_type", ir)
+        expected = GPUCompiler.resolve_relocation_target(
+            GPUCompiler.CGlobalRef(:jl_float32_type))
+        @test occursin("inttoptr (i64 $expected to $word_ptr)", ir)
+
+        mod = parse(LLVM.Module, """
+            @jl_float32_type = external global $word_ptr
+
+            define $word_ptr @entry() {
+                %value = load $word_ptr, $word_ptr_ptr @jl_float32_type
+                ret $word_ptr %value
+            }""")
+        relocs = GPUCompiler.Relocations()
+        @test GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
+        rec = only(relocs.records)
+        @test rec.target == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test rec.kind === GPUCompiler.SlotSite
+        @test rec.offset == 0
+        # the slot is a symbol a loader addresses, so its name carries the job's namespace
+        @test startswith(rec.name, GPUCompiler.relocation_namespace(job))
+        @test occursin("@$(rec.name) = external global i64", string(mod))
+        GPUCompiler.emit_patchable_relocations!(mod, relocs)
+        @test occursin("externally_initialized global i64 0", string(mod))
+
+        mod = parse(LLVM.Module, """
+            declare i64 @jl_float32_type()
+
+            define i64 @entry() {
+                %value = load i64, $(function_word_ptr("jl_float32_type"))
+                ret i64 %value
+            }""")
+        relocs = GPUCompiler.Relocations()
+        @test GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
+        rec = only(relocs.records)
+        @test rec.target == GPUCompiler.CGlobalRef(:jl_float32_type)
+        @test occursin("@$(rec.name) = external global i64", string(mod))
+        GPUCompiler.emit_patchable_relocations!(mod, relocs)
+        @test occursin("externally_initialized global i64 0", string(mod))
+    end
+end
+
+@testset "relocation linking" begin
+    JuliaContext() do ctx
+        ptr(T) = GPUCompiler.supports_typed_pointers(ctx) ? "$T*" : "ptr"
+
+        function slot_module(name, entry)
+            parse(LLVM.Module, """
+                @$name = external global i64
+
+                define i64 @$entry() {
+                    %value = load i64, $(ptr("i64")) @$name
+                    ret i64 %value
+                }""")
+        end
+
+        slot_relocs(name, value) = GPUCompiler.Relocations(
+            [GPUCompiler.Relocation(GPUCompiler.SlotSite, name, 0,
+                                    GPUCompiler.JuliaValueRef(value))])
+
+        # Per-job namespacing means a name never denotes two different words. Metadata for the
+        # same word still merges, though — the runtime library is linked into every kernel.
+        dest = slot_module("slot", "first")
+        dest_relocs = slot_relocs("slot", :shared)
+        src = slot_module("slot", "second")
+        src_relocs = slot_relocs("slot", :shared)
+        GPUCompiler.link_relocatable!(dest, dest_relocs, src, src_relocs)
+        @test [rec.name for rec in dest_relocs.records] == ["slot"]
+        @test occursin("@slot = external global i64", string(dest))
+
+        # Conflicting metadata for one word is an inconsistency, not a merge.
+        dest = slot_module("slot", "first")
+        dest_relocs = slot_relocs("slot", :first)
+        src = slot_module("slot", "second")
+        src_relocs = slot_relocs("slot", :second)
+        @test_throws "conflicting values" GPUCompiler.link_relocatable!(
+            dest, dest_relocs, src, src_relocs)
+
+        # ...as is disagreement about what the word even is.
+        dest_relocs = slot_relocs("slot", :shared)
+        src_relocs = GPUCompiler.Relocations(
+            [GPUCompiler.Relocation(GPUCompiler.InteriorSite, "slot", 0,
+                                    GPUCompiler.JuliaValueRef(:shared))])
+        @test_throws "recorded as both" GPUCompiler.add_relocation!(
+            dest_relocs, only(src_relocs.records))
+
+        # `only_needed` must keep metadata for imported slots and discard metadata for
+        # source globals that the LLVM linker did not import.
+        dest = parse(LLVM.Module, """
+            declare i64 @source()
+
+            define i64 @entry() {
+                %value = call i64 @source()
+                ret i64 %value
+            }""")
+        src = parse(LLVM.Module, """
+            @used = external global i64
+            @unused = external global i64
+
+            define i64 @source() {
+                %value = load i64, $(ptr("i64")) @used
+                ret i64 %value
+            }""")
+        src_relocs = GPUCompiler.Relocations()
+        for name in ("used", "unused")
+            GPUCompiler.add_relocation!(src_relocs, GPUCompiler.SlotSite, name, 0,
+                                        GPUCompiler.JuliaValueRef(Symbol(name)))
+        end
+        dest_relocs = GPUCompiler.Relocations()
+        GPUCompiler.link_relocatable!(dest, dest_relocs, src, src_relocs;
+                                       only_needed=true)
+        @test [rec.name for rec in dest_relocs.records] == ["used"]
+        @test only(dest_relocs.records).target.value === :used
+
+        # Metadata for interior globals not imported under `only_needed` is discarded too.
+        dest = parse(LLVM.Module, """
+            declare i64 @source_patch()
+            define i64 @entry_patch() {
+                %value = call i64 @source_patch()
+                ret i64 %value
+            }""")
+        src = parse(LLVM.Module, """
+            @used_patch = externally_initialized global { i64, i64 } { i64 0, i64 1 }
+
+            define i64 @source_patch() {
+                %value = load i64, $(ptr("i64")) getelementptr ({ i64, i64 }, $(ptr("{ i64, i64 }")) @used_patch, i32 0, i32 1)
+                ret i64 %value
+            }""")
+        unused = GlobalVariable(src, LLVM.StructType([LLVM.Int64Type(), LLVM.Int64Type()]),
+                                "unused_patch")
+        initializer!(unused, ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(1)]))
+        src_relocs = GPUCompiler.Relocations()
+        for (name, T) in ("used_patch" => Float64, "unused_patch" => Int64)
+            GPUCompiler.add_relocation!(src_relocs, GPUCompiler.InteriorSite, name, 0,
+                                        GPUCompiler.JuliaValueRef(T))
+        end
+        dest_relocs = GPUCompiler.Relocations()
+        GPUCompiler.link_relocatable!(dest, dest_relocs, src, src_relocs;
+                                       only_needed=true)
+        @test [rec.name for rec in dest_relocs.records] == ["used_patch"]
     end
 end
 
@@ -1100,6 +1692,32 @@ end
     ir = sprint(io->Native.code_llvm(io, dkernel, Tuple{Vector{Float64}}; debuginfo=:none))
     @test !occursin("deferred_codegen", ir)
     @test occursin("call void @julia_kernel", ir)
+end
+
+@testset "Mock Enzyme deferred relocations" begin
+    # A deferred child that references a Julia value produces its own relocations; those
+    # must merge into the parent's metadata when the child module is linked in.
+    mod = @eval module $(gensym())
+        import ..Enzyme
+        child(sym::Symbol) = sym === :deferred_reloc ? 1 : 2
+        function parent(sym::Symbol)
+            ptr = Enzyme.deferred_codegen(typeof(child), Tuple{Symbol})
+            return ccall(ptr, Int, (Symbol,), sym)
+        end
+    end
+
+    # Keep the merged relocation symbolic so we can inspect it.
+    job, _ = Native.create_job(mod.parent, (Symbol,); relocations=:patch, validate=false)
+    JuliaContext() do ctx
+        ir, meta = GPUCompiler.compile(:llvm, job)
+        @test !occursin("deferred_codegen", string(ir))
+        if GPUCompiler.supports_relocatable_ir()
+            @test any(meta.relocations.records) do rec
+                rec.target isa GPUCompiler.JuliaValueRef &&
+                    rec.target.value === :deferred_reloc
+            end
+        end
+    end
 end
 
 @testset "stack allocation intrinsic" begin
