@@ -8,7 +8,12 @@ const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulh
 # syntax highlighting
 #
 
-import Highlights
+# the actual rendering lives in the HighlightsExt package extension: Highlights.jl's
+# dependency tree (TreeSitter.jl, and through it JSON) invalidates enough Base code to
+# noticeably slow down loading of downstream packages, and highlighting is only ever
+# needed interactively. The extension publishes its renderer through this hook.
+const highlighter = Ref{Union{Nothing,Function}}(nothing)
+
 using tree_sitter_llvm_jll, tree_sitter_ptx_jll, tree_sitter_spirv_jll,
       tree_sitter_gcn_jll
 
@@ -154,12 +159,20 @@ function highlight(io::IO, code, lexer)
         return
     end
 
+    render = highlighter[]
+    if render === nothing
+        isinteractive() &&
+            @info("Load Highlights.jl (`using Highlights`) to enable syntax highlighting of this output.",
+                  maxlog=1, _id=:gpucompiler_highlighting)
+        print(io, code)
+        return
+    end
+
     # render to a buffer first so that highlighting failures don't result in
     # partial output
     buf = IOBuffer()
     try
-        Highlights.highlight(buf, MIME("text/ansi"), code, language,
-                             selected_highlight_theme(io))
+        Base.invokelatest(render, buf, code, language, selected_highlight_theme(io))
         write(io, take!(buf))
     catch err
         @warn "Failed to highlight $lexer code" exception=(err, catch_backtrace()) maxlog=1

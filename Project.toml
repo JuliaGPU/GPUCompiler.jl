@@ -1,6 +1,6 @@
 name = "GPUCompiler"
 uuid = "61eb1bfa-7361-4325-ad38-22787b887f55"
-version = "2.2.0"
+version = "2.2.1"
 authors = ["Tim Besard <tim.besard@gmail.com>"]
 
 [workspace]
@@ -9,7 +9,6 @@ projects = ["test"]
 [deps]
 CompilerCaching = "9db33cc3-5358-4881-8759-fa4194144afd"
 ExprTools = "e2ba6199-217a-4e67-a87a-7c52f15ade04"
-Highlights = "eafb193a-b7ab-5a9e-9068-77385905fa72"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
 LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
@@ -27,8 +26,12 @@ tree_sitter_spirv_jll = "f0e86581-c468-54df-a4de-3266e11a3c86"
 
 [weakdeps]
 AMDGPU_LLVM_Backend_jll = "cc5c0156-bd05-5a77-8a68-bb0aafb29019"
+Highlights = "eafb193a-b7ab-5a9e-9068-77385905fa72"
 LLVMDowngrader_jll = "f52de702-fb25-5922-94ba-81dd59b07444"
 NVPTX_LLVM_Backend_jll = "ef6e0fe3-e6ef-59c0-bde6-4989574699e0"
+
+[extensions]
+HighlightsExt = "Highlights"
 
 [compat]
 AMDGPU_LLVM_Backend_jll = "22"
