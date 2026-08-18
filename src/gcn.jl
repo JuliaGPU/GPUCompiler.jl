@@ -210,7 +210,7 @@ end
     elseif !isempty(log)
         # llc only diagnoses on stderr; even successful compilation may e.g. have
         # ignored an unrecognized CPU or feature, so make sure this surfaces.
-        @warn "External llc reported:\n$log"
+        @safe_warn "External llc reported:\n$log"
     end
 
     code = filetype == "asm" ? read(output, String) : String(read(output))
