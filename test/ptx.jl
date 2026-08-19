@@ -493,9 +493,10 @@ end
 
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
-        # box: a jl_box_float32 call <1.14; 1.14+ inlines it into the devirt'd ctor
-        @check cond=(VERSION < v"1.14-")  "jl_box_float32"
-        @check cond=(VERSION >= v"1.14-") "gpu_gc_pool_alloc"
+        # box: a jl_box_float32 call on 1.10, which ignores compilesig_invokes;
+        # 1.11+ devirtualizes the ctor, boxing through the GC pool allocator instead
+        @check cond=(VERSION < v"1.11-")  "jl_box_float32"
+        @check cond=(VERSION >= v"1.11-") "gpu_gc_pool_alloc"
         PTX.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}}; dump_module=true)
     end
     PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
