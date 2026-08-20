@@ -21,6 +21,10 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     cleanup()
     prune_dead_relocations!(mod, relocs)
 
+    # Linking left one DICompileUnit per linked module; fold the copies so the debug-info
+    # graph does not depend on link order (see determinism.jl).
+    dedup_compile_units!(mod)
+
     # For non-`:bake` strategies this already ran at the end of `emit_llvm` (so the
     # `:llvm`-level metadata is complete); re-running is a no-op since rewritten loads
     # target namespaced `gpu_jl_*` slots, which are not collection candidates. It remains
