@@ -39,8 +39,13 @@ end
 
 ## job
 
-isintrinsic(@nospecialize(job::CompilerJob{GCNCompilerTarget}), fn::String) =
-    return startswith(fn, "llvm.amdgcn.")
+function isintrinsic(@nospecialize(job::CompilerJob{GCNCompilerTarget}), fn::String)
+    startswith(fn, "llvm.amdgcn.") && return true
+    # The ROCm device libraries use `llvm.frexp` and `llvm.ldexp`, which were only added in
+    # LLVM 17, so they are not recognized as intrinsics by older versions of LLVM.
+    # Final code generation knows how to lower them, so accept them here.
+    return startswith(fn, "llvm.frexp.") || startswith(fn, "llvm.ldexp.")
+end
 
 pass_by_ref(@nospecialize(job::CompilerJob{GCNCompilerTarget})) = true
 
