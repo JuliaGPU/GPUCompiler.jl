@@ -1,3 +1,68 @@
+@testset "module layout canonicalization" begin
+    # The per-CodeInstance merge on older Julia hands us functions and globals in a
+    # session-dependent order, and auto-suffixes private constants that several modules
+    # emitted. Canonicalization must restore emission order (by codegen counter; uncountered
+    # declarations sort by name after) and fold the clones — but only clones that are provably
+    # identical.
+    JuliaContext() do ctx
+        p = typed_ptrs ? "i64*" : "ptr"
+        mod = parse(LLVM.Module, """
+            @"_j_const#2" = private unnamed_addr constant i64 2, align 8
+            @"_j_const#1.1" = private unnamed_addr constant i64 1, align 8
+            @jl_nothing = external global i64
+            @"_j_str_x#3.1" = private unnamed_addr constant i64 4, align 8
+            @"jl_global#20" = external global i64
+            @"_j_const#1" = private unnamed_addr constant i64 1, align 8
+            @"_j_str_x#3" = private unnamed_addr constant i64 3, align 8
+            @"+Core.Tuple#15" = external global i64
+
+            declare void @llvm.trap()
+
+            define i64 @julia_b_12() {
+              %v = load i64, $p @"_j_const#1.1"
+              ret i64 %v
+            }
+
+            define void @jfptr_a_11() {
+              ret void
+            }
+
+            declare void @ijl_throw()
+
+            define i64 @julia_a_10() {
+              %v = load i64, $p @"_j_const#1"
+              ret i64 %v
+            }
+
+            define i64 @julia_c_13() {
+              %v = load i64, $p @"_j_str_x#3.1"
+              ret i64 %v
+            }
+            """)
+        GPUCompiler.canonicalize_module_layout!(mod)
+        @test (verify(mod); true)
+
+        # emission order, then uncountered declarations by name
+        @test [LLVM.name(f) for f in functions(mod)] ==
+              ["julia_a_10", "jfptr_a_11", "julia_b_12", "julia_c_13", "ijl_throw", "llvm.trap"]
+        @test [LLVM.name(g) for g in globals(mod)] ==
+              ["_j_const#1", "_j_const#2", "_j_str_x#3", "_j_str_x#3.1", "+Core.Tuple#15",
+               "jl_global#20", "jl_nothing"]
+
+        # the identical clone was folded into the copy that kept the bare name...
+        @test !haskey(globals(mod), "_j_const#1.1")
+        @test occursin("@\"_j_const#1\"", string(functions(mod)["julia_b_12"]))
+        # ...while a same-named constant with different content is left alone
+        @test occursin("@\"_j_str_x#3.1\"", string(functions(mod)["julia_c_13"]))
+
+        # idempotent
+        before = string(mod)
+        GPUCompiler.canonicalize_module_layout!(mod)
+        @test string(mod) == before
+        dispose(mod)
+    end
+end
+
 @testset "compile unit deduplication" begin
     # Linking modules concatenates their `distinct` DICompileUnits. Identical copies must be
     # folded onto the first-listed one, references repointed, and the list shrunk, while a CU
