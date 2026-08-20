@@ -492,6 +492,56 @@ end
     end
 end
 
+@testset "reproducible output" begin
+    # Compiling the same kernel twice in one session has to yield byte-identical AIR: the two
+    # compilations see different LLVM wrapper addresses and codegen counters, so any pass that
+    # iterates a pointer-hashed collection in an order-sensitive way, or leaks a counter into
+    # the bitcode, shows up here (the cross-process variant lives in metal/reproducibility.jl).
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        function plain_kernel(ptr, x)
+            unsafe_store!(ptr, x * 2f0 + 1f0, 1)
+            return
+        end
+
+        # several CodeInstances (the `@noinline` callees and the exception constructors
+        # they reach), which also links in the runtime library
+        @noinline function checked(x)
+            x < 0 && throw(ArgumentError("negative"))
+            return sqrt(x)
+        end
+        @noinline function bounded(x)
+            x > 100 && throw(BoundsError())
+            return x * 2
+        end
+        function throwing_kernel(ptr, x)
+            unsafe_store!(ptr, checked(x) + bounded(x), 1)
+            return
+        end
+
+        # a relocation-carrying kernel: the Symbol comparison lowers to a table load
+        function reloc_kernel(ptr, sym)
+            unsafe_store!(ptr, sym === :a ? 1f0 : 2f0, 1)
+            return
+        end
+    end
+
+    compile_twice(compile) = (compile(), compile())
+    for (f, tt) in [(mod.plain_kernel,    Tuple{Core.LLVMPtr{Float32,1}, Float32}),
+                    (mod.throwing_kernel, Tuple{Core.LLVMPtr{Float32,1}, Float32})]
+        air1, air2 = compile_twice(() -> first(Metal.code_execution(f, tt)))
+        @test air1 == air2
+    end
+    if LLVM.version() >= v"17"
+        job, _ = Metal.create_table_job(mod.reloc_kernel,
+                                        Tuple{Core.LLVMPtr{Float32,1}, Symbol}; kernel=true)
+        air1, air2 = compile_twice(() -> JuliaContext() do _
+            first(GPUCompiler.compile(:asm, job))
+        end)
+        @test air1 == air2
+    end
+end
+
 @testset "identity kernel arguments" begin
     # A boxed argument that gets past `check_invocation` has no fields, so it can only be used
     # by identity (`sym === :foo`, whose comparison target is itself a relocation). Metal cannot
