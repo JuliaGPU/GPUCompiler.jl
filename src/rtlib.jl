@@ -180,7 +180,8 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     code_instances = CodeInstance[]
     relocs = Relocations()
 
-    for method in values(Runtime.methods)
+    # link in a fixed order: the library's layout must not depend on `Dict` iteration
+    for method in sort!(collect(values(Runtime.methods)); by = m -> m.name)
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         source = resolved
