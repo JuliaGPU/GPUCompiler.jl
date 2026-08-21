@@ -1,13 +1,10 @@
 @testset "module layout canonicalization" begin
-    # The per-CodeInstance merge on older Julia hands us functions and globals in a
-    # session-dependent order, and auto-suffixes private constants that several modules
-    # emitted. Canonicalization must restore emission order (by codegen counter; uncountered
-    # declarations sort by name after) and fold the clones — but only clones that are provably
-    # identical.
+    # Restore codegen-counter order and merge only equivalent constant clones.
     JuliaContext() do ctx
         p = typed_ptrs ? "i64*" : "ptr"
         mod = parse(LLVM.Module, """
             @"_j_const#2" = private unnamed_addr constant i64 2, align 8
+            @"_j_const#2.1" = private unnamed_addr constant i64 2, align 4
             @"_j_const#1.1" = private unnamed_addr constant i64 1, align 8
             @jl_nothing = external global i64
             @"_j_str_x#3.1" = private unnamed_addr constant i64 4, align 8
@@ -46,8 +43,8 @@
         @test [LLVM.name(f) for f in functions(mod)] ==
               ["julia_a_10", "jfptr_a_11", "julia_b_12", "julia_c_13", "ijl_throw", "llvm.trap"]
         @test [LLVM.name(g) for g in globals(mod)] ==
-              ["_j_const#1", "_j_const#2", "_j_str_x#3", "_j_str_x#3.1", "+Core.Tuple#15",
-               "jl_global#20", "jl_nothing"]
+              ["_j_const#1", "_j_const#2", "_j_const#2.1", "_j_str_x#3", "_j_str_x#3.1",
+               "+Core.Tuple#15", "jl_global#20", "jl_nothing"]
 
         # the identical clone was folded into the copy that kept the bare name...
         @test !haskey(globals(mod), "_j_const#1.1")
@@ -70,7 +67,7 @@ end
     JuliaContext() do ctx
         mod = parse(LLVM.Module, """
             define void @f() !dbg !4 {
-              ret void, !dbg !7
+              ret void, !dbg !7, !custom !12
             }
 
             define void @g() !dbg !8 {
@@ -96,12 +93,13 @@ end
             !9 = distinct !DISubprogram(name: "h", linkageName: "h", scope: null, file: !3, line: 3, type: !5, scopeLine: 3, spFlags: DISPFlagDefinition, unit: !0)
             !10 = !{i32 2, !"Dwarf Version", i32 4}
             !11 = !{i32 2, !"Debug Info Version", i32 3}
+            !12 = !{!1}
             """)
         @test GPUCompiler.dedup_compile_units!(mod)
         @test (verify(mod); true)
         ir = string(mod)
 
-        # two CUs remain: the canonical Julia one and the vendor one
+        # Two CUs remain even though the duplicate was also reachable through custom metadata.
         @test count("distinct !DICompileUnit", ir) == 2
         @test occursin(r"!llvm\.dbg\.cu = !\{!\d+, !\d+\}", ir)
 

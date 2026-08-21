@@ -180,8 +180,7 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
     code_instances = CodeInstance[]
     relocs = Relocations()
 
-    # link in a fixed order: the library's layout must not depend on `Dict` iteration
-    for method in sort!(collect(values(Runtime.methods)); by = m -> m.name)
+    for method in runtime_methods()
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         source = resolved
@@ -196,6 +195,9 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
 
     return mod, sources, code_instances, relocs
 end
+
+# Runtime.methods is a Dict, but library layout and source validation require the same order.
+runtime_methods() = sort!(collect(values(Runtime.methods)); by = method -> method.name)
 
 # Session-local cache of assembled runtime libraries, keyed by
 # `(runtime_config(job), opaque_pointers)`: the derived runtime config covers every
@@ -223,7 +225,7 @@ function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJ
     job.world == lib.validated_world && return true
 
     i = 0
-    for method in values(Runtime.methods)
+    for method in runtime_methods()
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         i += 1

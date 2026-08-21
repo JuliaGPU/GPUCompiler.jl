@@ -1028,8 +1028,7 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
     end
 
     # update functions that use the global
-    # process in module order: `function_worklist` is pointer-hashed, so its iteration order
-    # varies across sessions, and each clone is appended in processing order
+    # Clones are appended in processing order, so don't iterate the pointer-hashed worklist.
     if !isempty(function_worklist)
         entry_fn = LLVM.name(entry)
         for fun in [f for f in functions(mod) if f in function_worklist]

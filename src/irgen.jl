@@ -886,8 +886,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
     delete!(worklist, state_intr)
 
     # add a state argument
-    # process in module order: `worklist` is pointer-hashed, so its iteration order varies
-    # across sessions, and the new functions are appended in processing order
+    # Clones are appended in processing order, so don't iterate the pointer-hashed worklist.
     ordered_worklist = [f for f in functions(mod) if f in worklist]
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in ordered_worklist
@@ -1470,8 +1469,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     # add the arguments
     # NOTE: we don't need to be fine-grained here, as unused args will be removed during opt
-    # process in module order: `worklist` is pointer-hashed, so its iteration order varies
-    # across sessions, and the new functions are appended in processing order
+    # Clones are appended in processing order, so don't iterate the pointer-hashed worklist.
     ordered_worklist = [f for f in functions(mod) if f in worklist]
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in ordered_worklist
