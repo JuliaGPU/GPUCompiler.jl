@@ -1517,6 +1517,79 @@ end
     end
 end
 
+# Keep `malloc` non-null so the throwing branch constructs its `InexactError` argument.
+bool_conversion_mod = @eval module $(gensym())
+    using ..GPUCompiler
+    module AllocatingRuntime
+        signal_exception() = return
+        malloc(sz) = reinterpret(Ptr{Cvoid}, UInt(0x1000))
+        report_oom(sz) = return
+        report_exception(ex) = return
+        report_exception_name(ex) = return
+        report_exception_frame(idx, func, file, line) = return
+    end
+    struct AllocatingParams <: AbstractCompilerParams end
+    GPUCompiler.runtime_module(::CompilerJob{MetalCompilerTarget,AllocatingParams}) =
+        AllocatingRuntime
+
+    function kernel(a::Core.LLVMPtr{Bool,1}, x::Int)
+        unsafe_store!(a, convert(Bool, x))
+        return
+    end
+end
+function bool_conversion_job()
+    source = methodinstance(typeof(bool_conversion_mod.kernel),
+                            Tuple{Core.LLVMPtr{Bool,1}, Int}, Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    config = CompilerConfig(target, bool_conversion_mod.AllocatingParams(); kernel=true)
+    CompilerJob(source, config)
+end
+
+@testset "unordered atomic demotion" begin
+    # Demote unordered LLVM loads/stores, but preserve stronger atomics.
+    Context() do ctx
+        ir = """
+        define void @f(i8** %p, i8** %q, i64* %r) {
+        entry:
+          %a = load atomic i8*, i8** %p unordered, align 8
+          store atomic i8* %a, i8** %q unordered, align 8
+          %b = load atomic i64, i64* %r monotonic, align 8
+          store atomic i64 %b, i64* %r release, align 8
+          store i8* %a, i8** %p, align 8
+          ret void
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
+        memops() = filter(i -> i isa LLVM.LoadInst || i isa LLVM.StoreInst, insts())
+
+        @test count(is_atomic, memops()) == 4
+        @test GPUCompiler.demote_unordered_atomics!(mod)
+        atomics = filter(is_atomic, memops())
+        @test length(atomics) == 2
+        @test all(i -> ordering(i) != LLVM.API.LLVMAtomicOrderingUnordered, atomics)
+        @test !occursin("unordered", string(mod))
+        @test (verify(mod); true)
+        # idempotent
+        @test !GPUCompiler.demote_unordered_atomics!(mod)
+    end
+
+    # `compilesig_invokes=false` exposes the specialized, noinline `InexactError`
+    # constructor. Julia 1.12+ stores its argument tuple's pointer field unordered.
+    job = bool_conversion_job()
+    ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true))
+    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+    if VERSION >= v"1.11-"
+        # precondition: the specialized constructor (and its box) survive optimization
+        @test occursin(r"define .*@julia_InexactError", ir)
+        @test occursin(r"define .*@julia_InexactError", air)
+    end
+    if VERSION >= v"1.12-"
+        @test occursin(r"store atomic .* unordered", ir)
+    end
+    @test !occursin(r"(load|store) atomic", air)
+end
+
 # byval lowering must strip the (non-IPO-safe) Julia const-region metadata off loads derived
 # from the materialized argument; check the helper walks gep/addrspacecast chains and removes it.
 @testset "const-region metadata stripping for materialized args" begin
