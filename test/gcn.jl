@@ -203,6 +203,30 @@ end
 ############################################################################################
 @testset "assembly" begin
 
+@testset "patchable relocation visibility" begin
+    # AMDGPU.jl links the object into a shared library with ld.lld. Julia references the
+    # record globals `dso_local` (PC-relative `@rel32`), so a weak default-visibility
+    # definition would be rejected as preemptible ("recompile with -fPIC"); the symbol
+    # must be protected.
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            function kernel(out::Ptr{Bool}, s::Symbol)
+                unsafe_store!(out, s === :foo)
+                return
+            end
+        end
+        asm = sprint(io->GCN.code_native(io, mod.kernel, Tuple{Ptr{Bool},Symbol};
+                                         kernel=true, patch=true))
+        m = match(r"(?m)^\s*\.protected\s+(\S+jl_sym_foo\S*)", asm)
+        @test m !== nothing
+        if m !== nothing
+            name = m.captures[1]
+            @test occursin(r"(?m)^\s*\.weak\s+" * name, asm)
+            @test occursin("$(name)@rel32@lo", asm)
+        end
+    end
+end
+
 @testset "s_load for kernarg struct access" begin
     mod = @eval module $(gensym())
         struct MyStruct

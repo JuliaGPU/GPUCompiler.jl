@@ -660,8 +660,9 @@ end
     emit_patchable_relocations!(mod, relocs)
 
 Emit slots as writable, null-initialized definitions, and leave interior records as the
-`extinit` definitions they already are. The loader must patch every record by `(name,
-offset)` after loading the object ([`resolved_relocations`](@ref)).
+`extinit` definitions they already are. Every record global is a weak, protected-visibility
+definition. The loader must patch every record by `(name, offset)` after loading the object
+([`resolved_relocations`](@ref)).
 """
 function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
     used = GlobalVariable[]
@@ -681,6 +682,12 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
         # anchors them against DCE, and `externally_initialized` still stops the optimizer
         # from believing the null initializer.
         linkage!(gv, LLVM.API.LLVMWeakODRLinkage)
+        # Julia emits these globals `dso_local`, so backends address them PC-relatively
+        # (e.g. `@rel32` on AMDGPU). A weak definition with default visibility is however
+        # preemptible in an ELF shared link, which `ld.lld` rejects ("recompile with -fPIC").
+        # Protected visibility keeps the symbol in the dynamic symbol table, so loaders can
+        # still find it by name, while honouring the non-preemptible promise.
+        visibility!(gv, LLVM.API.LLVMProtectedVisibility)
         push!(used, gv)
     end
     isempty(used) || set_used!(mod, used...)
