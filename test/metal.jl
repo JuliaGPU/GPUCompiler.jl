@@ -1489,6 +1489,40 @@ end
     end
 end
 
+@testset "small typeof table relocation" begin
+    # Keep allocation live so `Bool(::Real)` materializes its `InexactError` arguments.
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        module AllocatingRuntime
+            signal_exception() = return
+            malloc(sz) = reinterpret(Ptr{Cvoid}, UInt(0x1000))
+            report_oom(sz) = return
+            report_exception(ex) = return
+            report_exception_name(ex) = return
+            report_exception_frame(idx, func, file, line) = return
+        end
+        struct AllocatingParams <: AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{MetalCompilerTarget,AllocatingParams}) =
+            AllocatingRuntime
+
+        function kernel(a::Core.LLVMPtr{Bool,1}, x::Int)
+            unsafe_store!(a, convert(Bool, x))
+            return
+        end
+    end
+    source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Bool,1}, Int},
+                            Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    config = CompilerConfig(target, mod.AllocatingParams(); kernel=true)
+    job = CompilerJob(source, config)
+    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+    if VERSION >= v"1.11-"
+        @test occursin(r"define .*@julia_InexactError", air)
+        @test occursin(Regex("inttoptr \\(?i64 $(UInt(pointer_from_objref(Bool))) to"), air)
+        @test !occursin(r"store .*\bnull\b", air)
+    end
+end
+
 # byval lowering must strip the (non-IPO-safe) Julia const-region metadata off loads derived
 # from the materialized argument; check the helper walks gep/addrspacecast chains and removes it.
 @testset "const-region metadata stripping for materialized args" begin

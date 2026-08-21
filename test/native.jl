@@ -1244,6 +1244,78 @@ end
         @test occursin("@$(rec.name) = external global i64", string(mod))
         GPUCompiler.emit_patchable_relocations!(mod, relocs)
         @test occursin("externally_initialized global i64 0", string(mod))
+
+        # Fold aggregate GEPs according to the module data layout.
+        mod = parse(LLVM.Module, """
+            target datalayout = "e-p:64:64-i64:64"
+            @jl_layout = external global { i8, i64, [3 x i32] }
+
+            define i32 @entry() {
+                %value = load i32, $(ptr("i32")) getelementptr (
+                    { i8, i64, [3 x i32] }, $(ptr("{ i8, i64, [3 x i32] }")) @jl_layout,
+                    i64 0, i32 2, i64 1)
+                ret i32 %value
+            }""")
+        load = first(instructions(first(blocks(functions(mod)["entry"]))))
+        @test GPUCompiler.constexpr_byte_offset(operands(load)[1], datalayout(mod)) == 20
+        @test_throws ArgumentError GPUCompiler.CGlobalRef(:jl_layout; offset=-1)
+
+        # Julia codegen references small-tagged DataTypes through `jl_small_typeof` offsets.
+        small_typeof = cglobal(:jl_small_typeof, Ptr{Cvoid})
+        bool_index = findfirst(i -> unsafe_load(small_typeof, i) == pointer_from_objref(Bool),
+                               1:(64 << 4) ÷ sizeof(Ptr{Cvoid}))
+        bool_index === nothing && error("Bool is absent from jl_small_typeof")
+        bool_offset = (bool_index - 1) * sizeof(Ptr{Cvoid})
+        @test bool_offset > 0
+        table_entry(offset) = GPUCompiler.supports_typed_pointers(ctx) ?
+            "bitcast (i8* getelementptr (i8, i8* @jl_small_typeof, i64 $offset) to $word_ptr_ptr)" :
+            "getelementptr (i8, ptr @jl_small_typeof, i64 $offset)"
+        table_ir = """
+            @jl_small_typeof = external global i8
+
+            define $word_ptr @entry() {
+                %bool = load $word_ptr, $word_ptr_ptr $(table_entry(bool_offset))
+                %first = load $word_ptr, $word_ptr_ptr $(table_entry(0))
+                %junk = ptrtoint $word_ptr %first to i64
+                ret $word_ptr %bool
+            }"""
+
+        mod = parse(LLVM.Module, table_ir)
+        relocs = GPUCompiler.Relocations()
+        @test GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
+        @test !GPUCompiler.has_unresolved_cglobal_loads(mod, relocs)
+        @test length(relocs.records) == 2
+        @test allunique(rec.name for rec in relocs.records)
+        @test all(rec -> endswith(rec.name, "_$(rec.target.offset)"), relocs.records)
+        @test Set(rec.target for rec in relocs.records) ==
+              Set([GPUCompiler.CGlobalRef(:jl_small_typeof),
+                   GPUCompiler.CGlobalRef(:jl_small_typeof; offset=bool_offset)])
+        @test all(rec -> rec.kind === GPUCompiler.SlotSite && rec.offset == 0, relocs.records)
+        @test GPUCompiler.resolve_relocation_target(
+                  GPUCompiler.CGlobalRef(:jl_small_typeof; offset=bool_offset)) ==
+              UInt(pointer_from_objref(Bool))
+
+        mod = parse(LLVM.Module, table_ir)
+        GPUCompiler.prepare_execution!(job, mod)
+        @test occursin("inttoptr (i64 $(UInt(pointer_from_objref(Bool))) to $word_ptr)",
+                       string(mod))
+
+        # Never silently relocate a dynamically-indexed load to the base word.
+        mod = parse(LLVM.Module, """
+            @jl_small_typeof = external global i8
+            @jl_float32_type = external global i8
+
+            define $word_ptr @entry() {
+                %value = load $word_ptr, $word_ptr_ptr $(GPUCompiler.supports_typed_pointers(ctx) ?
+                    "bitcast (i8* getelementptr (i8, i8* @jl_small_typeof, i64 ptrtoint (i8* @jl_float32_type to i64)) to $word_ptr_ptr)" :
+                    "getelementptr (i8, ptr @jl_small_typeof, i64 ptrtoint (ptr @jl_float32_type to i64))")
+                ret $word_ptr %value
+            }""")
+        relocs = GPUCompiler.Relocations()
+        @test_throws_message(ErrorException,
+                             GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)) do msg
+            occursin("Unsupported cglobal 'jl_small_typeof' load", msg)
+        end
     end
 end
 
