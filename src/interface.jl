@@ -335,7 +335,9 @@ A loader may hold several compiled functions in one symbol namespace without ren
 anything: record names are namespaced per compiler job, and where two objects do define one
 record — a relocation-carrying runtime-library function keeps its own namespace in every
 kernel it is linked into — `:patch` defines it weakly, so the definitions coalesce and
-patching the survivor serves both.
+patching the survivor serves both. Record globals have protected visibility: they stay
+visible to the loader by name, yet are never preemptible, matching the `dso_local`
+references Julia emits.
 
 The manifest is frozen once lowered: it then describes emitted code, so adding, dropping or
 reordering a record errors. Take a [`copy`](@ref) to work on one afterwards, as

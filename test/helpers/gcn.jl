@@ -3,14 +3,22 @@ module GCN
 using ..GPUCompiler
 import ..TestRuntime
 
-struct CompilerParams <: AbstractCompilerParams end
+struct CompilerParams <: AbstractCompilerParams
+    patch::Bool
+    CompilerParams(patch::Bool=false) = new(patch)
+end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 
-function create_job(@nospecialize(func), @nospecialize(types); backend::Symbol=:external, kwargs...)
+# `patch=true` keeps relocations symbolic (as AMDGPU.jl does); plain jobs resolve them in IR.
+GPUCompiler.relocation_lowering(@nospecialize(job::CompilerJob{<:Any,CompilerParams})) =
+    job.config.params.patch ? :patch : :bake
+
+function create_job(@nospecialize(func), @nospecialize(types); backend::Symbol=:external,
+                    patch::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = GCNCompilerTarget(dev_isa="gfx900"; backend)
-    params = CompilerParams()
+    params = CompilerParams(patch)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end
