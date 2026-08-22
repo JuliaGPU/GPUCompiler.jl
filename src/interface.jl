@@ -615,13 +615,7 @@ function inference_params(@nospecialize(job::CompilerJob))
 end
 
 # the optimization parameters to use when constructing the GPUInterpreter
-#
-# Emit `:invoke`s targeting the exact inferred specialization instead of the
-# compileable (vararg-widened) signature: GPU back-ends cannot dispatch at run
-# time, and widened signatures may have no inferred code in our cache (e.g.
-# `Base._throw_boundserror_indices(A, i1, I...)` from bounds checks).
-optimization_params(@nospecialize(job::CompilerJob)) =
-    CC.OptimizationParams(; compilesig_invokes=false)
+optimization_params(@nospecialize(job::CompilerJob)) = CC.OptimizationParams()
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))

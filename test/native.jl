@@ -1437,8 +1437,8 @@ end
         (occursin(GPUCompiler.RUNTIME_FUNCTION, msg) ||
          occursin(GPUCompiler.UNKNOWN_FUNCTION, msg) ||
          occursin(GPUCompiler.DYNAMIC_CALL, msg)) &&
-        occursin(r"\[\d+\] println", msg) &&
-        occursin(r"\[\d+\] foobar", msg)
+        occursin("[1] println", msg) &&
+        occursin("[2] foobar", msg)
     end
 end
 
@@ -1561,40 +1561,26 @@ end
         kernel(a, b) = (unsafe_store!(b, nospecialize_child(a)); return)
     end
 
-    if VERSION >= v"1.11-"
-        # with compilesig_invokes=false, the call targets the exact specialization
-        # instead of a (possibly uncached) vararg-widened compileable signature,
-        # so no dynamic call remains
-        @test @filecheck begin
-            @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
-            @check_not "jl_invoke"
-            @check_not "apply_generic"
-            Native.code_llvm(mod.kernel, Tuple{Int,Ptr{Int}}; dump_module=true)
-        end
-        Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})
-    else
-        # 1.10 ignores compilesig_invokes and emits a dynamic invoke
-        @test_throws_message(InvalidIRError,
-                             Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})) do msg
-            occursin("invalid LLVM IR", msg) &&
-            occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
-            occursin("call to nospecialize_child", msg) &&
-            occursin(r"\[\d+\] kernel", msg)
-        end
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})) do msg
+        occursin("invalid LLVM IR", msg) &&
+        occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
+        occursin("call to nospecialize_child", msg) &&
+        occursin("[1] kernel", msg)
     end
 end
 
 @testset "dynamic call (apply)" begin
     mod = @eval module $(gensym())
-        func(a) = (print(Base.inferencebarrier(a)); return)
+        func() = println(1)
     end
 
     @test_throws_message(InvalidIRError,
-                         Native.code_execution(mod.func, Tuple{Int})) do msg
+                         Native.code_execution(mod.func, Tuple{})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to print", msg) &&
-        occursin(r"\[\d+\] func", msg)
+        occursin("[2] func", msg)
     end
 end
 
