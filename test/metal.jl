@@ -1490,36 +1490,30 @@ end
 end
 
 @testset "small typeof table relocation" begin
-    # Keep allocation live so `Bool(::Real)` materializes its `InexactError` arguments.
-    mod = @eval module $(gensym())
-        using ..GPUCompiler
-        module AllocatingRuntime
-            signal_exception() = return
-            malloc(sz) = reinterpret(Ptr{Cvoid}, UInt(0x1000))
-            report_oom(sz) = return
-            report_exception(ex) = return
-            report_exception_name(ex) = return
-            report_exception_frame(idx, func, file, line) = return
-        end
-        struct AllocatingParams <: AbstractCompilerParams end
-        GPUCompiler.runtime_module(::CompilerJob{MetalCompilerTarget,AllocatingParams}) =
-            AllocatingRuntime
-
-        function kernel(a::Core.LLVMPtr{Bool,1}, x::Int)
-            unsafe_store!(a, convert(Bool, x))
-            return
-        end
+    # Julia codegen references small-tagged datatypes like `Bool` through a constant offset
+    # into `jl_small_typeof`. The relocation must resolve to the actual type pointer, not to
+    # the table's (null) first word. `pointer_from_objref` lowers inline, keeping the load
+    # live in the kernel without any allocation or exception machinery.
+    function kernel(a::Core.LLVMPtr{UInt,1})
+        unsafe_store!(a, UInt(pointer_from_objref(Bool)))
+        return
     end
-    source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Bool,1}, Int},
+    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{UInt,1}},
                             Base.get_world_counter())
     target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
-    config = CompilerConfig(target, mod.AllocatingParams(); kernel=true)
+    config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
     job = CompilerJob(source, config)
-    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+
+    # Julia 1.10 still emits small-tagged types as literal pointers.
     if VERSION >= v"1.11-"
-        @test occursin(r"define .*@julia_InexactError", air)
-        @test occursin(Regex("inttoptr \\(?i64 $(UInt(pointer_from_objref(Bool))) to"), air)
-        @test !occursin(r"store .*\bnull\b", air)
+        # precondition: the unoptimized IR loads the tag through a nonzero table offset
+        ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true, optimize=false))
+        @test occursin(r"getelementptr[^(]*\(i8, [^@]*@jl_small_typeof, i64 [1-9]\d*\)", ir)
+
+        air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+        @test occursin(Regex("store i64 $(UInt(pointer_from_objref(Bool))),"), air)
+        @test !occursin("jl_small_typeof", air)
+        @test !occursin(r"store i64 0,", air)
     end
 end
 
