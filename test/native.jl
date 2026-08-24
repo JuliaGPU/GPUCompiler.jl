@@ -240,6 +240,11 @@ end
             old = GPUCompiler.runtime_libs[key]
             @test GPUCompiler.runtime_library_valid(old, job)
 
+            # An unrelated world change must not invalidate an otherwise-current library.
+            Core.eval(Native.Runtime, :(runtime_cache_world_bump() = nothing))
+            same_job = CompilerJob(job.source, job.config, Base.get_world_counter())
+            @test GPUCompiler.runtime_library_valid(old, same_job)
+
             @eval Native.Runtime signal_exception() = return
             new_job, _ = Native.create_job(identity, (Nothing,))
             new_job = CompilerJob(new_job.source, new_job.config, Base.get_world_counter())

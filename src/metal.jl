@@ -1028,9 +1028,10 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
     end
 
     # update functions that use the global
+    # Clones are appended in processing order, so don't iterate the pointer-hashed worklist.
     if !isempty(function_worklist)
         entry_fn = LLVM.name(entry)
-        for fun in function_worklist
+        for fun in [f for f in functions(mod) if f in function_worklist]
             fn = LLVM.name(fun)
 
             new_fun = clone(fun; value_map=global_map)

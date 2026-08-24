@@ -886,8 +886,10 @@ function (self::AddKernelState)(mod::LLVM.Module)
     delete!(worklist, state_intr)
 
     # add a state argument
+    # Clones are appended in processing order, so don't iterate the pointer-hashed worklist.
+    ordered_worklist = [f for f in functions(mod) if f in worklist]
     workmap = Dict{LLVM.Function, LLVM.Function}()
-    for f in worklist
+    for f in ordered_worklist
         fn = LLVM.name(f)
         ft = function_type(f)
         LLVM.name!(f, fn * ".stateless")
@@ -938,7 +940,8 @@ function (self::AddKernelState)(mod::LLVM.Module)
         end
         return nothing # do not claim responsibility
     end
-    for (f, new_f) in workmap
+    for f in ordered_worklist
+        new_f = workmap[f]
         # use a value mapper for rewriting function arguments
         value_map = Dict{LLVM.Value, LLVM.Value}()
         for (param, new_param) in zip(parameters(f), parameters(new_f)[2:end])
@@ -1466,8 +1469,10 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     # add the arguments
     # NOTE: we don't need to be fine-grained here, as unused args will be removed during opt
+    # Clones are appended in processing order, so don't iterate the pointer-hashed worklist.
+    ordered_worklist = [f for f in functions(mod) if f in worklist]
     workmap = Dict{LLVM.Function, LLVM.Function}()
-    for f in worklist
+    for f in ordered_worklist
         fn = LLVM.name(f)
         ft = function_type(f)
         LLVM.name!(f, fn * ".orig")
@@ -1493,7 +1498,8 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
     # clone and rewrite the function bodies.
     # we don't need to rewrite much as the arguments are added last.
-    for (f, new_f) in workmap
+    for f in ordered_worklist
+        new_f = workmap[f]
         # map the arguments
         value_map = Dict{LLVM.Value, LLVM.Value}()
         for (param, new_param) in zip(parameters(f), parameters(new_f))

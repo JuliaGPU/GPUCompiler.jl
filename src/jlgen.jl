@@ -573,6 +573,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
     end
 
+    # Older Julia merges the per-CodeInstance modules in pointer order; restore emission
+    # order so the layout we hand downstream is the same in every session.
+    @static if VERSION < v"1.13.0-rc4"
+        canonicalize_module_layout!(llvm_mod)
+    end
+
     # Since Julia 1.13, the caller is responsible for initializing global variables that
     # point to global values or bindings with their address in memory. Similarly on earlier
     # versions where `HAS_LLVM_GVS_GLOBALS` is true (see
