@@ -31,17 +31,23 @@ struct JuliaValueRef
 end
 
 """
-    CGlobalRef(symbol, library=nothing)
+    CGlobalRef(symbol, library=nothing; offset=0)
 
 A named C data global. With `library === nothing`, resolution uses `jl_cglobal`'s
 process-wide lookup. Otherwise it looks up `symbol` in `library`. Resolution returns the
-word stored in the global.
+word stored at byte `offset`.
 """
 struct CGlobalRef
     symbol::Symbol
     library::Union{Nothing,String}
+    offset::Int
+
+    function CGlobalRef(symbol::Symbol, library::Union{Nothing,String}=nothing;
+                        offset::Integer=0)
+        offset >= 0 || throw(ArgumentError("cglobal offset must be nonnegative"))
+        new(symbol, library, Int(offset))
+    end
 end
-CGlobalRef(symbol::Symbol) = CGlobalRef(symbol, nothing)
 
 """
     RelocationTarget
@@ -53,7 +59,7 @@ const RelocationTarget = Union{JuliaValueRef,CGlobalRef}
 
 same_relocation_target(a::JuliaValueRef, b::JuliaValueRef) = a.value === b.value
 same_relocation_target(a::CGlobalRef, b::CGlobalRef) =
-    a.symbol === b.symbol && a.library == b.library
+    a.symbol === b.symbol && a.library == b.library && a.offset == b.offset
 same_relocation_target(::RelocationTarget, ::RelocationTarget) = false
 
 # Permanently root a value in the current process and return the canonical rooted
@@ -86,11 +92,11 @@ function resolve_relocation_target(target::CGlobalRef)
     if target.library === nothing
         # `jl_cglobal` accepts the symbol directly and does the process-wide `jl_dlfind`.
         address = ccall(:jl_cglobal, Any, (Any, Any), target.symbol, UInt)
-        return unsafe_load(address)
+        return unsafe_load(address + target.offset)
     end
     handle = Libdl.dlopen(target.library)
     address = Libdl.dlsym(handle, target.symbol)
-    return unsafe_load(Ptr{UInt}(address))
+    return unsafe_load(Ptr{UInt}(address) + target.offset)
 end
 
 
@@ -466,25 +472,56 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
     return val
 end
 
-# Rewrite every load of `value` into the word `produce_word(builder)` emits at the load's
-# position, restoring a pointer with `inttoptr` where the original load produced one.
-# Constant expressions (typed-pointer bitcasts) are recursed through, so both `i64` and
-# pointer-typed words are handled. Shared by every producer and lowering that replaces a
-# word-sized global with a run-time value.
-function rewrite_word_loads!(produce_word, @nospecialize(value), what::String)
+# Return the byte offset added by a constant cast or GEP, or `nothing` if it is not static.
+function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::DataLayout)
+    op = opcode(ce)
+    if op == LLVM.API.LLVMBitCast || op == LLVM.API.LLVMAddrSpaceCast
+        return 0
+    elseif op == LLVM.API.LLVMGetElementPtr
+        ops = operands(ce)
+        indices = ops[2:end]
+        all(idx -> idx isa LLVM.ConstantInt, indices) || return nothing
+        T = LLVMType(LLVM.API.LLVMGetGEPSourceElementType(ce))
+        offset = convert(Int, indices[1]) * Int(abi_size(dl, T))
+        for idx in indices[2:end]
+            i = convert(Int, idx)
+            if T isa LLVM.StructType
+                offset += Int(offsetof(dl, T, i))
+                T = elements(T)[i+1]
+            elseif T isa LLVM.ArrayType || T isa LLVM.VectorType
+                T = eltype(T)
+                offset += i * Int(abi_size(dl, T))
+            else
+                return nothing
+            end
+        end
+        return offset
+    end
+    return nothing
+end
+
+# Rewrite word-sized loads derived through constant casts or GEPs from `value`. The producer
+# receives the byte offset; reject paths whose offset is not static.
+function rewrite_word_loads!(produce_word, @nospecialize(value), what::String;
+                             offset::Union{Int,Nothing}=0,
+                             dl::DataLayout=datalayout(LLVM.parent(value)::LLVM.Module))
     changed = false
     for use in collect(uses(value))
         val = user(use)
         if isa(val, LLVM.ConstantExpr)
-            changed |= rewrite_word_loads!(produce_word, val, what)
+            delta = constexpr_byte_offset(val, dl)
+            inner = (offset === nothing || delta === nothing) ? nothing : offset + delta
+            changed |= rewrite_word_loads!(produce_word, val, what; offset=inner, dl)
         elseif isa(val, LLVM.LoadInst)
+            offset === nothing &&
+                error("Unsupported $what load through constant expression $(operands(val)[1])")
             T = value_type(val)
             (T isa LLVM.PointerType ||
              (T isa LLVM.IntegerType && width(T) == 8sizeof(UInt))) ||
                 error("Unsupported $what load of LLVM type $T")
             @dispose builder=IRBuilder() begin
                 position!(builder, val)
-                replacement = produce_word(builder)
+                replacement = produce_word(builder, offset)
                 T isa LLVM.PointerType &&
                     (replacement = inttoptr!(builder, replacement, T))
                 replace_uses!(val, replacement)
@@ -496,8 +533,7 @@ function rewrite_word_loads!(produce_word, @nospecialize(value), what::String)
     return changed
 end
 
-# Some Julia code loads words from libjulia C globals, for example type tags. Record those
-# loads as dedicated zero-offset relocations immediately before object emission.
+# Record loaded words from libjulia globals as one relocation slot per symbol and offset.
 function is_cglobal_candidate(value, relocs::Relocations)
     name = LLVM.name(value)
     value isa LLVM.GlobalVariable &&
@@ -515,20 +551,21 @@ function collect_cglobal_relocations!(@nospecialize(job::CompilerJob), mod::LLVM
     for f in [collect(functions(mod)); collect(globals(mod))]
         is_cglobal_candidate(f, relocs) || continue
         fn = LLVM.name(f)
-        slot = nothing
-        function cglobal_slot()
-            if slot === nothing
-                name = namespaced_name(namespace, "gpu_" * fn)
+        slots = Dict{Int,GlobalVariable}()
+        function cglobal_slot(offset::Int)
+            get!(slots, offset) do
+                # Including zero distinguishes `symbol` at N from `symbol_N` at zero.
+                name = namespaced_name(namespace, "gpu_$(fn)_$(offset)")
                 slot = GlobalVariable(mod, relocation_word_type(), name)
                 LLVM.name(slot) == name ||
                     error("cglobal slot name '$name' is already in use")
-                add_relocation!(relocs, SlotSite, name, 0, CGlobalRef(Symbol(fn)))
+                add_relocation!(relocs, SlotSite, name, 0, CGlobalRef(Symbol(fn); offset))
+                slot
             end
-            slot
         end
 
-        changed |= rewrite_word_loads!(f, "cglobal '$fn'") do builder
-            load!(builder, relocation_word_type(), cglobal_slot())
+        changed |= rewrite_word_loads!(f, "cglobal '$fn'") do builder, offset
+            load!(builder, relocation_word_type(), cglobal_slot(offset))
         end
     end
 
@@ -808,7 +845,9 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
         check_relocation(mod, rec, gv)
 
         if rec.kind === SlotSite
-            rewrite_word_loads!(gv, "relocation slot '$(rec.name)'") do builder
+            rewrite_word_loads!(gv, "relocation slot '$(rec.name)'") do builder, offset
+                offset == 0 ||
+                    error("Relocation slot '$(rec.name)' is loaded at offset $offset")
                 table_word(builder, index)
             end
             prune_constexpr_uses!(gv)

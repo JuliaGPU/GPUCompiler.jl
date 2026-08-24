@@ -1489,6 +1489,34 @@ end
     end
 end
 
+@testset "small typeof table relocation" begin
+    # Julia codegen references small-tagged datatypes like `Bool` through a constant offset
+    # into `jl_small_typeof`. The relocation must resolve to the actual type pointer, not to
+    # the table's (null) first word. `pointer_from_objref` lowers inline, keeping the load
+    # live in the kernel without any allocation or exception machinery.
+    function kernel(a::Core.LLVMPtr{UInt,1})
+        unsafe_store!(a, UInt(pointer_from_objref(Bool)))
+        return
+    end
+    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{UInt,1}},
+                            Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
+    job = CompilerJob(source, config)
+
+    # Julia 1.10 still emits small-tagged types as literal pointers.
+    if VERSION >= v"1.11-"
+        # precondition: the unoptimized IR loads the tag through a nonzero table offset
+        ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true, optimize=false))
+        @test occursin(r"getelementptr[^(]*\(i8, [^@]*@jl_small_typeof, i64 [1-9]\d*\)", ir)
+
+        air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+        @test occursin(Regex("store i64 $(UInt(pointer_from_objref(Bool))),"), air)
+        @test !occursin("jl_small_typeof", air)
+        @test !occursin(r"store i64 0,", air)
+    end
+end
+
 # byval lowering must strip the (non-IPO-safe) Julia const-region metadata off loads derived
 # from the materialized argument; check the helper walks gep/addrspacecast chains and removes it.
 @testset "const-region metadata stripping for materialized args" begin
