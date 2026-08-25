@@ -645,6 +645,23 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     return functions(mod)[entry_fn]
 end
 
+# Julia marks heap-reference accesses `unordered` so raced pointer reads cannot produce
+# values out of thin air. GPUCompiler has no device GC, and Metal's supported atomics
+# are already `air.atomic.*` intrinsics, so raw unordered LLVM loads/stores are unnecessary.
+# Demote them after optimization, where the weaker semantics cannot enable new transforms;
+# leave stronger orderings intact.
+function demote_unordered_atomics!(mod::LLVM.Module)
+    changed = false
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) || continue
+        is_atomic(inst) || continue
+        ordering(inst) == LLVM.API.LLVMAtomicOrderingUnordered || continue
+        ordering!(inst, LLVM.API.LLVMAtomicOrderingNotAtomic)
+        changed = true
+    end
+    return changed
+end
+
 # lowering of LLVM IR to AIR-compatible IR
 #
 # Metal does not have an LLVM back-end, so the lowering of target-independent LLVM IR into
@@ -658,6 +675,9 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # space and casting only the surviving pointer is the shape Julia emits for direct
     # Metal.malloc uses.
     rewrite_generic_null_selects!(mod)
+
+    # AIR does not support LLVM atomic load/store instructions
+    demote_unordered_atomics!(mod)
 
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
