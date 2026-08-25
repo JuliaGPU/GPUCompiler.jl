@@ -1517,34 +1517,6 @@ end
     end
 end
 
-# Keep `malloc` non-null so the throwing branch constructs its `InexactError` argument.
-bool_conversion_mod = @eval module $(gensym())
-    using ..GPUCompiler
-    module AllocatingRuntime
-        signal_exception() = return
-        malloc(sz) = reinterpret(Ptr{Cvoid}, UInt(0x1000))
-        report_oom(sz) = return
-        report_exception(ex) = return
-        report_exception_name(ex) = return
-        report_exception_frame(idx, func, file, line) = return
-    end
-    struct AllocatingParams <: AbstractCompilerParams end
-    GPUCompiler.runtime_module(::CompilerJob{MetalCompilerTarget,AllocatingParams}) =
-        AllocatingRuntime
-
-    function kernel(a::Core.LLVMPtr{Bool,1}, x::Int)
-        unsafe_store!(a, convert(Bool, x))
-        return
-    end
-end
-function bool_conversion_job()
-    source = methodinstance(typeof(bool_conversion_mod.kernel),
-                            Tuple{Core.LLVMPtr{Bool,1}, Int}, Base.get_world_counter())
-    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
-    config = CompilerConfig(target, bool_conversion_mod.AllocatingParams(); kernel=true)
-    CompilerJob(source, config)
-end
-
 @testset "unordered atomic demotion" begin
     # Demote unordered LLVM loads/stores, but preserve stronger atomics.
     Context() do ctx
@@ -1574,20 +1546,28 @@ end
         @test !GPUCompiler.demote_unordered_atomics!(mod)
     end
 
-    # `compilesig_invokes=false` exposes the specialized, noinline `InexactError`
-    # constructor. Julia 1.12+ stores its argument tuple's pointer field unordered.
-    job = bool_conversion_job()
+    # end-to-end: Julia's own `:unordered` accesses (as codegen emits for heap-reference
+    # fields) must reach the AIR as plain loads and stores
+    function kernel(p::Core.LLVMPtr{Int,1}, q::Core.LLVMPtr{Int,1})
+        x = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Int}, p), :unordered)
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int}, q), x, :unordered)
+        return
+    end
+    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int,1}, Core.LLVMPtr{Int,1}},
+                            Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
+    job = CompilerJob(source, config)
+
+    # precondition: the accesses survive optimization as unordered atomics
     ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true))
+    @test occursin(r"load atomic .* unordered", ir)
+    @test occursin(r"store atomic .* unordered", ir)
+
     air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
-    if VERSION >= v"1.11-"
-        # precondition: the specialized constructor (and its box) survive optimization
-        @test occursin(r"define .*@julia_InexactError", ir)
-        @test occursin(r"define .*@julia_InexactError", air)
-    end
-    if VERSION >= v"1.12-"
-        @test occursin(r"store atomic .* unordered", ir)
-    end
     @test !occursin(r"(load|store) atomic", air)
+    @test occursin(r"load i64", air)
+    @test occursin(r"store i64", air)
 end
 
 # byval lowering must strip the (non-IPO-safe) Julia const-region metadata off loads derived
