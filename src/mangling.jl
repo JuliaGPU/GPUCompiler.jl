@@ -34,7 +34,7 @@ safe_name(@nospecialize(x)) = safe_name(repr(x))
 # profilers, support them (grouping different instantiations of the same kernel together).
 
 function mangle_param(@nospecialize(t), substitutions = Any[], top = false)
-    t == Nothing && return "v"
+    t === Nothing && return "v"
 
     # Manual lookup instead of `findfirst(isequal(x), substitutions)`: the latter
     # builds a `Base.Fix{2, isequal, typeof(x)}` that specializes `findfirst` per

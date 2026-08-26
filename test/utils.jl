@@ -67,6 +67,10 @@ end
     @test mangle(identity) == "identity"
     @test mangle(identity, Nothing) == "identity()"
 
+    # `missing` as a type parameter: comparing against `Nothing` with `==` returns
+    # `missing` instead of `false`, which used to throw a `TypeError` in a boolean context.
+    @test mangle(identity, Val{missing}) == "identity(Val<missing>)"
+
     # primitive types
     @test mangle(identity, Int32) == "identity(Int32)"
     @test mangle(identity, Int64) == "identity(Int64)"
