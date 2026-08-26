@@ -490,6 +490,46 @@ end
         @test occursin("@julia_probe_12bar", ir)
         dispose(m)
     end
+
+    # A function's value symbol table retains name-insertion order even though textual IR
+    # only exposes value order. Recreate the same block names in different orders, as
+    # pointer-keyed lowering worklists can, and ensure normalization canonicalizes the
+    # otherwise-different bitcode string tables.
+    function named_block_module(order)
+        m = parse(LLVM.Module, """
+            define void @probe(i1 %cond) {
+            conversion:
+              br i1 %cond, label %julia_throw_boundserror_5.exit, label %L25
+            julia_throw_boundserror_5.exit:
+              br label %ret
+            L25:
+              br label %ret
+            ret:
+              ret void
+            }
+            """)
+        bbs = collect(blocks(functions(m)["probe"]))
+        names = LLVM.name.(bbs)
+        for bb in bbs
+            LLVM.name!(bb, "")
+        end
+        for i in order
+            LLVM.name!(bbs[i], names[i])
+        end
+        return m
+    end
+
+    JuliaContext() do ctx
+        a = named_block_module(1:4)
+        b = named_block_module((4, 2, 1, 3))
+        @test string(a) == string(b)
+        GPUCompiler.normalize_julia_symbol_names!(a)
+        GPUCompiler.normalize_julia_symbol_names!(b)
+        bytes(mod) = (io = IOBuffer(); write(io, mod); take!(io))
+        @test bytes(a) == bytes(b)
+        dispose(a)
+        dispose(b)
+    end
 end
 
 @testset "reproducible output" begin
