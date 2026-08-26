@@ -14,20 +14,12 @@
 """
     JuliaValueRef(value)
 
-A Julia value with a stable address (a heap object, symbol, or singleton), used as the
-serializable identity of a relocation target. Resolve it in the active session with
-[`resolve_relocation_target`](@ref), which permanently roots the value in the process so
-the resolved address stays valid for as long as the session lives.
+A Julia value used as the serializable identity of a relocation target. Resolving it with
+[`resolve_relocation_target`](@ref) permanently roots the value and returns the address of
+its canonical representation. This also gives nonzero-sized `isbits` values a stable box.
 """
 struct JuliaValueRef
     value::Any
-
-    function JuliaValueRef(value)
-        value_type = typeof(value)
-        isbitstype(value_type) && sizeof(value_type) > 0 &&
-            error("JuliaValueRef requires an object with a stable address")
-        new(value)
-    end
 end
 
 """
@@ -345,6 +337,10 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
     relocs = Relocations()
     namespace = relocation_namespace(job)
     mod_gvs = globals(mod)
+
+    # Device jobs cannot refer to host boxes, so embed copies of boxed isbits constants.
+    # Runtime jobs must keep the GC-managed boxes because returned values may re-enter Julia.
+    materialize_boxes = !uses_julia_runtime(job)
     for (name, init) in gv_to_value
         haskey(mod_gvs, name) || continue
         gv = mod_gvs[name]
@@ -358,7 +354,8 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
         # mapped global, so a null here means those maps are out of sync.
         init == C_NULL && error("Missing Julia object for global '$name'")
         obj = Base.unsafe_pointer_to_objref(init)
-        if isbitstype(typeof(obj)) && sizeof(typeof(obj)) > 0 && !(obj isa Bool)
+        if materialize_boxes && isbitstype(typeof(obj)) && sizeof(typeof(obj)) > 0 &&
+           !(obj isa Bool)
             val = materialize_box!(mod, relocs, namespace, gv, obj, init)
             initializer!(gv, val)
             linkage!(gv, LLVM.API.LLVMPrivateLinkage)
@@ -387,21 +384,24 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
         end
     end
 
-    # Bool JuliaVariables are absent from `gv_to_value`; define one device box per module.
-    for (name, obj) in ("jl_true" => true, "jl_false" => false)
-        haskey(mod_gvs, name) || continue
-        gv = mod_gvs[name]
-        cur = initializer(gv)
-        if !(cur === nothing || LLVM.isnull(cur))
-            @assert !supports_relocatable_ir()
-            continue
-        end
+    # Bool globals are absent from `gv_to_value`. Device jobs need local boxes; runtime jobs
+    # leave them as external cglobals for `collect_cglobal_relocations!`.
+    if materialize_boxes
+        for (name, obj) in ("jl_true" => true, "jl_false" => false)
+            haskey(mod_gvs, name) || continue
+            gv = mod_gvs[name]
+            cur = initializer(gv)
+            if !(cur === nothing || LLVM.isnull(cur))
+                @assert !supports_relocatable_ir()
+                continue
+            end
 
-        init = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
-        val = materialize_box!(mod, relocs, namespace, gv, obj, init)
-        initializer!(gv, val)
-        constant!(gv, true)
-        linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+            init = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
+            val = materialize_box!(mod, relocs, namespace, gv, obj, init)
+            initializer!(gv, val)
+            constant!(gv, true)
+            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+        end
     end
     return relocs
 end
