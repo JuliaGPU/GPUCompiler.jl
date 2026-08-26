@@ -148,8 +148,14 @@ function runtime_method_instance(@nospecialize(job::CompilerJob), method)
     end
     # Resolve at the requesting job's explicit world, rather than this task's TLS world.
     # Runtime methods may be redefined while a long-lived compilation task is running.
+    #
+    # Look up through the job's method table, so that back-ends can define runtime
+    # functions as overlay methods only (without a definition in the global method
+    # table, where ahead-of-time compilation would compile the GPU-only code for the
+    # host; see JuliaGPU/GPUCompiler.jl#611).
     return generic_methodinstance(
-        typeof(def), Base.to_tuple_type(method.types), job.world)
+        typeof(def), Base.to_tuple_type(method.types), job.world;
+        method_table_view=method_table_view(job))
 end
 
 function runtime_code_instance(@nospecialize(job::CompilerJob))

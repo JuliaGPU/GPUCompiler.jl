@@ -1697,6 +1697,36 @@ end
     end
 end
 
+@testset "runtime functions from overlay methods" begin
+    # runtime library functions (`signal_exception`, `malloc`, ...) should be resolved
+    # through the job's method table, so that back-ends can keep GPU-only code out of
+    # the global method table (JuliaGPU/GPUCompiler.jl#611)
+    isdefined(Native.Runtime, :signal_exception) ||
+        @eval Native.Runtime signal_exception() = nothing
+
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..Native
+
+        Base.Experimental.@MethodTable(method_table)
+
+        Base.Experimental.@overlay method_table Native.Runtime.signal_exception() = nothing
+
+        kernel(x) = x
+    end
+
+    method = GPUCompiler.Runtime.methods[:signal_exception]
+
+    job, _ = Native.create_job(mod.kernel, (Int,); method_table=mod.method_table)
+    mi = GPUCompiler.runtime_method_instance(job, method)
+    @test mi.def.module === mod
+
+    # the global definition is used with the global method table
+    job, _ = Native.create_job(mod.kernel, (Int,); method_table=GPUCompiler.GLOBAL_METHOD_TABLE)
+    mi = GPUCompiler.runtime_method_instance(job, method)
+    @test mi.def.module === Native.Runtime
+end
+
 @testset "semi-concrete interpretation + overlay methods" begin
     # issue 366, caused dynamic deispatch
     mod = @eval module $(gensym())

@@ -71,10 +71,16 @@ pass at run time. For non-concrete signatures, use `generic_methodinstance` inst
 methodinstance
 
 function generic_methodinstance(@nospecialize(ft::Type), @nospecialize(tt::Type),
-                                world::Integer=tls_world_age())
+                                world::Integer=tls_world_age();
+                                method_table_view::Union{Nothing,CC.MethodTableView}=nothing)
     sig = signature_type_by_tt(ft, tt)
 
-    match, _ = CC._findsup(sig, nothing, world)
+    match = if method_table_view === nothing
+        first(CC._findsup(sig, nothing, world))
+    else
+        # e.g. an overlay table: prefer its methods, falling back to the global table
+        first(CC.findsup(sig, method_table_view))
+    end
     match === nothing && throw(MethodError(ft, tt, world))
 
     mi = CC.specialize_method(match)
