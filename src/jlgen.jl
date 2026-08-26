@@ -496,16 +496,24 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
     method_instances = []
-    if Sys.ARCH == :x86 || Sys.ARCH == :x86_64
-        function lookup_fun(mi, min_world, max_world)
-            push!(method_instances, mi)
-            lookup_ci(cache_handle, mi, min_world, max_world)
+    lookup_cb = @static if VERSION < v"1.12.0-DEV.1823"
+        if Sys.ARCH == :x86 || Sys.ARCH == :x86_64
+            function lookup_fun(mi, min_world, max_world)
+                push!(method_instances, mi)
+                lookup_ci(cache_handle, mi, min_world, max_world)
+            end
+            @cfunction($lookup_fun, Any, (Any, UInt, UInt))
+        else
+            _lookup_cache[] = cache_handle
+            _method_instances[] = method_instances
+            @cfunction(_lookup_fun, Any, (Any, UInt, UInt))
         end
-        lookup_cb = @cfunction($lookup_fun, Any, (Any, UInt, UInt))
     else
-        _lookup_cache[] = cache_handle
-        _method_instances[] = method_instances
-        lookup_cb = @cfunction(_lookup_fun, Any, (Any, UInt, UInt))
+        # `jl_emit_native` takes CodeInstances directly and does not need a lookup callback.
+        # Avoid creating one: a closure `@cfunction` lowers to `llvm.init.trampoline`, which
+        # with LLVM 22 marks the object's `.note.GNU-stack` as executable, and lld 22 then
+        # refuses to link the pkgimage (`requires an executable stack`).
+        nothing
     end
 
     # set-up the compiler interface
