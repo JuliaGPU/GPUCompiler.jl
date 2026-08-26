@@ -70,10 +70,10 @@ end
 
 function create_job(@nospecialize(func), @nospecialize(types);
                     entry_safepoint::Bool=false, method_table=test_method_table,
-                    relocations::Symbol=:bake, kwargs...)
+                    relocations::Symbol=:bake, jlruntime::Bool=true, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = NativeCompilerTarget(;jlruntime=true)
+    target = NativeCompilerTarget(;jlruntime)
     params = CompilerParams(entry_safepoint, method_table, relocations)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs

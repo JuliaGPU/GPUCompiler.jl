@@ -287,8 +287,9 @@ end
     end
 
     @testset "boxed constant materialization" begin
-        # since JuliaLang/julia#55045, isbits union constants stay fully boxed; the
-        # box must be replicated on device instead of referencing a host address
+        # Since JuliaLang/julia#55045, isbits union constants stay boxed. Device jobs must
+        # embed copies instead of referring to GC-managed host boxes.
+        device = (; jlruntime=false)
         mod = @eval module $(gensym())
             union_smalltag(cond::Bool, a::Int32) = cond ? a : Int64(0)
             union_float(cond::Bool, a::Float32) = cond ? a : 1.0
@@ -319,7 +320,7 @@ end
 
         # smalltag constants materialize fully session-portably
         ir = sprint(io->Native.code_llvm(io, mod.union_smalltag, Tuple{Bool, Int32};
-                                         dump_module=true, validate=true))
+                                         dump_module=true, validate=true, device...))
         @static if VERSION >= v"1.14.0-DEV.1348"
             @test occursin("_box", ir)
             @test !occursin("inttoptr", ir)
@@ -328,7 +329,7 @@ end
         # non-smalltag constants carry a host type pointer in the box header,
         # but the payload is still device-resident
         ir = sprint(io->Native.code_llvm(io, mod.union_float, Tuple{Bool, Float32};
-                                         dump_module=true, validate=true))
+                                         dump_module=true, validate=true, device...))
         @static if VERSION >= v"1.14.0-DEV.1348"
             @test occursin("_box", ir)
         end
@@ -337,7 +338,7 @@ end
         for (f, name) in ((mod.consume_true, "jl_true"),
                           (mod.consume_false, "jl_false"))
             ir = sprint(io->Native.code_llvm(io, f, Tuple{Bool, Int32};
-                                             dump_module=true, validate=true))
+                                             dump_module=true, validate=true, device...))
             @static if VERSION >= v"1.14.0-DEV.1348"
                 @test occursin("@$(name)_box = private unnamed_addr constant", ir)
                 @test !occursin("@$name = external", ir)
@@ -347,16 +348,16 @@ end
 
         # zero-sized identity objects remain opaque host tokens
         ir = sprint(io->Native.code_llvm(io, mod.union_ghost, Tuple{Bool, Int32};
-                                         dump_module=true, validate=true))
+                                         dump_module=true, validate=true, device...))
         @test !occursin("_box", ir)
 
         # kernel compilation, including bits-egal on the materialized leaf
-        Native.code_execution(mod.kernel, (Ptr{Int64}, Bool, Int32))
-        Native.code_execution(mod.egal_kernel, (Ptr{Bool}, Bool, Int32))
+        Native.code_execution(mod.kernel, (Ptr{Int64}, Bool, Int32); device...)
+        Native.code_execution(mod.egal_kernel, (Ptr{Bool}, Bool, Int32); device...)
 
         # Classification records whether the module stayed session-portable; eager
         # lowering then resolves any remaining relocation slots.
-        collect_job, _ = Native.create_job(mod.kernel, (Ptr{Int64}, Bool, Int32))
+        collect_job, _ = Native.create_job(mod.kernel, (Ptr{Int64}, Bool, Int32); device...)
         namespace = GPUCompiler.relocation_namespace(collect_job)
         collect!(m, map) = GPUCompiler.collect_julia_value_relocations!(collect_job, m, map)
         JuliaContext() do ctx
@@ -791,7 +792,76 @@ end
     @test GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(singleton)) ==
           UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), singleton))
 
-    @test_throws ErrorException GPUCompiler.JuliaValueRef(1.5)
+    # Isbits values resolve by egal identity to one globally rooted box.
+    a, b = parse(Float64, "1.5"), parse(Float64, "1.5")
+    word = GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(a))
+    @test word == GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(b))
+    @test unsafe_pointer_to_objref(Ptr{Cvoid}(word)) === 1.5
+end
+
+@testset "runtime-backed boxed constants" begin
+    # Values returned through the boxed `:func` ABI must be valid GC-managed objects.
+    if GPUCompiler.supports_relocatable_ir()
+        mod = @eval module $(gensym())
+            returns_bool(x::Float64) = x > 0
+            # A `Union` keeps the `isbits` alternative boxed (JuliaLang/julia#55045).
+            returns_float(cond::Bool) = cond ? 2.5 : nothing
+        end
+        valptr(@nospecialize x) = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x)
+
+        for (f, args, expected) in ((mod.returns_bool, (1.0,), true),
+                                    (mod.returns_bool, (-1.0,), false),
+                                    (mod.returns_float, (true,), 2.5))
+            types = map(typeof, args)
+            # The other `Union` arm leaves an allocation in the module; only relocation is
+            # under test here.
+            ir = sprint(io->Native.code_llvm(io, f, Tuple{types...}; entry_abi=:func,
+                                             dump_module=true, validate=false))
+            @test !occursin(r"^@\S+_box = "m, ir)   # no materialized replica
+            if expected isa Bool
+                @test occursin("@jl_$expected = external", ir)
+            end
+
+            job, _ = Native.create_job(f, types; entry_abi=:func, relocations=:patch,
+                                       validate=false)
+            JuliaContext() do ctx
+                obj, meta = GPUCompiler.compile(:obj, job)
+                relocs = meta.relocations
+                # Runtime objects use whole-word slots, never materialized box headers.
+                @test all(rec -> rec.kind === GPUCompiler.SlotSite, relocs.records)
+                if expected isa Bool
+                    # `jl_true` and `jl_false` are libjulia pointer globals.
+                    ref = GPUCompiler.CGlobalRef(Symbol("jl_$expected"))
+                    @test any(rec -> GPUCompiler.same_relocation_target(rec.target, ref),
+                              relocs.records)
+                else
+                    @test any(rec -> rec.target isa GPUCompiler.JuliaValueRef &&
+                                     rec.target.value === expected, relocs.records)
+                end
+
+                fptr, lljit, _table = Native.load(Vector{UInt8}(codeunits(obj)),
+                                                  LLVM.name(meta.entry), relocs)
+                try
+                    boxed_args = Any[args...]
+                    r = GC.@preserve boxed_args ccall(fptr, Any, (Any, Ptr{Any}, Int32),
+                                                      f, pointer(boxed_args), length(args))
+                    @test r === expected
+                    expected_ptr = if expected isa Bool
+                        valptr(expected)
+                    else
+                        Ptr{Cvoid}(GPUCompiler.resolve_relocation_target(
+                            GPUCompiler.JuliaValueRef(expected)))
+                    end
+                    @test valptr(r) == expected_ptr
+                    keep = Any[r]
+                    GC.gc(true)
+                    @test keep == Any[expected]
+                finally
+                    dispose(lljit)
+                end
+            end
+        end
+    end
 end
 
 @testset "applied relocation execution" begin
@@ -811,7 +881,7 @@ end
                 return word + UInt(pointer_from_objref(:applied_probe))
             end
         end
-        job, _ = Native.create_job(mod.f, (Bool,); relocations=:patch)
+        job, _ = Native.create_job(mod.f, (Bool,); relocations=:patch, jlruntime=false)
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job)
             relocs = meta.relocations
@@ -996,7 +1066,7 @@ end
                 return word + UInt(pointer_from_objref(:table_probe))
             end
         end
-        job, _ = Native.create_job(mod.f, (Bool,); relocations=:table)
+        job, _ = Native.create_job(mod.f, (Bool,); relocations=:table, jlruntime=false)
         JuliaContext() do ctx
             obj, meta = GPUCompiler.compile(:obj, job)
             relocs = meta.relocations
