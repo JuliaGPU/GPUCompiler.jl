@@ -7,7 +7,10 @@ precompile_test_harness("Inference caching") do load_path
         import PTXCompiler
         using PrecompileTools
 
+        # use a target-specific intrinsic, so that any leak of this foreign code into
+        # native compilation (of the package image) fails loudly (GPUCompiler.jl#611)
         function kernel()
+            ccall("llvm.nvvm.barrier0", llvmcall, Cvoid, ())
             return
         end
 
