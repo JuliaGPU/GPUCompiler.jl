@@ -94,6 +94,20 @@ function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations
         prefix = LLVM.get_prefix(lljit)
         add!(jd, LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix))
 
+        # Code using the Julia runtime fetches the TLS through `jl_get_pgcstack_resolved`
+        # (JuliaLang/julia#61527), which is not a symbol in the process but one Julia's own
+        # JIT defines as an absolute address; do the same here.
+        getter = Ref{Ptr{Cvoid}}(C_NULL)
+        key = Ref{UInt64}(0)    # `jl_pgcstack_key_t` is at most a word wide
+        ccall(:jl_pgcstack_getkey, Cvoid, (Ptr{Ptr{Cvoid}}, Ptr{UInt64}), getter, key)
+        flags = LLVM.API.LLVMJITSymbolFlags(
+            LLVM.API.LLVMJITSymbolGenericFlagsExported |
+            LLVM.API.LLVMJITSymbolGenericFlagsCallable, 0)
+        symbol = LLVM.API.LLVMJITEvaluatedSymbol(reinterpret(UInt, getter[]), flags)
+        pair = LLVM.API.LLVMOrcCSymbolMapPair(mangle(lljit, "jl_get_pgcstack_resolved"),
+                                              symbol)
+        LLVM.define(jd, LLVM.absolute_symbols(Ref(pair)))
+
         add!(lljit, jd, MemoryBuffer(obj))
         words = UInt[]
         if table
