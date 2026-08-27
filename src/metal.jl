@@ -814,6 +814,32 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
             end
         end
     end
+
+    # LLVM's function-local value symbol table preserves insertion history, which is not
+    # visible in textual IR but does affect bitcode string-table order. Transformations above
+    # can create the same named values through pointer-keyed worklists in different orders.
+    # Reinsert every local name in IR order so equivalent modules serialize identically.
+    for f in functions(mod)
+        named_values = Pair{LLVM.Value,String}[]
+        for value in parameters(f)
+            name = LLVM.name(value)
+            isempty(name) || push!(named_values, value => name)
+        end
+        for bb in blocks(f)
+            name = LLVM.name(bb)
+            isempty(name) || push!(named_values, bb => name)
+            for inst in instructions(bb)
+                name = LLVM.name(inst)
+                isempty(name) || push!(named_values, inst => name)
+            end
+        end
+        for (value, _) in named_values
+            LLVM.name!(value, "")
+        end
+        for (value, name) in named_values
+            LLVM.name!(value, name)
+        end
+    end
     return
 end
 
