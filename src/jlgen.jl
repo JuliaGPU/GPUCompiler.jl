@@ -150,6 +150,53 @@ get_method_table_view(world::UInt, mt::CC.MethodTable) = CC.OverlayMethodTable(w
 # VERSION >= v"1.14.0-DEV.1691"
 const INFERENCE_CACHE_TYPE = isdefined(CC, :InferenceCache) ? CC.InferenceCache : Vector{CC.InferenceResult}
 
+# Interpreter-local inference caches shared within an `inference_batch`, keyed by
+# task, cache owner and world: results are only interchangeable between jobs that
+# infer identically (same owner) in the same world, and a cache is only ever used
+# by one task at a time.
+struct InferenceBatch
+    caches::Dict{Tuple{Task,Any,UInt},INFERENCE_CACHE_TYPE}
+    lock::ReentrantLock
+    InferenceBatch() = new(Dict{Tuple{Task,Any,UInt},INFERENCE_CACHE_TYPE}(), ReentrantLock())
+end
+
+const current_inference_batch = ScopedValue{Union{Nothing,InferenceBatch}}(nothing)
+
+"""
+    inference_batch(f)
+
+Run `f()` such that the interpreters GPUCompiler constructs within share their local
+inference cache — per task, per [`cache_owner`](@ref) and per world age — instead of
+each starting from an empty one.
+
+The local cache holds the results of constant propagation into callees. Julia keeps
+them for the lifetime of the interpreter, and GPUCompiler constructs an interpreter
+per compilation, so a batch of compilations of the same method with different
+constants (an autotuning sweep) re-derives them every time. Within a batch, later
+compilations on the same task reuse what earlier ones inferred.
+
+```julia
+GPUCompiler.inference_batch() do
+    for config in configs
+        compile(config)
+    end
+end
+```
+
+Sharing is per owner and world because only jobs with the same owner, in the same
+world, produce interchangeable inference results; and per task so that a cache is
+never used concurrently — tasks spawned inside the scope get their own caches.
+"""
+inference_batch(f) = with(f, current_inference_batch => InferenceBatch())
+
+# The inference cache for a new interpreter partitioned by `owner` at `world`: fresh,
+# or the current task's cache for that owner and world within an `inference_batch`.
+function inference_cache(@nospecialize(owner), world::UInt)
+    batch = current_inference_batch[]
+    batch === nothing && return INFERENCE_CACHE_TYPE()
+    Base.@lock batch.lock get!(INFERENCE_CACHE_TYPE, batch.caches, (current_task(), owner, world))
+end
+
 """
     GPUInterpreter
 
@@ -187,7 +234,7 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         always_inline::Bool=false)
     @assert world <= Base.get_world_counter()
     return GPUInterpreter{typeof(method_table_view)}(
-        world, method_table_view, owner, INFERENCE_CACHE_TYPE(),
+        world, method_table_view, owner, inference_cache(owner, world),
         inf_params, opt_params, always_inline)
 end
 
@@ -216,7 +263,7 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         always_inline::Bool=false)
     @assert world <= Base.get_world_counter()
     return GPUInterpreter{typeof(method_table_view)}(
-        world, method_table_view, code_cache, Vector{CC.InferenceResult}(),
+        world, method_table_view, code_cache, inference_cache(code_cache, world),
         inf_params, opt_params, always_inline)
 end
 

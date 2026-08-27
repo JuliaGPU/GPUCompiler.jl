@@ -25,6 +25,38 @@
     end
 end
 
+@testset "inference batch" begin
+    mod = @eval module $(gensym())
+        f(x::Int) = nothing
+    end
+    job, _ = Native.create_job(mod.f, (Int,))
+    other_job, _ = Native.create_job(mod.f, (Int,); always_inline=true)   # other owner
+    cache_of(job) = GPUCompiler.get_interpreter(job).inf_cache
+
+    # outside a batch: a fresh cache per interpreter
+    @test cache_of(job) !== cache_of(job)
+
+    GPUCompiler.inference_batch() do
+        # same task, same owner: shared
+        @test cache_of(job) === cache_of(job)
+        # different owner: separate
+        @test cache_of(job) !== cache_of(other_job)
+        # different world: separate
+        older_job = GPUCompiler.CompilerJob(job.source, job.config, job.world - 1)
+        @test cache_of(older_job) !== cache_of(job)
+        # different task: separate, and stable within that task
+        spawned = fetch(Threads.@spawn (cache_of(job), cache_of(job)))
+        @test spawned[1] === spawned[2]
+        @test spawned[1] !== cache_of(job)
+        # compilation uses it
+        Native.code_execution(mod.f, (Int,))
+        @test cache_of(job) === cache_of(job)
+    end
+
+    # the batch is gone with its scope
+    @test cache_of(job) !== cache_of(job)
+end
+
 @testset "method instances for type-valued callees and arguments" begin
     # JuliaLang/julia#62001: closed type-valued callees and arguments
     # dispatch on Core.TypeEgal keys instead of Type{T}

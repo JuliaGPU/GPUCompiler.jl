@@ -44,6 +44,8 @@ const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
 # `CompilerCaching.`.
 import CompilerCaching
 
+using ScopedValues: ScopedValue, with
+
 # Optional callback invoked from `compile(...)` / `cached_compilation(...)` before
 # compilation runs. Set by `@device_code_*` reflection macros. Defined here (early)
 # so the legacy `cached_compilation` in deprecated.jl can reference it.

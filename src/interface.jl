@@ -595,6 +595,7 @@ end # HAS_INTEGRATED_CACHE
 @public apply_relocations!, resolved_relocations, resolved_relocation_table
 @public supports_relocatable_ir
 @public GPUCompilerCacheToken, cache_owner, cached_results
+@public inference_batch
 
 # the method table to use
 #
