@@ -11,6 +11,7 @@ const init_code = quote
     using LLVMDowngrader_jll
     using NVPTX_LLVM_Backend_jll
     using AMDGPU_LLVM_Backend_jll
+    using ScopedValues: with
 
     # include all helpers
     include(joinpath(@__DIR__, "helpers", "runtime.jl"))

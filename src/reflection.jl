@@ -312,28 +312,23 @@ function emit_hooked_compilation(inner_hook, ex...)
     user_code = ex[end]
     user_kwargs = ex[1:end-1]
     quote
-        # we only want to invoke the hook once for every compilation job
+        # The job set and hook output are shared by child tasks, so update them together.
         jobs = Set()
+        jobs_lock = ReentrantLock()
         function outer_hook(job)
-            if !in(job, jobs)
-                # the user hook might invoke the compiler again, so disable the hook
-                old_hook = $compile_hook[]
-                try
-                    $compile_hook[] = nothing
-                    $inner_hook(job; $(map(esc, user_kwargs)...))
-                finally
-                    $compile_hook[] = old_hook
-                end
+            Base.@lock jobs_lock begin
+                job in jobs && return
                 push!(jobs, job)
+                # the user hook might invoke the compiler again, so disable the hook
+                $with($compile_hook => nothing) do
+                    $inner_hook(job; $(map(esc, user_kwargs)...))
+                end
             end
         end
 
         # now invoke the user code with this hook in place
-        try
-            $compile_hook[] = outer_hook
+        $with($compile_hook => outer_hook) do
             $(esc(user_code))
-        finally
-            $compile_hook[] = nothing
         end
 
         if isempty(jobs)
