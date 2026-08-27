@@ -79,8 +79,19 @@ steps:
     command: |
       julia -e 'println("--- :julia: Instantiating project")
                 using Pkg
-                Pkg.develop(; path=pwd())
-                Pkg.develop(; name="Metal")' || exit 3
+                withenv("JULIA_PKG_PRECOMPILE_AUTO" => 0) do
+                    Pkg.develop(; path=pwd())
+                    Pkg.develop(; name="Metal")
+
+                    # Metal runs its example suites in their own workspace
+                    # environments, which resolve through the manifest of the
+                    # Metal checkout; instantiate that workspace, against this
+                    # GPUCompiler, so those environments can actually load.
+                    gpucompiler = pwd()
+                    Pkg.activate(joinpath(Pkg.devdir(), "Metal"))
+                    Pkg.develop(; path=gpucompiler)
+                    Pkg.instantiate(workspace=true)
+                end' || exit 3
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
