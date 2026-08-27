@@ -1,0 +1,154 @@
+name: TestAsserts
+
+# This workflow runs tests using assert builds downloaded by GetAsserts.
+# It does not use any secrets (BUILDKITE_TOKEN access is confined to GetAsserts).
+#
+# The real GetAsserts never runs on `pull_request`, so a same-named workflow added by a
+# fork PR cannot be used to feed this workflow an attacker-built artifact.
+
+on:
+  workflow_run:
+    workflows: ["GetAsserts"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  report-start:
+    name: Report assertion tests started
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    permissions:
+      checks: write
+    steps:
+      - name: Report in-progress
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // Keep in sync with the matrix below
+            const versions = ['1.12', '1.13'];
+            await Promise.all(versions.map(version =>
+              github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head_sha: '${{ github.event.workflow_run.head_sha }}',
+                name: `Julia ${version} (assert) - Linux`,
+                status: 'in_progress',
+                details_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              })
+            ));
+
+  test:
+    name: Julia ${{ matrix.version }} (assert) - Linux
+    needs: report-start
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['1.12', '1.13']
+    steps:
+      - name: Download Julia build
+        uses: actions/download-artifact@v8
+        with:
+          name: julia-${{ matrix.version }}-x86_64-linux-gnuassert
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Install Julia
+        run: |
+          tar -xf julia.tar.gz -C ../
+          rm julia.tar.gz
+          echo $PWD/../julia-*/bin >> $GITHUB_PATH
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          # GetAsserts only runs trusted base-branch code. This job intentionally tests the
+          # resulting artifact against the triggering revision without exposing credentials.
+          allow-unsafe-pr-checkout: true
+          persist-credentials: false
+
+      # NOTE: no julia-actions/cache here; this job runs untrusted code in the
+      #       default-branch cache scope, so it must not write to the cache.
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+
+  report-result:
+    name: Report assertion test results
+    needs: test
+    if: always() && github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      checks: write
+    steps:
+      - name: Report check run
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // Keep in sync with the matrix above
+            const versions = ['1.12', '1.13'];
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+              attempt_number: Number(process.env.GITHUB_RUN_ATTEMPT),
+              per_page: 100,
+            });
+            await Promise.all(versions.map(version => {
+              const name = `Julia ${version} (assert) - Linux`;
+              const job = jobs.find(job => job.name === name);
+              const conclusion = job?.conclusion || 'failure';
+              return github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head_sha: '${{ github.event.workflow_run.head_sha }}',
+                name,
+                status: 'completed',
+                conclusion,
+                details_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                output: {
+                  title: `Assert build test ${conclusion}`,
+                  summary: `Tested against \`x86_64-linux-gnuassert\` build of Julia ${version}.`
+                }
+              });
+            }));
+
+  report-failure:
+    name: Report download failure
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.conclusion == 'failure'
+    permissions:
+      checks: write
+    steps:
+      - name: Report check runs
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // Keep in sync with the matrix above
+            const versions = ['1.12', '1.13'];
+            await Promise.all(versions.map(version =>
+              github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head_sha: '${{ github.event.workflow_run.head_sha }}',
+                name: `Julia ${version} (assert) - Linux`,
+                status: 'completed',
+                conclusion: 'failure',
+                details_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${{ github.event.workflow_run.id }}`,
+                output: {
+                  title: 'Assert build download failed',
+                  summary: 'The GetAsserts workflow failed to download the Julia build.'
+                }
+              })
+            ));
