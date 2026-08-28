@@ -57,6 +57,33 @@ end
     end
 end
 
+@testset "launch bounds" begin
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+
+    @test @filecheck begin
+        @check_not "amdgpu-flat-work-group-size"
+        GCN.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
+    end
+
+    @test @filecheck begin
+        @check "\"amdgpu-flat-work-group-size\"=\"1,42\""
+        GCN.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, maxthreads=42)
+    end
+
+    @test @filecheck begin
+        @check "\"amdgpu-flat-work-group-size\"=\"256,256\""
+        GCN.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true,
+                      minthreads=256, maxthreads=256)
+    end
+
+    @test @filecheck begin
+        @check ".max_flat_workgroup_size: 42"
+        GCN.code_native(mod.kernel, Tuple{}; dump_module=true, kernel=true, maxthreads=42)
+    end
+end
+
 @testset "bounds errors" begin
     mod = @eval module $(gensym())
         function kernel()

@@ -13,6 +13,19 @@ Base.@kwdef struct GCNCompilerTarget <: AbstractCompilerTarget
     features::String=""
 
     backend::Symbol = isavailable(AMDGPU_LLVM_Backend_jll) ? :external : :inprocess
+
+    # optional launch bounds (scalar or per-dimension; flattened to their product)
+    minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
+    maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
+end
+
+function Base.hash(target::GCNCompilerTarget, h::UInt)
+    h = hash(target.dev_isa, h)
+    h = hash(target.features, h)
+    h = hash(target.backend, h)
+    h = hash(target.minthreads, h)
+    h = hash(target.maxthreads, h)
+    h
 end
 GCNCompilerTarget(dev_isa; kwargs...) = GCNCompilerTarget(; dev_isa, kwargs...)
 
@@ -56,6 +69,16 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
     if job.config.kernel
         # calling convention
         callconv!(entry, LLVM.API.LLVMAMDGPUKERNELCallConv)
+
+        # workgroup size bounds; the backend sizes its register budget for the
+        # worst case (1,1024) when unset
+        if job.config.target.minthreads !== nothing ||
+           job.config.target.maxthreads !== nothing
+            lo = prod(something(job.config.target.minthreads, 1))
+            hi = prod(something(job.config.target.maxthreads, 1024))
+            push!(function_attributes(entry),
+                  StringAttribute("amdgpu-flat-work-group-size", "$lo,$hi"))
+        end
     end
 
     return entry

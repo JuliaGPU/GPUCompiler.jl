@@ -14,10 +14,11 @@ GPUCompiler.relocation_lowering(@nospecialize(job::CompilerJob{<:Any,CompilerPar
     job.config.params.patch ? :patch : :bake
 
 function create_job(@nospecialize(func), @nospecialize(types); backend::Symbol=:external,
+                    minthreads=nothing, maxthreads=nothing,
                     patch::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = GCNCompilerTarget(dev_isa="gfx900"; backend)
+    target = GCNCompilerTarget(dev_isa="gfx900"; backend, minthreads, maxthreads)
     params = CompilerParams(patch)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
