@@ -44,10 +44,12 @@ const HAS_INTEGRATED_CACHE = VERSION >= v"1.11.0-DEV.1552"
 # `CompilerCaching.`.
 import CompilerCaching
 
-# Optional callback invoked from `compile(...)` / `cached_compilation(...)` before
-# compilation runs. Set by `@device_code_*` reflection macros. Defined here (early)
-# so the legacy `cached_compilation` in deprecated.jl can reference it.
-const compile_hook = Ref{Union{Nothing,Function}}(nothing)
+using ScopedValues: ScopedValue, with
+
+# Hook used by the `@device_code_*` macros. Scope it to the current task and its
+# children so concurrent reflection calls do not interfere. Defined here so the
+# legacy `cached_compilation` in deprecated.jl can reference it.
+const compile_hook = ScopedValue{Union{Nothing,Function}}(nothing)
 
 include("utils.jl")
 include("mangling.jl")

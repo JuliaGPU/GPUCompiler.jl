@@ -25,6 +25,73 @@
     end
 end
 
+@testset "compile hook" begin
+    mod = @eval module $(gensym())
+        f(x::Int) = nothing
+        g(x::Int) = nothing
+    end
+
+    # the hook sees every job compiled within its scope, and nothing outside it
+    seen = []
+    with(GPUCompiler.compile_hook => job -> push!(seen, job)) do
+        Native.code_execution(mod.f, (Int,))
+    end
+    @test length(seen) == 1 && only(seen).source.def.name === :f
+    @test GPUCompiler.compile_hook[] === nothing
+    Native.code_execution(mod.g, (Int,))
+    @test length(seen) == 1
+
+    # the reflection macros go through the hook once per job, even when the user
+    # code compiles the same job repeatedly
+    lowered = GPUCompiler.@device_code_lowered begin
+        Native.code_execution(mod.f, (Int,))
+        Native.code_execution(mod.f, (Int,))
+    end
+    @test length(lowered) == 1
+    @test_throws "no kernels executed" GPUCompiler.@device_code_native mod.f(1)
+
+    # concurrent compilations within the scope are all observed, exactly once each
+    mod2 = @eval module $(gensym())
+        $((:($(Symbol(:f, i))(x::Int) = nothing) for i in 1:8)...)
+    end
+    fs = [getfield(mod2, Symbol(:f, i)) for i in 1:8]
+    typed = GPUCompiler.@device_code_typed begin
+        @sync for f in fs, _ in 1:2
+            Threads.@spawn Native.code_execution(f, (Int,))
+        end
+    end
+    @test length(typed) == 8
+    @test Set(job.source.def.name for job in keys(typed)) == Set(Symbol(:f, i) for i in 1:8)
+
+    # simultaneous scopes in unrelated tasks do not observe each other's jobs
+    ready = Channel(2)
+    proceed = Channel(2)
+    tasks = map((mod.f, mod.g)) do f
+        Threads.@spawn GPUCompiler.@device_code_typed begin
+            put!(ready, nothing)
+            take!(proceed)
+            Native.code_execution(f, (Int,))
+        end
+    end
+    take!(ready)
+    take!(ready)
+    put!(proceed, nothing)
+    put!(proceed, nothing)
+    outputs = fetch.(tasks)
+    @test all(length(output) == 1 for output in outputs)
+    @test Set(only(keys(output)).source.def.name for output in outputs) == Set((:f, :g))
+
+    # scoped: tasks spawned inside the scope inherit the hook, others don't
+    hook = job -> nothing
+    inherited = Ref{Any}(nothing)
+    with(GPUCompiler.compile_hook => hook) do
+        wait(Threads.@spawn inherited[] = GPUCompiler.compile_hook[])
+        @test GPUCompiler.compile_hook[] === hook
+    end
+    @test inherited[] === hook
+    @test fetch(Threads.@spawn GPUCompiler.compile_hook[]) === nothing
+end
+
 @testset "method instances for type-valued callees and arguments" begin
     # JuliaLang/julia#62001: closed type-valued callees and arguments
     # dispatch on Core.TypeEgal keys instead of Type{T}
