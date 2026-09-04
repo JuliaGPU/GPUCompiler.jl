@@ -254,23 +254,23 @@ function emit_exception!(@nospecialize(job::CompilerJob), builder, name, inst)
     if job.config.debug_level >= 1
         name = globalstring_ptr!(builder, name, "exception")
         if job.config.debug_level == 1
-            call!(builder, Runtime.get(:report_exception), [name])
+            call!(builder, Runtime.get(:report_exception), [name]; job)
         else
-            call!(builder, Runtime.get(:report_exception_name), [name])
+            call!(builder, Runtime.get(:report_exception_name), [name]; job)
         end
     end
 
     # report each frame
     if job.config.debug_level >= 2
         rt = Runtime.get(:report_exception_frame)
-        ft = convert(LLVM.FunctionType, rt)
+        ft = runtime_function_type(job, rt)
         bt = backtrace(inst)
         for (i,frame) in enumerate(bt)
             idx = ConstantInt(parameters(ft)[1], i)
             func = globalstring_ptr!(builder, String(frame.func), "di_func")
             file = globalstring_ptr!(builder, String(frame.file), "di_file")
             line = ConstantInt(parameters(ft)[4], frame.line)
-            call!(builder, rt, [idx, func, file, line])
+            call!(builder, rt, [idx, func, file, line]; job)
         end
     end
 

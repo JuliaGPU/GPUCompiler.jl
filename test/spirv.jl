@@ -46,6 +46,36 @@ end
     end
 end
 
+@testset "exception strings" begin
+    # the exception name and backtrace strings are globals in the cross-workgroup address
+    # space, so the reporting runtime should accept them there without a cast.
+    mod = @eval module $(gensym())
+        kernel() = throw(DivideError())
+    end
+    # Keep the IR unoptimized because the test runtime ignores and otherwise drops the strings.
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6kernel"
+        @check "gpu_report_exception_name("
+        @check_same cond=opaque_ptrs "ptr addrspace(1) @exception"
+        @check_same cond=typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @exception"
+        @check "gpu_report_exception_frame(i32 1,"
+        @check_same cond=opaque_ptrs "ptr addrspace(1) @di_func"
+        @check_same cond=opaque_ptrs "ptr addrspace(1) @di_file"
+        @check_same cond=typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @di_func"
+        @check_same cond=typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @di_file"
+        SPIRV.code_llvm(mod.kernel, Tuple{}; backend, kernel=true, debug_level=2, optimize=false)
+    end
+
+    # Exercise translation too, and ensure this does not introduce generic pointers.
+    @test @filecheck begin
+        @check_not "OpCapability GenericPointer"
+        @check "OpEntryPoint Kernel"
+        @check_not "OpPtrCastToGeneric"
+        SPIRV.code_native(mod.kernel, Tuple{}; backend, kernel=true,
+                          debug_level=2, optimize=false)
+    end
+end
+
 @testset "failed runtime boxing" begin
     mod = @eval module $(gensym())
         import ..GPUCompiler

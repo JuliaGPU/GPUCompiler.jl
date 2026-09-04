@@ -56,6 +56,12 @@ end
 # SPIRV is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::SPIRVCompilerTarget) = nothing
 
+function runtime_cstring_type(job::CompilerJob{SPIRVCompilerTarget})
+    DataLayout(llvm_datalayout(job.config.target)) do dl
+        Core.LLVMPtr{Cchar, globals_addrspace(dl)}
+    end
+end
+
 llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
     "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1" :
     "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1"

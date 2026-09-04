@@ -113,7 +113,7 @@ else
 end
 
 const CONFIG_KWARGS = [:kernel, :name, :entry_abi, :always_inline, :opt_level,
-                       :libraries, :optimize, :cleanup, :validate, :strip]
+                       :debug_level, :libraries, :optimize, :cleanup, :validate, :strip]
 
 """
     CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, name=nothing,
@@ -368,6 +368,12 @@ runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 
 # check if a function is an intrinsic that can assumed to be always available
 isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
+
+# the Julia type of the string pointers passed to runtime methods declared with the
+# `Runtime.StringPointer` placeholder (`report_exception` & co). The strings are emitted
+# as globals in the target's global address space, so targets where that is not the default
+# should return an `LLVMPtr` in the matching address space.
+runtime_cstring_type(@nospecialize(job::CompilerJob)) = Ptr{Cchar}
 
 # provide a specific interpreter to use.
 @static if HAS_INTEGRATED_CACHE
