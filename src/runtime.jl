@@ -16,6 +16,9 @@ using LLVM.Interop
 
 ## representation of a runtime method instance
 
+# Sentinel for NUL-terminated string arguments whose pointer type depends on the target.
+struct StringPointer end
+
 struct RuntimeMethodInstance
     # either a function defined here, or a symbol to fetch a target-specific definition
     def::Union{Function,Symbol}
@@ -33,9 +36,12 @@ struct RuntimeMethodInstance
     llvm_name::String
 end
 
-function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance)
+resolve_types(types::Tuple, string_type::Type) =
+    map(typ -> typ === StringPointer ? string_type : typ, types)
+
+function llvm_function_type(rt::RuntimeMethodInstance, types::Tuple)
     types = if rt.llvm_types === nothing
-        LLVMType[convert(LLVMType, typ; allow_boxed=true) for typ in rt.types]
+        LLVMType[convert(LLVMType, typ; allow_boxed=true) for typ in types]
     else
         rt.llvm_types()
     end
@@ -48,6 +54,9 @@ function Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance)
 
     LLVM.FunctionType(return_type, types)
 end
+
+Base.convert(::Type{LLVM.FunctionType}, rt::RuntimeMethodInstance) =
+    llvm_function_type(rt, resolve_types(rt.types, Ptr{Cchar}))
 
 const methods = Dict{Symbol,RuntimeMethodInstance}()
 function get(name::Symbol)
@@ -86,8 +95,10 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
     # the strong.
     if def isa Symbol
         args = [gensym() for typ in types]
+        # The stub only satisfies host-side symbol resolution.
+        stub_types = resolve_types(types, Ptr{Cchar})
         stub = LLVM.Context() do _
-            build_runtime_stub(llvm_name, return_type, types, args)
+            build_runtime_stub(llvm_name, return_type, stub_types, args)
         end
         @eval @inline $def($(args...)) = $stub
     end
@@ -160,12 +171,12 @@ end
 compile(:signal_exception, Nothing, ())
 
 # expected functions for simple exception handling
-compile(:report_exception, Nothing, (Ptr{Cchar},))
+compile(:report_exception, Nothing, (StringPointer,))
 compile(:report_oom, Nothing, (Csize_t,))
 
 # expected functions for verbose exception handling
-compile(:report_exception_frame, Nothing, (Cint, Ptr{Cchar}, Ptr{Cchar}, Cint))
-compile(:report_exception_name, Nothing, (Ptr{Cchar},))
+compile(:report_exception_frame, Nothing, (Cint, StringPointer, StringPointer, Cint))
+compile(:report_exception_name, Nothing, (StringPointer,))
 
 # NOTE: no throw functions are provided here, but replaced by an LLVM pass instead
 #       in order to provide some debug information without stack unwinding.

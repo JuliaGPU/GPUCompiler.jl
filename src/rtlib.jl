@@ -7,7 +7,24 @@
 
 ## higher-level functionality to work with runtime functions
 
-function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[])
+# the Julia argument types of a runtime method for a specific job, resolving
+# target-dependent placeholders (see `Runtime.StringPointer`)
+function runtime_types(@nospecialize(job::CompilerJob), rt::Runtime.RuntimeMethodInstance)
+    Runtime.resolve_types(rt.types, runtime_cstring_type(job))
+end
+
+function runtime_function_type(@nospecialize(job::CompilerJob),
+                               rt::Runtime.RuntimeMethodInstance)
+    Runtime.llvm_function_type(rt, runtime_types(job, rt))
+end
+
+# `job` is required for runtime methods with target-dependent argument types
+function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[];
+                    job::Union{Nothing,CompilerJob}=nothing)
+    if job === nothing && Runtime.StringPointer in rt.types
+        error("A compiler job is required to call runtime method '$(rt.name)'")
+    end
+
     bb = position(builder)
     f = LLVM.parent(bb)
     mod = LLVM.parent(f)
@@ -17,7 +34,11 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         f = functions(mod)[rt.llvm_name]
         ft = function_type(f)
     else
-        ft = convert(LLVM.FunctionType, rt)
+        ft = if job === nothing
+            convert(LLVM.FunctionType, rt)
+        else
+            runtime_function_type(job, rt)
+        end
         f = LLVM.Function(mod, rt.llvm_name, ft)
     end
     if !isdeclaration(f) && (rt.name !== :gc_pool_alloc && rt.name !== :report_exception)
@@ -45,8 +66,8 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
             elseif value_type(arg) isa LLVM.PointerType &&
                    parameters(ft)[i] isa LLVM.PointerType &&
                    addrspace(value_type(arg)) != addrspace(parameters(ft)[i])
-                # runtime functions are always in the default address space,
-                # while arguments may come from globals in other address spaces.
+                # arguments may come from globals in other address spaces than the
+                # one the runtime function expects (see `runtime_cstring_type`).
                 addrspacecast!(builder, args[i], parameters(ft)[i])
             else
                 error("Don't know how to convert ", arg, " argument to ", parameters(ft)[i])
@@ -92,7 +113,7 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # relocations eagerly. The caller links a fresh copy and lowers the merged sites.
     new_mod, meta = compile_unhooked(:llvm, rt_job; resolve_relocations=false)
     ft = function_type(meta.entry)
-    expected_ft = convert(LLVM.FunctionType, method)
+    expected_ft = runtime_function_type(rt_job, method)
     if return_type(ft) != return_type(expected_ft)
         error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
     end
@@ -154,7 +175,7 @@ function runtime_method_instance(@nospecialize(job::CompilerJob), method)
     # table, where ahead-of-time compilation would compile the GPU-only code for the
     # host; see JuliaGPU/GPUCompiler.jl#611).
     return generic_methodinstance(
-        typeof(def), Base.to_tuple_type(method.types), job.world;
+        typeof(def), Base.to_tuple_type(runtime_types(job, method)), job.world;
         method_table_view=method_table_view(job))
 end
 
