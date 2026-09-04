@@ -243,6 +243,11 @@ end
     quote
         ptr = malloc($(Csize_t(allocsz)))
 
+        if ptr == C_NULL
+            report_oom($(Csize_t(allocsz)))
+            throw(OutOfMemoryError())
+        end
+
         # store the type tag
         ptr = convert(Ptr{tag_type}, ptr)
         Core.Intrinsics.pointerset(ptr, $tag | $gc_bits, #=index=# 1, #=align=# $tag_size)

@@ -46,6 +46,32 @@ end
     end
 end
 
+@testset "failed runtime boxing" begin
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+
+        function kernel(x::Float32)
+            throw(GPUCompiler.Runtime.box_float32(x))
+        end
+    end
+
+    # Call the helper directly because Julia's lowering of boxed exception fields varies by
+    # version. The allocator-less SPIR-V runtime should take a real OOM path before the stores.
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6kernel"
+        @check "gpu_malloc"
+        @check "icmp eq"
+        @check "br i1"
+        @check "gpu_report_oom"
+        @check "gpu_signal_exception"
+        @check "store"
+        @check "store"
+        @check "gpu_report_exception"
+        @check "gpu_signal_exception"
+        SPIRV.code_llvm(mod.kernel, Tuple{Float32}; backend, kernel=true, dump_module=true)
+    end
+end
+
 @testset "baked boxed relocation cleanup" begin
     mod = @eval module $(gensym())
         @noinline produce(cond::Bool, value::Int32) = cond ? value : 1.5
