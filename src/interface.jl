@@ -364,6 +364,7 @@ relocation_table_pointer(@nospecialize(job::CompilerJob), builder::IRBuilder,
 # the Julia module to look up target-specific runtime functions in (this includes both
 # target-specific functions from the GPU runtime library, like `malloc`, but also
 # replacements functions for operations like `Base.sin`)
+# If `malloc` is absent, allocations fail through the runtime's OOM handling.
 runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 
 # check if a function is an intrinsic that can assumed to be always available
@@ -621,7 +622,13 @@ function inference_params(@nospecialize(job::CompilerJob))
 end
 
 # the optimization parameters to use when constructing the GPUInterpreter
-optimization_params(@nospecialize(job::CompilerJob)) = CC.OptimizationParams()
+#
+# Keep invokes specialized to the inferred argument types. Widening to compilation
+# signatures can lose type information or target code absent from our cache.
+# `infer_compilation_signature` would infer those wider signatures too; it does not
+# preserve specialization. Back-ends can override this hook to change the policy.
+optimization_params(@nospecialize(job::CompilerJob)) =
+    CC.OptimizationParams(; compilesig_invokes=false)
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))

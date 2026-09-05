@@ -162,8 +162,13 @@ end
 
 function runtime_method_instance(@nospecialize(job::CompilerJob), method)
     def = if isa(method.def, Symbol)
-        isdefined(runtime_module(job), method.def) || return nothing
-        getfield(runtime_module(job), method.def)
+        if isdefined(runtime_module(job), method.def)
+            getfield(runtime_module(job), method.def)
+        elseif method.def === :malloc
+            Runtime.default_malloc
+        else
+            return nothing
+        end
     else
         method.def
     end

@@ -1651,8 +1651,8 @@ end
         (occursin(GPUCompiler.RUNTIME_FUNCTION, msg) ||
          occursin(GPUCompiler.UNKNOWN_FUNCTION, msg) ||
          occursin(GPUCompiler.DYNAMIC_CALL, msg)) &&
-        occursin("[1] println", msg) &&
-        occursin("[2] foobar", msg)
+        occursin(r"\[\d+\] println", msg) &&
+        occursin(r"\[\d+\] foobar", msg)
     end
 end
 
@@ -1769,32 +1769,60 @@ end
     end
 end
 
+@testset "specialized vararg invoke" begin
+    mod = @eval module $(gensym())
+        @noinline child(x, xs...) = x + sum(xs)
+        function kernel(out, x, y, z)
+            unsafe_store!(out, child(x, y, z))
+            return
+        end
+    end
+    @test @filecheck begin
+        @check_not "jl_invoke"
+        @check_not "apply_generic"
+        Native.code_llvm(mod.kernel, Tuple{Ptr{Int},Int,Int,Int}; dump_module=true)
+    end
+    Native.code_execution(mod.kernel, Tuple{Ptr{Int},Int,Int,Int})
+end
+
 @testset "dynamic call (invoke)" begin
     mod = @eval module $(gensym())
         @noinline nospecialize_child(@nospecialize(i)) = i
         kernel(a, b) = (unsafe_store!(b, nospecialize_child(a)); return)
     end
 
-    @test_throws_message(InvalidIRError,
-                         Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})) do msg
-        occursin("invalid LLVM IR", msg) &&
-        occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
-        occursin("call to nospecialize_child", msg) &&
-        occursin("[1] kernel", msg)
+    if VERSION >= v"1.11-"
+        # Preserve the inferred specialization despite @nospecialize.
+        @test @filecheck begin
+            @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+            @check_not "jl_invoke"
+            @check_not "apply_generic"
+            Native.code_llvm(mod.kernel, Tuple{Int,Ptr{Int}}; dump_module=true)
+        end
+        Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})
+    else
+        # 1.10 still emits a dynamic invoke for this @nospecialize call
+        @test_throws_message(InvalidIRError,
+                             Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})) do msg
+            occursin("invalid LLVM IR", msg) &&
+            occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
+            occursin("call to nospecialize_child", msg) &&
+            occursin(r"\[\d+\] kernel", msg)
+        end
     end
 end
 
 @testset "dynamic call (apply)" begin
     mod = @eval module $(gensym())
-        func() = println(1)
+        func(a) = (print(Base.inferencebarrier(a)); return)
     end
 
     @test_throws_message(InvalidIRError,
-                         Native.code_execution(mod.func, Tuple{})) do msg
+                         Native.code_execution(mod.func, Tuple{Int})) do msg
         occursin("invalid LLVM IR", msg) &&
         occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
         occursin("call to print", msg) &&
-        occursin("[2] func", msg)
+        occursin(r"\[\d+\] func", msg)
     end
 end
 
@@ -1831,6 +1859,38 @@ end
         @check_label "@julia_kernel"
         @check "ret i64 1"
         Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
+    end
+end
+
+@testset "runtime without a device heap" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        allocation() = UInt(GPUCompiler.Runtime.malloc(Csize_t(8)))
+        value(x) = exponent(x)
+    end
+    target = NativeCompilerTarget(; jlruntime=false)
+    config = CompilerConfig(target, NoHeapCompilerParams(); kernel=false)
+    for (f, tt) in ((mod.allocation, Tuple{}), (mod.value, Tuple{Float64}))
+        source = methodinstance(typeof(f), tt, Base.get_world_counter())
+        job = CompilerJob(source, config)
+        JuliaContext() do ctx
+            obj, meta = GPUCompiler.compile(:obj, job)
+            if f === mod.value
+                # Failed boxing must terminate before dereferencing the null allocation.
+                @test occursin("llvm.trap", string(LLVM.parent(meta.entry)))
+            end
+            ptr, jit, _ = Native.load(Vector{UInt8}(codeunits(obj)),
+                                      LLVM.name(meta.entry), meta.relocations)
+            try
+                if f === mod.allocation
+                    @test ccall(ptr, UInt, ()) == 0
+                else
+                    @test ccall(ptr, Int, (Float64,), 8.0) == 3
+                end
+            finally
+                dispose(jit)
+            end
+        end
     end
 end
 

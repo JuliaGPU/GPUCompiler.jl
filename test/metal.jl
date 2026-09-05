@@ -1557,6 +1557,38 @@ end
     end
 end
 
+@testset "Bool conversion exception allocation" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        module Runtime
+            # Keep allocation visible to LLVM; a constant-null allocator erases
+            # the heap-reference stores which exposed #904.
+            malloc(sz) = ccall("extern test_malloc", llvmcall, Ptr{Nothing}, (Csize_t,), sz)
+            signal_exception() = return
+            report_oom(sz) = return
+            report_exception(ex) = return
+            report_exception_name(ex) = return
+            report_exception_frame(idx, func, file, line) = return
+        end
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = Runtime
+        function kernel(out, x)
+            unsafe_store!(out, Bool(x))
+            return
+        end
+    end
+    source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Bool,1},Int},
+                            Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
+    ir = sprint(io -> GPUCompiler.code_llvm(io, job; dump_module=true))
+    if VERSION >= v"1.12-"
+        @test occursin(r"store atomic .* unordered", ir)
+    end
+    air = sprint(io -> GPUCompiler.code_native(io, job; dump_module=true))
+    @test !occursin(r"(load|store) atomic", air)
+end
+
 @testset "unordered atomic demotion" begin
     # Demote unordered LLVM loads/stores, but preserve stronger atomics.
     Context() do ctx
