@@ -622,7 +622,13 @@ function inference_params(@nospecialize(job::CompilerJob))
 end
 
 # the optimization parameters to use when constructing the GPUInterpreter
-optimization_params(@nospecialize(job::CompilerJob)) = CC.OptimizationParams()
+#
+# Keep invokes specialized to the inferred argument types. Widening to compilation
+# signatures can lose type information or target code absent from our cache.
+# `infer_compilation_signature` would infer those wider signatures too; it does not
+# preserve specialization. Back-ends can override this hook to change the policy.
+optimization_params(@nospecialize(job::CompilerJob)) =
+    CC.OptimizationParams(; compilesig_invokes=false)
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))
