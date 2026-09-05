@@ -1834,6 +1834,38 @@ end
     end
 end
 
+@testset "runtime without a device heap" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        allocation() = UInt(GPUCompiler.Runtime.malloc(Csize_t(8)))
+        value(x) = exponent(x)
+    end
+    target = NativeCompilerTarget(; jlruntime=false)
+    config = CompilerConfig(target, NoHeapCompilerParams(); kernel=false)
+    for (f, tt) in ((mod.allocation, Tuple{}), (mod.value, Tuple{Float64}))
+        source = methodinstance(typeof(f), tt, Base.get_world_counter())
+        job = CompilerJob(source, config)
+        JuliaContext() do ctx
+            obj, meta = GPUCompiler.compile(:obj, job)
+            if f === mod.value
+                # Failed boxing must terminate before dereferencing the null allocation.
+                @test occursin("llvm.trap", string(LLVM.parent(meta.entry)))
+            end
+            ptr, jit, _ = Native.load(Vector{UInt8}(codeunits(obj)),
+                                      LLVM.name(meta.entry), meta.relocations)
+            try
+                if f === mod.allocation
+                    @test ccall(ptr, UInt, ()) == 0
+                else
+                    @test ccall(ptr, Int, (Float64,), 8.0) == 3
+                end
+            finally
+                dispose(jit)
+            end
+        end
+    end
+end
+
 @testset "runtime functions from overlay methods" begin
     # runtime library functions (`signal_exception`, `malloc`, ...) should be resolved
     # through the job's method table, so that back-ends can keep GPU-only code out of

@@ -46,6 +46,27 @@ end
     end
 end
 
+@testset "exceptions without a device heap" begin
+    mod = @eval module $(gensym())
+        function kernel(out, x)
+            unsafe_store!(out, exponent(x))
+            return
+        end
+    end
+    for T in (Float32, Float64)
+        source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Int,1},T},
+                                Base.get_world_counter())
+        target = SPIRVCompilerTarget(; backend, validate=true)
+        job = CompilerJob(source, CompilerConfig(target, NoHeapCompilerParams(); kernel=true))
+        # exponent's DomainError paths require boxing. Validate the final module,
+        # including runtime linkage, even though valid inputs do not allocate (#906).
+        JuliaContext() do ctx
+            code, _ = GPUCompiler.compile(:asm, job)
+            @test !isempty(code)
+        end
+    end
+end
+
 @testset "exception strings" begin
     # the exception name and backtrace strings are globals in the cross-workgroup address
     # space, so the reporting runtime should accept them there without a cast.

@@ -201,6 +201,10 @@ compile(gc_pool_alloc, Any, (Csize_t,), T_prjlvalue)
 # expected functions for GC support
 compile(:malloc, Ptr{Nothing}, (Csize_t,))
 
+# Back-ends without a device heap fail allocations through the usual OOM path.
+# This lets kernels compile when only an untaken error path needs to allocate.
+default_malloc(sz::Csize_t) = C_NULL
+
 
 ## boxing and unboxing
 

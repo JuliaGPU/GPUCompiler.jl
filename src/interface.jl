@@ -364,6 +364,7 @@ relocation_table_pointer(@nospecialize(job::CompilerJob), builder::IRBuilder,
 # the Julia module to look up target-specific runtime functions in (this includes both
 # target-specific functions from the GPU runtime library, like `malloc`, but also
 # replacements functions for operations like `Base.sin`)
+# If `malloc` is absent, allocations fail through the runtime's OOM handling.
 runtime_module(@nospecialize(job::CompilerJob)) = error("Not implemented")
 
 # check if a function is an intrinsic that can assumed to be always available
