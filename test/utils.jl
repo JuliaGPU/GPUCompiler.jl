@@ -100,6 +100,10 @@ end
     @test mangle(identity, Tuple{1, 2}, Tuple{}, Tuple) == "identity(Tuple<1, 2>, Tuple<>, Tuple)"
     @test mangle(identity, NTuple{2, Int}) == "identity(Tuple<Int64, Int64>)"
     @test mangle(identity, Tuple{Vararg{Int}}) == "identity(Tuple<>)"
+    # A `Vararg` whose length is still a `TypeVar`, which is what unwrapping a `UnionAll`
+    # leaves behind. It is the same type as the unbounded `Vararg` above, so it mangles alike.
+    @test mangle(identity, NTuple{N, Int} where {N}) == "identity(Tuple<>)"
+    @test mangle(identity, Val{NTuple{N, Int} where {N}}) == "identity(Val<Tuple<>>)"
 
     # many substitutions
     @test mangle(identity, Val{1}, Val{2}, Val{3}, Val{4}, Val{5}, Val{6}, Val{7}, Val{8},

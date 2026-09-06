@@ -120,10 +120,14 @@ function mangle_param(@nospecialize(t), substitutions = Any[], top = false)
         mangle_param(Base.unwrap_unionall(t), substitutions)
     elseif isa(t, Core.TypeofVararg)
         T = isdefined(t, :T) ? t.T : Any
-        if isdefined(t, :N)
+        # `N` is a `TypeVar` when the length is still parametric, which is what unwrapping a
+        # `UnionAll` such as `NTuple{N,Int}` leaves behind. There is no count to repeat then,
+        # so the type is mangled like the unbounded `Vararg{T}` it is equal to.
+        N = isdefined(t, :N) && isa(t.N, Integer) ? t.N : nothing
+        if N !== nothing
             # For NTuple, repeat the type as needed
             str = ""
-            for _ in 1:t.N
+            for _ in 1:N
                 str *= mangle_param(T, substitutions)
             end
             str
