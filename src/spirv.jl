@@ -109,6 +109,10 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # OpUnreachable (UB if reached), which PoCL and friends handle poorly.
     lower_unreachable_control_flow!(job, mod)
 
+    # SPIR-V cannot express atomic loads and stores of pointers, which is what Julia's
+    # `unordered` heap-reference accesses become; the orderings serve no purpose on device
+    demote_unordered_atomics!(mod)
+
     # convert the kernel state argument to a byval reference
     if job.config.kernel
         state = kernel_state_type(job)

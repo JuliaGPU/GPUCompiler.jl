@@ -214,6 +214,38 @@ end
     end
 end
 
+@testset "unordered atomic demotion" begin
+    # Julia's `unordered` heap-reference accesses cannot be expressed in SPIR-V when they
+    # involve pointers (OpAtomicLoad/OpAtomicStore take scalars only): the translator would
+    # emit an invalid pointer-typed atomic. They carry no meaning without a device GC, so
+    # `demote_unordered_atomics!` turns them into plain accesses.
+    mod = @eval module $(gensym())
+        function kernel(p::Ptr{Ptr{Int}}, q::Ptr{Ptr{Int}})
+            x = Core.Intrinsics.atomic_pointerref(p, :unordered)
+            Core.Intrinsics.atomic_pointerset(q, x, :unordered)
+            return
+        end
+    end
+    tt = Tuple{Ptr{Ptr{Int}}, Ptr{Ptr{Int}}}
+
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6kernel"
+        @check_not "load atomic"
+        @check_not "store atomic"
+        @check "ret void"
+        SPIRV.code_llvm(mod.kernel, tt; backend, kernel=true)
+    end
+
+    # the SPIR-V is validated by the helper, so an invalid pointer-typed atomic would fail here
+    @test @filecheck begin
+        @check "OpEntryPoint Kernel %[[KERNEL:[^ ]+]]"
+        @check "%[[KERNEL]] = OpFunction %void None"
+        @check_not "OpAtomicLoad"
+        @check_not "OpAtomicStore"
+        SPIRV.code_native(mod.kernel, tt; backend, kernel=true)
+    end
+end
+
 @testset "inlining of throwing callees" begin
     mod = @eval module $(gensym())
         @noinline function guard(x)
