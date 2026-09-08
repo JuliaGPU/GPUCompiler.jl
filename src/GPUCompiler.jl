@@ -46,12 +46,27 @@ import CompilerCaching
 
 using ScopedValues: ScopedValue, with
 
-# Hook used by the `@device_code_*` macros. Scope it to the current task and its
-# children so concurrent reflection calls do not interfere. Defined here so the
-# legacy `cached_compilation` in deprecated.jl can reference it.
+"""
+    compile_hook
+
+Hook used by the `@device_code_*` macros to observe compilations in the current task
+and its children. When non-`nothing`, call it with the compilation job using
+`Base.invokelatest(compile_hook[], job)`. `GPUCompiler.compile` does this itself;
+back-ends with their own pipeline must call it even when compilation results are cached.
+
+Jobs must have stable `hash` and `isequal` semantics for deduplication, support `show`,
+and implement the requested GPUCompiler reflection functions: `code_lowered(job)`,
+`code_typed(job; kwargs...)`, or `code_warntype`, `code_llvm`, and `code_native` with
+`(io, job; kwargs...)`. Jobs need not be `CompilerJob`s or use LLVM. The all-stage
+`@device_code` dump still requires a `CompilerJob` and the LLVM pipeline.
+
+Reflection runs with the hook disabled to avoid recursion. Wait for child tasks before
+leaving a reflection macro so their output is included.
+"""
 const compile_hook = ScopedValue{Union{Nothing,Function}}(nothing)
 
 include("utils.jl")
+@public compile_hook, emit_hooked_compilation
 include("mangling.jl")
 
 # compiler interface and implementations

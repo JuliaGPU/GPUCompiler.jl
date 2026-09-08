@@ -278,6 +278,7 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=job.c
     highlight(io, str, "llvm")
 end
 code_llvm(@nospecialize(job::CompilerJob); kwargs...) = code_llvm(stdout, job; kwargs...)
+code_llvm(io::IO, @nospecialize(job); kwargs...) = throw(unsupported_reflection(:code_llvm, job))
 
 """
     code_native([io], f, types; cap::VersionNumber, kernel=false, raw=false)
@@ -302,13 +303,35 @@ function code_native(io::IO, @nospecialize(job::CompilerJob);
 end
 code_native(@nospecialize(job::CompilerJob); kwargs...) =
     code_native(stdout, job; kwargs...)
+code_native(io::IO, @nospecialize(job); kwargs...) = throw(unsupported_reflection(:code_native, job))
+
+unsupported_reflection(f::Symbol, @nospecialize(job)) =
+    ArgumentError("$f is not supported for jobs of type $(typeof(job))")
 
 
 #
 # @device_code_* functions
 #
 
-function emit_hooked_compilation(inner_hook, ex...)
+"""
+    emit_hooked_compilation(hook, ex...; job_filter=Returns(true)) -> Expr
+
+Build the body of a `@device_code_*` macro: an expression that evaluates the user's
+code (the last element of `ex`) with `hook` installed as the [`compile_hook`](@ref),
+calling `hook(job; kwargs...)` once per distinct job with the remaining elements of
+`ex` as keyword arguments. Back-ends define stage-specific macros with it, e.g.
+
+```julia
+macro device_code_ptx(ex...)
+    hook = (job; io::IO=stdout) -> code_ptx(io, job)
+    GPUCompiler.emit_hooked_compilation(hook, ex...)
+end
+```
+
+`job_filter(job)` selects which jobs to inspect. Jobs rejected by the filter do not
+count toward the check that at least one kernel was observed.
+"""
+function emit_hooked_compilation(inner_hook, ex...; job_filter=Returns(true))
     user_code = ex[end]
     user_kwargs = ex[1:end-1]
     quote
@@ -316,6 +339,7 @@ function emit_hooked_compilation(inner_hook, ex...)
         jobs = Set()
         jobs_lock = ReentrantLock()
         function outer_hook(job)
+            $job_filter(job) || return
             Base.@lock jobs_lock begin
                 job in jobs && return
                 push!(jobs, job)
@@ -350,7 +374,7 @@ See also: `InteractiveUtils.@code_lowered`
 macro device_code_lowered(ex...)
     quote
         buf = Any[]
-        function hook(job::CompilerJob)
+        function hook(job)
             append!(buf, code_lowered(job))
         end
         $(emit_hooked_compilation(:hook, ex...))
@@ -368,8 +392,8 @@ See also: `InteractiveUtils.@code_typed`
 """
 macro device_code_typed(ex...)
     quote
-        output = Dict{CompilerJob,Any}()
-        function hook(job::CompilerJob; kwargs...)
+        output = Dict{Any,Any}()
+        function hook(job; kwargs...)
             output[job] = code_typed(job; kwargs...)
         end
         $(emit_hooked_compilation(:hook, ex...))
@@ -386,7 +410,7 @@ Evaluates the expression `ex` and prints the result of
 See also: `InteractiveUtils.@code_warntype`
 """
 macro device_code_warntype(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(@nospecialize(job); io::IO=stdout, kwargs...)
         println(io, "$job")
         println(io)
         code_warntype(io, job; kwargs...)
@@ -404,7 +428,7 @@ to `io` for every compiled GPU kernel. For other supported keywords, see
 See also: InteractiveUtils.@code_llvm
 """
 macro device_code_llvm(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(@nospecialize(job); io::IO=stdout, kwargs...)
         println(io, "; $job")
         code_llvm(io, job; kwargs...)
     end
@@ -419,7 +443,7 @@ for every compiled GPU kernel. For other supported keywords, see
 [`GPUCompiler.code_native`](@ref).
 """
 macro device_code_native(ex...)
-    function hook(job::CompilerJob; io::IO=stdout, kwargs...)
+    function hook(@nospecialize(job); io::IO=stdout, kwargs...)
         println(io, "// $job")
         println(io)
         code_native(io, job; kwargs...)
@@ -431,11 +455,13 @@ end
     @device_code dir::AbstractString=... [...] ex
 
 Evaluates the expression `ex` and dumps all intermediate forms of code to the directory
-`dir`.
+`dir`. This dump requires a `CompilerJob` and includes LLVM IR; use the individual
+`@device_code_*` macros for back-ends with other compilation stages.
 """
 macro device_code(ex...)
     localUnique = 1
-    function hook(job::CompilerJob; dir::AbstractString)
+    function hook(@nospecialize(job); dir::AbstractString)
+        job isa CompilerJob || throw(unsupported_reflection(:device_code, job))
         name = job.source.def.name
         fn = "$(name)_$(localUnique)"
         mkpath(dir)
