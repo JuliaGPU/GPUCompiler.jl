@@ -90,6 +90,75 @@ end
     end
     @test inherited[] === hook
     @test fetch(Threads.@spawn GPUCompiler.compile_hook[]) === nothing
+
+    # the macros accept jobs of back-ends that do not compile through LLVM, as long
+    # as they fire the hook and implement the reflection functions of their stages
+    mod3 = @eval module $(gensym())
+        struct ForeignJob
+            name::Symbol
+        end
+        Base.show(io::IO, job::ForeignJob) = print(io, "ForeignJob(", job.name, ")")
+        $GPUCompiler.code_lowered(job::ForeignJob) = Any[job.name]
+        function $GPUCompiler.code_typed(job::ForeignJob; marker=job.name)
+            @assert $GPUCompiler.compile_hook[] === nothing
+            Any[marker]
+        end
+        $GPUCompiler.code_native(io::IO, job::ForeignJob; marker=job.name) = print(io, marker)
+        $GPUCompiler.code_warntype(io::IO, job::ForeignJob) = println(io, "typed ", job.name)
+        macro foreign_code(ex...)
+            hook = (job; io::IO=stdout) -> print(io, job.name)
+            $GPUCompiler.emit_hooked_compilation(hook, ex...; job_filter=job -> job isa ForeignJob)
+        end
+        report(job) = $GPUCompiler.compile_hook[] === nothing ? nothing :
+                      Base.invokelatest($GPUCompiler.compile_hook[], job)
+        function filtered(io)
+            @foreign_code io=io begin
+                report(:other_backend)
+                report(ForeignJob(:foreign))
+                report(ForeignJob(:foreign))
+            end
+        end
+        rejected() = @foreign_code report(:other_backend)
+    end
+    typed = GPUCompiler.@device_code_typed begin
+        mod3.report(mod3.ForeignJob(:foreign))
+        mod3.report(mod3.ForeignJob(:foreign))
+    end
+    @test typed == Dict(mod3.ForeignJob(:foreign) => Any[:foreign])
+    @test sprint(mod3.filtered) == "foreign"
+    @test_throws "no kernels executed" mod3.rejected()
+    warntype = sprint() do io
+        GPUCompiler.@device_code_warntype io=io mod3.report(mod3.ForeignJob(:foreign))
+    end
+    @test occursin("ForeignJob(foreign)", warntype) && occursin("typed foreign", warntype)
+    @test GPUCompiler.@device_code_lowered(mod3.report(mod3.ForeignJob(:foreign))) == [:foreign]
+    typed = GPUCompiler.@device_code_typed marker=:forwarded begin
+        mod3.report(mod3.ForeignJob(:foreign))
+    end
+    @test only(values(typed)) == [:forwarded]
+    native = sprint() do io
+        GPUCompiler.@device_code_native io=io marker=:assembly mod3.report(mod3.ForeignJob(:foreign))
+    end
+    @test occursin("assembly", native)
+    @test_throws "code_llvm is not supported" GPUCompiler.@device_code_llvm(
+        io=devnull, mod3.report(mod3.ForeignJob(:foreign)))
+    @test_throws "code_native is not supported" GPUCompiler.code_native(devnull, :unsupported)
+    mktempdir() do dir
+        @test_throws "device_code is not supported" GPUCompiler.@device_code(
+            dir=dir, mod3.report(mod3.ForeignJob(:foreign)))
+        @test isempty(readdir(dir))
+    end
+    @test GPUCompiler.compile_hook[] === nothing
+
+    # One expression can report both CompilerJobs and a back-end's own job type.
+    mixed = GPUCompiler.@device_code_typed begin
+        Native.code_execution(mod.f, (Int,))
+        mod3.report(mod3.ForeignJob(:foreign))
+        mod3.report(mod3.ForeignJob(:foreign))
+    end
+    @test length(mixed) == 2
+    @test mixed[mod3.ForeignJob(:foreign)] == [:foreign]
+    @test count(job -> job isa CompilerJob, keys(mixed)) == 1
 end
 
 @testset "method instances for type-valued callees and arguments" begin
