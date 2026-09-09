@@ -147,8 +147,19 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     return entry
 end
 
+# mirrors `SPIRVCompileOptions` from libspirv.h
+struct SPIRVCompileOptions
+    is_64bit::Cint
+    version_major::Cuint
+    version_minor::Cuint
+    extensions::Cstring
+    opt_level::Cint
+end
+
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMAssemblyFile)
+    target = job.config.target
+
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
@@ -157,16 +168,25 @@ end
     rm_freeze!(job, mod)
 
     # translate to SPIR-V
-    input = tempname(cleanup=false) * ".bc"
-    translated = tempname(cleanup=false) * ".spv"
-    write(input, mod)
-    if job.config.target.backend === :llvm
-        cmd = `$(SPIRV_LLVM_Backend_jll.llc()) $input -filetype=obj -o $translated`
-
-        if !isempty(job.config.target.extensions)
-            cmd = `$(cmd) -spirv-ext=$(job.config.target.extensions)`
+    input = bitcode(mod)
+    dump_input() = let path = tempname(cleanup=false) * ".bc"
+        write(path, input)
+        path
+    end
+    spirv = if target.backend === :llvm
+        # compile in-process through libspirv. the back-end derives the triple from the
+        # options; unlike `llc`, it rejects unknown extensions instead of ignoring them.
+        backend = ExternalBackend(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV")
+        version = something(target.version, v"0.0")
+        extensions = target.extensions
+        GC.@preserve extensions begin
+            options = Ref(SPIRVCompileOptions(Int === Int64, version.major, version.minor,
+                                              Base.unsafe_convert(Cstring, extensions),
+                                              #=opt_level=# 2))
+            external_compile(backend, input, options,
+                             "Failed to compile to SPIR-V with the SPIR-V back-end")
         end
-    elseif job.config.target.backend === :khronos
+    elseif target.backend === :khronos
         translator = if isavailable(SPIRV_LLVM_Translator_jll)
             SPIRV_LLVM_Translator_jll.llvm_spirv()
         elseif isavailable(SPIRV_LLVM_Translator_unified_jll)
@@ -174,57 +194,67 @@ end
         else
             error("This functionality requires the SPIRV_LLVM_Translator_jll or SPIRV_LLVM_Translator_unified_jll package, which should be installed and loaded first.")
         end
-        cmd = `$translator -o $translated $input --spirv-debug-info-version=ocl-100`
+        input_path = dump_input()
+        translated = tempname(cleanup=false) * ".spv"
+        cmd = `$translator -o $translated $input_path --spirv-debug-info-version=ocl-100`
 
-        if !isempty(job.config.target.extensions)
-            cmd = `$(cmd) --spirv-ext=$(job.config.target.extensions)`
+        if !isempty(target.extensions)
+            cmd = `$(cmd) --spirv-ext=$(target.extensions)`
         end
 
-        if job.config.target.version !== nothing
-            cmd = `$(cmd) --spirv-max-version=$(job.config.target.version.major).$(job.config.target.version.minor)`
+        if target.version !== nothing
+            cmd = `$(cmd) --spirv-max-version=$(target.version.major).$(target.version.minor)`
         end
+        try
+            run(cmd)
+        catch e
+            error("""Failed to translate LLVM code to SPIR-V.
+                     If you think this is a bug, please file an issue and attach $(input_path).""")
+        end
+        rm(input_path)
+        code = read(translated)
+        rm(translated)
+        code
+    else
+        error("Unsupported SPIR-V back-end $(repr(target.backend)); expected :llvm or :khronos.")
     end
-    try
-        run(cmd)
-    catch e
-        error("""Failed to translate LLVM code to SPIR-V.
-                 If you think this is a bug, please file an issue and attach $(input).""")
-    end
+
+    # the SPIR-V tools work on files
+    translated = tempname(cleanup=false) * ".spv"
+    write(translated, spirv)
 
     # validate
-    if job.config.target.validate
+    if target.validate
         try
             run(`$(SPIRV_Tools_jll.spirv_val()) $translated`)
         catch e
             error("""Failed to validate generated SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(translated).""")
         end
     end
 
     # optimize
-    optimized = tempname(cleanup=false) * ".spv"
-    if job.config.target.optimize
+    if target.optimize
+        optimized = tempname(cleanup=false) * ".spv"
         try
             run(```$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation
                                                   $translated -o $optimized```)
         catch
             error("""Failed to optimize generated SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(input) and $(translated).""")
+                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(translated).""")
         end
-    else
-        cp(translated, optimized)
+        spirv = read(optimized)
+        rm(optimized)
     end
 
     output = if format == LLVM.API.LLVMObjectFile
-        read(optimized)
+        spirv
     else
         # disassemble
-        read(`$(SPIRV_Tools_jll.spirv_dis()) $optimized`, String)
+        write(translated, spirv)
+        read(`$(SPIRV_Tools_jll.spirv_dis()) $translated`, String)
     end
-
-    rm(input)
     rm(translated)
-    rm(optimized)
 
     return output
 end

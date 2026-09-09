@@ -843,20 +843,35 @@ end
     # downgrade to AIR. Metal's metallib loader is a backward-compatible reader that accepts
     # real LLVM <= 15 bitcode; target LLVM 14 (typed pointers, but with native `bfloat` —
     # unlike the 5.0/7.0 targets) so BFloat16 kernels compile on Julia 1.13+, where Julia
-    # emits the native `bfloat` IR type (JuliaGPU/Metal.jl#817). `llvm-downgrade` reads
-    # bitcode, so hand it the module's bitcode rather than its textual form.
-    bitcode = let io = IOBuffer()
-        write(io, mod)
-        take!(io)
-    end
-    air = run_tool(`$(LLVMDowngrader_jll.llvm_downgrade()) --bitcode-version=14.0 -o - -`, bitcode)
+    # emits the native `bfloat` IR type (JuliaGPU/Metal.jl#817).
+    air = downgrade(bitcode(mod), v"14.0")
 
     if format == LLVM.API.LLVMAssemblyFile
-        # disassemble the bitcode again to AIR assembly, i.e. LLVM 14 era textual IR
-        String(run_tool(`$(LLVMDowngrader_jll.llvm_dis_14()) -o - -`, air))
+        # disassemble the AIR again. the downgrader no longer ships the legacy `llvm-dis`,
+        # so parse the bitcode with the in-process LLVM instead; it auto-upgrades on load,
+        # so this is textual IR in the in-process LLVM's dialect rather than LLVM 14's.
+        Context() do ctx
+            @dispose air_mod = parse(LLVM.Module, air) begin
+                string(air_mod)
+            end
+        end
     else
         air
     end
+end
+
+# downgrade bitcode to the format of an older LLVM through libllvm_downgrade
+function downgrade(input::Vector{UInt8}, version::VersionNumber)
+    backend = ExternalBackend(LLVMDowngrader_jll.libllvm_downgrade, "LLVMDG")
+    buffer = Ref{Ptr{Cvoid}}(C_NULL)
+    message = Ref{Cstring}(C_NULL)
+    status = @ccall $(api(backend, "Downgrade"))(input::Ptr{UInt8}, length(input)::Csize_t,
+                                                 version.major::Cuint, version.minor::Cuint,
+                                                 buffer::Ptr{Ptr{Cvoid}},
+                                                 message::Ptr{Cstring})::Cint
+    external_result(backend, status, "Failed to downgrade bitcode to LLVM $(version)",
+                    message[], String[], input)
+    return take_buffer(backend, buffer[])
 end
 
 

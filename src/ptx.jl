@@ -293,55 +293,42 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 end
 
+# mirrors `NVPTXCompileOptions` from libnvptx.h
+struct NVPTXCompileOptions
+    cpu::Cstring
+    ptx_major::Cuint
+    ptx_minor::Cuint
+    is_64bit::Cint
+    opt_level::Cint
+    fma_contraction::Cint
+    verbose::Cint
+end
+
 @unlocked function mcgen(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                          mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
     if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
         error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
     end
+    if format != LLVM.API.LLVMAssemblyFile
+        error("Unsupported PTX output format $format; the NVPTX back-end only emits PTX assembly.")
+    end
+    backend = ExternalBackend(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX")
 
+    # the back-end derives the triple and datalayout from these options; unlike `llc`,
+    # it rejects unknown processors and PTX versions instead of silently falling back.
+    # FMA contraction is requested as `-nvptx-fma-level=1` was: match nvcc by leaving
+    # eligible multiply-add pairs contractible for ptxas.
     target = job.config.target
-    filetype = if format == LLVM.API.LLVMAssemblyFile
-        "asm"
-    elseif format == LLVM.API.LLVMObjectFile
-        "obj"
-    else
-        error("Unsupported PTX output format $format")
+    cpu = cpu_name(target)
+    ptx = GC.@preserve cpu begin
+        options = Ref(NVPTXCompileOptions(Base.unsafe_convert(Cstring, cpu),
+                                          target.ptx.major, target.ptx.minor,
+                                          Int === Int64, #=opt_level=# 2,
+                                          #=fma_contraction=# true, #=verbose=# true))
+        external_compile(backend, bitcode(mod), options,
+                         "Failed to compile to PTX with the NVPTX back-end")
     end
-
-    input  = tempname(cleanup=false) * ".bc"
-    output = tempname(cleanup=false) * (filetype == "asm" ? ".ptx" : ".cubin")
-    write(input, mod)
-
-    # Match nvcc by leaving eligible multiply-add pairs contractible for ptxas.
-    cmd = `$(NVPTX_LLVM_Backend_jll.llc()) $input
-              -mtriple=$(llvm_triple(target))
-              -mcpu=$(cpu_name(target))
-              -mattr=+ptx$(target.ptx.major)$(target.ptx.minor)
-              -nvptx-fma-level=1
-              -filetype=$filetype
-              -o $output`
-    out = Pipe()
-    proc = run(pipeline(ignorestatus(cmd); stdout=out, stderr=out); wait=false)
-    close(out.in)
-    log = strip(read(out, String))
-    wait(proc)
-    if !success(proc)
-        # keep the input around for debugging
-        msg = "Failed to compile to PTX with external llc"
-        isempty(log) || (msg *= ":\n" * log)
-        msg *= "\nIf you think this is a bug, please file an issue and attach $(input)."
-        isfile(output) && rm(output)
-        error(msg)
-    elseif !isempty(log)
-        # llc only diagnoses on stderr; even successful compilation may e.g. have
-        # ignored an unrecognized CPU or feature, so make sure this surfaces.
-        @warn "External llc reported:\n$log"
-    end
-
-    code = filetype == "asm" ? read(output, String) : String(read(output))
-    rm(input)
-    rm(output)
-    return code
+    return String(ptx)
 end
 
 function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))

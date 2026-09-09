@@ -427,7 +427,7 @@ end
         # the table base is loaded out of the kernel-state argument, and the words out of the
         # table -- a bake would instead leave a private constant holding the resolved address
         @test occursin("reloc_table", air)
-        @test occursin(r"load i64, i64 addrspace\(1\)\*", air)
+        @test occursin(r"load i64, (i64 addrspace\(1\)\*|ptr addrspace\(1\))", air)
         # nothing is left of the site globals the records named
         for rec in relocs.records
             @test !occursin("@$(rec.name) ", air)

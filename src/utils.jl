@@ -59,34 +59,91 @@ function Base.getproperty(lazy_mod::LazyModule, sym::Symbol)
 end
 
 
-## external tools
+## external back-ends
 
-# run an external tool (e.g. from a JLL package), feeding `input` to its standard input
-# and returning its standard output. throws on failure, including the tool's standard
-# error output in the exception. for tools that instead communicate through files, e.g.,
-# because the inputs should be preserved for error reporting, use `run` directly.
-function run_tool(cmd::Cmd, input)
-    stdin_pipe = Pipe()
-    stdout_pipe = Pipe()
-    stderr_pipe = Pipe()
+# The LLVM back-ends for PTX, GCN and SPIR-V and the bitcode downgrader ship as
+# symbol-hidden shared libraries with a small C API modelled after llvm-c: status as the
+# return value, an error message through an out-pointer on failure, results as opaque
+# memory buffers, and diagnostics that the tools used to print to stderr delivered through
+# a callback. The libraries share the shape of this API, differing only in the prefix of
+# their entry points, so this is implemented once against function pointers.
 
-    proc = run(pipeline(cmd; stdin=stdin_pipe, stdout=stdout_pipe, stderr=stderr_pipe);
-               wait=false)
-    close(stdout_pipe.in)
-    close(stderr_pipe.in)
+struct ExternalBackend
+    library::String     # path to the shared library, as exported by its JLL
+    prefix::String      # e.g. "NVPTX" for `NVPTXCompile`
+end
 
-    writer = @async begin
-        write(stdin_pipe, input)
-        close(stdin_pipe)
+function api(backend::ExternalBackend, name::String)
+    # `dlopen` returns the handle of an already-loaded library, so this is only a lookup
+    Libdl.dlsym(Libdl.dlopen(backend.library), Symbol(backend.prefix * name))
+end
+
+function external_diagnostic(severity::Cint, message::Cstring, ctx::Ptr{Cvoid})
+    diagnostics = unsafe_pointer_to_objref(ctx)::Vector{String}
+    # errors are folded into the failure message by the back-end; only keep what would
+    # otherwise be lost (warnings, remarks and notes).
+    severity == 0 || push!(diagnostics, unsafe_string(message))
+    return nothing
+end
+
+# compile `input` (bitcode) with the back-end's `Compile` entry point. `options` is a
+# reference to the back-end's option struct, whose string fields the caller keeps alive.
+function external_compile(backend::ExternalBackend, input::Vector{UInt8}, options::Ref,
+                          what::String; warn=(msg)->@warn(msg))
+    diagnostics = String[]
+    buffer = Ref{Ptr{Cvoid}}(C_NULL)
+    message = Ref{Cstring}(C_NULL)
+    compile = api(backend, "Compile")
+    handler = @cfunction(external_diagnostic, Cvoid, (Cint, Cstring, Ptr{Cvoid}))
+    status = GC.@preserve diagnostics begin
+        @ccall $compile(input::Ptr{UInt8}, length(input)::Csize_t, options::Ptr{Cvoid},
+                        handler::Ptr{Cvoid}, pointer_from_objref(diagnostics)::Ptr{Cvoid},
+                        buffer::Ptr{Ptr{Cvoid}}, message::Ptr{Cstring})::Cint
     end
-    reader = @async read(stdout_pipe)
-    logger = @async read(stderr_pipe, String)
+    external_result(backend, status, what, message[], diagnostics, input; warn)
+    return take_buffer(backend, buffer[])
+end
 
-    wait(proc)
-    if !success(proc)
-        error("Failed to run $(basename(cmd.exec[1])):\n" * fetch(logger))
+# report the outcome of a back-end invocation: raise `what` on failure with the error
+# message and a bitcode file to attach, and surface collected diagnostics otherwise.
+function external_result(backend::ExternalBackend, status, what::String, message::Cstring,
+                         diagnostics::Vector{String}, input::Vector{UInt8};
+                         warn=(msg)->@warn(msg))
+    if status != 0
+        path = tempname(cleanup=false) * ".bc"
+        write(path, input)
+        msg = what
+        message == C_NULL || (msg *= ":\n" * take_message(backend, message))
+        isempty(diagnostics) || (msg *= "\n" * join(diagnostics, "\n"))
+        msg *= "\nIf you think this is a bug, please file an issue and attach $(path)."
+        error(msg)
+    elseif !isempty(diagnostics)
+        warn("The $(backend.prefix) back-end reported:\n" * join(diagnostics, "\n"))
     end
-    fetch(reader)
+    return
+end
+
+# copy out and dispose of an opaque memory buffer
+function take_buffer(backend::ExternalBackend, buffer::Ptr{Cvoid})
+    start = @ccall $(api(backend, "GetBufferStart"))(buffer::Ptr{Cvoid})::Ptr{UInt8}
+    size = @ccall $(api(backend, "GetBufferSize"))(buffer::Ptr{Cvoid})::Csize_t
+    data = copy(unsafe_wrap(Array, start, size))
+    @ccall $(api(backend, "DisposeMemoryBuffer"))(buffer::Ptr{Cvoid})::Cvoid
+    return data
+end
+
+# copy out and dispose of a message
+function take_message(backend::ExternalBackend, message::Cstring)
+    str = unsafe_string(message)
+    @ccall $(api(backend, "DisposeMessage"))(message::Cstring)::Cvoid
+    return str
+end
+
+# serialize a module to bitcode
+function bitcode(mod::LLVM.Module)
+    io = IOBuffer()
+    write(io, mod)
+    take!(io)
 end
 
 
