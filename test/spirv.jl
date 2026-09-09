@@ -214,15 +214,17 @@ end
     end
 end
 
-@testset "unordered atomic demotion" begin
-    # Julia's `unordered` heap-reference accesses cannot be expressed in SPIR-V when they
-    # involve pointers (OpAtomicLoad/OpAtomicStore take scalars only): the translator would
-    # emit an invalid pointer-typed atomic. They carry no meaning without a device GC, so
-    # `demote_unordered_atomics!` turns them into plain accesses.
+@testset "atomic demotion" begin
+    # Julia's `unordered` heap-reference accesses and `release` type-tag stores cannot be
+    # expressed in SPIR-V when they involve pointers (OpAtomicLoad/OpAtomicStore take scalars
+    # only): the translator would emit an invalid pointer-typed atomic. They carry no meaning
+    # without a device GC, so `demote_atomics!` turns them into plain accesses.
     mod = @eval module $(gensym())
         function kernel(p::Ptr{Ptr{Int}}, q::Ptr{Ptr{Int}})
             x = Core.Intrinsics.atomic_pointerref(p, :unordered)
             Core.Intrinsics.atomic_pointerset(q, x, :unordered)
+            y = Core.Intrinsics.atomic_pointerref(p, :acquire)
+            Core.Intrinsics.atomic_pointerset(q, y, :release)
             return
         end
     end
