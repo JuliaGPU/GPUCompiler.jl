@@ -56,7 +56,11 @@ end
 
 function GPUCompiler.mcgen(@nospecialize(job::NativeCompilerJob), mod::LLVM.Module,
                            format=LLVM.API.LLVMAssemblyFile)
-    if job.config.params.relocations !== :bake
+    # objects only exist to be loaded into `load`'s ORC JIT, so always emit them with the
+    # JIT's target machine: the default one uses the small code model with static
+    # relocations, whose 32-bit absolute references to e.g. constant pools cannot reach
+    # the addresses the JIT loads code at (and, on Windows, it emits COFF where ORC wants ELF)
+    if job.config.params.relocations !== :bake || format == LLVM.API.LLVMObjectFile
         target = job.config.target
         @dispose tm=JITTargetMachine(GPUCompiler.llvm_triple(target), target.cpu,
                                      target.features) begin
