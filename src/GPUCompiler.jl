@@ -94,6 +94,9 @@ include("mcgen.jl")
 include("debug.jl")
 include("driver.jl")
 
+# Optional device-library providers maintained alongside the compiler pipeline.
+include("softfloat/SoftFloat.jl")
+
 # other reusable functionality
 include("execution.jl")
 include("static_assert.jl")
