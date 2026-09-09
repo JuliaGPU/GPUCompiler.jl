@@ -2030,9 +2030,25 @@ end
         return
     end
 
-    ir = sprint(io->Native.code_llvm(io, dkernel, Tuple{Vector{Float64}}; debuginfo=:none))
+    ir = sprint(io->Native.code_llvm(io, dkernel, Tuple{Vector{Float64}};
+                                     debuginfo=:none, dump_module=true))
     @test !occursin("deferred_codegen", ir)
-    @test occursin("call void @julia_kernel", ir)
+    # the deferred function is only called from within the module, so it gets internalized
+    @test occursin(r"define internal .*@julia_kernel", ir)
+    @test occursin(r"call .*@julia_kernel", ir)
+
+    # Enzyme's wrappers are `alwaysinline`, and should be dropped entirely once inlined
+    function dkernel_inline(a)
+        ptr = Enzyme.deferred_codegen(typeof(kernel), Tuple{Vector{Float64}};
+                                      always_inline=true)
+        ccall(ptr, Cvoid, (Vector{Float64},), a)
+        return
+    end
+
+    ir = sprint(io->Native.code_llvm(io, dkernel_inline, Tuple{Vector{Float64}};
+                                     debuginfo=:none, dump_module=true))
+    @test !occursin("deferred_codegen", ir)
+    @test !occursin("@julia_kernel", ir)
 end
 
 @testset "Mock Enzyme deferred relocations" begin

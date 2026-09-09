@@ -292,6 +292,13 @@ const __llvm_initialized = Ref(false)
         erase!(dyn_marker)
     end
 
+    # only deferred jobs that are kernels themselves (e.g. child kernels for dynamic
+    # parallelism) are entrypoints in their own right. other deferred functions (e.g. the
+    # wrappers Enzyme generates) are only called from within this module, so they should
+    # be internalized like any other function and dropped once inlined, rather than kept
+    # around for back-ends that cannot express their signatures (e.g. SPIR-V).
+    entrypoints = filter(((job′, _),) -> job′ === job || job′.config.kernel, jobs)
+
     if job.config.toplevel && job.config.libraries
         # load the runtime outside of a timing block (because it recurses into the compiler)
         if !uses_julia_runtime(job)
@@ -320,7 +327,7 @@ const __llvm_initialized = Ref(false)
             # mark everything internal except for entrypoints and any exported
             # global variables. this makes sure that the optimizer can, e.g.,
             # rewrite function signatures.
-            preserved_gvs = collect(values(jobs))
+            preserved_gvs = collect(values(entrypoints))
             for gvar in globals(ir)
                 if linkage(gvar) == LLVM.API.LLVMExternalLinkage
                     push!(preserved_gvs, LLVM.name(gvar))
@@ -400,8 +407,8 @@ const __llvm_initialized = Ref(false)
             # during deferred code generation. instead, process the deferred jobs
             # here.
             entry = finish_ir!(job, ir, entry)
-            for (job′, fn′) in jobs
-                job′ == job && continue
+            for (job′, fn′) in entrypoints
+                job′ === job && continue
                 finish_ir!(job′, ir, functions(ir)[fn′])
             end
         end
