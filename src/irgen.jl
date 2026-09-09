@@ -354,23 +354,28 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
     return changed
 end
 
-# demote unordered atomic loads and stores to plain ones
+# demote LLVM atomic loads and stores to plain ones
 #
 # Julia marks accesses to heap references `unordered` so that a read racing with the GC, or
-# with another thread's write, cannot observe a torn pointer. There is no device GC and no
-# such race for GPUCompiler to protect against, so the ordering carries no meaning here, but
-# not every back-end can express it: SPIR-V's OpAtomicLoad/OpAtomicStore only take scalar
-# integer or floating-point operands, so the Khronos translator turns an `unordered` load of a
-# pointer into an invalid pointer-typed atomic that consumers reject (Intel's compiler fails
-# with an undefined `__spirv_AtomicLoad(long**, int, int)`), and AIR has no atomic load or
-# store instructions at all. Run after optimization, where dropping the ordering cannot
-# enable new transformations; stronger orderings are left intact.
-function demote_unordered_atomics!(mod::LLVM.Module)
+# with another thread's write, cannot observe a torn pointer, and stores the type tag of a
+# freshly allocated object with `release` ordering so that no other thread can observe the
+# object before its header. There is no device GC and no such race for GPUCompiler to
+# protect against, so these orderings carry no meaning here, but not every back-end can
+# express them: SPIR-V's OpAtomicLoad/OpAtomicStore only take scalar integer or
+# floating-point operands, so the Khronos translator turns an atomic access of a pointer
+# into an invalid pointer-typed atomic that consumers reject (Intel's compiler fails with an
+# undefined `__spirv_AtomicLoad(long**, int, int)`), and AIR has no atomic load or store
+# instructions at all: Apple's back-end aborts on them (`XPC_ERROR_CONNECTION_INTERRUPTED`
+# from the driver; the macOS 26 AGX compiler reports `unable to legalize instruction:
+# store release (p0)` for a type-tag store through the generic pointer the device allocator
+# returns). Run after optimization, where dropping the ordering cannot enable new
+# transformations. Device-side atomics proper go through target intrinsics, not these
+# instructions, so every remaining one is such Julia bookkeeping and gets demoted.
+function demote_atomics!(mod::LLVM.Module)
     changed = false
     for f in functions(mod), bb in blocks(f), inst in instructions(bb)
         (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) || continue
         is_atomic(inst) || continue
-        ordering(inst) == LLVM.API.LLVMAtomicOrderingUnordered || continue
         ordering!(inst, LLVM.API.LLVMAtomicOrderingNotAtomic)
         changed = true
     end

@@ -659,8 +659,8 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # Metal.malloc uses.
     rewrite_generic_null_selects!(mod)
 
-    # AIR does not support LLVM atomic load/store instructions (see `demote_unordered_atomics!`)
-    demote_unordered_atomics!(mod)
+    # AIR does not support LLVM atomic load/store instructions (see `demote_atomics!`)
+    demote_atomics!(mod)
 
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
