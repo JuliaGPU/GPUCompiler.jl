@@ -183,6 +183,16 @@ function add_kernarg_address_spaces!(
     return new_f
 end
 
+# mirrors `AMDGPUCompileOptions` and `AMDGPUFileType` from libamdgpu.h
+struct AMDGPUCompileOptions
+    cpu::Cstring
+    features::Cstring
+    opt_level::Cint
+    filetype::Cint
+end
+const AMDGPUAssemblyFile = Cint(0)
+const AMDGPUObjectFile = Cint(1)
+
 @unlocked function mcgen(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                          mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
     target = job.config.target
@@ -203,48 +213,29 @@ end
         error("The :external GCN back-end requires AMDGPU_LLVM_Backend_jll, which " *
               "should be installed and loaded first.")
     end
+    backend = ExternalBackend(AMDGPU_LLVM_Backend_jll.libamdgpu, "AMDGPU")
 
     filetype = if format == LLVM.API.LLVMAssemblyFile
-        "asm"
+        AMDGPUAssemblyFile
     elseif format == LLVM.API.LLVMObjectFile
-        "obj"
+        AMDGPUObjectFile
     else
         error("Unsupported GCN output format $format")
     end
 
-    input  = tempname(cleanup=false) * ".bc"
-    output = tempname(cleanup=false) * (filetype == "asm" ? ".s" : ".o")
-    write(input, mod)
-
-    cmd = `$(AMDGPU_LLVM_Backend_jll.llc()) $input
-              -mtriple=$(llvm_triple(target))
-              -mcpu=$(target.dev_isa)
-              -mattr=$(target.features)
-              --relocation-model=pic
-              -filetype=$filetype
-              -o $output`
-    out = Pipe()
-    proc = run(pipeline(ignorestatus(cmd); stdout=out, stderr=out); wait=false)
-    close(out.in)
-    log = strip(read(out, String))
-    wait(proc)
-    if !success(proc)
-        # keep the input around for debugging
-        msg = "Failed to compile to GCN with external llc"
-        isempty(log) || (msg *= ":\n" * log)
-        msg *= "\nIf you think this is a bug, please file an issue and attach $(input)."
-        isfile(output) && rm(output)
-        error(msg)
-    elseif !isempty(log)
-        # llc only diagnoses on stderr; even successful compilation may e.g. have
-        # ignored an unrecognized CPU or feature, so make sure this surfaces.
-        @safe_warn "External llc reported:\n$log"
+    # the back-end targets amdgcn-amd-amdhsa with the PIC relocation model; unlike `llc`,
+    # it rejects unknown processors and features instead of silently falling back.
+    cpu = target.dev_isa
+    features = target.features
+    code = GC.@preserve cpu features begin
+        options = Ref(AMDGPUCompileOptions(Base.unsafe_convert(Cstring, cpu),
+                                           Base.unsafe_convert(Cstring, features),
+                                           #=opt_level=# 2, filetype))
+        external_compile(backend, bitcode(mod), options,
+                         "Failed to compile to GCN with the AMDGPU back-end";
+                         warn=msg->@safe_warn(msg))
     end
-
-    code = filetype == "asm" ? read(output, String) : String(read(output))
-    rm(input)
-    rm(output)
-    return code
+    return String(code)
 end
 
 
