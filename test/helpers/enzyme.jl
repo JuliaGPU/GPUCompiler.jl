@@ -1,6 +1,7 @@
 module Enzyme
 
 using ..GPUCompiler
+using LLVM
 
 struct EnzymeTarget{Target<:AbstractCompilerTarget} <: AbstractCompilerTarget
     target::Target
@@ -20,13 +21,17 @@ GPUCompiler.dwarf_version(target::EnzymeTarget) = GPUCompiler.dwarf_version(targ
 abstract type AbstractEnzymeCompilerParams <: AbstractCompilerParams end
 struct EnzymeCompilerParams{Params<:AbstractCompilerParams} <: AbstractEnzymeCompilerParams
     params::Params
+    # mark the generated function `alwaysinline`, like the wrappers Enzyme generates
+    always_inline::Bool
 end
 struct PrimalCompilerParams <: AbstractEnzymeCompilerParams
 end
 
-EnzymeCompilerParams() = EnzymeCompilerParams(PrimalCompilerParams())
+EnzymeCompilerParams(params=PrimalCompilerParams(); always_inline=false) =
+    EnzymeCompilerParams(params, always_inline)
 
-GPUCompiler.nest_params(::EnzymeCompilerParams, other::AbstractCompilerParams) = EnzymeCompilerParams(other)
+GPUCompiler.nest_params(params::EnzymeCompilerParams, other::AbstractCompilerParams) =
+    EnzymeCompilerParams(other; params.always_inline)
 
 function GPUCompiler.compile_unhooked(output::Symbol, job::CompilerJob{<:EnzymeTarget})
     config = job.config
@@ -47,21 +52,28 @@ function GPUCompiler.compile_unhooked(output::Symbol, job::CompilerJob{<:EnzymeT
         # ??? entry_abi
     )
     primal_job = CompilerJob(job.source, primal_config, job.world)
-    return GPUCompiler.compile_unhooked(output, primal_job)
+    ir, meta = GPUCompiler.compile_unhooked(output, primal_job)
 
     # Normally, Enzyme would run here and transform the output of the primal job.
+    if output === :llvm && job.config.params.always_inline
+        push!(function_attributes(meta.entry), EnumAttribute("alwaysinline", 0))
+    end
+
+    return ir, meta
 end
 
 import GPUCompiler: deferred_codegen_jobs
 import Core.Compiler as CC
 
-function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::Type)
+function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::Type,
+                                       always_inline::Type)
     @nospecialize
     @assert CC.isType(ft) && CC.isType(tt)
     ft = ft.parameters[1]
     tt = tt.parameters[1]
+    always_inline = always_inline.parameters[1]::Bool
 
-    stub = Core.GeneratedFunctionStub(identity, Core.svec(:deferred_codegen_id, :ft, :tt), Core.svec())
+    stub = Core.GeneratedFunctionStub(identity, Core.svec(:deferred_codegen_id, :ft, :tt, :always_inline), Core.svec())
 
     # look up the method match
     method_error = :(throw(MethodError(ft, tt, $world)))
@@ -98,15 +110,15 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
     new_ci.edges = Any[mi]
 
     # prepare the slots
-    new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt]
-    new_ci.slotflags = UInt8[0x00 for i = 1:3]
+    new_ci.slotnames = Symbol[Symbol("#self#"), :ft, :tt, :always_inline]
+    new_ci.slotflags = UInt8[0x00 for i = 1:4]
     @static if isdefined(Core, :DebugInfo)
-        new_ci.nargs = 3
+        new_ci.nargs = 4
     end
 
     # We don't know the caller's target so EnzymeTarget uses the default NativeCompilerTarget.
     target = EnzymeTarget()
-    params = EnzymeCompilerParams()
+    params = EnzymeCompilerParams(; always_inline)
     config = CompilerConfig(target, params; kernel=false)
     job = CompilerJob(mi, config, world)
 
@@ -130,13 +142,13 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
     return new_ci
 end
 
-@eval function deferred_codegen_id(ft, tt)
+@eval function deferred_codegen_id(ft, tt, always_inline)
     $(Expr(:meta, :generated_only))
     $(Expr(:meta, :generated, deferred_codegen_id_generator))
 end
 
-@inline function deferred_codegen(f::Type, tt::Type)
-    id = deferred_codegen_id(f, tt)
+@inline function deferred_codegen(f::Type, tt::Type; always_inline::Bool=false)
+    id = deferred_codegen_id(f, tt, Val(always_inline))
     ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), id)
 end
 

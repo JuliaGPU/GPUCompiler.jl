@@ -277,6 +277,39 @@ end
 
 end
 
+@testset "deferred codegen" begin
+    # Enzyme's deferred wrappers are `alwaysinline` and take arguments the SPIR-V back-end
+    # cannot always express. once inlined they have to be dropped, rather than left behind
+    # as external definitions that still need to be translated.
+    mod = @eval module $(gensym())
+        import ..Enzyme
+        function child(a)
+            unsafe_store!(a, unsafe_load(a)^2)
+            return
+        end
+        function kernel(a)
+            ptr = Enzyme.deferred_codegen(typeof(child), Tuple{Ptr{Float64}};
+                                          always_inline=true)
+            ccall(ptr, Cvoid, (Ptr{Float64},), a)
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check_not "@{{(julia|j)_child}}"
+        @check "define spir_kernel void @{{.*}}"
+        @check_not "@{{(julia|j)_child}}"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float64}}; backend, kernel=true,
+                        dump_module=true)
+    end
+
+    # `dump_module=true` disables `only_entry`, which would skip deferred codegen
+    asm = sprint(io->SPIRV.code_native(io, mod.kernel, Tuple{Ptr{Float64}};
+                                       backend, kernel=true, dump_module=true))
+    @test occursin("OpEntryPoint Kernel", asm)
+    @test count("= OpFunction ", asm) == 1
+end
+
 @testset "replace i128 allocas" begin
     mod = @eval module $(gensym())
         # reimplement some of SIMD.jl
