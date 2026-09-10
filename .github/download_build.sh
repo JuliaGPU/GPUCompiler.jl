@@ -10,19 +10,21 @@ DEST_FILE="$3"
 API_BASE="https://api.buildkite.com/v2"
 ORG="julialang"
 
-# derive pipeline and branch filter from version
+# All Julia branches are built by the single `julia-ci` pipeline; the per-release
+# `julia-release-X-dot-Y` and `julia-master` pipelines were archived in July 2026.
+PIPELINE="julia-ci"
+
+# derive the branch to look at from the version
 if [ "$VERSION" = "master" ]; then
-    PIPELINE="julia-master"
-    BRANCH_FILTER='.branch == "master"'
+    BRANCH="master"
 else
-    PIPELINE="julia-release-${VERSION//./-dot-}"
-    BRANCH_FILTER="(.branch == \"release-$VERSION\") or (.branch | startswith(\"v$VERSION\"))"
+    BRANCH="release-$VERSION"
 fi
 
 # find the first successful job and get its artifacts url
 ARTIFACTS_URL=$(curl -s -H "Authorization: Bearer $BUILDKITE_TOKEN" \
-    "$API_BASE/organizations/$ORG/pipelines/$PIPELINE/builds?per_page=100" | \
-    jq -r "first(.[] | select($BRANCH_FILTER) | .jobs[] | select(.step_key == \"$BUILD_NAME\" and .exit_status == 0) | .artifacts_url)")
+    "$API_BASE/organizations/$ORG/pipelines/$PIPELINE/builds?branch=$BRANCH&per_page=100" | \
+    jq -r "first(.[] | .jobs[] | select(.step_key == \"$BUILD_NAME\" and .exit_status == 0) | .artifacts_url)")
 [ -z "$ARTIFACTS_URL" ] || [ "$ARTIFACTS_URL" = "null" ] && { echo "No successful build found."; exit 1; }
 
 # fetch the url of the first artifact
