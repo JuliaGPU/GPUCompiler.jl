@@ -7,9 +7,6 @@
 const SPIRV_LLVM_Backend_jll =
     LazyModule("SPIRV_LLVM_Backend_jll",
                UUID("4376b9bf-cff8-51b6-bb48-39421dff0d0c"))
-const SPIRV_LLVM_Translator_unified_jll =
-    LazyModule("SPIRV_LLVM_Translator_unified_jll",
-               UUID("85f0d8ed-5b39-5caa-b1ae-7472de402361"))
 const SPIRV_LLVM_Translator_jll =
     LazyModule("SPIRV_LLVM_Translator_jll",
                UUID("4a5d46fc-d8cf-5151-a261-86b458210efb"))
@@ -156,6 +153,31 @@ struct SPIRVCompileOptions
     opt_level::Cint
 end
 
+# mirrors `LLVMSPIRVTranslateOptions` from libllvm_spirv.h
+struct LLVMSPIRVTranslateOptions
+    max_version_major::Cuint
+    max_version_minor::Cuint
+    extensions::Cstring
+    debug_info_version::Cint    # LLVMSPIRVDebugInfoVersion
+end
+const LLVMSPIRVDebugInfoOpenCL100 = Cint(1)
+
+# translate bitcode to SPIR-V through libllvm_spirv. unlike the back-ends' `Compile`, the
+# translator's entry point takes no diagnostic handler, so this doesn't use
+# `external_compile`.
+function translate(input::Vector{UInt8}, options::Ref{LLVMSPIRVTranslateOptions})
+    backend = ExternalBackend(SPIRV_LLVM_Translator_jll.libllvm_spirv, "LLVMSPIRV")
+    buffer = Ref{Ptr{Cvoid}}(C_NULL)
+    message = Ref{Cstring}(C_NULL)
+    status = @ccall $(api(backend, "Translate"))(input::Ptr{UInt8}, length(input)::Csize_t,
+                                                 options::Ptr{Cvoid},
+                                                 buffer::Ptr{Ptr{Cvoid}},
+                                                 message::Ptr{Cstring})::Cint
+    external_result(backend, status, "Failed to translate LLVM code to SPIR-V",
+                    message[], String[], input)
+    return take_buffer(backend, buffer[])
+end
+
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.API.LLVMAssemblyFile)
     target = job.config.target
@@ -187,34 +209,16 @@ end
                              "Failed to compile to SPIR-V with the SPIR-V back-end")
         end
     elseif target.backend === :khronos
-        translator = if isavailable(SPIRV_LLVM_Translator_jll)
-            SPIRV_LLVM_Translator_jll.llvm_spirv()
-        elseif isavailable(SPIRV_LLVM_Translator_unified_jll)
-            SPIRV_LLVM_Translator_unified_jll.llvm_spirv()
-        else
-            error("This functionality requires the SPIRV_LLVM_Translator_jll or SPIRV_LLVM_Translator_unified_jll package, which should be installed and loaded first.")
+        # translate in-process through libllvm_spirv. like `llvm-spirv`, the translator
+        # takes the triple from the module and rejects unknown extensions.
+        version = something(target.version, v"0.0")
+        extensions = target.extensions
+        GC.@preserve extensions begin
+            options = Ref(LLVMSPIRVTranslateOptions(version.major, version.minor,
+                                                    Base.unsafe_convert(Cstring, extensions),
+                                                    LLVMSPIRVDebugInfoOpenCL100))
+            translate(input, options)
         end
-        input_path = dump_input()
-        translated = tempname(cleanup=false) * ".spv"
-        cmd = `$translator -o $translated $input_path --spirv-debug-info-version=ocl-100`
-
-        if !isempty(target.extensions)
-            cmd = `$(cmd) --spirv-ext=$(target.extensions)`
-        end
-
-        if target.version !== nothing
-            cmd = `$(cmd) --spirv-max-version=$(target.version.major).$(target.version.minor)`
-        end
-        try
-            run(cmd)
-        catch e
-            error("""Failed to translate LLVM code to SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(input_path).""")
-        end
-        rm(input_path)
-        code = read(translated)
-        rm(translated)
-        code
     else
         error("Unsupported SPIR-V back-end $(repr(target.backend)); expected :llvm or :khronos.")
     end
