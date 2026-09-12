@@ -61,12 +61,13 @@ end
 
 ## external back-ends
 
-# The LLVM back-ends for PTX, GCN and SPIR-V and the bitcode downgrader ship as
-# symbol-hidden shared libraries with a small C API modelled after llvm-c: status as the
-# return value, an error message through an out-pointer on failure, results as opaque
-# memory buffers, and diagnostics that the tools used to print to stderr delivered through
-# a callback. The libraries share the shape of this API, differing only in the prefix of
-# their entry points, so this is implemented once against function pointers.
+# The LLVM back-ends for PTX, GCN and SPIR-V, the Khronos SPIR-V translator and the
+# bitcode downgrader ship as symbol-hidden shared libraries with a small C API modelled
+# after llvm-c: status as the return value, an error message through an out-pointer on
+# failure, results as opaque memory buffers, and diagnostics that the tools used to print
+# to stderr delivered through a callback. The libraries share the shape of this API,
+# differing only in the prefix of their entry points, so this is implemented once against
+# function pointers.
 
 struct ExternalBackend
     library::String     # path to the shared library, as exported by its JLL
