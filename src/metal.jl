@@ -662,6 +662,9 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # AIR does not support LLVM atomic load/store instructions (see `demote_atomics!`)
     demote_atomics!(mod)
 
+    # the macOS 27 back-end rejects bare LLVM fences (Metal.jl#968)
+    lower_fences!(job, mod)
+
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
     # force-inlines throwing functions into the kernel first so the rewrite is sound, then scrubs
@@ -711,6 +714,78 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     merge_byte_gep_chains!(mod)
 
     return
+end
+
+# Before LLVM 18, `ordering(inst)` calls `LLVMGetOrdering`, which incorrectly casts fences
+# to AtomicRMWInst. Use the stable textual form on all versions to keep this workaround tested.
+function fence_ordering(inst::LLVM.FenceInst)
+    # Scope names escape embedded quotes as \22; metadata follows the ordering.
+    m = match(r"^\s*fence(?:\s+syncscope\(\"[^\"]*\"\))?\s+(acquire|release|acq_rel|seq_cst)\b",
+              string(inst))
+    m === nothing && error("Unexpected fence instruction: $inst")
+    return m.captures[1] == "acquire" ? LLVM.API.LLVMAtomicOrderingAcquire :
+           m.captures[1] == "release" ? LLVM.API.LLVMAtomicOrderingRelease :
+           m.captures[1] == "acq_rel" ? LLVM.API.LLVMAtomicOrderingAcquireRelease :
+                                        LLVM.API.LLVMAtomicOrderingSequentiallyConsistent
+end
+
+# Lower LLVM fences to air.atomic.fence(flags, order, scope), as MSL's atomic_thread_fence
+# does. Bare fences from Julia's atomic_fence crash the macOS 27 AGX back-end (Metal.jl#968).
+#
+# MSL memory_order values are acquire=2, release=3, acq_rel=4, seq_cst=5. Metal 3.2-4.0
+# only supports relaxed/seq_cst fences, so strengthen other orderings to seq_cst. Before
+# Metal 3.2 the intrinsic is unavailable; retain the bare fence. Such targets still
+# require a back-end that accepts bare fences.
+#
+# Cover device and threadgroup memory (mem_flags=1|2), the shared writable LLVM address spaces.
+# Use thread scope (0) for singlethread and device scope (2) otherwise. Metal has no
+# system-wide scope: this only synchronizes threads on the same device.
+function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
+    metal = job.config.target.metal
+    metal >= v"3.2" || return false
+
+    worklist = LLVM.FenceInst[]
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        inst isa LLVM.FenceInst && push!(worklist, inst)
+    end
+    isempty(worklist) && return false
+
+    T_int32 = LLVM.Int32Type()
+    fence_ft = LLVM.FunctionType(LLVM.VoidType(), [T_int32, T_int32, T_int32])
+    fence_fn = if haskey(functions(mod), "air.atomic.fence")
+        functions(mod)["air.atomic.fence"]
+    else
+        LLVM.Function(mod, "air.atomic.fence", fence_ft)
+    end
+
+    for inst in worklist
+        order = if metal < v"4.1"
+            5   # seq_cst
+        else
+            ord = fence_ordering(inst)
+            if ord == LLVM.API.LLVMAtomicOrderingAcquire
+                2
+            elseif ord == LLVM.API.LLVMAtomicOrderingRelease
+                3
+            elseif ord == LLVM.API.LLVMAtomicOrderingAcquireRelease
+                4
+            else
+                5   # seq_cst (the only other ordering LLVM allows on a fence)
+            end
+        end
+        scope = syncscope(inst) == SyncScope("singlethread") ? 0 : 2
+        flags = 1 | 2   # device | threadgroup
+
+        @dispose builder=IRBuilder() begin
+            position!(builder, inst)
+            debuglocation!(builder, inst)
+            call!(builder, fence_ft, fence_fn,
+                  [ConstantInt(T_int32, flags), ConstantInt(T_int32, order),
+                   ConstantInt(T_int32, scope)])
+        end
+        erase!(inst)
+    end
+    return true
 end
 
 # Julia names each generated LLVM function `julia_<name>_<counter>`, where the counter is

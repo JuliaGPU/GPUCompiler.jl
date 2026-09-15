@@ -1663,6 +1663,82 @@ end
     end
 end
 
+@testset "fence lowering" begin
+    orders = [("acquire", 2), ("release", 3), ("acq_rel", 4), ("seq_cst", 5)]
+    scopes = [("", 2), ("syncscope(\"singlethread\") ", 0),
+              ("syncscope(\"workgroup\") ", 2),
+              (raw"syncscope(\"fence acquire\22\5C\0A\") ", 2)]
+    metadata = ("", ", !dbg !3, !annotation !4")
+    fences_ir = join(["fence $scope$order$md" for (order, _) in orders
+                     for (scope, _) in scopes for md in metadata], "\n")
+    ir = """
+        define void @f() !dbg !2 {\n$fences_ir\nret void\n}
+        !llvm.dbg.cu = !{!0}
+        !llvm.module.flags = !{!5}
+        !0 = distinct !DICompileUnit(language: DW_LANG_C, file: !1, producer: "GPUCompiler", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
+        !1 = !DIFile(filename: "fence.jl", directory: "/")
+        !2 = distinct !DISubprogram(name: "f", scope: !1, file: !1, line: 1, type: !6, spFlags: DISPFlagDefinition, unit: !0)
+        !3 = !DILocation(line: 2, column: 1, scope: !2)
+        !4 = !{!"fence seq_cst"}
+        !5 = !{i32 2, !"Debug Info Version", i32 3}
+        !6 = !DISubroutineType(types: !7)
+        !7 = !{}
+        """
+    fence_job(metal) = let
+        source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"27", metal, air=v"2.9")
+        CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+    end
+    fences(mod) = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)
+                   if i isa LLVM.FenceInst]
+
+    @testset "Metal $metal, existing declaration: $declared" for
+            metal in (v"3.1", v"3.2", v"4.0", v"4.1"), declared in (false, true)
+        Context() do ctx
+            decl = declared ? "declare void @air.atomic.fence(i32, i32, i32)\n" : ""
+            mod = parse(LLVM.Module, decl * ir)
+            original = string(mod)
+            @test length(fences(mod)) == length(orders) * length(scopes) * length(metadata)
+            @test GPUCompiler.lower_fences!(fence_job(metal), mod) == (metal >= v"3.2")
+            @test (verify(mod); true)
+            if metal < v"3.2"
+                @test string(mod) == original
+            else
+                @test isempty(fences(mod))
+                calls = [m.match for m in eachmatch(r"call void @air.atomic.fence\([^\n]+\)", string(mod))]
+                expected = ["call void @air.atomic.fence(i32 3, i32 $(metal < v"4.1" ? 5 : order), i32 $scope)"
+                            for (_, order) in orders for (_, scope) in scopes for _ in metadata]
+                @test calls == expected
+                @test count("declare void @air.atomic.fence(", string(mod)) == 1
+            end
+            @test !GPUCompiler.lower_fences!(fence_job(metal), mod)
+        end
+    end
+
+    # end-to-end: Julia's `atomic_fence` intrinsic must not reach the AIR as a bare `fence`
+    # (Julia 1.14 added a syncscope argument to the intrinsic, JuliaLang/julia#60311)
+    function kernel(p::Core.LLVMPtr{Int,1})
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int}, p), 1, :monotonic)
+        @static if VERSION >= v"1.14.0-DEV.1371"
+            Core.Intrinsics.atomic_fence(:release, :system)
+        else
+            Core.Intrinsics.atomic_fence(:release)
+        end
+        return
+    end
+    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int,1}}, Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"27", metal=v"4.1", air=v"2.9")
+    config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
+    job = CompilerJob(source, config)
+
+    llvm_ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true))
+    @test occursin("fence release", llvm_ir)
+
+    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+    @test !occursin(r"^\s*fence "m, air)
+    @test occursin("call void @air.atomic.fence(i32 3, i32 3, i32 2)", air)
+end
+
 # byval lowering must strip the (non-IPO-safe) Julia const-region metadata off loads derived
 # from the materialized argument; check the helper walks gep/addrspacecast chains and removes it.
 @testset "const-region metadata stripping for materialized args" begin
