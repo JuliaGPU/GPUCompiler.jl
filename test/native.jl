@@ -357,6 +357,39 @@ end
 
     end
 
+    @testset "runtime cache partition" begin
+        # Runtime functions live in their own owner partition, split on output generation:
+        # a runtime CodeInstance revived across the precompilation boundary can carry
+        # unoptimized code that emits dynamic dispatch into the runtime library.
+        job, _ = Native.create_job(identity, (Nothing,))
+        rt_config = GPUCompiler.runtime_config(job)
+        if GPUCompiler.HAS_INTEGRATED_CACHE
+            owner = rt_config.cache_owner
+            @test owner isa GPUCompiler.RuntimeCacheToken
+            @test owner.parent === GPUCompiler.cache_owner(job)
+            @test owner.generating == (ccall(:jl_generating_output, Cint, ()) != 0)
+        end
+
+        # dynamic-dispatch fallbacks in emitted runtime modules must be detected
+        JuliaContext() do ctx
+            dirty = parse(LLVM.Module, """
+                declare nonnull ptr addrspace(10) @ijl_apply_generic(ptr addrspace(10), ptr, i32)
+                define void @f() {
+                    ret void
+                }""")
+            @test GPUCompiler.dynamic_call_symbol(dirty) == "ijl_apply_generic"
+            dispose(dirty)
+
+            clean = parse(LLVM.Module, """
+                declare i64 @malloc(i64)
+                define void @f() {
+                    ret void
+                }""")
+            @test GPUCompiler.dynamic_call_symbol(clean) === nothing
+            dispose(clean)
+        end
+    end
+
     @testset "runtime cache invalidation" begin
         # The assembled runtime cache must follow Julia's CodeInstance invalidation. Runtime
         # functions are ordinary Julia methods and can be redefined during a session.

@@ -102,11 +102,19 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # inference itself.
     ci, res = runtime_function_results(rt_job)
     if res !== nothing && res.bitcode !== nothing
-        link_relocatable!(mod, relocs,
-                          parse(LLVM.Module, MemoryBuffer(res.bitcode)),
-                          res.relocations)
-        ci === nothing && (ci = runtime_code_instance(rt_job))
-        return ci::CodeInstance
+        cached = parse(LLVM.Module, MemoryBuffer(res.bitcode))
+        bad = dynamic_call_symbol(cached)
+        if bad === nothing
+            link_relocatable!(mod, relocs, cached, res.relocations)
+            ci === nothing && (ci = runtime_code_instance(rt_job))
+            return ci::CodeInstance
+        end
+        # persisted by a GPUCompiler version that cached runtime functions across the
+        # precompilation boundary
+        @warn "Discarding cached runtime function '$(method.name)' with unresolved \
+               dynamic calls ($bad); recompiling" maxlog=1 _id=Symbol(name)
+        dispose(cached)
+        res.bitcode = nothing
     end
 
     # Keep this intermediate module relocatable even when the final back-end resolves
@@ -132,10 +140,14 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     end
     LLVM.name!(meta.entry, name)
 
+    bad = dynamic_call_symbol(new_mod)
+    bad === nothing || @warn "Runtime function '$(method.name)' compiled with unresolved \
+        dynamic calls ($bad); not caching it" maxlog=1 _id=Symbol(name)
+
     io = IOBuffer()
     write(io, new_mod)
     ci === nothing && (ci = runtime_code_instance(rt_job))
-    if supports_relocatable_ir()
+    if supports_relocatable_ir() && bad === nothing
         res === nothing && (res = runtime_results(RuntimeFunctionResults, ci, rt_job.config))
         res.bitcode = take!(io)
         res.relocations = meta.relocations
@@ -197,8 +209,28 @@ end
 # functions always use the specfunc ABI and are deliberately left unoptimized until linked
 # into the toplevel module, making the kernel's entry ABI and LLVM opt level irrelevant.
 function runtime_config(@nospecialize(job::CompilerJob))
+    owner = @static if HAS_INTEGRATED_CACHE
+        RuntimeCacheToken(cache_owner(job), ccall(:jl_generating_output, Cint, ()) != 0)
+    else
+        nothing
+    end
     CompilerConfig(job.config; kernel=false, entry_abi=:specfunc, opt_level=0,
-                   toplevel=false, only_entry=false, strip=false, name=nothing)
+                   toplevel=false, only_entry=false, strip=false, name=nothing,
+                   cache_owner=owner)
+end
+
+# Detect codegen fallbacks to dynamic dispatch. A runtime function containing these
+# poisons every kernel that links it, so such modules must never be cached or persisted.
+function dynamic_call_symbol(mod::LLVM.Module)
+    for f in functions(mod)
+        isempty(blocks(f)) || continue
+        fn = LLVM.name(f)
+        if fn in ("ijl_apply_generic", "jl_apply_generic", "ijl_invoke", "jl_invoke") ||
+           startswith(fn, "jl_f_") || startswith(fn, "ijl_f_")
+            return fn
+        end
+    end
+    return nothing
 end
 
 function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
