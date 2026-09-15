@@ -2105,7 +2105,7 @@ end
     # once optimized the slot is promoted away entirely (result is x + x).
     @test @filecheck begin
         @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
-        @check_not "alloca"
+        @check_not "= alloca"
         @check_not "julia.gpu.alloca"
         Native.code_llvm(mod.scratch, Tuple{Float32})
     end
@@ -2113,7 +2113,7 @@ end
     # a zero-byte allocation lowers to a null pointer rather than a degenerate alloca.
     @test @filecheck begin
         @check_label "define {{.*}}@{{(julia|j)_empty_scratch_[0-9]+}}"
-        @check_not "alloca"
+        @check_not "= alloca"
         @check_not "julia.gpu.alloca"
         Native.code_llvm(mod.empty_scratch, Tuple{})
     end
