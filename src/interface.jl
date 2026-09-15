@@ -97,6 +97,15 @@ cache_owner(target::AbstractCompilerTarget, params::AbstractCompilerParams,
             always_inline::Bool) =
     GPUCompilerCacheToken(target, params, always_inline)
 
+# Runtime-library functions get their own cache partition, additionally split on whether
+# output is being generated: a runtime-function CodeInstance revived across the
+# precompilation boundary can carry unoptimized inferred code, which codegens into a
+# runtime library full of dynamic calls that poisons every kernel linking it.
+struct RuntimeCacheToken
+    parent::Any
+    generating::Bool
+end
+
 
 ## config
 
@@ -176,12 +185,12 @@ struct CompilerConfig{T,P}
                             always_inline=false, opt_level=2,
                             debug_level=Base.JLOptions().debug_level, optimize=toplevel,
                             libraries=toplevel, cleanup=toplevel, validate=toplevel,
-                            strip=false, only_entry=false)
+                            strip=false, only_entry=false, cache_owner=nothing)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
         owner = @static if HAS_INTEGRATED_CACHE
-            cache_owner(target, params, always_inline)
+            something(cache_owner, GPUCompiler.cache_owner(target, params, always_inline))
         else
             nothing
         end
@@ -199,7 +208,7 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
                         debug_level=cfg.debug_level, libraries=cfg.libraries,
                         optimize=cfg.optimize, cleanup=cfg.cleanup,
                         validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
-                        only_entry=cfg.only_entry)
+                        only_entry=cfg.only_entry, cache_owner=nothing)
     # deriving a non-toplevel job disables certain features
     # XXX: should we keep track if any of these were set explicitly in the first place?
     #      see how PkgEval does that.
@@ -211,7 +220,7 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
     end
     CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
                    debug_level, libraries, optimize, cleanup, validate, strip, toplevel,
-                   only_entry)
+                   only_entry, cache_owner)
 end
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
