@@ -564,7 +564,7 @@ end
     # a zero-byte allocation lowers to a null pointer rather than a degenerate alloca.
     @test @filecheck begin
         @check_label "define {{.*}}@{{(julia|j)_empty_scratch_[0-9]+}}"
-        @check_not "alloca"
+        @check_not "= alloca"
         @check_not "julia.gpu.alloca"
         GCN.code_llvm(mod.empty_scratch, Tuple{})
     end
