@@ -1,5 +1,78 @@
 # compiler support for working with run-time libraries
 
+
+#
+# Job-scoped device libraries
+#
+
+"""
+    AbstractDeviceLibraryProvider
+
+A collection of Julia device functions that a back-end links into individual compilation
+jobs, as selected by [`device_library_providers`](@ref). Provider libraries are compiled
+and cached like the built-in runtime library, but never registered globally: loading a
+package that defines a provider does not affect unrelated jobs.
+"""
+abstract type AbstractDeviceLibraryProvider end
+
+"""
+    DeviceLibraryMethod(def, return_type, argument_types; name=nameof(def), llvm_name="gpu_\$name")
+
+Describe a Julia method to compile into a device library, exported as `llvm_name`. Unlike
+`Runtime.compile`, this does not mutate a global registry.
+"""
+function DeviceLibraryMethod(def::Union{Function,Symbol}, @nospecialize(return_type::Type),
+                             @nospecialize(types::Tuple), llvm_return_type=nothing,
+                             llvm_types=nothing;
+                             name=isa(def, Symbol) ? def : nameof(def),
+                             llvm_name="gpu_$name")
+    Runtime.RuntimeMethodInstance(def, return_type, types, name,
+                                  llvm_return_type, llvm_types, llvm_name)
+end
+
+"""
+    device_library_providers(job::CompilerJob) -> Tuple
+
+Return the device-library providers to link into `job`, in order. The default is none;
+back-ends select providers based on their compiler configuration, which therefore also
+keys any cached compilation results.
+"""
+device_library_providers(@nospecialize(job::CompilerJob)) = ()
+
+"""
+    device_library_methods(provider, job)
+
+Return the [`DeviceLibraryMethod`](@ref)s supplied by `provider` for `job`.
+"""
+device_library_methods(provider::AbstractDeviceLibraryProvider,
+                       @nospecialize(job::CompilerJob)) =
+    error("device_library_methods is not implemented for $(typeof(provider))")
+
+"""
+    device_library_cache_key(provider, job)
+
+Identify the provider's source and policy for the purpose of caching assembled libraries
+within a session. The default is the provider itself.
+"""
+device_library_cache_key(provider::AbstractDeviceLibraryProvider,
+                         @nospecialize(job::CompilerJob)) = provider
+
+"""
+    prepare_device_library!(provider, job, mod::LLVM.Module, entry::LLVM.Function) -> entry
+
+Prepare the linked module for `provider`, right before its library is linked. Providers
+can use this hook to rewrite the module, e.g. to legalize a representation that their
+library implements. The hook must return the entry function, which may be a new
+`LLVM.Function` when the module was rebuilt. The default leaves the module untouched.
+"""
+prepare_device_library!(provider::AbstractDeviceLibraryProvider,
+                        @nospecialize(job::CompilerJob), mod::LLVM.Module,
+                        entry::LLVM.Function) = entry
+
+@public AbstractDeviceLibraryProvider, DeviceLibraryMethod
+@public device_library_providers, device_library_methods, device_library_cache_key
+@public prepare_device_library!
+
 #
 # GPU run-time library
 #
@@ -201,13 +274,14 @@ function runtime_config(@nospecialize(job::CompilerJob))
                    toplevel=false, only_entry=false, strip=false, name=nothing)
 end
 
-function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
-    mod = LLVM.Module("GPUCompiler run-time library")
+function build_device_library(@nospecialize(job::CompilerJob), config::CompilerConfig,
+                              methods; name="GPUCompiler device library")
+    mod = LLVM.Module(name)
     sources = MethodInstance[]
     code_instances = CodeInstance[]
     relocs = Relocations()
 
-    for method in runtime_methods()
+    for method in methods
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         source = resolved
@@ -222,6 +296,9 @@ function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
 
     return mod, sources, code_instances, relocs
 end
+
+build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig) =
+    build_device_library(job, config, runtime_methods(); name="GPUCompiler run-time library")
 
 # Runtime.methods is a Dict, but library layout and source validation require the same order.
 runtime_methods() = sort!(collect(values(Runtime.methods)); by = method -> method.name)
@@ -245,14 +322,14 @@ mutable struct RuntimeLibrary
     relocations::Relocations
 end
 
-function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob))
+function device_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob), methods)
     # Method-table changes and CI invalidations always advance the world counter. A runtime
     # already validated for this exact world therefore needs no per-function scan on the
     # common cache-hit path.
     job.world == lib.validated_world && return true
 
     i = 0
-    for method in runtime_methods()
+    for method in methods
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         i += 1
@@ -264,6 +341,9 @@ function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJ
     lib.validated_world = job.world
     return true
 end
+
+runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob)) =
+    device_library_valid(lib, job, runtime_methods())
 
 const runtime_libs = Dict{Tuple{CompilerConfig, Bool}, RuntimeLibrary}()
 const runtime_libs_lock = ReentrantLock()
@@ -287,4 +367,35 @@ const runtime_libs_lock = ReentrantLock()
 
     return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true),
            cached.relocations
+end
+
+# Provider libraries share the runtime's per-function bitcode cache, but assembled
+# libraries are additionally keyed by provider identity. `Any` is intentional: provider
+# cache keys are extension values whose concrete types are not known to GPUCompiler.
+const device_libs = Dict{Tuple{Any,CompilerConfig,Bool},RuntimeLibrary}()
+const device_libs_lock = ReentrantLock()
+
+@locked function load_device_library(provider::AbstractDeviceLibraryProvider,
+                                     @nospecialize(job::CompilerJob))
+    config = runtime_config(job)
+    methods = collect(device_library_methods(provider, job))
+    key = (device_library_cache_key(provider, job), config,
+           !supports_typed_pointers(context()))
+
+    cached = Base.@lock device_libs_lock begin
+        cached = get(device_libs, key, nothing)
+        if cached === nothing || !device_library_valid(cached, job, methods)
+            lib, sources, code_instances, relocations =
+                build_device_library(job, config, methods;
+                                     name="GPUCompiler device library: $(typeof(provider))")
+            io = IOBuffer()
+            write(io, lib)
+            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world,
+                                    relocations)
+            device_libs[key] = cached
+        end
+        cached
+    end
+
+    return parse(LLVM.Module, MemoryBuffer(cached.bytes); lazy=true), cached.relocations
 end

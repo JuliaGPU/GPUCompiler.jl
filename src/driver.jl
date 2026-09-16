@@ -343,7 +343,44 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
+            # a back-end may rebuild the entry function while preserving its name (e.g.
+            # Metal's by-reference ABI pass), so re-resolve the wrapper afterwards.
+            entry_name = LLVM.name(entry)
             finish_linked_module!(job, ir)
+            entry = functions(ir)[entry_name]
+
+            # link job-specific device libraries. this happens after all target-specific
+            # processing of the linked module, so that providers can legalize the complete
+            # module (including its entry ABI) before their definitions are linked in.
+            for provider in device_library_providers(job)
+                job.config.libraries || break
+                entry = prepare_device_library!(provider, job, ir, entry)
+
+                # providers are typically enabled unconditionally, even though most kernels
+                # will not use them, so only load the library when it is actually needed.
+                needed = any(device_library_methods(provider, job)) do method
+                    haskey(functions(ir), method.llvm_name) &&
+                        !isempty(uses(functions(ir)[method.llvm_name]))
+                end
+                needed || continue
+
+                library, library_relocs = load_device_library(provider, job)
+                @tracepoint "device library $(typeof(provider))" begin
+                    link_relocatable!(ir, relocations, library, library_relocs;
+                                      only_needed=true)
+                end
+
+                # internalize the newly linked definitions as well
+                if LLVM.version() >= v"17"
+                    run!(InternalizePass(; preserved_gvs), ir,
+                         llvm_machine(job.config.target))
+                else
+                    @dispose pm=ModulePassManager() begin
+                        internalize!(pm, preserved_gvs)
+                        run!(pm, ir)
+                    end
+                end
+            end
 
             # Resolve early so optimization sees concrete values.
             resolve_early = resolve_relocations && relocation_lowering(job) === :bake

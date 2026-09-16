@@ -3,17 +3,21 @@ module SPIRV
 using ..GPUCompiler
 import ..TestRuntime
 
-struct CompilerParams <: AbstractCompilerParams end
+struct CompilerParams <: AbstractCompilerParams
+    emulate_fp64::Bool
+end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
+GPUCompiler.device_library_providers(job::CompilerJob{<:Any,CompilerParams}) =
+    job.config.params.emulate_fp64 ? (GPUCompiler.SoftFloat.SoftFloat64Provider(),) : ()
 
 function create_job(@nospecialize(func), @nospecialize(types);
                    supports_fp16=true, supports_fp64=true, supports_bfloat16=false,
-                   backend::Symbol, kwargs...)
+                   backend::Symbol, emulate_fp64=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = SPIRVCompilerTarget(; backend, validate=true, optimize=true,
                                    supports_fp16, supports_fp64, supports_bfloat16)
-    params = CompilerParams()
+    params = CompilerParams(emulate_fp64)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end
