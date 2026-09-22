@@ -1305,6 +1305,50 @@ end
     end
 end
 
+@testset "floating-point class lowering" begin
+    # LLVM combines floating-point comparisons into llvm.is.fpclass, which AIR lacks, so it is
+    # expanded into tests on the value's bits. Check these against Julia's classification by
+    # lowering calls on constant values (which the IR builder folds).
+    km = @eval module $(gensym())
+        f() = return
+    end
+    job, _ = Metal.create_job(km.f, Tuple{})
+
+    # the `FPClassTest` bit of a value
+    function fpclass(x::T) where {T}
+        if isnan(x)
+            quiet = reinterpret(Unsigned, x) & (Base.significand_mask(T) + 1) >> 1 != 0
+            return quiet ? 1 : 0
+        end
+        bit = isinf(x) ? 9 : iszero(x) ? 6 : issubnormal(x) ? 7 : 8
+        return signbit(x) ? 11 - bit : bit
+    end
+
+    Context() do ctx
+        for (T, typ, suffix) in ((Float16, "half", "f16"), (Float32, "float", "f32"),
+                                 (Float64, "double", "f64"))
+            snan = reinterpret(T, Base.exponent_mask(T) | one(Base.exponent_mask(T)))
+            values = T[0, -0.0, nextfloat(zero(T)), -nextfloat(zero(T)), prevfloat(floatmin(T)),
+                       floatmin(T), -floatmin(T), 1, -1, floatmax(T), -floatmax(T),
+                       Inf, -Inf, NaN, -T(NaN), snan, -snan]
+            for x in values, mask in [0:37:1023; (1 .<< (0:9)); 0x3ff]
+                val = "bitcast (i$(8*sizeof(T)) $(reinterpret(Signed, x)) to $typ)"
+                ir = """
+                    declare i1 @llvm.is.fpclass.$suffix($typ, i32)
+                    define i1 @f() {
+                      %r = call i1 @llvm.is.fpclass.$suffix($typ $val, i32 $mask)
+                      ret i1 %r
+                    }"""
+                mod = parse(LLVM.Module, ir)
+                f = functions(mod)["f"]
+                GPUCompiler.lower_llvm_intrinsics!(job, f)
+                ret = only(filter(i -> i isa LLVM.RetInst, collect(instructions(entry(f)))))
+                @test convert(Bool, operands(ret)[1]) == (mask & (1 << fpclass(x)) != 0)
+            end
+        end
+    end
+end
+
 @testset "fast-math min/max lowering" begin
     # Base min/max -> llvm.minimum/maximum lower to a NaN-propagating wrapper (air.minimum/
     # maximum, which falls back to air.fmin/fmax). @fastmath/fastmath set `nnan`, so the relaxed
