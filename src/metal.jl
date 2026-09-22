@@ -2243,6 +2243,84 @@ function lower_minimum_maximum!(builder::IRBuilder, call::LLVM.CallBase, minmax:
     return promote_bf ? fptrunc!(builder, new, typ) : new
 end
 
+# integer power, which AIR lacks (MSL has no `pown`, and `pow` is undefined for negative
+# bases), by exponentiation by squaring as LLVM's back-ends expand it: a constant exponent
+# is unrolled into multiplies like SelectionDAG's `ExpandPowI`, any other calls a loop over
+# the exponent's bits like compiler-rt's `__powisf2`. A negative exponent takes the
+# reciprocal, and `x^0` is 1 (even for NaN). The exponent of a vector `powi` is a scalar.
+function lower_powi!(builder::IRBuilder, call::LLVM.CallBase)
+    x, n = arguments(call)
+    if n isa LLVM.ConstantInt && width(value_type(n)) <= 64
+        return expand_powi!(builder, x, convert(Int, n))
+    end
+
+    # the loop halves the exponent, which doesn't work for an `i1` (where 2 wraps to 0)
+    width(value_type(n)) < 32 && (n = sext!(builder, n, LLVM.Int32Type()))
+
+    mod = LLVM.parent(LLVM.parent(position(builder)))
+    typ, ntyp = value_type(x), value_type(n)
+    fn ="air.powi.$(type_suffix(typ)).$(type_suffix(ntyp))"
+    f = haskey(functions(mod), fn) ? functions(mod)[fn] : build_powi!(mod, fn, typ, ntyp)
+    return call!(builder, function_type(f), f, LLVM.Value[x, n])
+end
+
+# 1.0 of a floating-point type, splat across the lanes of a vector type
+fp_one(typ::LLVMType) = LLVM.Value(LLVM.API.LLVMConstReal(typ, 1.0))
+
+function expand_powi!(builder::IRBuilder, x::LLVM.Value, n::Int)
+    m = unsigned(abs(n))    # also for `typemin(n)`, which `abs` returns as is
+    res = nothing           # 1.0, until the first set bit
+    sq = x                  # x^(2^i) for the current bit i
+    while m != 0
+        isodd(m) && (res = res === nothing ? sq : fmul!(builder, res, sq))
+        m >>= 1
+        m != 0 && (sq = fmul!(builder, sq, sq))
+    end
+    res = something(res, fp_one(value_type(x)))
+    return n < 0 ? fdiv!(builder, fp_one(value_type(x)), res) : res
+end
+
+function build_powi!(mod::LLVM.Module, fn::String, typ::LLVMType, ntyp::LLVMType)
+    f = LLVM.Function(mod, fn, LLVM.FunctionType(typ, LLVMType[typ, ntyp]))
+    linkage!(f, LLVM.API.LLVMInternalLinkage)
+    push!(function_attributes(f), EnumAttribute("alwaysinline"))
+    x, n = parameters(f)
+    one = fp_one(typ)
+    zero = LLVM.ConstantInt(ntyp, 0)
+
+    bb_entry = BasicBlock(f, "entry")
+    bb_loop = BasicBlock(f, "loop")
+    bb_done = BasicBlock(f, "done")
+    @dispose builder=IRBuilder() begin
+        position!(builder, bb_entry)
+        br!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, n, zero), bb_done, bb_loop)
+
+        # multiply the squares selected by the bits of `n`, least significant first. like
+        # `__powisf2`, shift the signed `n` by halving it (rounding towards zero), so as not
+        # to take `abs(n)`, which InstCombine would turn into an `llvm.abs` after that has
+        # already been lowered.
+        position!(builder, bb_loop)
+        acc = phi!(builder, typ, "acc")
+        sq = phi!(builder, typ, "sq")
+        rest = phi!(builder, ntyp, "rest")
+        bit = trunc!(builder, rest, LLVM.Int1Type())
+        acc′ = select!(builder, bit, fmul!(builder, acc, sq), acc)
+        sq′ = fmul!(builder, sq, sq)
+        rest′ = sdiv!(builder, rest, LLVM.ConstantInt(ntyp, 2))
+        br!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, rest′, zero), bb_done, bb_loop)
+        append!(incoming(acc), [(one, bb_entry), (acc′, bb_loop)])
+        append!(incoming(sq), [(x, bb_entry), (sq′, bb_loop)])
+        append!(incoming(rest), [(n, bb_entry), (rest′, bb_loop)])
+
+        position!(builder, bb_done)
+        pow = phi!(builder, typ, "pow")
+        append!(incoming(pow), [(one, bb_entry), (acc′, bb_loop)])
+        negative = icmp!(builder, LLVM.API.LLVMIntSLT, n, zero)
+        ret!(builder, select!(builder, negative, fdiv!(builder, one, pow), pow))
+    end
+    return f
+end
+
 function build_minimum_maximum!(mod::LLVM.Module, fn::String, op_ft::LLVM.FunctionType,
                                 jltyp::Type, minmax::String)
     optyp = return_type(op_ft)
@@ -2328,8 +2406,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
     removable = Set(LLVM.Intrinsic.(REMOVABLE_INTRINSICS))
     value_intrinsics = intrinsic_table(AIR_VALUE_INTRINSICS)
     bit_intrinsics = intrinsic_table(AIR_BIT_INTRINSICS)
-    is_fpclass, copysign, minimum, maximum =
-        LLVM.Intrinsic.(("llvm.is.fpclass", "llvm.copysign", "llvm.minimum", "llvm.maximum"))
+    is_fpclass, copysign, minimum, maximum, powi =
+        LLVM.Intrinsic.(("llvm.is.fpclass", "llvm.copysign", "llvm.minimum", "llvm.maximum",
+                         "llvm.powi"))
     changed |= lower_intrinsic_calls!(fun) do builder, call, intr
         if intr in removable
             :erase
@@ -2346,6 +2425,8 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             lower_copysign!(builder, call)
         elseif intr == minimum || intr == maximum
             lower_minimum_maximum!(builder, call, intr == minimum ? "min" : "max")
+        elseif intr == powi
+            lower_powi!(builder, call)
         end
     end
 

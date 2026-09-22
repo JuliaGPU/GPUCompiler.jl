@@ -1246,6 +1246,48 @@ end
     end
 end
 
+@testset "integer power lowering" begin
+    # AIR has no integer power, so `llvm.powi` (as emitted for `@fastmath x^n`) is expanded
+    # into multiplies: unrolled for a constant exponent, and a loop over its bits otherwise.
+    mod = @eval module $(gensym())
+        pow_const(x) = @fastmath x^-5
+        pow_var(x, n) = @fastmath x^n
+        pow_vec(x, n) = ccall("llvm.powi.v2f32.i64", llvmcall, NTuple{2, VecElement{Float32}},
+                              (NTuple{2, VecElement{Float32}}, Int64), x, n)
+    end
+
+    # x^-5 = 1 / (x * (x^2)^2)
+    @test @filecheck begin
+        @check_label "define float @{{(julia|j)_pow_const_[0-9]+}}"
+        @check_not "@llvm.powi"
+        @check_count 3 "fmul float"
+        @check "fdiv float 1.000000e+00"
+        @check_not "fmul"
+        @check "ret float"
+        Metal.code_native(mod.pow_const, Tuple{Float32})
+    end
+
+    @test @filecheck begin
+        @check_label "define float @{{(julia|j)_pow_var_[0-9]+}}"
+        @check_not "@llvm.powi"
+        @check "phi float"
+        @check "fmul float"
+        @check "fdiv float 1.000000e+00"
+        @check_not "@{{(llvm|air)\\.[a-z_]*pow}}"
+        Metal.code_native(mod.pow_var, Tuple{Float32, Int32})
+    end
+
+    @test @filecheck begin
+        @check_label "define <2 x float> @{{(julia|j)_pow_vec_[0-9]+}}"
+        @check_not "@llvm.powi"
+        @check "phi <2 x float>"
+        @check "fmul <2 x float>"
+        @check "fdiv <2 x float>"
+        @check_not "@{{(llvm|air)\\.[a-z_]*pow}}"
+        Metal.code_native(mod.pow_vec, Tuple{NTuple{2, VecElement{Float32}}, Int64})
+    end
+end
+
 @testset "integer intrinsic lowering" begin
     # The integer ops Julia emits as llvm.* are lowered to their AIR builtins, so Metal.jl need
     # not wrap them. Names/signatures verified against Apple's frontend:
