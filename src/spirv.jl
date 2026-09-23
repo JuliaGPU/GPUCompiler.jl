@@ -110,6 +110,9 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # heap-reference accesses and type-tag stores are; the orderings serve no purpose on device
     demote_atomics!(mod)
 
+    # the SPIR-V back-ends lower `llvm.minimum`/`llvm.maximum` to NaN-ignoring `fmin`/`fmax`
+    lower_minimum_maximum!(mod)
+
     # convert the kernel state argument to a byval reference
     if job.config.kernel
         state = kernel_state_type(job)
@@ -301,6 +304,81 @@ function rm_freeze!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             erase!(inst)
             changed = true
         end
+    end
+
+    end
+    return changed
+end
+
+# expand `llvm.minimum` and `llvm.maximum`, which Julia uses for `min` and `max` of
+# floating-point numbers. these return NaN when either operand is NaN, and order -0.0 before
+# +0.0, but both SPIR-V back-ends translate them to OpenCL's `fmin` and `fmax`, which return
+# the other operand when one is NaN, and may return either zero. so use `llvm.minnum` and
+# `llvm.maxnum` (which translate to the same `fmin` and `fmax`) and fix up those cases,
+# unless the call's fast-math flags say they don't occur.
+function lower_minimum_maximum!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "lower minimum/maximum" begin
+
+    for f in collect(functions(mod))
+        isdeclaration(f) || continue
+        fn = LLVM.name(f)
+        is_minimum = startswith(fn, "llvm.minimum.")
+        is_minimum || startswith(fn, "llvm.maximum.") || continue
+
+        typ = return_type(function_type(f))
+        eltyp = typ isa LLVM.VectorType ? eltype(typ) : typ
+        bits = if eltyp == LLVM.HalfType()
+            16
+        elseif eltyp == LLVM.FloatType()
+            32
+        elseif eltyp == LLVM.DoubleType()
+            64
+        else
+            continue
+        end
+        ityp = LLVM.IntType(bits)
+        if typ isa LLVM.VectorType
+            ityp = LLVM.VectorType(ityp, length(typ))
+        end
+        num = LLVM.Function(mod, LLVM.Intrinsic(is_minimum ? "llvm.minnum" : "llvm.maxnum"),
+                            LLVMType[typ])
+
+        for use in collect(uses(f))
+            call = user(use)
+            call isa LLVM.CallInst || continue
+            x, y = arguments(call)
+            flags = LLVM.fast_math(call)
+            @dispose builder=IRBuilder() begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                res = call!(builder, function_type(num), num, LLVM.Value[x, y])
+                fast_math!(res; flags...)
+
+                # if both operands are zero, combine their sign bits
+                if !flags.nsz
+                    zero = LLVM.null(typ)
+                    both_zero = and!(builder, fcmp!(builder, LLVM.API.LLVMRealOEQ, x, zero),
+                                              fcmp!(builder, LLVM.API.LLVMRealOEQ, y, zero))
+                    xi = bitcast!(builder, x, ityp)
+                    yi = bitcast!(builder, y, ityp)
+                    zi = is_minimum ? or!(builder, xi, yi) : and!(builder, xi, yi)
+                    res = select!(builder, both_zero, bitcast!(builder, zi, typ), res)
+                end
+
+                # if either operand is NaN, return a NaN
+                if !flags.nnan
+                    either_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, x, y)
+                    res = select!(builder, either_nan, fadd!(builder, x, y), res)
+                end
+
+                replace_uses!(call, res)
+                erase!(call)
+            end
+            changed = true
+        end
+        isempty(uses(f)) && erase!(f)
     end
 
     end
