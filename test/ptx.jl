@@ -217,6 +217,168 @@ end
     @test occursin(r"call .*@julia_kernel", ir)
 end
 
+
+@testset "atomics on local memory" begin
+    # PTX has no atomics on the local state space: `atom` on a generic address of a stack slot
+    # faults at run time (CUDA_ERROR_INVALID_ADDRESS_SPACE). Enzyme emits such atomics when it
+    # accumulates into the shadow of a by-reference argument. They become plain memory
+    # operations when the pointer is known to be local, and get a run-time `isspacep.local`
+    # check when the address space is unknown. No GPU needed: this checks the IR. (The
+    # typed-pointer syntax below parses to opaque pointers too, so this covers both pointer
+    # regimes.)
+    insts(f) = [i for bb in blocks(f) for i in instructions(bb)]
+    count_of(f, T) = count(i -> i isa T, insts(f))
+    callees(f) = [LLVM.name(called_operand(i)) for i in insts(f)
+                  if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
+    rmw_ops = ["xchg", "add", "sub", "and", "nand", "or", "xor", "max", "min", "umax", "umin"]
+    ir = """
+        define float @stack(float %v) {
+          %a = alloca float
+          store float 1.0, float* %a
+          %gep = getelementptr inbounds float, float* %a, i64 0
+          %old = atomicrmw fadd float* %gep, float %v monotonic, align 4
+          %new = load float, float* %a
+          %r = fadd float %old, %new
+          ret float %r
+        }
+        define float @local_as(float addrspace(5)* %p, float %v) {
+          %old = atomicrmw fmax float addrspace(5)* %p, float %v seq_cst, align 4
+          ret float %old
+        }
+        define { i64, i1 } @stack_cmpxchg(i64 %c, i64 %n) {
+          %a = alloca i64
+          store i64 0, i64* %a
+          %r = cmpxchg i64* %a, i64 %c, i64 %n acq_rel monotonic, align 8
+          ret { i64, i1 } %r
+        }
+        define float @generic(float* %p, float %v) {
+          %old = atomicrmw fadd float* %p, float %v syncscope("block") monotonic, align 4
+          ret float %old
+        }
+        define { i32, i1 } @generic_cmpxchg(i32* %p, i32 %c, i32 %n) {
+          %r = cmpxchg weak i32* %p, i32 %c, i32 %n seq_cst seq_cst, align 4
+          ret { i32, i1 } %r
+        }
+        define float @global(float addrspace(1)* %p, float %v) {
+          %old = atomicrmw fadd float addrspace(1)* %p, float %v monotonic, align 4
+          ret float %old
+        }
+        define float @global_cast(float addrspace(1)* %p, float %v) {
+          %g = addrspacecast float addrspace(1)* %p to float*
+          %old = atomicrmw fadd float* %g, float %v monotonic, align 4
+          ret float %old
+        }
+        define float @shared(float addrspace(3)* %p, float %v) {
+          %old = atomicrmw fadd float addrspace(3)* %p, float %v monotonic, align 4
+          ret float %old
+        }
+        $(join(["""
+        define i32 @int_$op(i32* %p, i32 %v) {
+          %a = alloca i32
+          store i32 7, i32* %a
+          %x = atomicrmw $op i32* %a, i32 %v monotonic
+          %y = atomicrmw $op i32* %p, i32 %v monotonic
+          %r = add i32 %x, %y
+          ret i32 %r
+        }""" for op in rmw_ops], "\n"))
+        """
+    Context() do ctx
+        mod = parse(LLVM.Module, ir)
+        fn(name) = functions(mod)[name]
+        @test GPUCompiler.ptx_local_atomics!(mod)
+        @test !GPUCompiler.ptx_local_atomics!(mod)   # the checked atomics are not wrapped again
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, AlwaysInlinerPass())
+            add!(pb, GlobalDCEPass())
+            run!(pb, mod)
+        end
+        verify(mod)
+        @test !any(f -> startswith(LLVM.name(f), "gpucompiler.local_safe_atomic"), functions(mod))
+
+        # known to be local: no atomic left, the value is read, updated and written back
+        for f in ("stack", "local_as", "stack_cmpxchg")
+            @test count_of(fn(f), LLVM.AtomicRMWInst) == 0
+            @test count_of(fn(f), LLVM.AtomicCmpXchgInst) == 0
+        end
+        @test count_of(fn("stack"), LLVM.FAddInst) == 2
+        @test "llvm.maxnum.f32" in callees(fn("local_as"))
+
+        # unknown address space: a run-time check, the atomic kept for non-local memory with
+        # its ordering, scope, alignment and weakness
+        for f in ("generic", "generic_cmpxchg")
+            @test "llvm.nvvm.isspacep.local" in callees(fn(f))
+            @test count_of(fn(f), LLVM.StoreInst) == 1
+        end
+        rmw = only(i for i in insts(fn("generic")) if i isa LLVM.AtomicRMWInst)
+        @test ordering(rmw) == LLVM.API.LLVMAtomicOrderingMonotonic
+        @test syncscope(rmw) == SyncScope("block")
+        @test LLVM.API.LLVMGetAlignment(rmw) == 4
+        cx = only(i for i in insts(fn("generic_cmpxchg")) if i isa LLVM.AtomicCmpXchgInst)
+        @test isweak(cx) && success_ordering(cx) == LLVM.API.LLVMAtomicOrderingSequentiallyConsistent
+        @test LLVM.API.LLVMGetAlignment(cx) == 4
+
+        # global and shared memory: unchanged
+        for f in ("global", "global_cast", "shared")
+            @test count_of(fn(f), LLVM.AtomicRMWInst) == 1
+            @test isempty(callees(fn(f)))
+        end
+
+        # every integer operation: the stack slot is updated in place, the generic pointer checked
+        for op in rmw_ops
+            f = fn("int_$op")
+            @test count_of(f, LLVM.AtomicRMWInst) == 1
+            @test "llvm.nvvm.isspacep.local" in callees(f)
+        end
+    end
+
+    # the plain form stores what the atomic would: run both on the host for every operation
+    # (on a stack slot, so that the lowered code needs no GPU intrinsic)
+    for op in rmw_ops, (init, v) in ((7, 3), (3, 7), (0, 5), (5, 5), (-2, 3), (typemax(Int32), 1))
+        ir = """
+            define i32 @entry(i32 %init, i32 %v) {
+              %a = alloca i32
+              store i32 %init, i32* %a
+              %old = atomicrmw $op i32* %a, i32 %v monotonic
+              %new = load i32, i32* %a
+              ret i32 %new
+            }"""
+        results = map((false, true)) do lower
+            Context() do ctx
+                mod = parse(LLVM.Module, ir)
+                lower && GPUCompiler.ptx_local_atomics!(mod)
+                verify(mod)
+                string(mod)
+            end
+        end
+        ref, got = map(results) do r
+            f = @eval (a, b) -> Base.llvmcall(($r, "entry"), Int32, Tuple{Int32,Int32}, a, b)
+            Base.invokelatest(f, Int32(init), Int32(v))
+        end
+        @test got == ref
+    end
+end
+
+@testset "atomics on local memory, in the pipeline" begin
+    # `optimize_module!` runs the pass: an atomic on the kernel's own stack slot becomes a
+    # plain update, and one through a pointer argument gets the run-time check
+    @test @filecheck PTX.code_llvm(Tuple{Float32}; dump_module=true) do v
+        @check_not "atomicrmw"
+        Base.llvmcall("""
+            %a = alloca float
+            store float 1.0, float* %a
+            %old = atomicrmw fadd float* %a, float %0 monotonic
+            %new = load float, float* %a
+            ret float %new""", Float32, Tuple{Float32}, v)
+    end
+    @test @filecheck PTX.code_llvm(Tuple{Core.LLVMPtr{Int32,0}, Int32}; dump_module=true) do p, v
+        @check "llvm.nvvm.isspacep.local"
+        @check "atomicrmw xchg"
+        Base.llvmcall("""
+            %p = bitcast i8* %0 to i32*
+            %old = atomicrmw xchg i32* %p, i32 %1 monotonic
+            ret i32 %old""", Int32, Tuple{Core.LLVMPtr{Int32,0}, Int32}, p, v)
+    end
+end
 end
 
 ############################################################################################
