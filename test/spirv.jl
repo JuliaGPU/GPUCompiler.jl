@@ -183,6 +183,53 @@ end
 
 end
 
+@testset "min and max" begin
+    # Julia's `min` and `max` propagate NaNs and order -0.0 before +0.0, which the `fmin` and
+    # `fmax` the SPIR-V back-ends translate `llvm.minimum` and `llvm.maximum` to don't do
+    # (call the intrinsics directly: on Julia 1.10 and 1.11, `min` and `max` only use them
+    #  on aarch64 hosts)
+    mod = @eval module $(gensym())
+        const V = NTuple{4, VecElement{Float32}}
+        smin(x, y) = ccall("llvm.minimum.f32", llvmcall, Float32, (Float32, Float32), x, y)
+        smax(x, y) = ccall("llvm.maximum.f32", llvmcall, Float32, (Float32, Float32), x, y)
+        vmin(x, y) = ccall("llvm.minimum.v4f32", llvmcall, V, (V, V), x, y)
+        function kernel(p::Ptr{Float32}, q::Ptr{V}, x::Float32, y::Float32, v::V, w::V)
+            unsafe_store!(p, smin(x, y), 1)
+            unsafe_store!(p, smax(x, y), 2)
+            unsafe_store!(q, vmin(v, w))
+            return
+        end
+        fast_kernel(p::Ptr{Float32}, x::Float32, y::Float32) =
+            (unsafe_store!(p, Base.FastMath.min_fast(x, y)); return)
+    end
+    V = mod.V
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+        @check "call float @llvm.minnum.f32"
+        @check "fcmp uno float"
+        @check "call float @llvm.maxnum.f32"
+        @check "fcmp uno float"
+        @check "call <4 x float> @llvm.minnum.v4f32"
+        @check "fcmp uno <4 x float>"
+        @check_not "llvm.minimum"
+        @check_not "llvm.maximum"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float32}, Ptr{V}, Float32, Float32, V, V}; backend)
+    end
+
+    # with fast-math flags, NaNs and signed zeros don't need to be handled
+    # (Julia 1.12+ implements `min_fast` using `llvm.minimum`)
+    if VERSION >= v"1.12"
+        @test @filecheck begin
+            @check_label "define {{.*}} @{{(julia|j)_fast_kernel_[0-9]+}}"
+            @check "call fast float @llvm.minnum.f32"
+            @check_not "fcmp"
+            @check_not "select"
+            SPIRV.code_llvm(mod.fast_kernel, Tuple{Ptr{Float32}, Float32, Float32}; backend)
+        end
+    end
+end
+
 ############################################################################################
 
 @testset "asm" begin
@@ -211,6 +258,23 @@ end
         @check "%[[KERNEL]] = OpFunction %void None"
         @check_not "OpUnreachable"
         SPIRV.code_native(mod.kernel, Tuple{Bool}; backend, kernel=true)
+    end
+end
+
+@testset "min and max" begin
+    mod = @eval module $(gensym())
+        smin(x, y) = ccall("llvm.minimum.f32", llvmcall, Float32, (Float32, Float32), x, y)
+        function kernel(p::Ptr{Float32}, x::Float32, y::Float32)
+            unsafe_store!(p, smin(x, y))
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check "OpEntryPoint Kernel %[[KERNEL:[^ ]+]]"
+        @check "OpExtInst %float %{{[0-9]+}} fmin"
+        @check "OpUnordered"
+        SPIRV.code_native(mod.kernel, Tuple{Ptr{Float32}, Float32, Float32}; backend, kernel=true)
     end
 end
 
