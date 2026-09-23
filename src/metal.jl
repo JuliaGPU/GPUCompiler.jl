@@ -2201,6 +2201,82 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             end
         end
 
+        # floating-point class tests, which LLVM forms out of combined comparisons (e.g., of
+        # `isfinite` and `iszero`) but AIR does not support: test the value's bits instead
+        if intr == LLVM.Intrinsic("llvm.is.fpclass")
+            x, test = arguments(call)
+            typ = value_type(x)
+
+            # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
+            jltyp = if typ == LLVM.HalfType()
+                Float16
+            elseif typ == LLVM.FloatType()
+                Float32
+            elseif typ == LLVM.DoubleType()
+                Float64
+            else
+                error("Unsupported is.fpclass type: $typ")
+            end
+            mask = convert(Int, test)
+
+            @dispose builder=IRBuilder() begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                ityp = LLVM.IntType(8*sizeof(jltyp))
+                bits = bitcast!(builder, x, ityp)
+                magnitude = and!(builder, bits, LLVM.ConstantInt(ityp, ~Base.sign_mask(jltyp)))
+
+                # tests for the classes of the magnitude, emitted when needed
+                inf = Base.exponent_mask(jltyp)
+                qnan = inf | (Base.significand_mask(jltyp) + one(inf)) >> 1
+                normal = reinterpret(Unsigned, floatmin(jltyp))
+                compare(pred, lhs, rhs) = icmp!(builder, pred, lhs, LLVM.ConstantInt(ityp, rhs))
+                test_nan() = compare(LLVM.API.LLVMIntUGT, magnitude, inf)
+                test_qnan() = compare(LLVM.API.LLVMIntUGE, magnitude, qnan)
+                test_inf() = compare(LLVM.API.LLVMIntEQ, magnitude, inf)
+                test_normal() = compare(LLVM.API.LLVMIntULT,
+                                        sub!(builder, magnitude, LLVM.ConstantInt(ityp, normal)),
+                                        inf - normal)
+                test_subnormal() = compare(LLVM.API.LLVMIntULT,
+                                           sub!(builder, magnitude, LLVM.ConstantInt(ityp, 1)),
+                                           normal - 1)
+                test_zero() = compare(LLVM.API.LLVMIntEQ, magnitude, 0)
+                negative = nothing
+                function with_sign(test, neg)
+                    if negative === nothing
+                        negative = compare(LLVM.API.LLVMIntSLT, bits, 0)
+                    end
+                    and!(builder, test, neg ? negative : not!(builder, negative))
+                end
+
+                # combine the tested classes, as encoded by the `FPClassTest` mask bits
+                terms = LLVM.Value[]
+                tested(bit) = mask & (1 << bit) != 0
+                if tested(0) && tested(1)
+                    push!(terms, test_nan())
+                elseif tested(0)
+                    push!(terms, and!(builder, test_nan(), not!(builder, test_qnan())))
+                elseif tested(1)
+                    push!(terms, test_qnan())
+                end
+                for (test, negbit, posbit) in ((test_inf, 2, 9), (test_normal, 3, 8),
+                                               (test_subnormal, 4, 7), (test_zero, 5, 6))
+                    if tested(negbit) && tested(posbit)
+                        push!(terms, test())
+                    elseif tested(negbit) || tested(posbit)
+                        push!(terms, with_sign(test(), tested(negbit)))
+                    end
+                end
+                new_value = isempty(terms) ? LLVM.ConstantInt(LLVM.Int1Type(), 0) :
+                                             foldl((a, b) -> or!(builder, a, b), terms)
+
+                replace_uses!(call, new_value)
+                erase!(call)
+                changed = true
+            end
+        end
+
         # copysign
         if intr == LLVM.Intrinsic("llvm.copysign")
             arg0, arg1 = operands(call)
