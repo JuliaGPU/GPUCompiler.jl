@@ -59,6 +59,10 @@ function runtime_cstring_type(job::CompilerJob{SPIRVCompilerTarget})
     end
 end
 
+# OpenCL requires `fma` to be supported, and correctly rounded, so `fma` should use it rather
+# than Julia's Float64-based `fma_emulated` fallback (which fails without Float64 support).
+have_fma(@nospecialize(target::SPIRVCompilerTarget), T::Type) = true
+
 llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
     "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1" :
     "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1"

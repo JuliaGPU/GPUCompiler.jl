@@ -41,6 +41,21 @@ end
 
 @testset "IR" begin
 
+@testset "fma" begin
+    # `fma` uses the hardware instruction, not the Float64-based `fma_emulated`
+    mod = @eval module $(gensym())
+        kernel(p::Ptr{Float32}, x::Float32, y::Float32, z::Float32) =
+            (unsafe_store!(p, fma(x, y, z)); return)
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+        @check "call float @llvm.fma.f32"
+        @check_not "double"
+        GCN.code_llvm(mod.kernel, Tuple{Ptr{Float32}, Float32, Float32, Float32})
+    end
+end
+
 @testset "kernel calling convention" begin
     mod = @eval module $(gensym())
         kernel() = return
