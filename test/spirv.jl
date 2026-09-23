@@ -186,12 +186,16 @@ end
 @testset "min and max" begin
     # Julia's `min` and `max` propagate NaNs and order -0.0 before +0.0, which the `fmin` and
     # `fmax` the SPIR-V back-ends translate `llvm.minimum` and `llvm.maximum` to don't do
+    # (call the intrinsics directly: on Julia 1.10 and 1.11, `min` and `max` only use them
+    #  on aarch64 hosts)
     mod = @eval module $(gensym())
         const V = NTuple{4, VecElement{Float32}}
+        smin(x, y) = ccall("llvm.minimum.f32", llvmcall, Float32, (Float32, Float32), x, y)
+        smax(x, y) = ccall("llvm.maximum.f32", llvmcall, Float32, (Float32, Float32), x, y)
         vmin(x, y) = ccall("llvm.minimum.v4f32", llvmcall, V, (V, V), x, y)
         function kernel(p::Ptr{Float32}, q::Ptr{V}, x::Float32, y::Float32, v::V, w::V)
-            unsafe_store!(p, min(x, y), 1)
-            unsafe_store!(p, max(x, y), 2)
+            unsafe_store!(p, smin(x, y), 1)
+            unsafe_store!(p, smax(x, y), 2)
             unsafe_store!(q, vmin(v, w))
             return
         end
@@ -259,8 +263,9 @@ end
 
 @testset "min and max" begin
     mod = @eval module $(gensym())
+        smin(x, y) = ccall("llvm.minimum.f32", llvmcall, Float32, (Float32, Float32), x, y)
         function kernel(p::Ptr{Float32}, x::Float32, y::Float32)
-            unsafe_store!(p, min(x, y))
+            unsafe_store!(p, smin(x, y))
             return
         end
     end
