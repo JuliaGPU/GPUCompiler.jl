@@ -659,9 +659,6 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # Metal.malloc uses.
     rewrite_generic_null_selects!(mod)
 
-    # AIR does not support LLVM atomic load/store instructions (see `demote_atomics!`)
-    demote_atomics!(mod)
-
     # the macOS 27 back-end rejects bare LLVM fences (Metal.jl#968)
     lower_fences!(job, mod)
 
