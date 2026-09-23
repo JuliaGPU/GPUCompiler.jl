@@ -59,7 +59,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
         register!(pb, GPULowerCPUFeaturesPass(job))
         register!(pb, GPULowerPTLSPass(job))
-        register!(pb, GPULowerGCFramePass(job))
+        register!(pb, GPULowerGCFramePass(job, relocs))
         register!(pb, GPULinkRuntimePass(job, relocs))
         register!(pb, GPULinkLibrariesPass(job))
         register!(pb, GPUFinishRuntimeIntrinsicsPass(job))
@@ -323,7 +323,8 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     # lower GC intrinsics
     if !uses_julia_runtime(job)
         add!(mpm, NewPMFunctionPassManager()) do fpm
-            add!(fpm, GPULowerGCFramePass(job))
+            # Use the registered pass because it owns `relocs`.
+            add!(fpm, "GPULowerGCFrame")
         end
         if job.config.libraries
             # Use the registered pass because it owns `relocs`; the others only capture `job`.
@@ -531,6 +532,7 @@ GPUFinishRuntimeIntrinsicsPass(job) =
 # lower-level intrinsics which then can be lowered to architecture-specific code.
 struct LowerGCFrame
     job::CompilerJob
+    relocs::Relocations
 end
 function (self::LowerGCFrame)(fun::LLVM.Function)
     mod = LLVM.parent(fun)
@@ -549,10 +551,13 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
             # decode the call
             ops = arguments(call)
             sz = ops[2]
+            typ = ops[3]
 
             # replace with PTX alloc_obj
             @dispose builder=IRBuilder() begin
                 position!(builder, call)
+                debuglocation!(builder, call)
+                check_allocation!(builder, typ, self.relocs)
                 ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz])
                 replace_uses!(call, ptr)
             end
@@ -580,7 +585,40 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
 
     return changed
 end
-GPULowerGCFramePass(job) = NewPMFunctionPass("GPULowerGCFrame", LowerGCFrame(job))
+GPULowerGCFramePass(job, relocs::Relocations) =
+    NewPMFunctionPass("GPULowerGCFrame", LowerGCFrame(job, relocs))
+
+# only allocations of objects without references to other heap objects are supported.
+#
+# there is no garbage collector on the device, and `gc_pool_alloc` only provides the object's
+# memory (without the header Julia's runtime expects, e.g., for `typeof`), so what works is a
+# statically-typed use of an object that holds plain data (an escaping `Ref{Int}`, a mutable
+# struct with bits fields, a boxed bits value). references are a different matter: Julia puts
+# GC orderings on their loads and stores, which not every back-end can express, and they
+# typically come from code that isn't GPU compatible, e.g., closures boxing captured variables.
+# allocations that the optimizer could not remove are checked here, after Julia's `AllocOpt`,
+# marking the unsupported ones for `check_ir` to report with a backtrace.
+const UNSUPPORTED_ALLOCATION_MARKER = "gpu_unsupported_allocation"
+function check_allocation!(builder::IRBuilder, typ::LLVM.Value, relocs::Relocations)
+    ref = referenced_object(typ, relocs)
+    ref === nothing && return
+    T = something(ref)
+    (T isa DataType && isconcretetype(T)) || return
+    Base.datatype_pointerfree(T) && return
+
+    # emit a call to a marker, passing the name of the type
+    bb = position(builder)
+    mod = LLVM.parent(LLVM.parent(bb))
+    name = globalstring_ptr!(builder, string(T), "allocated_type")
+    marker_type = LLVM.FunctionType(LLVM.VoidType(), [value_type(name)])
+    marker = if haskey(functions(mod), UNSUPPORTED_ALLOCATION_MARKER)
+        functions(mod)[UNSUPPORTED_ALLOCATION_MARKER]
+    else
+        LLVM.Function(mod, UNSUPPORTED_ALLOCATION_MARKER, marker_type)
+    end
+    call!(builder, marker_type, marker, [name])
+    return
+end
 
 # lower the `julia.ptls_states` intrinsic by removing it, since it is GPU incompatible.
 #
