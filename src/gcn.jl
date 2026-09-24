@@ -62,6 +62,10 @@ end
 
 pass_by_ref(@nospecialize(job::CompilerJob{GCNCompilerTarget})) = true
 
+# AMD GPUs have fused multiply-add, so `fma` should use the hardware instruction rather than
+# Julia's Float64-based `fma_emulated` fallback.
+have_fma(@nospecialize(target::GCNCompilerTarget), T::Type) = true
+
 function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     lower_throw_extra!(job, mod)
