@@ -2162,33 +2162,38 @@ end
 
 @testset "atomics on thread-private objects" begin
     # GPUCompiler.jl#934: `AllocOpt` moves a non-escaping object with `@atomic` fields to the
-    # stack, keeping its compare-exchange loops, which Metal cannot express
-    mod = @eval module $(gensym())
-        mutable struct Acc
-            @atomic n::Int32
-            @atomic x::Float32
+    # stack, keeping its compare-exchange loops, which Metal cannot express. From Julia 1.13,
+    # `@atomic` modifications are calls to `julia.atomicmodify`, which `AllocOpt` treats as
+    # an escape, so the object stays on the heap (the "thread-private memory" testset covers
+    # the lowering on every version).
+    @static if VERSION < v"1.13-"
+        mod = @eval module $(gensym())
+            mutable struct Acc
+                @atomic n::Int32
+                @atomic x::Float32
+            end
+            function kernel(out::Core.LLVMPtr{Float32,1}, x::Float32)
+                acc = Acc(0, 0f0)
+                @atomic acc.n += Int32(1)
+                @atomic acc.x += x
+                unsafe_store!(out, (@atomic acc.n) + (@atomic acc.x))
+                return
+            end
         end
-        function kernel(out::Core.LLVMPtr{Float32,1}, x::Float32)
-            acc = Acc(0, 0f0)
-            @atomic acc.n += Int32(1)
-            @atomic acc.x += x
-            unsafe_store!(out, (@atomic acc.n) + (@atomic acc.x))
-            return
+        source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Float32,1}, Float32},
+                                Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"15", metal=v"3.2", air=v"2.7")
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        @test @filecheck begin
+            @check "alloca"
+            @check "cmpxchg"
+            GPUCompiler.code_llvm(job; dump_module=true)
         end
-    end
-    source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Float32,1}, Float32},
-                            Base.get_world_counter())
-    target = MetalCompilerTarget(; macos=v"15", metal=v"3.2", air=v"2.7")
-    job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
-    @test @filecheck begin
-        @check "alloca"
-        @check "cmpxchg"
-        GPUCompiler.code_llvm(job; dump_module=true)
-    end
-    @test @filecheck begin
-        @check_not "cmpxchg"
-        @check_not "air.atomic"
-        GPUCompiler.code_native(job; dump_module=true)
+        @test @filecheck begin
+            @check_not "cmpxchg"
+            @check_not "air.atomic"
+            GPUCompiler.code_native(job; dump_module=true)
+        end
     end
 end
 
