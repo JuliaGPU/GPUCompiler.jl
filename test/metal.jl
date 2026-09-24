@@ -2170,6 +2170,38 @@ end
                                            metal=v"3.1", air=v"2.6"))
     end
 
+    @testset "unsupported atomics without validation" begin
+        # the lowering reports them too, instead of selecting AIR intrinsics that don't exist
+        source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"27", metal=v"4.1", air=v"2.9")
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        Context(; opaque_pointers=true) do ctx
+            mod = parse(LLVM.Module, kernel("""
+                %a = atomicrmw add ptr addrspace(1) %p, i64 1 monotonic, align 8
+                %b = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4
+                """))
+            err = try
+                GPUCompiler.lower_atomics!(job, mod)
+                nothing
+            catch err
+                err
+            end
+            @test err isa GPUCompiler.InvalidIRError
+            @test startswith(only(err.errors)[1], "64-bit atomic operation")
+        end
+
+        # e.g. when reflecting, which compiles without validation
+        function kernel64(p::Core.LLVMPtr{Int64,1})
+            Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int64}, p), 1, :monotonic)
+            return
+        end
+        source = methodinstance(typeof(kernel64), Tuple{Core.LLVMPtr{Int64,1}},
+                                Base.get_world_counter())
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        @test occursin("store atomic i64", sprint(io -> GPUCompiler.code_llvm(io, job)))
+        @test_throws GPUCompiler.InvalidIRError GPUCompiler.code_native(devnull, job)
+    end
+
     # end-to-end, from Julia code emitting LLVM atomics (like UnsafeAtomics does), which also
     # exercises typed pointers on Julia versions that still use them
     mod = @eval module $(gensym())
@@ -2320,8 +2352,8 @@ end
 
     # end-to-end: Julia's `atomic_fence` intrinsic must not reach the AIR as a bare `fence`
     # (Julia 1.14 added a syncscope argument to the intrinsic, JuliaLang/julia#60311)
-    function kernel(p::Core.LLVMPtr{Int,1})
-        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int}, p), 1, :monotonic)
+    function kernel(p::Core.LLVMPtr{Int32,1})
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int32}, p), Int32(1), :monotonic)
         @static if VERSION >= v"1.14.0-DEV.1371"
             Core.Intrinsics.atomic_fence(:release, :system)
         else
@@ -2329,7 +2361,7 @@ end
         end
         return
     end
-    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int,1}}, Base.get_world_counter())
+    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int32,1}}, Base.get_world_counter())
     target = MetalCompilerTarget(; macos=v"27", metal=v"4.1", air=v"2.9")
     config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
     job = CompilerJob(source, config)
