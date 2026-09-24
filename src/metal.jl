@@ -465,6 +465,13 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     # Metal never supports 128-bit integers
     append!(errors, check_ir_values(mod, LLVM.IntType(128)))
 
+    # fences with a synchronization scope `lower_fences!` cannot map
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        inst isa LLVM.FenceInst && metal_thread_scope(inst) === nothing || continue
+        push!(errors, ("fence with synchronization scope $(syncscope_name(inst))",
+                       backtrace(inst), string(inst)))
+    end
+
     errors
 end
 
@@ -713,6 +720,41 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     return
 end
 
+# MSL memory_order values: relaxed=0, acquire=2, release=3, acq_rel=4, seq_cst=5
+metal_memory_order(order::AtomicOrdering) =
+    order == LLVM.API.LLVMAtomicOrderingAcquire ? 2 :
+    order == LLVM.API.LLVMAtomicOrderingRelease ? 3 :
+    order == LLVM.API.LLVMAtomicOrderingAcquireRelease ? 4 :
+    order == LLVM.API.LLVMAtomicOrderingSequentiallyConsistent ? 5 : 0
+
+# MSL mem_flags naming the memory an ordered operation orders. LLVM orders all memory, so
+# cover device and threadgroup memory, the writable address spaces LLVM code can access.
+const METAL_MEM_FLAGS = 1 | 2   # mem_device | mem_threadgroup
+
+# The MSL thread_scope for the synchronization scope of an atomic operation or fence: thread=0,
+# simdgroup=4, threadgroup=1, device=2. Scopes are spelled like the LLVM SPIR-V back-end
+# does: `singlethread`, `subgroup`, `workgroup`, `device`, and the system scope (LLVM's
+# default). Metal code can only synchronize with other threads on the same device (MSL has no
+# scope that includes the host or other devices), so the system scope is the device scope.
+# Threadgroup memory is only shared within a threadgroup, and MSL never uses a wider scope
+# for it. Returns `nothing` for other scopes, which `validate_ir` rejects (like the NVPTX and
+# AMDGPU back-ends do) rather than guessing what they mean.
+function metal_thread_scope(inst::LLVM.Instruction, as::Union{Nothing,Int}=nothing)
+    ss = syncscope(inst)
+    scope = if ss == SyncScope("singlethread")
+        0
+    elseif ss == SyncScope("subgroup")
+        4
+    elseif ss == SyncScope("workgroup")
+        1
+    elseif ss == SyncScope("device") || ss == SyncScope("system")
+        2
+    else
+        return nothing
+    end
+    return as == 3 && scope == 2 ? 1 : scope
+end
+
 # Before LLVM 18, `ordering(inst)` calls `LLVMGetOrdering`, which incorrectly casts fences
 # to AtomicRMWInst. Use the stable textual form on all versions to keep this workaround tested.
 function fence_ordering(inst::LLVM.FenceInst)
@@ -729,14 +771,12 @@ end
 # Lower LLVM fences to air.atomic.fence(flags, order, scope), as MSL's atomic_thread_fence
 # does. Bare fences from Julia's atomic_fence crash the macOS 27 AGX back-end (Metal.jl#968).
 #
-# MSL memory_order values are acquire=2, release=3, acq_rel=4, seq_cst=5. Metal 3.2-4.0
-# only supports relaxed/seq_cst fences, so strengthen other orderings to seq_cst. Before
-# Metal 3.2 the intrinsic is unavailable; retain the bare fence. Such targets still
-# require a back-end that accepts bare fences.
+# Metal 3.2-4.0 only supports relaxed/seq_cst fences, so strengthen other orderings to
+# seq_cst. Before Metal 3.2 the intrinsic is unavailable; retain the bare fence. Such targets
+# still require a back-end that accepts bare fences.
 #
-# Cover device and threadgroup memory (mem_flags=1|2), the shared writable LLVM address spaces.
-# Use thread scope (0) for singlethread and device scope (2) otherwise. Metal has no
-# system-wide scope: this only synchronizes threads on the same device.
+# Cover device and threadgroup memory (`METAL_MEM_FLAGS`), the shared writable LLVM address
+# spaces, and map the scope like for atomics (`metal_thread_scope`).
 function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
     metal = job.config.target.metal
     metal >= v"3.2" || return false
@@ -756,28 +796,15 @@ function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod
     end
 
     for inst in worklist
-        order = if metal < v"4.1"
-            5   # seq_cst
-        else
-            ord = fence_ordering(inst)
-            if ord == LLVM.API.LLVMAtomicOrderingAcquire
-                2
-            elseif ord == LLVM.API.LLVMAtomicOrderingRelease
-                3
-            elseif ord == LLVM.API.LLVMAtomicOrderingAcquireRelease
-                4
-            else
-                5   # seq_cst (the only other ordering LLVM allows on a fence)
-            end
-        end
-        scope = syncscope(inst) == SyncScope("singlethread") ? 0 : 2
-        flags = 1 | 2   # device | threadgroup
+        order = metal < v"4.1" ? 5 : metal_memory_order(fence_ordering(inst))
+        # (`validate_ir` rejects unknown scopes; without validation, use the widest one)
+        scope = something(metal_thread_scope(inst), 2)
 
         @dispose builder=IRBuilder() begin
             position!(builder, inst)
             debuglocation!(builder, inst)
             call!(builder, fence_ft, fence_fn,
-                  [ConstantInt(T_int32, flags), ConstantInt(T_int32, order),
+                  [ConstantInt(T_int32, METAL_MEM_FLAGS), ConstantInt(T_int32, order),
                    ConstantInt(T_int32, scope)])
         end
         erase!(inst)

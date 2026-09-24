@@ -1734,7 +1734,7 @@ end
 @testset "fence lowering" begin
     orders = [("acquire", 2), ("release", 3), ("acq_rel", 4), ("seq_cst", 5)]
     scopes = [("", 2), ("syncscope(\"singlethread\") ", 0),
-              ("syncscope(\"workgroup\") ", 2),
+              ("syncscope(\"workgroup\") ", 1),
               (raw"syncscope(\"fence acquire\22\5C\0A\") ", 2)]
     metadata = ("", ", !dbg !3, !annotation !4")
     fences_ir = join(["fence $scope$order$md" for (order, _) in orders
@@ -1781,6 +1781,18 @@ end
             end
             @test !GPUCompiler.lower_fences!(fence_job(metal), mod)
         end
+    end
+
+    # scopes without an MSL equivalent are rejected, not guessed
+    Context() do ctx
+        mod = parse(LLVM.Module, """
+            define void @f() {
+              fence syncscope("block") seq_cst
+              ret void
+            }
+            """)
+        errors = GPUCompiler.validate_ir(fence_job(v"4.1"), mod)
+        @test only(errors)[1] == "fence with synchronization scope \"block\""
     end
 
     # end-to-end: Julia's `atomic_fence` intrinsic must not reach the AIR as a bare `fence`
