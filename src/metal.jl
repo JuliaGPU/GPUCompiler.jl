@@ -737,6 +737,7 @@ end
 # ordering and a synchronization scope, and `lower_atomics!` turns them into the
 # `air.atomic.*` intrinsics MSL uses:
 #
+# - atomics on the thread's own memory become plain accesses (`demote_private_atomic!`);
 # - on targets without ordered atomics (MSL < 4.1), an ordered operation becomes a relaxed one
 #   bracketed by fences, as `AtomicExpand` does for targets that `shouldInsertFencesForAtomic`;
 # - operations that AIR cannot express are rewritten in terms of ones it can
@@ -806,10 +807,41 @@ function atomic_bits(T::LLVMType)
     return nothing
 end
 
+# Does `ptr` point to the thread's own stack, i.e., is every object it can be derived from an
+# `alloca`? That is the case for atomics on objects that Julia's `AllocOpt` moved to the stack,
+# e.g., a non-escaping mutable struct with `@atomic` fields (GPUCompiler.jl#934). Metal cannot
+# express those (MSL only has atomics on device and threadgroup memory), but they don't need
+# to be atomic: no other thread can access a thread's stack, even when it has a pointer to it
+# (thread memory is private to every thread), so plain accesses behave the same. Anything this
+# cannot trace back to an `alloca`, e.g., a function argument or a loaded pointer, is not
+# known to be private.
+function is_thread_private(ptr::LLVM.Value)
+    seen = Set{LLVM.Value}()
+    worklist = LLVM.Value[ptr]
+    while !isempty(worklist)
+        val = pop!(worklist)
+        val in seen && continue
+        push!(seen, val)
+        if val isa LLVM.AllocaInst
+            continue
+        elseif val isa LLVM.GetElementPtrInst || val isa LLVM.BitCastInst
+            push!(worklist, operands(val)[1])
+        elseif val isa LLVM.PHIInst
+            append!(worklist, first.(LLVM.incoming(val)))
+        elseif val isa LLVM.SelectInst
+            push!(worklist, operands(val)[2], operands(val)[3])
+        else
+            return false
+        end
+    end
+    return true
+end
+
 # How to lower `inst`, an atomic memory operation, for the job's target. Like the rule tables
 # of LLVM's legalizers, the rules are tried in order and the first that applies decides. Returns
 # the action, or the reason why the operation cannot be lowered (which `validate_ir` reports):
 #
+# - `:demote`: an atomic on the thread's own memory, which becomes plain accesses;
 # - `:cast`: a floating-point load, store or exchange, which becomes an integer one (like the
 #   default `TargetLowering::shouldCast*InIR`), so that AIR's integer intrinsics can be used;
 # - `:partword`: an 8- or 16-bit operation, which becomes a masked operation on the containing
@@ -824,6 +856,8 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
     if op !== nothing && !haskey(AIR_ATOMICRMW_OPS, op) && !(op in EXPANDABLE_ATOMICRMW_OPS)
         return "atomicrmw $op operation"
     end
+
+    is_thread_private(atomic_pointer(inst)) && return :demote
 
     as = addrspace(value_type(atomic_pointer(inst)))
     if as != 1 && as != 3
@@ -900,6 +934,50 @@ function set_atomic!(inst::LLVM.Instruction, order::AtomicOrdering, scope::SyncS
     syncscope!(inst, scope)
     volatile && LLVM.API.LLVMSetVolatile(inst, true)
     return inst
+end
+
+# Replace an atomic operation on the thread's own memory (see `is_thread_private`) by plain
+# accesses. Its ordering and scope don't matter either: no other thread can observe the memory
+# it accesses, so it cannot synchronize with any.
+function demote_private_atomic!(inst::LLVM.Instruction)
+    ptr = atomic_pointer(inst)
+    T = atomic_value_type(inst)
+    volatile = is_volatile(inst)
+    @dispose builder=IRBuilder() begin
+        position!(builder, inst)
+        debuglocation!(builder, inst)
+        function plain_load()
+            ld = load!(builder, T, ptr)
+            alignment!(ld, alignment(inst))
+            volatile && LLVM.API.LLVMSetVolatile(ld, true)
+            ld
+        end
+        function plain_store(val)
+            st = store!(builder, val, ptr)
+            alignment!(st, alignment(inst))
+            volatile && LLVM.API.LLVMSetVolatile(st, true)
+            st
+        end
+        if inst isa LLVM.LoadInst
+            replace_uses!(inst, plain_load())
+        elseif inst isa LLVM.StoreInst
+            plain_store(operands(inst)[1])
+        elseif inst isa LLVM.AtomicRMWInst
+            old = plain_load()
+            plain_store(atomicrmw_value!(builder, atomicrmw_op(inst), old, operands(inst)[2]))
+            replace_uses!(inst, old)
+        else
+            # compare-exchange: store the new value if the old one matches, else the old one
+            cmp, new = operands(inst)[2:3]
+            old = plain_load()
+            success = icmp!(builder, LLVM.API.LLVMIntEQ, old, cmp)
+            plain_store(select!(builder, success, new, old))
+            result = insert_value!(builder, UndefValue(value_type(inst)), old, 0)
+            replace_uses!(inst, insert_value!(builder, result, success, 1))
+        end
+    end
+    erase!(inst)
+    return
 end
 
 # Emit a loop that atomically replaces the 32-bit word at `ptr` by `update(builder, word)`
@@ -1318,6 +1396,10 @@ function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
         action = metal_atomic_action(job, inst)
         # (`validate_ir` rejects unsupported operations; without validation, select them as-is)
         action isa String && continue
+        if action === :demote
+            demote_private_atomic!(inst)
+            continue
+        end
         job.config.target.metal < v"4.1" && insert_atomic_fences!(inst)
         if action === :cast
             inst = cast_atomic_to_int!(job, inst)

@@ -2022,6 +2022,61 @@ end
         }
         """; metal=v"4.0", air=v"2.8")
 
+    @testset "thread-private memory" begin
+        # atomics on the thread's stack (e.g. from `AllocOpt`) become plain accesses, whatever
+        # their ordering, operation or size (GPUCompiler.jl#934)
+        ir = lower_metal_atomics(kernel("""
+            %slot = alloca i64, align 8
+            %hi = getelementptr inbounds i32, ptr %slot, i64 1
+            store i32 0, ptr %slot, align 4
+            %pair = cmpxchg ptr %slot, i32 0, i32 1 seq_cst monotonic, align 4
+            %fadd = atomicrmw fadd ptr %hi, float 1.0 seq_cst, align 4
+            %sel = select i1 %c, ptr %slot, ptr %hi
+            %umax = atomicrmw umax ptr %sel, i32 2 acquire, align 4
+            %wide = load atomic i64, ptr %slot seq_cst, align 8
+            store atomic volatile i64 %wide, ptr %slot release, align 8
+            %old = extractvalue { i32, i1 } %pair, 0
+            store i32 %old, ptr addrspace(1) %p
+            """; args="ptr addrspace(1) %p, i1 %c"); metal=v"3.2", air=v"2.7")
+        @test @filecheck begin
+            @check_label "define void @f"
+            # compare-exchange
+            @check "[[OLD:%.+]] = load i32, ptr %slot, align 4"
+            @check_next "[[OK:%.+]] = icmp eq i32 [[OLD]], 0"
+            @check_next "[[NEW:%.+]] = select i1 [[OK]], i32 1, i32 [[OLD]]"
+            @check_next "store i32 [[NEW]], ptr %slot, align 4"
+            # read-modify-write, also through a select of stack pointers
+            @check "load float, ptr %hi, align 4"
+            @check_next "fadd float"
+            @check_next "store float"
+            @check "load i32, ptr %sel, align 4"
+            @check_next "icmp ugt i32"
+            @check_next "select i1"
+            @check_next "store i32"
+            # 64-bit loads and stores
+            @check "load i64, ptr %slot, align 8"
+            @check_next "store volatile i64 {{%.+}}, ptr %slot, align 8"
+            @check_not "air.atomic"
+            ir
+        end
+
+        # also through phis of stack pointers
+        ir = lower_metal_atomics(kernel("""
+            %a = alloca i32, align 4
+            %b = alloca i32, align 4
+            br i1 %c, label %l, label %r
+          l:
+            br label %m
+          r:
+            br label %m
+          m:
+            %phi = phi ptr [ %a, %l ], [ %b, %r ]
+            %x = atomicrmw add ptr %phi, i32 1 monotonic, align 4
+            """; args="i1 %c"); metal=v"4.1", air=v"2.9")
+        @test occursin("load i32, ptr %phi", ir)
+        @test !occursin("air.atomic", ir)
+    end
+
     @testset "unsupported atomics" begin
         for (body, reason) in (
                 ("%a = atomicrmw add ptr %g, i32 1 monotonic, align 4",
@@ -2044,8 +2099,11 @@ end
                  "misaligned atomic operation"),
                 ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"agent\") monotonic, align 4",
                  "synchronization scope \"agent\""),
+                # a pointer that may not be on the stack
+                ("%s = alloca i32, align 4\n%m = select i1 %b, ptr %s, ptr %g\n%a = atomicrmw add ptr %m, i32 1 monotonic, align 4",
+                 "atomic operation in address space 0"),
             )
-            errors = lower_metal_atomics(kernel(body; args="ptr addrspace(1) %p, ptr addrspace(3) %t, ptr %g, ptr addrspace(2) %c");
+            errors = lower_metal_atomics(kernel(body; args="ptr addrspace(1) %p, ptr addrspace(3) %t, ptr %g, ptr addrspace(2) %c, i1 %b");
                                          metal=v"4.1", air=v"2.9")
             @test occursin(reason, errors)
         end
@@ -2099,6 +2157,38 @@ end
         @test occursin("@air.atomic.global.cmpxchg.weak.i32", asm)
         @test occursin("@air.atomic.fence", asm) == (metal < v"4.1")
         @test !occursin(r"(atomicrmw|cmpxchg|load atomic|store atomic) ", asm)
+    end
+end
+
+@testset "atomics on thread-private objects" begin
+    # GPUCompiler.jl#934: `AllocOpt` moves a non-escaping object with `@atomic` fields to the
+    # stack, keeping its compare-exchange loops, which Metal cannot express
+    mod = @eval module $(gensym())
+        mutable struct Acc
+            @atomic n::Int32
+            @atomic x::Float32
+        end
+        function kernel(out::Core.LLVMPtr{Float32,1}, x::Float32)
+            acc = Acc(0, 0f0)
+            @atomic acc.n += Int32(1)
+            @atomic acc.x += x
+            unsafe_store!(out, (@atomic acc.n) + (@atomic acc.x))
+            return
+        end
+    end
+    source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Float32,1}, Float32},
+                            Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"15", metal=v"3.2", air=v"2.7")
+    job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+    @test @filecheck begin
+        @check "alloca"
+        @check "cmpxchg"
+        GPUCompiler.code_llvm(job; dump_module=true)
+    end
+    @test @filecheck begin
+        @check_not "cmpxchg"
+        @check_not "air.atomic"
+        GPUCompiler.code_native(job; dump_module=true)
     end
 end
 
