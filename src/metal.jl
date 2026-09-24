@@ -1880,6 +1880,78 @@ end
 #
 # we don't have a proper back-end, so we're missing out on intrinsics-related functionality.
 
+# The function `name` of `mod`, declaring it with type `ft` if it doesn't exist yet. An
+# existing function must have that type.
+function declare!(mod::LLVM.Module, name::String, ft::LLVM.FunctionType)
+    fns = functions(mod)
+    haskey(fns, name) || return LLVM.Function(mod, name, ft)
+    f = fns[name]
+    function_type(f) == ft ||
+        error("Conflicting declarations of $name: $(function_type(f)) and $ft")
+    return f
+end
+
+# Call the function `name`, declaring it for the types of `args` and return type `T_ret`.
+function call_declared!(builder::IRBuilder, name::String, T_ret::LLVMType,
+                        args::Vector{<:LLVM.Value})
+    mod = LLVM.parent(LLVM.parent(position(builder)))
+    ft = LLVM.FunctionType(T_ret, LLVMType[value_type(arg) for arg in args])
+    return call!(builder, ft, declare!(mod, name, ft), args)
+end
+
+# the suffix LLVM and AIR use to mangle overloaded intrinsics on `typ`, e.g. `v4f32`
+function type_suffix(@nospecialize(typ::LLVMType))
+    typ isa LLVM.IntegerType && return "i$(width(typ))"
+    typ == LLVM.HalfType() && return "f16"
+    typ == LLVM.BFloatType() && return "bf16"
+    typ == LLVM.FloatType() && return "f32"
+    typ == LLVM.DoubleType() && return "f64"
+    typ isa LLVM.VectorType && return "v$(length(typ))$(type_suffix(eltype(typ)))"
+    error("Unsupported intrinsic type: $typ")
+end
+
+# the Julia floating-point type of an LLVM one (the C API lacks getPrimitiveSizeInBits)
+function julia_float_type(typ::LLVMType)
+    typ == LLVM.HalfType() && return Float16
+    typ == LLVM.FloatType() && return Float32
+    typ == LLVM.DoubleType() && return Float64
+    error("Unsupported floating-point type: $typ")
+end
+
+# the intrinsic that `inst` calls, if any
+function called_intrinsic(inst::LLVM.Instruction)
+    inst isa LLVM.CallBase || return nothing
+    callee = called_operand(inst)
+    (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || return nothing
+    return LLVM.Intrinsic(callee)
+end
+
+# Lower the calls to intrinsics in `fun`: `lower(builder, call, intrinsic)` is called for each,
+# with `builder` positioned at the call, and returns the value that replaces the call,
+# `:erase` to remove it, or `nothing` to keep it. The calls are collected first, so `lower`
+# can emit code, but it must not erase other instructions.
+function lower_intrinsic_calls!(lower, fun::LLVM.Function)
+    calls = LLVM.CallBase[]
+    for bb in blocks(fun), inst in instructions(bb)
+        inst isa LLVM.CallBase || continue
+        called_intrinsic(inst) === nothing || push!(calls, inst)
+    end
+    isempty(calls) && return false
+    changed = false
+    @dispose builder=IRBuilder() begin
+        for call in calls
+            position!(builder, call)
+            debuglocation!(builder, call)
+            new = lower(builder, call, called_intrinsic(call))
+            new === nothing && continue
+            new === :erase || replace_uses!(call, new)
+            erase!(call)
+            changed = true
+        end
+    end
+    return changed
+end
+
 # AIR has no vector floating-point min/max intrinsic; only the scalar `air.fmin`/`air.fmax`
 # exist. Julia's NaN-propagating `min`/`max` lower to `llvm.minimum`/`llvm.maximum` (and the
 # non-propagating `llvm.minnum`/`llvm.maxnum`), which LLVM's vectorizers can widen to vector
@@ -1890,43 +1962,24 @@ end
 # form, and semantically exact.
 function scalarize_vector_minmax!(fun::LLVM.Function)
     minmax = LLVM.Intrinsic.(["llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum"])
-
-    worklist = LLVM.CallBase[]
-    for bb in blocks(fun), inst in instructions(bb)
-        inst isa LLVM.CallBase || continue
-        callee = called_operand(inst)
-        (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
-        LLVM.Intrinsic(callee) in minmax || continue
-        value_type(inst) isa LLVM.VectorType || continue
-        push!(worklist, inst)
-    end
-    isempty(worklist) && return false
-
     mod = LLVM.parent(fun)
-    for call in worklist
-        vecty = value_type(call)::LLVM.VectorType
-        elty = eltype(vecty)
+    return lower_intrinsic_calls!(fun) do builder, call, intr
+        vecty = value_type(call)
+        (intr in minmax && vecty isa LLVM.VectorType) || return nothing
         # the scalar overload of the same intrinsic, e.g. llvm.minimum.v4f32 -> llvm.minimum.f32
-        intr = LLVM.Intrinsic(called_operand(call))
-        scalar_f = LLVM.Function(mod, intr, LLVMType[elty])
+        scalar_f = LLVM.Function(mod, intr, LLVMType[eltype(vecty)])
         scalar_ft = function_type(scalar_f)
         arg0, arg1 = arguments(call)
-        @dispose builder=IRBuilder() begin
-            position!(builder, call)
-            debuglocation!(builder, call)
-            res = PoisonValue(vecty)
-            for i in 0:Int(length(vecty))-1
-                idx = ConstantInt(LLVM.Int32Type(), i)
-                a = extract_element!(builder, arg0, idx)
-                b = extract_element!(builder, arg1, idx)
-                s = call!(builder, scalar_ft, scalar_f, LLVM.Value[a, b])
-                res = insert_element!(builder, res, s, idx)
-            end
-            replace_uses!(call, res)
-            erase!(call)
+        res = PoisonValue(vecty)
+        for i in 0:Int(length(vecty))-1
+            idx = ConstantInt(LLVM.Int32Type(), i)
+            a = extract_element!(builder, arg0, idx)
+            b = extract_element!(builder, arg1, idx)
+            s = call!(builder, scalar_ft, scalar_f, LLVM.Value[a, b])
+            res = insert_element!(builder, res, s, idx)
         end
+        res
     end
-    return true
 end
 
 # floating-point math intrinsics that Julia emits as plain `llvm.*` and that Metal exposes as
@@ -1938,55 +1991,34 @@ end
 # target's fast-math passes): it lets Metal.jl drop its hand-written `air.*`/`air.fast_*`
 # overrides for these ops and rely on the LLVM intrinsics Julia already generates. `round` is
 # covered too — Julia lowers it to `llvm.rint` (round-to-even).
+#
+# llvm intrinsic => (precise air op, relaxed f32 air op or `nothing`)
+# Verified against Apple's frontend (`xcrun metal -S -emit-llvm`, precise vs -ffast-math):
+# every op has an `air.<op>.f16` and `air.<op>.f32`; all but `fma` also have an f32-only
+# `air.fast_<op>` that Apple selects under fast math. Half always stays precise, and `fma`
+# is exact so even fast math keeps `air.fma.{f16,f32}`.
+const AIR_MATH_INTRINSICS = Dict(
+    "llvm.sqrt"  => ("air.sqrt",  "air.fast_sqrt"),
+    "llvm.fma"   => ("air.fma",   nothing),
+    "llvm.floor" => ("air.floor", "air.fast_floor"),
+    "llvm.ceil"  => ("air.ceil",  "air.fast_ceil"),
+    "llvm.trunc" => ("air.trunc", "air.fast_trunc"),
+    "llvm.rint"  => ("air.rint",  "air.fast_rint"),
+)
 function lower_math_intrinsics!(fun::LLVM.Function)
-    # llvm intrinsic => (precise air op, relaxed f32 air op or `nothing`)
-    # Verified against Apple's frontend (`xcrun metal -S -emit-llvm`, precise vs -ffast-math):
-    # every op has an `air.<op>.f16` and `air.<op>.f32`; all but `fma` also have an f32-only
-    # `air.fast_<op>` that Apple selects under fast math. Half always stays precise, and `fma`
-    # is exact so even fast math keeps `air.fma.{f16,f32}`.
-    math_intrinsics = Dict(
-        LLVM.Intrinsic("llvm.sqrt")  => ("air.sqrt",  "air.fast_sqrt"),
-        LLVM.Intrinsic("llvm.fma")   => ("air.fma",   nothing),
-        LLVM.Intrinsic("llvm.floor") => ("air.floor", "air.fast_floor"),
-        LLVM.Intrinsic("llvm.ceil")  => ("air.ceil",  "air.fast_ceil"),
-        LLVM.Intrinsic("llvm.trunc") => ("air.trunc", "air.fast_trunc"),
-        LLVM.Intrinsic("llvm.rint")  => ("air.rint",  "air.fast_rint"),
-    )
-
-    worklist = Tuple{LLVM.CallBase, String, Union{String,Nothing}}[]
-    for bb in blocks(fun), inst in instructions(bb)
-        inst isa LLVM.CallBase || continue
-        callee = called_operand(inst)
-        (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
-        mapping = get(math_intrinsics, LLVM.Intrinsic(callee), nothing)
-        mapping === nothing && continue
+    return lower_intrinsic_calls!(fun) do builder, call, intr
+        mapping = get(AIR_MATH_INTRINSICS, LLVM.name(intr), nothing)
+        mapping === nothing && return nothing
         # Metal floats are f16/f32 only; skip f64 (rejected by validate_ir) and vector types
         # (these ops have no `air.<op>.v4f32`) rather than synthesize a nonexistent intrinsic.
-        typ = value_type(inst)
-        (typ == LLVM.HalfType() || typ == LLVM.FloatType()) || continue
-        push!(worklist, (inst, mapping[1], mapping[2]))
-    end
-    isempty(worklist) && return false
-
-    mod = LLVM.parent(fun)
-    fns = functions(mod)
-    for (call, precise, fast) in worklist
         typ = value_type(call)
+        (typ == LLVM.HalfType() || typ == LLVM.FloatType()) || return nothing
+        precise, fast = mapping
         # the relaxed variant exists for f32 only; f16 always uses the precise op
         use_fast = fast !== nothing && typ == LLVM.FloatType() && LLVM.fast_math(call).afn
-        suffix = typ == LLVM.HalfType() ? "f16" : "f32"
-        fn = "$(use_fast ? fast : precise).$suffix"
-        ft = function_type(called_operand(call))
-        air = haskey(fns, fn) ? fns[fn] : LLVM.Function(mod, fn, ft)
-        @dispose builder=IRBuilder() begin
-            position!(builder, call)
-            debuglocation!(builder, call)
-            new_value = call!(builder, ft, air, arguments(call))
-            replace_uses!(call, new_value)
-            erase!(call)
-        end
+        call_declared!(builder, "$(use_fast ? fast : precise).$(type_suffix(typ))", typ,
+                       collect(LLVM.Value, arguments(call)))
     end
-    return true
 end
 
 # Fuse chained integer min/max into AIR's native 3-way builtins: a 2-way
@@ -1996,47 +2028,44 @@ end
 # every chained min/max benefits, not just literal 3-argument calls. Integer only: float min/max
 # go through the NaN-propagating wrapper, which `air.f{min,max}3` would not preserve.
 function fuse_minmax3!(fun::LLVM.Function)
-    mod = LLVM.parent(fun)
     pat = r"^air\.(min|max)\.(s|u)\.i(8|16|32|64)$"
-    changed = false
+    function minmax_callee(inst)
+        inst isa LLVM.CallInst || return nothing
+        callee = called_operand(inst)
+        (callee isa LLVM.Function && occursin(pat, LLVM.name(callee))) || return nothing
+        return LLVM.name(callee)
+    end
+
+    # the next pair to fold: an outer call with an operand that is a call to the same builtin
+    # (the name pins down min/max, signedness and width) feeding only the outer one, else
+    # folding it would drop a live value
+    function next_fold()
+        for bb in blocks(fun), outer in instructions(bb)
+            outer isa LLVM.CallInst || continue
+            fn = minmax_callee(outer)
+            fn === nothing && continue
+            args = arguments(outer)
+            length(args) == 2 || continue
+            for (inner, other) in ((args[1], args[2]), (args[2], args[1]))
+                minmax_callee(inner) == fn && length(collect(uses(inner))) == 1 &&
+                    return outer, inner, other
+            end
+        end
+        return nothing
+    end
 
     # fold one pair then rescan: each fold removes a call, so this terminates, and rescanning
     # avoids mutating the instruction stream while iterating it.
-    while true
-        fold = nothing  # (outer, inner, other_operand)
-        for bb in blocks(fun), outer in instructions(bb)
-            outer isa LLVM.CallInst || continue
-            oc = called_operand(outer)
-            (oc isa LLVM.Function && match(pat, LLVM.name(oc)) !== nothing) || continue
-            oargs = arguments(outer)
-            length(oargs) == 2 || continue
-            for i in 1:2
-                inner = oargs[i]
-                inner isa LLVM.CallInst || continue
-                ic = called_operand(inner)
-                # same builtin (name pins down min/max, signedness and width)
-                (ic isa LLVM.Function && LLVM.name(ic) == LLVM.name(oc)) || continue
-                # inner must feed only this outer, else folding it would drop a live value
-                length(collect(uses(inner))) == 1 || continue
-                fold = (outer, inner, oargs[i == 1 ? 2 : 1])
-                break
-            end
-            fold === nothing || break
-        end
-        fold === nothing && break
-
+    changed = false
+    while (fold = next_fold()) !== nothing
         outer, inner, other = fold
-        m = match(pat, LLVM.name(called_operand(outer)))
-        fn3 = "air.$(m[1])3.$(m[2]).i$(m[3])"
-        T = value_type(outer)
-        ft3 = LLVM.FunctionType(T, LLVMType[T, T, T])
-        f3 = haskey(functions(mod), fn3) ? functions(mod)[fn3] : LLVM.Function(mod, fn3, ft3)
-        iargs = arguments(inner)
+        fn3 = replace(LLVM.name(called_operand(outer)), r"^air\.(min|max)\." => s"air.\g<1>3.")
         @dispose builder=IRBuilder() begin
             position!(builder, outer)
             debuglocation!(builder, outer)
-            v = call!(builder, ft3, f3, LLVM.Value[iargs[1], iargs[2], other])
-            replace_uses!(outer, v)
+            a, b = arguments(inner)
+            replace_uses!(outer, call_declared!(builder, fn3, value_type(outer),
+                                                LLVM.Value[a, b, other]))
             erase!(outer)
             erase!(inner)   # now dead (its only use was `outer`)
         end
@@ -2045,414 +2074,268 @@ function fuse_minmax3!(fun::LLVM.Function)
     return changed
 end
 
+# unsupported intrinsics that are safe to remove
+const REMOVABLE_INTRINSICS = ("llvm.experimental.noalias.scope.decl", "llvm.lifetime.start",
+                              "llvm.lifetime.end", "llvm.assume")
+
+# intrinsics that map straight to AIR functions on the same values, suffixed by the type and,
+# for integers, the signedness: llvm intrinsic => (air function, signed)
+const AIR_VALUE_INTRINSICS = Dict(
+    # one argument
+    "llvm.abs"      => ("air.abs", true),
+    "llvm.fabs"     => ("air.fabs", missing),
+    # two arguments
+    "llvm.umin"     => ("air.min", false),
+    "llvm.smin"     => ("air.min", true),
+    "llvm.umax"     => ("air.max", false),
+    "llvm.smax"     => ("air.max", true),
+    "llvm.minnum"   => ("air.fmin", missing),
+    "llvm.maxnum"   => ("air.fmax", missing),
+)
+
+# integer bit intrinsics: pure renames to AIR's builtin names (same signature, including
+# the `i1` on clz/ctz). Apple's frontend emits these `air.*` rather than the `llvm.*`
+# forms, so we rename rather than rely on the metallib loader accepting `llvm.*`.
+const AIR_BIT_INTRINSICS = Dict(
+    "llvm.ctlz"       => "air.clz",
+    "llvm.cttz"       => "air.ctz",
+    "llvm.ctpop"      => "air.popcount",
+    "llvm.bitreverse" => "air.reverse_bits",
+)
+
+function lower_value_intrinsic!(builder::IRBuilder, call::LLVM.CallBase, fn::String, signed)
+    typ = value_type(call)
+    elty = typ isa LLVM.VectorType ? eltype(typ) : typ
+
+    # AIR has no native bfloat fabs/fmin/fmax (MSL promotes bfloat to float for them), so do
+    # the same: call the float function on fpext'd operands and fptrunc the result back.
+    # `optyp` is the type the AIR call actually uses.
+    promote_bf = elty == LLVM.BFloatType()
+    optyp = if !promote_bf
+        typ
+    elseif typ isa LLVM.VectorType
+        LLVM.VectorType(LLVM.FloatType(), Int(length(typ)))
+    else
+        LLVM.FloatType()
+    end
+    fn *= elty isa LLVM.IntegerType ? ".$(signed::Bool ? "s" : "u").$(type_suffix(optyp))" :
+                                      ".$(type_suffix(optyp))"
+
+    # AIR's value intrinsics take only the value operands. `llvm.abs` carries an extra
+    # `i1 is_int_min_poison` flag that `air.abs` does not, so drop any operand whose type
+    # isn't the result type. (For the others every operand is the result type.)
+    args = LLVM.Value[arg for arg in arguments(call) if value_type(arg) == typ]
+    promote_bf && (args = LLVM.Value[fpext!(builder, arg, optyp) for arg in args])
+    new = call_declared!(builder, fn, optyp, args)
+    return promote_bf ? fptrunc!(builder, new, typ) : new
+end
+
+# floating-point class tests, which LLVM forms out of combined comparisons (e.g., of
+# `isfinite` and `iszero`) but AIR does not support: test the value's bits instead
+function lower_is_fpclass!(builder::IRBuilder, call::LLVM.CallBase)
+    x, test = arguments(call)
+    jltyp = julia_float_type(value_type(x))
+    mask = convert(Int, test)
+
+    ityp = LLVM.IntType(8*sizeof(jltyp))
+    bits = bitcast!(builder, x, ityp)
+    magnitude = and!(builder, bits, LLVM.ConstantInt(ityp, ~Base.sign_mask(jltyp)))
+
+    # tests for the classes of the magnitude, emitted when needed
+    inf = Base.exponent_mask(jltyp)
+    qnan = inf | (Base.significand_mask(jltyp) + one(inf)) >> 1
+    normal = reinterpret(Unsigned, floatmin(jltyp))
+    compare(pred, lhs, rhs) = icmp!(builder, pred, lhs, LLVM.ConstantInt(ityp, rhs))
+    test_nan() = compare(LLVM.API.LLVMIntUGT, magnitude, inf)
+    test_qnan() = compare(LLVM.API.LLVMIntUGE, magnitude, qnan)
+    test_inf() = compare(LLVM.API.LLVMIntEQ, magnitude, inf)
+    test_normal() = compare(LLVM.API.LLVMIntULT,
+                            sub!(builder, magnitude, LLVM.ConstantInt(ityp, normal)),
+                            inf - normal)
+    test_subnormal() = compare(LLVM.API.LLVMIntULT,
+                               sub!(builder, magnitude, LLVM.ConstantInt(ityp, 1)),
+                               normal - 1)
+    test_zero() = compare(LLVM.API.LLVMIntEQ, magnitude, 0)
+    negative = nothing
+    function with_sign(test, neg)
+        if negative === nothing
+            negative = compare(LLVM.API.LLVMIntSLT, bits, 0)
+        end
+        and!(builder, test, neg ? negative : not!(builder, negative))
+    end
+
+    # combine the tested classes, as encoded by the `FPClassTest` mask bits
+    terms = LLVM.Value[]
+    tested(bit) = mask & (1 << bit) != 0
+    if tested(0) && tested(1)
+        push!(terms, test_nan())
+    elseif tested(0)
+        push!(terms, and!(builder, test_nan(), not!(builder, test_qnan())))
+    elseif tested(1)
+        push!(terms, test_qnan())
+    end
+    for (test, negbit, posbit) in ((test_inf, 2, 9), (test_normal, 3, 8),
+                                   (test_subnormal, 4, 7), (test_zero, 5, 6))
+        if tested(negbit) && tested(posbit)
+            push!(terms, test())
+        elseif tested(negbit) || tested(posbit)
+            push!(terms, with_sign(test(), tested(negbit)))
+        end
+    end
+    return isempty(terms) ? LLVM.ConstantInt(LLVM.Int1Type(), 0) :
+                            foldl((a, b) -> or!(builder, a, b), terms)
+end
+
+# copysign, by twiddling the sign bit
+function lower_copysign!(builder::IRBuilder, call::LLVM.CallBase)
+    arg0, arg1 = arguments(call)
+    typ = value_type(call)
+    jltyp = julia_float_type(typ)
+    ityp = LLVM.IntType(8*sizeof(jltyp))
+    arg0′ = bitcast!(builder, arg0, ityp)
+    arg1′ = bitcast!(builder, arg1, ityp)
+    sign = and!(builder, arg1′, LLVM.ConstantInt(ityp, Base.sign_mask(jltyp)))
+    mantissa = and!(builder, arg0′, LLVM.ConstantInt(ityp, ~Base.sign_mask(jltyp)))
+    return bitcast!(builder, or!(builder, sign, mantissa), typ)
+end
+
+# IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
+function lower_minimum_maximum!(builder::IRBuilder, call::LLVM.CallBase, minmax::String)
+    mod = LLVM.parent(LLVM.parent(position(builder)))
+    typ = value_type(call)
+
+    # AIR has no bfloat min/max, so promote to float as MSL does: build the wrapper
+    # in float and fpext/fptrunc around it. `optyp` is the type it operates on.
+    promote_bf = typ == LLVM.BFloatType()
+    optyp = promote_bf ? LLVM.FloatType() : typ
+    op_ft = LLVM.FunctionType(optyp, LLVMType[optyp, optyp])
+    jltyp = julia_float_type(optyp)
+    bits = 8*sizeof(jltyp)
+
+    # @fastmath / fastmath=true set `nnan` (assume no NaNs), so we can skip the
+    # NaN-propagating wrapper and call the relaxed AIR builtin directly, matching Apple's
+    # -ffast-math: f32 has air.fast_f{min,max}; f16 has no fast form, so use air.f{min,max}.
+    # otherwise create a function that performs the IEEE-compliant operation. normally
+    # we'd do this inline, but LLVM.jl doesn't have BB split functionality.
+    nnan = LLVM.fast_math(call).nnan
+    fn = if !nnan
+        "air.$(minmax)imum.f$bits"
+    elseif optyp == LLVM.FloatType()
+        "air.fast_f$minmax.f32"
+    else
+        "air.f$minmax.f$bits"
+    end
+    f = if nnan || haskey(functions(mod), fn)
+        declare!(mod, fn, op_ft)
+    else
+        build_minimum_maximum!(mod, fn, op_ft, jltyp, minmax)
+    end
+
+    args = collect(LLVM.Value, arguments(call))
+    promote_bf && (args = LLVM.Value[fpext!(builder, arg, optyp) for arg in args])
+    new = call!(builder, op_ft, f, args)
+    return promote_bf ? fptrunc!(builder, new, typ) : new
+end
+
+function build_minimum_maximum!(mod::LLVM.Module, fn::String, op_ft::LLVM.FunctionType,
+                                jltyp::Type, minmax::String)
+    optyp = return_type(op_ft)
+    f = LLVM.Function(mod, fn, op_ft)
+    push!(function_attributes(f), EnumAttribute("alwaysinline"))
+    arg0, arg1 = parameters(f)
+
+    bb_check_arg0 = BasicBlock(f, "check_arg0")
+    bb_nan_arg0 = BasicBlock(f, "nan_arg0")
+    bb_check_arg1 = BasicBlock(f, "check_arg1")
+    bb_nan_arg1 = BasicBlock(f, "nan_arg1")
+    bb_check_zero = BasicBlock(f, "check_zero")
+    bb_compare_zero = BasicBlock(f, "compare_zero")
+    bb_fallback = BasicBlock(f, "fallback")
+
+    @dispose builder=IRBuilder() begin
+        # first, check if either argument is NaN, and return it if so
+
+        position!(builder, bb_check_arg0)
+        arg0_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, arg0, arg0)
+        br!(builder, arg0_nan, bb_nan_arg0, bb_check_arg1)
+
+        position!(builder, bb_nan_arg0)
+        ret!(builder, arg0)
+
+        position!(builder, bb_check_arg1)
+        arg1_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, arg1, arg1)
+        br!(builder, arg1_nan, bb_nan_arg1, bb_check_zero)
+
+        position!(builder, bb_nan_arg1)
+        ret!(builder, arg1)
+
+        # then, check if both arguments are zero and have a mismatching sign.
+        # if so, return in accordance to the intrinsic (minimum or maximum)
+
+        position!(builder, bb_check_zero)
+
+        typ′ = LLVM.IntType(8*sizeof(jltyp))
+        arg0′ = bitcast!(builder, arg0, typ′)
+        arg1′ = bitcast!(builder, arg1, typ′)
+
+        arg0_zero = fcmp!(builder, LLVM.API.LLVMRealUEQ, arg0,
+                          LLVM.ConstantFP(optyp, zero(jltyp)))
+        arg1_zero = fcmp!(builder, LLVM.API.LLVMRealUEQ, arg1,
+                          LLVM.ConstantFP(optyp, zero(jltyp)))
+        args_zero = and!(builder, arg0_zero, arg1_zero)
+        arg0_sign = and!(builder, arg0′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
+        arg1_sign = and!(builder, arg1′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
+        sign_mismatch = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign, arg1_sign)
+        relevant_zero = and!(builder, args_zero, sign_mismatch)
+        br!(builder, relevant_zero, bb_compare_zero, bb_fallback)
+
+        position!(builder, bb_compare_zero)
+        arg0_negative = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign,
+                              LLVM.ConstantInt(typ′, 0))
+        val = if minmax == "min"
+            select!(builder, arg0_negative, arg0, arg1)
+        else
+            select!(builder, arg0_negative, arg1, arg0)
+        end
+        ret!(builder, val)
+
+        # finally, it's safe to use the existing minnum/maxnum intrinsics
+
+        position!(builder, bb_fallback)
+        fallback = declare!(mod, "air.f$minmax.f$(8*sizeof(jltyp))", op_ft)
+        ret!(builder, call!(builder, op_ft, fallback, collect(parameters(f))))
+    end
+    return f
+end
+
 # replace LLVM intrinsics with AIR equivalents
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
 
-    mod = LLVM.parent(fun)
-    changed = false
-
     # AIR lacks vector min/max intrinsics; scalarize so the per-call lowering below applies.
-    changed |= scalarize_vector_minmax!(fun)
+    changed = scalarize_vector_minmax!(fun)
 
     # lower the floating-point math intrinsics Julia emits (sqrt, fma, floor, ...) to their
     # AIR device functions, picking the relaxed `air.fast_*` variant for `afn`-flagged calls.
     changed |= lower_math_intrinsics!(fun)
 
-    # determine worklist
-    worklist = LLVM.CallBase[]
-    for bb in blocks(fun), inst in instructions(bb)
-        isa(inst, LLVM.CallBase) || continue
-
-        call_fun = called_operand(inst)
-        isa(call_fun, LLVM.Function) || continue
-        LLVM.isintrinsic(call_fun) || continue
-
-        push!(worklist, inst)
-    end
-
-    # lower intrinsics
-    for call in worklist
-        bb = LLVM.parent(call)
-        call_fun = called_operand(call)
-        call_ft = function_type(call_fun)
-        intr = LLVM.Intrinsic(call_fun)
-
-        # unsupported, but safe to remove
-        unsupported_intrinsics = LLVM.Intrinsic.([
-            "llvm.experimental.noalias.scope.decl",
-            "llvm.lifetime.start",
-            "llvm.lifetime.end",
-            "llvm.assume"
-        ])
-        if intr in unsupported_intrinsics
-            erase!(call)
-            changed = true
-        end
-
-        # intrinsics that map straight to AIR
-        mappable_intrinsics = Dict(
-            # one argument
-            LLVM.Intrinsic("llvm.abs")      => ("air.abs", true),
-            LLVM.Intrinsic("llvm.fabs")     => ("air.fabs", missing),
-            # two arguments
-            LLVM.Intrinsic("llvm.umin")     => ("air.min", false),
-            LLVM.Intrinsic("llvm.smin")     => ("air.min", true),
-            LLVM.Intrinsic("llvm.umax")     => ("air.max", false),
-            LLVM.Intrinsic("llvm.smax")     => ("air.max", true),
-            LLVM.Intrinsic("llvm.minnum")   => ("air.fmin", missing),
-            LLVM.Intrinsic("llvm.maxnum")   => ("air.fmax", missing),
-
-        )
-        if haskey(mappable_intrinsics, intr)
-            fn, signed = mappable_intrinsics[intr]
-
-            # determine type of the intrinsic
-            typ = value_type(call)
-
-            # AIR has no native bfloat fabs/fmin/fmax (MSL promotes bfloat to float for
-            # them), so do the same: call the float intrinsic on fpext'd operands and
-            # fptrunc the result back. `optyp` is the type the AIR call actually uses.
-            bf = LLVM.BFloatType()
-            promote_bf = typ == bf || (typ isa LLVM.VectorType && eltype(typ) == bf)
-            optyp = if typ == bf
-                LLVM.FloatType()
-            elseif promote_bf
-                LLVM.VectorType(LLVM.FloatType(), Int(length(typ)))
-            else
-                typ
-            end
-            function type_suffix(typ)
-                # XXX: can't we use LLVM to do this kind of mangling?
-                if typ isa LLVM.IntegerType
-                    "i$(width(typ))"
-                elseif typ == LLVM.HalfType()
-                    "f16"
-                elseif typ == LLVM.FloatType()
-                    "f32"
-                elseif typ == LLVM.DoubleType()
-                    "f64"
-                elseif typ isa LLVM.VectorType
-                    "v$(length(typ))$(type_suffix(eltype(typ)))"
-                else
-                    error("Unsupported intrinsic type: $typ")
-                end
-            end
-
-            if optyp isa LLVM.IntegerType || (optyp isa LLVM.VectorType && eltype(optyp) isa LLVM.IntegerType)
-                fn *= "." * (signed::Bool ? "s" : "u") * "." * type_suffix(optyp)
-            else
-                fn *= "." * type_suffix(optyp)
-            end
-
-            # AIR's value intrinsics take only the value operands. `llvm.abs` carries an extra
-            # `i1 is_int_min_poison` flag that `air.abs` does not, so drop any operand whose
-            # type isn't the result type before building the call. (For the others every
-            # operand is the result type, so this is a no-op.)
-            air_args = LLVM.Value[a for a in arguments(call) if value_type(a) == typ]
-            air_ft = LLVM.FunctionType(optyp, LLVMType[optyp for _ in air_args])
-            new_intr = if haskey(functions(mod), fn)
-                functions(mod)[fn]
-            else
-                LLVM.Function(mod, fn, air_ft)
-            end
-            @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
-
-                call_args = promote_bf ?
-                    LLVM.Value[fpext!(builder, a, optyp) for a in air_args] : air_args
-                new_value = call!(builder, air_ft, new_intr, call_args)
-                if promote_bf
-                    new_value = fptrunc!(builder, new_value, typ)
-                end
-                replace_uses!(call, new_value)
-                erase!(call)
-                changed = true
-            end
-        end
-
-        # integer bit intrinsics: pure renames to AIR's builtin names (same signature, including
-        # the `i1` on clz/ctz). Apple's frontend emits these `air.*` rather than the `llvm.*`
-        # forms, so we rename rather than rely on the metallib loader accepting `llvm.*`.
-        bit_renames = Dict(
-            LLVM.Intrinsic("llvm.ctlz")       => ("llvm.ctlz",       "air.clz"),
-            LLVM.Intrinsic("llvm.cttz")       => ("llvm.cttz",       "air.ctz"),
-            LLVM.Intrinsic("llvm.ctpop")      => ("llvm.ctpop",      "air.popcount"),
-            LLVM.Intrinsic("llvm.bitreverse") => ("llvm.bitreverse", "air.reverse_bits"),
-        )
-        if haskey(bit_renames, intr)
-            llvm_base, air_base = bit_renames[intr]
+    changed |= lower_intrinsic_calls!(fun) do builder, call, intr
+        name = LLVM.name(intr)
+        if name in REMOVABLE_INTRINSICS
+            :erase
+        elseif haskey(AIR_VALUE_INTRINSICS, name)
+            lower_value_intrinsic!(builder, call, AIR_VALUE_INTRINSICS[name]...)
+        elseif haskey(AIR_BIT_INTRINSICS, name)
             # keep the mangled type suffix, e.g. llvm.ctlz.i32 -> air.clz.i32
-            fn = air_base * LLVM.name(call_fun)[length(llvm_base)+1:end]
-            new_intr = if haskey(functions(mod), fn)
-                functions(mod)[fn]
-            else
-                LLVM.Function(mod, fn, call_ft)
-            end
-            @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
-
-                new_value = call!(builder, call_ft, new_intr, arguments(call))
-                replace_uses!(call, new_value)
-                erase!(call)
-                changed = true
-            end
-        end
-
-        # floating-point class tests, which LLVM forms out of combined comparisons (e.g., of
-        # `isfinite` and `iszero`) but AIR does not support: test the value's bits instead
-        if intr == LLVM.Intrinsic("llvm.is.fpclass")
-            x, test = arguments(call)
-            typ = value_type(x)
-
-            # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
-            jltyp = if typ == LLVM.HalfType()
-                Float16
-            elseif typ == LLVM.FloatType()
-                Float32
-            elseif typ == LLVM.DoubleType()
-                Float64
-            else
-                error("Unsupported is.fpclass type: $typ")
-            end
-            mask = convert(Int, test)
-
-            @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
-
-                ityp = LLVM.IntType(8*sizeof(jltyp))
-                bits = bitcast!(builder, x, ityp)
-                magnitude = and!(builder, bits, LLVM.ConstantInt(ityp, ~Base.sign_mask(jltyp)))
-
-                # tests for the classes of the magnitude, emitted when needed
-                inf = Base.exponent_mask(jltyp)
-                qnan = inf | (Base.significand_mask(jltyp) + one(inf)) >> 1
-                normal = reinterpret(Unsigned, floatmin(jltyp))
-                compare(pred, lhs, rhs) = icmp!(builder, pred, lhs, LLVM.ConstantInt(ityp, rhs))
-                test_nan() = compare(LLVM.API.LLVMIntUGT, magnitude, inf)
-                test_qnan() = compare(LLVM.API.LLVMIntUGE, magnitude, qnan)
-                test_inf() = compare(LLVM.API.LLVMIntEQ, magnitude, inf)
-                test_normal() = compare(LLVM.API.LLVMIntULT,
-                                        sub!(builder, magnitude, LLVM.ConstantInt(ityp, normal)),
-                                        inf - normal)
-                test_subnormal() = compare(LLVM.API.LLVMIntULT,
-                                           sub!(builder, magnitude, LLVM.ConstantInt(ityp, 1)),
-                                           normal - 1)
-                test_zero() = compare(LLVM.API.LLVMIntEQ, magnitude, 0)
-                negative = nothing
-                function with_sign(test, neg)
-                    if negative === nothing
-                        negative = compare(LLVM.API.LLVMIntSLT, bits, 0)
-                    end
-                    and!(builder, test, neg ? negative : not!(builder, negative))
-                end
-
-                # combine the tested classes, as encoded by the `FPClassTest` mask bits
-                terms = LLVM.Value[]
-                tested(bit) = mask & (1 << bit) != 0
-                if tested(0) && tested(1)
-                    push!(terms, test_nan())
-                elseif tested(0)
-                    push!(terms, and!(builder, test_nan(), not!(builder, test_qnan())))
-                elseif tested(1)
-                    push!(terms, test_qnan())
-                end
-                for (test, negbit, posbit) in ((test_inf, 2, 9), (test_normal, 3, 8),
-                                               (test_subnormal, 4, 7), (test_zero, 5, 6))
-                    if tested(negbit) && tested(posbit)
-                        push!(terms, test())
-                    elseif tested(negbit) || tested(posbit)
-                        push!(terms, with_sign(test(), tested(negbit)))
-                    end
-                end
-                new_value = isempty(terms) ? LLVM.ConstantInt(LLVM.Int1Type(), 0) :
-                                             foldl((a, b) -> or!(builder, a, b), terms)
-
-                replace_uses!(call, new_value)
-                erase!(call)
-                changed = true
-            end
-        end
-
-        # copysign
-        if intr == LLVM.Intrinsic("llvm.copysign")
-            arg0, arg1 = operands(call)
-            @assert value_type(arg0) == value_type(arg1)
             typ = value_type(call)
-
-            # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
-            jltyp = if typ == LLVM.HalfType()
-                Float16
-            elseif typ == LLVM.FloatType()
-                Float32
-            elseif typ == LLVM.DoubleType()
-                Float64
-            else
-                error("Unsupported copysign type: $typ")
-            end
-
-            @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
-
-                # get bits
-                typ′ = LLVM.IntType(8*sizeof(jltyp))
-                arg0′ = bitcast!(builder, arg0, typ′)
-                arg1′ = bitcast!(builder, arg1, typ′)
-
-                # twiddle bits
-                sign = and!(builder, arg1′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
-                mantissa = and!(builder, arg0′, LLVM.ConstantInt(typ′, ~Base.sign_mask(jltyp)))
-                new_value = or!(builder, sign, mantissa)
-
-                new_value = bitcast!(builder, new_value, typ)
-                replace_uses!(call, new_value)
-                erase!(call)
-                changed = true
-            end
-        end
-
-        # IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
-        if intr == LLVM.Intrinsic("llvm.minimum") || intr == LLVM.Intrinsic("llvm.maximum")
-            typ = value_type(call)
-            is_minimum = intr == LLVM.Intrinsic("llvm.minimum")
-
-            # AIR has no bfloat min/max, so promote to float as MSL does: build the wrapper
-            # in float and fpext/fptrunc around it. `optyp` is the type it operates on.
-            promote_bf = typ == LLVM.BFloatType()
-            optyp = promote_bf ? LLVM.FloatType() : typ
-            op_ft = LLVM.FunctionType(optyp, LLVMType[optyp, optyp])
-
-            # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
-            jltyp = if optyp == LLVM.HalfType()
-                Float16
-            elseif optyp == LLVM.FloatType()
-                Float32
-            elseif optyp == LLVM.DoubleType()
-                Float64
-            else
-                error("Unsupported maximum/minimum type: $typ")
-            end
-
-            # @fastmath / fastmath=true set `nnan` (assume no NaNs), so we can skip the
-            # NaN-propagating wrapper and call the relaxed AIR builtin directly, matching Apple's
-            # -ffast-math: f32 has air.fast_f{min,max}; f16 has no fast form, so use air.f{min,max}.
-            fast_fn = if !LLVM.fast_math(call).nnan
-                nothing
-            elseif optyp == LLVM.FloatType()
-                is_minimum ? "air.fast_fmin.f32" : "air.fast_fmax.f32"
-            else
-                is_minimum ? "air.fmin.f$(8*sizeof(jltyp))" : "air.fmax.f$(8*sizeof(jltyp))"
-            end
-
-            # otherwise create a function that performs the IEEE-compliant operation. normally
-            # we'd do this inline, but LLVM.jl doesn't have BB split functionality.
-            new_intr_fn = something(fast_fn, is_minimum ? "air.minimum.f$(8*sizeof(jltyp))" :
-                                                          "air.maximum.f$(8*sizeof(jltyp))")
-
-            if haskey(functions(mod), new_intr_fn)
-                new_intr = functions(mod)[new_intr_fn]
-            elseif fast_fn !== nothing
-                # relaxed builtin: just declare it, no wrapper needed
-                new_intr = LLVM.Function(mod, new_intr_fn, op_ft)
-            else
-                new_intr = LLVM.Function(mod, new_intr_fn, op_ft)
-                push!(function_attributes(new_intr), EnumAttribute("alwaysinline"))
-
-                arg0, arg1 = parameters(new_intr)
-                @assert value_type(arg0) == value_type(arg1)
-
-                bb_check_arg0 = BasicBlock(new_intr, "check_arg0")
-                bb_nan_arg0 = BasicBlock(new_intr, "nan_arg0")
-                bb_check_arg1 = BasicBlock(new_intr, "check_arg1")
-                bb_nan_arg1 = BasicBlock(new_intr, "nan_arg1")
-                bb_check_zero = BasicBlock(new_intr, "check_zero")
-                bb_compare_zero = BasicBlock(new_intr, "compare_zero")
-                bb_fallback = BasicBlock(new_intr, "fallback")
-
-                @dispose builder=IRBuilder() begin
-                    # first, check if either argument is NaN, and return it if so
-
-                    position!(builder, bb_check_arg0)
-                    arg0_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, arg0, arg0)
-                    br!(builder, arg0_nan, bb_nan_arg0, bb_check_arg1)
-
-                    position!(builder, bb_nan_arg0)
-                    ret!(builder, arg0)
-
-                    position!(builder, bb_check_arg1)
-                    arg1_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, arg1, arg1)
-                    br!(builder, arg1_nan, bb_nan_arg1, bb_check_zero)
-
-                    position!(builder, bb_nan_arg1)
-                    ret!(builder, arg1)
-
-                    # then, check if both arguments are zero and have a mismatching sign.
-                    # if so, return in accordance to the intrinsic (minimum or maximum)
-
-                    position!(builder, bb_check_zero)
-
-                    typ′ = LLVM.IntType(8*sizeof(jltyp))
-                    arg0′ = bitcast!(builder, arg0, typ′)
-                    arg1′ = bitcast!(builder, arg1, typ′)
-
-                    arg0_zero = fcmp!(builder, LLVM.API.LLVMRealUEQ, arg0,
-                                      LLVM.ConstantFP(optyp, zero(jltyp)))
-                    arg1_zero = fcmp!(builder, LLVM.API.LLVMRealUEQ, arg1,
-                                      LLVM.ConstantFP(optyp, zero(jltyp)))
-                    args_zero = and!(builder, arg0_zero, arg1_zero)
-                    arg0_sign = and!(builder, arg0′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
-                    arg1_sign = and!(builder, arg1′, LLVM.ConstantInt(typ′, Base.sign_mask(jltyp)))
-                    sign_mismatch = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign, arg1_sign)
-                    relevant_zero = and!(builder, args_zero, sign_mismatch)
-                    br!(builder, relevant_zero, bb_compare_zero, bb_fallback)
-
-                    position!(builder, bb_compare_zero)
-                    arg0_negative = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign,
-                                          LLVM.ConstantInt(typ′, 0))
-                    val = if is_minimum
-                        select!(builder, arg0_negative, arg0, arg1)
-                    else
-                        select!(builder, arg0_negative, arg1, arg0)
-                    end
-                    ret!(builder, val)
-
-                    # finally, it's safe to use the existing minnum/maxnum intrinsics
-
-                    position!(builder, bb_fallback)
-                    fallback_intr_fn = if is_minimum
-                        "air.fmin.f$(8*sizeof(jltyp))"
-                    else
-                        "air.fmax.f$(8*sizeof(jltyp))"
-                    end
-                    fallback_intr = if haskey(functions(mod), fallback_intr_fn)
-                        functions(mod)[fallback_intr_fn]
-                    else
-                        LLVM.Function(mod, fallback_intr_fn, op_ft)
-                    end
-                    val = call!(builder, op_ft, fallback_intr, collect(parameters(new_intr)))
-                    ret!(builder, val)
-                end
-            end
-
-            @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
-
-                call_args = promote_bf ?
-                    LLVM.Value[fpext!(builder, a, optyp) for a in arguments(call)] :
-                    collect(arguments(call))
-                new_value = call!(builder, op_ft, new_intr, call_args)
-                if promote_bf
-                    new_value = fptrunc!(builder, new_value, typ)
-                end
-                replace_uses!(call, new_value)
-                erase!(call)
-                changed = true
-            end
+            call_declared!(builder, "$(AIR_BIT_INTRINSICS[name]).$(type_suffix(typ))", typ,
+                           collect(LLVM.Value, arguments(call)))
+        elseif name == "llvm.is.fpclass"
+            lower_is_fpclass!(builder, call)
+        elseif name == "llvm.copysign"
+            lower_copysign!(builder, call)
+        elseif name == "llvm.minimum" || name == "llvm.maximum"
+            lower_minimum_maximum!(builder, call, name == "llvm.minimum" ? "min" : "max")
         end
     end
 
