@@ -365,6 +365,12 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         if uses_julia_runtime(job) && VERSION >= v"1.11.0-DEV.208"
             add!(fpm, FinalLowerGCPass())
         end
+        # codegen emits atomic modifications (e.g. `@atomic x.f += 1`) as calls to the
+        # `julia.atomicmodify` pseudo-intrinsic, which Julia expands after GC lowering
+        # (JuliaLang/julia#57010)
+        @static if VERSION >= v"1.13.0-DEV.321"
+            add!(fpm, ExpandAtomicModifyPass())
+        end
     end
     if uses_julia_runtime(job) && VERSION < v"1.11.0-DEV.208"
         add!(mpm, FinalLowerGCPass())
