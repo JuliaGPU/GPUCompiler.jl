@@ -1919,6 +1919,11 @@ function julia_float_type(typ::LLVMType)
 end
 
 # the intrinsic that `inst` calls, if any
+# The tables below map intrinsics by name, but calls are matched on the intrinsic's ID:
+# `LLVM.name` cannot name an overloaded intrinsic (LLVM asserts that it isn't), and IDs are
+# only known at run time.
+intrinsic_table(table) = Dict(LLVM.Intrinsic(name) => val for (name, val) in table)
+
 function called_intrinsic(inst::LLVM.Instruction)
     inst isa LLVM.CallBase || return nothing
     callee = called_operand(inst)
@@ -2006,8 +2011,9 @@ const AIR_MATH_INTRINSICS = Dict(
     "llvm.rint"  => ("air.rint",  "air.fast_rint"),
 )
 function lower_math_intrinsics!(fun::LLVM.Function)
+    math_intrinsics = intrinsic_table(AIR_MATH_INTRINSICS)
     return lower_intrinsic_calls!(fun) do builder, call, intr
-        mapping = get(AIR_MATH_INTRINSICS, LLVM.name(intr), nothing)
+        mapping = get(math_intrinsics, intr, nothing)
         mapping === nothing && return nothing
         # Metal floats are f16/f32 only; skip f64 (rejected by validate_ir) and vector types
         # (these ops have no `air.<op>.v4f32`) rather than synthesize a nonexistent intrinsic.
@@ -2319,23 +2325,27 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
     # AIR device functions, picking the relaxed `air.fast_*` variant for `afn`-flagged calls.
     changed |= lower_math_intrinsics!(fun)
 
+    removable = Set(LLVM.Intrinsic.(REMOVABLE_INTRINSICS))
+    value_intrinsics = intrinsic_table(AIR_VALUE_INTRINSICS)
+    bit_intrinsics = intrinsic_table(AIR_BIT_INTRINSICS)
+    is_fpclass, copysign, minimum, maximum =
+        LLVM.Intrinsic.(("llvm.is.fpclass", "llvm.copysign", "llvm.minimum", "llvm.maximum"))
     changed |= lower_intrinsic_calls!(fun) do builder, call, intr
-        name = LLVM.name(intr)
-        if name in REMOVABLE_INTRINSICS
+        if intr in removable
             :erase
-        elseif haskey(AIR_VALUE_INTRINSICS, name)
-            lower_value_intrinsic!(builder, call, AIR_VALUE_INTRINSICS[name]...)
-        elseif haskey(AIR_BIT_INTRINSICS, name)
+        elseif haskey(value_intrinsics, intr)
+            lower_value_intrinsic!(builder, call, value_intrinsics[intr]...)
+        elseif haskey(bit_intrinsics, intr)
             # keep the mangled type suffix, e.g. llvm.ctlz.i32 -> air.clz.i32
             typ = value_type(call)
-            call_declared!(builder, "$(AIR_BIT_INTRINSICS[name]).$(type_suffix(typ))", typ,
+            call_declared!(builder, "$(bit_intrinsics[intr]).$(type_suffix(typ))", typ,
                            collect(LLVM.Value, arguments(call)))
-        elseif name == "llvm.is.fpclass"
+        elseif intr == is_fpclass
             lower_is_fpclass!(builder, call)
-        elseif name == "llvm.copysign"
+        elseif intr == copysign
             lower_copysign!(builder, call)
-        elseif name == "llvm.minimum" || name == "llvm.maximum"
-            lower_minimum_maximum!(builder, call, name == "llvm.minimum" ? "min" : "max")
+        elseif intr == minimum || intr == maximum
+            lower_minimum_maximum!(builder, call, intr == minimum ? "min" : "max")
         end
     end
 
