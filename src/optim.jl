@@ -571,9 +571,12 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
         @compiler_assert isempty(uses(alloc_obj)) self.job
     end
 
-    # we don't care about write barriers
-    if haskey(functions(mod), "julia.write_barrier")
-        barrier = functions(mod)["julia.write_barrier"]
+    # we don't care about write barriers. Julia 1.14 replaced `julia.write_barrier` with
+    # object and field-aware variants, the latter specialized on the slot address space.
+    for name in ("julia.write_barrier", "julia.object_write_barrier",
+                 "julia.field_write_barrier.p11", "julia.field_write_barrier.p13")
+        haskey(functions(mod), name) || continue
+        barrier = functions(mod)[name]
 
         for use in uses(barrier)
             call = user(use)::LLVM.CallInst
