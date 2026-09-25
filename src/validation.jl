@@ -131,6 +131,7 @@ const CCALL_FUNCTION   = "call to an external C function"
 const LAZY_FUNCTION    = "call to a lazy-initialized function"
 const DELAYED_BINDING  = "use of an undefined name"
 const DYNAMIC_CALL     = "dynamic function invocation"
+const UNKNOWN_INTRINSIC = "call to an unknown LLVM intrinsic"
 
 function Base.showerror(io::IO, err::InvalidIRError)
     print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
@@ -221,6 +222,31 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
     return errors
 end
 
+# the contents of a constant string global, or `nothing`
+function constant_string(val::LLVM.Value)
+    while val isa LLVM.ConstantExpr
+        val = first(operands(val))
+    end
+    val isa LLVM.GlobalVariable || return nothing
+    init = initializer(val)
+    init === nothing && return nothing
+    LLVM.API.LLVMIsConstantString(init) == 1 || return nothing
+    len = Ref{Csize_t}()
+    ptr = LLVM.API.LLVMGetAsString(init, len)
+    return rstrip(unsafe_string(convert(Ptr{UInt8}, ptr), len[]), '\0')
+end
+
+# Julia's codegen replaces an `llvmcall` of an intrinsic it doesn't know, e.g. one that was
+# removed from LLVM, with a call to `jl_error`, deferring the error to run time.
+function is_unknown_intrinsic_error(call::LLVM.CallInst)
+    dest = called_operand(call)
+    dest isa LLVM.Function || return false
+    LLVM.name(dest) in ("jl_error", "ijl_error") || return false
+    args = arguments(call)
+    length(args) == 1 || return false
+    return constant_string(args[1]) == "llvmcall only supports intrinsic calls"
+end
+
 function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Relocations)
     bt = backtrace(inst)
     dest = called_operand(inst)
@@ -230,6 +256,8 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
         # some special handling for runtime functions that we don't implement
         if fn == STATIC_ASSERT_MARKER
             push!(errors, (STATIC_ASSERTION, bt, static_assert_message(inst)))
+        elseif is_unknown_intrinsic_error(inst)
+            push!(errors, (UNKNOWN_INTRINSIC, bt, nothing))
         elseif fn == "jl_get_binding_or_error" || fn == "ijl_get_binding_or_error"
             try
                 m, sym = arguments(inst)
