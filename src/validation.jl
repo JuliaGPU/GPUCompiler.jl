@@ -94,6 +94,16 @@ function check_invocation(@nospecialize(job::CompilerJob))
                    This is a CPU-only object not supported by GPUCompiler."""))
         end
 
+        # Before `Core.TypeEgal`, `Type{T}` is only a singleton when `T` has a unique
+        # representation, so e.g. `Type{Union{Missing, Int}}` or `Type{Vector}` would be
+        # passed as a boxed host pointer.
+        if Base.isType(dt)
+            throw(KernelError(job, "passing a non-singleton type argument",
+                """Argument $arg_i to your kernel function is the type $(dt.parameters[1]), which
+                   cannot be passed to a GPU kernel on this version of Julia.
+                   Pass `Val($(dt.parameters[1]))` instead, or a value of that type."""))
+        end
+
         # If an object doesn't have fields, it can only be used by identity, so we can allow
         # them to be passed to the GPU (this also applies to e.g. Symbols).
         if fieldcount(dt) == 0
