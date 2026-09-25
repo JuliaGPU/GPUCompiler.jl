@@ -32,7 +32,7 @@ jobs:
         with:
           script: |
             // Keep in sync with the matrix below
-            const versions = ['1.12', '1.13'];
+            const versions = ['1.12', '1.13', 'master'];
             await Promise.all(versions.map(version =>
               github.rest.checks.create({
                 owner: context.repo.owner,
@@ -55,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.12', '1.13']
+        version: ['1.12', '1.13', 'master']
     steps:
       - name: Download Julia build
         uses: actions/download-artifact@v8
@@ -97,7 +97,7 @@ jobs:
         with:
           script: |
             // Keep in sync with the matrix above
-            const versions = ['1.12', '1.13'];
+            const versions = ['1.12', '1.13', 'master'];
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -136,7 +136,7 @@ jobs:
         with:
           script: |
             // Keep in sync with the matrix above
-            const versions = ['1.12', '1.13'];
+            const versions = ['1.12', '1.13', 'master'];
             await Promise.all(versions.map(version =>
               github.rest.checks.create({
                 owner: context.repo.owner,
