@@ -1813,6 +1813,28 @@ end
         @test !occursin(r"(atomicrmw|cmpxchg|load atomic|store atomic) |^\s*fence "m, ir)
     end
 
+    @testset "relaxed loads (Metal $metal, AIR $air)" for (metal, air) in targets
+        # relaxed loads of device memory at device scope are acquire loads, so that they
+        # eventually see other threadgroups' stores; others aren't affected (and relaxed loads
+        # of device memory are selected at device scope regardless, like MSL does)
+        ir = lower_metal_atomics(kernel("""
+            %a = load atomic i32, ptr addrspace(1) %p monotonic, align 4
+            %b = load atomic i32, ptr addrspace(1) %p syncscope("workgroup") monotonic, align 4
+            %c = load atomic i32, ptr addrspace(3) %t monotonic, align 4
+            """); metal, air)
+        ordered = metal >= v"4.1"
+        args(order, flags) = air >= v"2.9" ?
+            "i32 $order, i32 2, i32 $flags, i1 true" : "i32 $order, i32 2, i1 true"
+        relaxed(scope) = air >= v"2.9" ? "i32 0, i32 $scope, i32 0, i1 true" : "i32 0, i32 $scope, i1 true"
+        @test @filecheck begin
+            @check "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(ordered ? args(2, 3) : args(0, 0)))"
+            @check_next cond=!ordered "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+            @check_next "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(relaxed(2)))"
+            @check_next "call i32 @air.atomic.local.load.i32(ptr addrspace(3) %t, $(relaxed(1)))"
+            ir
+        end
+    end
+
     @testset "sequentially-consistent stores" begin
         # from MSL 4.1, only sequentially-consistent stores get a (trailing) fence, with the
         # store's scope: other orderings and operations don't need one

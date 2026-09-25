@@ -1212,6 +1212,23 @@ function insert_atomic_fences!(inst::LLVM.Instruction)
     return true
 end
 
+# LLVM requires that threads repeatedly loading an address monotonically eventually see the
+# stores of other threads, but Apple's compiler emits relaxed loads of device memory as cached
+# loads: on an M1, a spin loop that relaxed-loads a flag another threadgroup sets never sees
+# the store (not in 20M iterations; within a threadgroup it does, as it shares the cache).
+# Acquire loads invalidate the cache after loading, so lower device-scope monotonic loads of
+# device memory as acquire ones (which on targets without ordered atomics adds a fence; before
+# MSL 3.2, there are no fences to lower that to).
+function strengthen_relaxed_load!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                                  inst::LLVM.Instruction)
+    job.config.target.metal >= v"3.2" && inst isa LLVM.LoadInst &&
+        atomic_ordering(inst) == LLVM.API.LLVMAtomicOrderingMonotonic &&
+        addrspace(value_type(atomic_pointer(inst))) == 1 &&
+        metal_thread_scope(inst, 1) == 2 || return false
+    ordering!(inst, LLVM.API.LLVMAtomicOrderingAcquire)
+    return true
+end
+
 # With ordered atomics (MSL ≥ 4.1), follow a sequentially-consistent store by a
 # sequentially-consistent fence (AtomicExpand's `shouldInsertTrailingSeqCstFenceForAtomicStore`,
 # which AArch64 uses for MSVC). Apple compiles such a store as a release store that doesn't
@@ -1267,7 +1284,11 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
 
     # the operands after the memory order(s): scope, flags (from AIR 2.9), volatile
     order = lowered_ordering(job, atomic_ordering(inst))
-    scope = ConstantInt(T_i32, metal_thread_scope(inst, as))
+    # (the scope of a relaxed load of device memory only matters to whether we strengthen it,
+    # so use the device scope, like MSL does: it doesn't change the code, but it is recorded)
+    relaxed_device_load = inst isa LLVM.LoadInst && as == 1 &&
+                          atomic_ordering(inst) == LLVM.API.LLVMAtomicOrderingMonotonic
+    scope = ConstantInt(T_i32, relaxed_device_load ? 2 : metal_thread_scope(inst, as))
     flags = ConstantInt(T_i32, is_ordered(order) ? METAL_MEM_FLAGS : 0)
     # MSL sets the volatile bit on every atomic before 4.1, but since then only on atomics
     # of `volatile` objects. Without it, the back-end treats a load like a plain one (e.g.,
@@ -1427,6 +1448,7 @@ function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
             demote_private_atomic!(inst)
             continue
         end
+        strengthen_relaxed_load!(job, inst)
         if job.config.target.metal < v"4.1"
             insert_atomic_fences!(inst)
         else
