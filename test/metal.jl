@@ -1288,6 +1288,54 @@ end
     end
 end
 
+@testset "vector reduction lowering" begin
+    # AIR has no vector reductions: each is expanded into a chain of its scalar operation over the
+    # lanes, in lane order, and min/max into the scalar intrinsics, which are lowered to AIR.
+    km = @eval module $(gensym())
+        f() = return
+        prod4(v) = ccall("llvm.vector.reduce.mul.v4i64", llvmcall, Int64, (NTuple{4, VecElement{Int64}},), v)
+    end
+    job, _ = Metal.create_job(km.f, Tuple{})
+    ops = ["add", "mul", "and", "or", "xor", "smax", "smin", "umax", "umin", "fadd", "fmul", "fmax", "fmin"]
+    LLVM.version() >= v"17" && append!(ops, ["fmaximum", "fminimum"])
+    Context() do ctx
+        ir = IOBuffer()
+        for op in ops, n in (3, 4)
+            t, s = op[1] == 'f' ? ("float", "f32") : ("i32", "i32")
+            args = op in ("fadd", "fmul") ? "$t %s, <$n x $t> %v" : "<$n x $t> %v"
+            flags = op[1] == 'f' ? "nnan " : ""
+            println(ir, "declare $t @llvm.vector.reduce.$op.v$n$s($args)")
+            println(ir, "define $t @$op$n($args) {\n  %r = call $flags$t @llvm.vector.reduce.$op.v$n$s($args)\n  ret $t %r\n}")
+        end
+        println(ir, "declare i1 @llvm.vector.reduce.smax.v3i1(<3 x i1>)")
+        println(ir, "define i1 @smax_i1(<3 x i1> %v) {\n  %r = call i1 @llvm.vector.reduce.smax.v3i1(<3 x i1> %v)\n  ret i1 %r\n}")
+        mod = parse(LLVM.Module, String(take!(ir)))
+        insts(f) = [i for bb in blocks(f) for i in instructions(bb)]
+        callees(f) = [LLVM.name(called_operand(i)) for i in insts(f) if i isa LLVM.CallBase]
+        for f in functions(mod)
+            isdeclaration(f) && continue
+            GPUCompiler.lower_llvm_intrinsics!(job, f)
+            @test !any(startswith("llvm."), callees(f))
+        end
+        # the ordered reduction continues from its start value, with the call's fast-math flags
+        f = functions(mod)["fadd3"]
+        adds = filter(i -> i isa LLVM.FAddInst, insts(f))
+        @test length(adds) == 3 && operands(first(adds))[1] == parameters(f)[1]
+        @test all(i -> LLVM.fast_math(i).nnan, adds)
+        @test "air.fmin.f32" in callees(functions(mod)["fmin4"])
+        @test isempty(callees(functions(mod)["smax_i1"]))  # `and` on i1 lanes
+        @test (verify(mod); true)
+    end
+
+    # end to end
+    @test @filecheck begin
+        @check_label "define i64 @{{(julia|j)_prod4_[0-9]+}}"
+        @check_not "@llvm.vector.reduce"
+        @check_count 3 "mul i64"
+        Metal.code_native(km.prod4, Tuple{NTuple{4, VecElement{Int64}}})
+    end
+end
+
 @testset "integer intrinsic lowering" begin
     # The integer ops Julia emits as llvm.* are lowered to their AIR builtins, so Metal.jl need
     # not wrap them. Names/signatures verified against Apple's frontend:
