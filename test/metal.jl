@@ -1733,7 +1733,7 @@ end
         GPUCompiler.code_llvm(job; dump_module=true)
     end
     @test @filecheck begin
-        @check "call i32 @air.atomic.global.load.i32({{.+}}, i32 2, i32 2, i32 3, i1 false)"
+        @check "call i32 @air.atomic.global.load.i32({{.+}}, i32 2, i32 2, i32 3, i1 true)"
         @check "call void @air.atomic.global.store.i32({{.+}}, i32 3, i32 2, i32 3, i1 false)"
         GPUCompiler.code_native(job; dump_module=true)
     end
@@ -1775,7 +1775,10 @@ end
         ordered = metal >= v"4.1"
         args(order, flags, volatile) = air >= v"2.9" ?
             "i32 $order, i32 2, i32 $flags, i1 $volatile" : "i32 $order, i32 2, i1 $volatile"
-        rmw(order) = ordered ? args(order, order == 0 ? 0 : 3, false) : args(0, 0, true)
+        # loads and read-modify-writes are always volatile (see `select_atomic!`)
+        op(order; volatile=false) =
+            ordered ? args(order, order == 0 ? 0 : 3, volatile) : args(0, 0, true)
+        rmw(order) = op(order; volatile=true)
         fence = "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
         ir = lower_metal_atomics(kernel("""
             %a = atomicrmw add ptr addrspace(1) %p, i32 1 seq_cst, align 4
@@ -1794,13 +1797,13 @@ end
             @check "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(rmw(2)))"
             @check_next cond=!ordered fence
             @check_next cond=!ordered fence
-            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 {{%.+}}, $(rmw(3)))"
+            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 {{%.+}}, $(op(3)))"
             @check "call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p, ptr {{%.+}}, i32 2, i32 0, $(ordered ? args(2, 3, false) : args(0, 0, true)))"
             @check_next "icmp eq i32 {{%.+}}, 1"
             @check cond=!ordered fence
             @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(rmw(0)))"
             @check_next cond=!ordered fence
-            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 {{%.+}}, $(rmw(5)))"
+            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 {{%.+}}, $(op(5)))"
             @check_next cond=!ordered fence
             @check_not "call void @air.atomic.fence"
             ir
@@ -1823,14 +1826,14 @@ end
             fence seq_cst
             """); metal=v"4.1", air=v"2.9")
         @test @filecheck begin
-            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 0, i32 0, i1 false)"
-            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 4, i32 0, i1 false)"
-            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 1, i32 0, i1 false)"
-            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 false)"
-            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 false)"
-            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 1, i32 0, i1 false)"
-            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 1, i32 0, i1 false)"
-            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 4, i32 0, i1 false)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 0, i32 0, i1 true)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 4, i32 0, i1 true)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 1, i32 0, i1 true)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 true)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 true)"
+            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 1, i32 0, i1 true)"
+            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 1, i32 0, i1 true)"
+            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 4, i32 0, i1 true)"
             @check "call void @air.atomic.fence(i32 3, i32 3, i32 1)"
             @check "call void @air.atomic.fence(i32 3, i32 2, i32 4)"
             @check "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
@@ -1852,9 +1855,11 @@ end
             %umin = atomicrmw umin ptr addrspace(1) %p, i32 1 monotonic, align 4
             %fadd = atomicrmw fadd ptr addrspace(1) %p, float 1.0 monotonic, align 4
             %fsub = atomicrmw fsub ptr addrspace(3) %t, float 1.0 monotonic, align 4
-            %vol = atomicrmw volatile add ptr addrspace(1) %p, i32 1 monotonic, align 4
+            store atomic i32 1, ptr addrspace(1) %p monotonic, align 4
+            store atomic volatile i32 1, ptr addrspace(1) %p monotonic, align 4
             """); metal=v"4.1", air=v"2.9")
-        trailer = "i32 0, i32 2, i32 0, i1 false)"
+        # loads and read-modify-writes are always volatile, stores only when LLVM's are
+        trailer = "i32 0, i32 2, i32 0, i1 true)"
         @test @filecheck begin
             @check "call i32 @air.atomic.global.xchg.i32(ptr addrspace(1) %p, i32 1, $trailer"
             @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $trailer"
@@ -1867,8 +1872,9 @@ end
             @check "call i32 @air.atomic.global.max.u.i32(ptr addrspace(1) %p, i32 1, $trailer"
             @check "call i32 @air.atomic.global.min.u.i32(ptr addrspace(1) %p, i32 1, $trailer"
             @check "call float @air.atomic.global.add.f32(ptr addrspace(1) %p, float 1.000000e+00, $trailer"
-            @check "call float @air.atomic.local.sub.f32(ptr addrspace(3) %t, float 1.000000e+00, i32 0, i32 1, i32 0, i1 false)"
-            @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 true)"
+            @check "call float @air.atomic.local.sub.f32(ptr addrspace(3) %t, float 1.000000e+00, i32 0, i32 1, i32 0, i1 true)"
+            @check "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 false)"
+            @check "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 true)"
             # declared like Apple does, with element types for the typed-pointer downgrader
             @check "declare !arg_eltypes [[I32:![0-9]+]] i32 @air.atomic.global.xchg.i32(ptr addrspace(1), i32, i32, i32, i32, i1) [[ATTRS:#[0-9]+]]"
             @check "declare !arg_eltypes [[F32:![0-9]+]] float @air.atomic.global.add.f32"
@@ -1983,9 +1989,9 @@ end
             "i32 $order, i32 2, i32 $flags, i1 $volatile" : "i32 $order, i32 2, i1 $volatile"
         ordered = metal >= v"4.1"
         @test @filecheck begin
-            @check "call void @air.atomic.global.max.u.i64(ptr addrspace(1) %p, i64 1, $(trailer(0, 0, !ordered)))"
+            @check "call void @air.atomic.global.max.u.i64(ptr addrspace(1) %p, i64 1, $(trailer(0, 0, true)))"
             @check cond=!ordered "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
-            @check "call void @air.atomic.global.min.u.i64(ptr addrspace(1) %p, i64 1, $(ordered ? trailer(3, 3, false) : trailer(0, 0, true)))"
+            @check "call void @air.atomic.global.min.u.i64(ptr addrspace(1) %p, i64 1, $(ordered ? trailer(3, 3, true) : trailer(0, 0, true)))"
             ir
         end
     end
@@ -2004,10 +2010,12 @@ end
             """; metal, air)
         trailer = metal >= v"4.1" ? "i32 0, i32 2, i32 0, i1 false" :
                   air >= v"2.9" ? "i32 0, i32 2, i32 0, i1 true" : "i32 0, i32 2, i1 true"
+        # (the read-modify-write we select is always volatile)
+        selected = air >= v"2.9" ? "i32 0, i32 2, i32 0, i1 true" : "i32 0, i32 2, i1 true"
         @test @filecheck begin
             @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $trailer)"
             @check "call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p, ptr %e, i32 1, i32 0, $trailer)"
-            @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $trailer)"
+            @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $selected)"
             ir
         end
         @test occursin(r"declare !arg_eltypes ![0-9]+ i32 @air.atomic.global.cmpxchg.weak.i32", ir)

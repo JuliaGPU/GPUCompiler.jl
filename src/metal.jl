@@ -1249,7 +1249,14 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
     order = lowered_ordering(job, atomic_ordering(inst))
     scope = ConstantInt(T_i32, metal_thread_scope(inst, as))
     flags = ConstantInt(T_i32, is_ordered(order) ? METAL_MEM_FLAGS : 0)
-    volatile = ConstantInt(T_i1, target.metal < v"4.1" || is_volatile(inst))
+    # MSL sets the volatile bit on every atomic before 4.1, but since then only on atomics
+    # of `volatile` objects. Without it, the back-end treats a load like a plain one (e.g.,
+    # a relaxed load of memory the kernel doesn't write is hoisted into the uniform preamble,
+    # out of any spin loop), and a read-modify-write that doesn't change memory (e.g., adding
+    # 0) becomes such a load. LLVM atomics allow neither, so always set it on loads and
+    # read-modify-writes; stores and compare-exchanges are compiled the same either way.
+    volatile = ConstantInt(T_i1, target.metal < v"4.1" || is_volatile(inst) ||
+                                 inst isa LLVM.LoadInst || inst isa LLVM.AtomicRMWInst)
     trailing_types = target.air >= v"2.9" ? [T_i32, T_i32, T_i1] : [T_i32, T_i1]
     trailing = target.air >= v"2.9" ? [scope, flags, volatile] : [scope, volatile]
     memory_order(order) = ConstantInt(T_i32, metal_memory_order(lowered_ordering(job, order)))
