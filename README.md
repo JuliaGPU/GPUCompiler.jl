@@ -47,6 +47,8 @@ last commit of a pull request:
 | `[skip amdgpu]`      | Do not test the listed back-ends, even when the changes affect them. |
 | `[run all]`          | Test all back-ends, regardless of the files changed.               |
 | `[skip tests]`       | Do not test any back-end.                                          |
+| `[julia nightly]`    | Test the back-ends on the given Julia version (default: the latest release), e.g. `nightly` or `1.10`. |
+| `[test_args core]`   | Only run the listed tests of each back-end, passed as `test_args` to `Pkg.test`, e.g. `[test_args core/codegen gpuarrays/broadcasting]`. |
 
 Back-ends are named `cuda`, `amdgpu`, `metal`, `oneapi` and `opencl` (all lowercase), or by
 their target: `ptx` for CUDA.jl, `gcn` for AMDGPU.jl, and `spirv` for both oneAPI.jl and

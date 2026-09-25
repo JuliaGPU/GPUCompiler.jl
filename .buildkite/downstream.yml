@@ -1,5 +1,8 @@
 # Tests of the packages that build on GPUCompiler, uploaded by `launch.sh`.
 #
+# The Julia version and the test selection of every step can be changed with the `[julia X]`
+# and `[test_args ...]` commit message tags, which `launch.sh` exports for interpolation here.
+#
 # Each step's `if_changed` lists the files that can affect that package: everything in
 # `src/` and `ext/`, `Project.toml` and the CI configuration, except the other back-ends'
 # target files. The `if:` conditions implement the commit message tags documented in the
@@ -8,7 +11,7 @@ steps:
   - label: "CUDA.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.13"
+          version: "${DOWNSTREAM_JULIA:-1.13}"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -20,7 +23,7 @@ steps:
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("CUDA"; coverage=true)'
+                Pkg.test("CUDA"; coverage=true, test_args=split(ENV["DOWNSTREAM_TEST_ARGS"]))'
     agents:
       queue: "cuda"
     if_changed:
@@ -42,7 +45,7 @@ steps:
   - label: "oneAPI.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.13"
+          version: "${DOWNSTREAM_JULIA:-1.13}"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -57,7 +60,7 @@ steps:
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("oneAPI"; coverage=true)'
+                Pkg.test("oneAPI"; coverage=true, test_args=split(ENV["DOWNSTREAM_TEST_ARGS"]))'
     agents:
       queue: "oneapi"
     if_changed:
@@ -75,7 +78,7 @@ steps:
   - label: "AMDGPU.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.13"
+          version: "${DOWNSTREAM_JULIA:-1.13}"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -86,7 +89,7 @@ steps:
 
        julia -e 'println("+++ :julia: Running tests")
                  using Pkg
-                 Pkg.test("AMDGPU"; coverage=true)'
+                 Pkg.test("AMDGPU"; coverage=true, test_args=split(ENV["DOWNSTREAM_TEST_ARGS"]))'
     agents:
       queue: "rocm"
     if_changed:
@@ -104,7 +107,7 @@ steps:
   - label: "Metal.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.13"
+          version: "${DOWNSTREAM_JULIA:-1.13}"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -126,7 +129,7 @@ steps:
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("Metal"; coverage=true)'
+                Pkg.test("Metal"; coverage=true, test_args=split(ENV["DOWNSTREAM_TEST_ARGS"]))'
     agents:
       queue: "metal"
     if_changed:
@@ -144,7 +147,7 @@ steps:
   - label: "OpenCL.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.13"
+          version: "${DOWNSTREAM_JULIA:-1.13}"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -156,7 +159,7 @@ steps:
 
        julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("OpenCL"; coverage=true)'
+                Pkg.test("OpenCL"; coverage=true, test_args=split(ENV["DOWNSTREAM_TEST_ARGS"]))'
     agents:
       # XXX: not on "juliaecosystem" because those workers don't have libc-dev
       #      see JuliaGPU/OpenCL.jl#303
@@ -175,3 +178,5 @@ steps:
 
 env:
   JULIA_PKG_SERVER: "" # it often struggles with our large artifacts
+  # set by `launch.sh` from the `[test_args ...]` commit message tag
+  DOWNSTREAM_TEST_ARGS: "${DOWNSTREAM_TEST_ARGS:-}"
