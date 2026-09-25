@@ -176,6 +176,9 @@ end
     opt_params::CC.OptimizationParams
 
     always_inline::Bool
+
+    # passes to run over the optimized Julia IR (see `julia_ir_passes`)
+    julia_ir_passes::Tuple
 end
 
 @static if HAS_INTEGRATED_CACHE
@@ -184,11 +187,12 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         owner::Any,
                         inf_params::CC.InferenceParams,
                         opt_params::CC.OptimizationParams,
-                        always_inline::Bool=false)
+                        always_inline::Bool=false,
+                        julia_ir_passes::Tuple=())
     @assert world <= Base.get_world_counter()
     return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, owner, INFERENCE_CACHE_TYPE(),
-        inf_params, opt_params, always_inline)
+        inf_params, opt_params, always_inline, julia_ir_passes)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
@@ -198,10 +202,11 @@ function GPUInterpreter(interp::GPUInterpreter;
                         inf_cache::INFERENCE_CACHE_TYPE=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
                         opt_params::CC.OptimizationParams=interp.opt_params,
-                        always_inline::Bool=interp.always_inline)
+                        always_inline::Bool=interp.always_inline,
+                        julia_ir_passes::Tuple=interp.julia_ir_passes)
     return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, owner, inf_cache,
-        inf_params, opt_params, always_inline)
+        inf_params, opt_params, always_inline, julia_ir_passes)
 end
 
 CC.cache_owner(interp::GPUInterpreter) = interp.owner
@@ -213,11 +218,12 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         code_cache::CodeCache,
                         inf_params::CC.InferenceParams,
                         opt_params::CC.OptimizationParams,
-                        always_inline::Bool=false)
+                        always_inline::Bool=false,
+                        julia_ir_passes::Tuple=())
     @assert world <= Base.get_world_counter()
     return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, code_cache, Vector{CC.InferenceResult}(),
-        inf_params, opt_params, always_inline)
+        inf_params, opt_params, always_inline, julia_ir_passes)
 end
 
 function GPUInterpreter(interp::GPUInterpreter;
@@ -227,10 +233,11 @@ function GPUInterpreter(interp::GPUInterpreter;
                         inf_cache::Vector{CC.InferenceResult}=interp.inf_cache,
                         inf_params::CC.InferenceParams=interp.inf_params,
                         opt_params::CC.OptimizationParams=interp.opt_params,
-                        always_inline::Bool=interp.always_inline)
+                        always_inline::Bool=interp.always_inline,
+                        julia_ir_passes::Tuple=interp.julia_ir_passes)
     return GPUInterpreter{typeof(method_table_view)}(
         world, method_table_view, code_cache, inf_cache,
-        inf_params, opt_params, always_inline)
+        inf_params, opt_params, always_inline, julia_ir_passes)
 end
 
 CC.code_cache(interp::GPUInterpreter) = WorldView(interp.code_cache, interp.world)
@@ -307,6 +314,7 @@ else
     # 1.10-1.12
     function CC.finish(interp::GPUInterpreter, opt::CC.OptimizationState,
                        ir::CC.IRCode, caller::CC.InferenceResult)
+        ir = run_julia_ir_passes(interp.julia_ir_passes, interp, opt, ir)
         ret = @invoke CC.finish(interp::CC.AbstractInterpreter, opt::CC.OptimizationState,
                                 ir::CC.IRCode, caller::CC.InferenceResult)
         src = opt.src
@@ -316,6 +324,33 @@ else
             CC.set_inlineable!(src, true)
         end
         return ret
+    end
+end
+
+
+## Julia IR passes
+
+# run Julia IR passes (see `julia_ir_passes`) on the IR of a function, as optimized by Julia.
+# this is independent of the interpreter, so that other interpreters compiling for GPUCompiler
+# jobs can run the job's passes too.
+function run_julia_ir_passes(passes::Tuple, interp::CC.AbstractInterpreter,
+                             opt::CC.OptimizationState, ir::CC.IRCode)
+    for pass in passes
+        ir = pass(interp, opt, ir)::CC.IRCode
+    end
+    return ir
+end
+
+# Julia's optimizer hands its final IR of every function to `finish` (1.10-1.12, overridden
+# above) or `finishopt!` (1.13+), which determine inlineability and store the IR for inlining
+# into callers, caching and code generation. that is where we run the passes.
+@static if isdefined(CC, :finishopt!)
+    # `finishopt!` was introduced together with `compute_inlining_cost`, which selects the
+    # `inline_cost_model` override above instead of the `finish` one
+    function CC.finishopt!(interp::GPUInterpreter, opt::CC.OptimizationState, ir::CC.IRCode)
+        ir = run_julia_ir_passes(interp.julia_ir_passes, interp, opt, ir)
+        return @invoke CC.finishopt!(interp::CC.AbstractInterpreter,
+                                     opt::CC.OptimizationState, ir::CC.IRCode)
     end
 end
 
