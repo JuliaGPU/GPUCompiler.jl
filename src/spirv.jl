@@ -32,6 +32,11 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     supports_bfloat16::Bool = false
 
     backend::Symbol = isavailable(SPIRV_LLVM_Backend_jll) ? :llvm : :khronos
+
+    # the driver that will consume the SPIR-V, used to work around its bugs. `:generic` if
+    # unknown, `:intel` for Intel's GPU driver (NEO, with IGC), `:pocl`, `:nvidia`, ...
+    driver::Symbol = :generic
+
     # XXX: these don't really belong in the _target_ struct
     validate::Bool = false
     optimize::Bool = false
@@ -116,6 +121,11 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
 
     # the SPIR-V back-ends lower `llvm.minimum`/`llvm.maximum` to NaN-ignoring `fmin`/`fmax`
     lower_minimum_maximum!(mod)
+
+    # IGC drops fields when legalizing aggregates built by nested `insertvalue`s
+    if job.config.target.driver === :intel
+        flatten_nested_insertvalue!(mod)
+    end
 
     # convert the kernel state argument to a byval reference
     if job.config.kernel
@@ -312,6 +322,59 @@ function rm_freeze!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
     end
     return changed
+end
+
+# flatten `insertvalue`s with multiple indices into single-index ones, extracting and
+# re-inserting the intermediate aggregates: `insertvalue %agg, %val, 1, 0` becomes
+#   %sub = extractvalue %agg, 1
+#   %new = insertvalue %sub, %val, 0
+#          insertvalue %agg, %new, 1
+#
+# this works around a bug in Intel's graphics compiler, whose `TypesLegalizationPass` splits
+# aggregate stores (and phis, which it lowers to stores) into per-field stores by looking up
+# each field in the `insertvalue` chain. that lookup gives up on an `insertvalue` with more
+# indices than the field it is looking for, silently dropping the store of that field.
+# e.g., storing `(flag::Bool, (a, b))` built by inserting `flag`, `a` and `b`, loses `flag`
+# (intel/intel-graphics-compiler#378, JuliaGPU/OpenCL.jl#502, JuliaGPU/oneAPI.jl#259).
+# this needs to run after optimization, as InstCombine folds these sequences back together.
+function flatten_nested_insertvalue!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "flatten nested insertvalue" begin
+
+    for f in functions(mod), bb in blocks(f)
+        worklist = filter(collect(instructions(bb))) do inst
+            opcode(inst) == LLVM.API.LLVMInsertValue && LLVM.API.LLVMGetNumIndices(inst) > 1
+        end
+        isempty(worklist) && continue
+
+        @dispose builder=IRBuilder() begin
+            for inst in worklist
+                agg, val = operands(inst)
+                n = LLVM.API.LLVMGetNumIndices(inst)
+                idxptr = LLVM.API.LLVMGetIndices(inst)
+                indices = [unsafe_load(idxptr, i) for i in 1:n]
+
+                position!(builder, inst)
+                new = flatten_insertvalue!(builder, agg, val, indices)
+                replace_uses!(inst, new)
+                erase!(inst)
+                changed = true
+            end
+        end
+    end
+
+    end
+    return changed
+end
+
+function flatten_insertvalue!(builder::IRBuilder, agg::LLVM.Value, val::LLVM.Value,
+                              indices::AbstractVector)
+    idx = first(indices)
+    if length(indices) > 1
+        sub = extract_value!(builder, agg, idx)
+        val = flatten_insertvalue!(builder, sub, val, @view indices[2:end])
+    end
+    return insert_value!(builder, agg, val, idx)
 end
 
 # expand `llvm.minimum` and `llvm.maximum`, which Julia uses for `min` and `max` of

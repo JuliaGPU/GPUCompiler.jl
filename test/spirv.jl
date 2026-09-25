@@ -245,6 +245,35 @@ end
     end
 end
 
+@testset "nested insertvalue" begin
+    # Intel's graphics compiler drops fields when legalizing aggregates built by nested
+    # `insertvalue`s, so these are flattened for that driver (JuliaGPU/OpenCL.jl#502)
+    mod = @eval module $(gensym())
+        struct FlagFirst
+            valid::Bool
+            value::Tuple{Float32, Int32}
+        end
+        kernel(p::Core.LLVMPtr{FlagFirst,1}, x::Float32, i::Int32) =
+            (unsafe_store!(p, FlagFirst(x >= 0, (x, i))); return)
+    end
+    tt = Tuple{Core.LLVMPtr{mod.FlagFirst,1}, Float32, Int32}
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+        @check "insertvalue {{.*}}, 1, 0"
+        SPIRV.code_llvm(mod.kernel, tt; backend)
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+        @check_not "insertvalue {{.*}}, {{[0-9]+}}, {{[0-9]+}}"
+        @check "extractvalue {{.*}}, 1"
+        @check "insertvalue {{.*}}, 0"
+        @check "insertvalue {{.*}}, 1"
+        SPIRV.code_llvm(mod.kernel, tt; backend, driver=:intel)
+    end
+end
+
 ############################################################################################
 
 @testset "asm" begin
