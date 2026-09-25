@@ -1692,7 +1692,6 @@ end
     end
 end
 
-
 @testset "unsupported allocations" begin
     # without a garbage collector, device code can only allocate objects that do not
     # reference other objects
@@ -1756,77 +1755,21 @@ end
     end
 end
 
-@testset "atomic demotion" begin
-    # Demote every LLVM atomic load/store, whatever its ordering or value type.
-    Context() do ctx
-        ir = """
-        define void @f(i8** %p, i8** %q, i64* %r) {
-        entry:
-          %a = load atomic i8*, i8** %p unordered, align 8
-          store atomic i8* %a, i8** %q unordered, align 8
-          %t = load atomic i8*, i8** %p acquire, align 8
-          store atomic i8* %t, i8** %q release, align 8
-          %b = load atomic i64, i64* %r monotonic, align 8
-          store atomic i64 %b, i64* %r release, align 8
-          store i8* %a, i8** %p, align 8
-          ret void
-        }
-        """
-        mod = parse(LLVM.Module, ir)
-        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
-        memops() = filter(i -> i isa LLVM.LoadInst || i isa LLVM.StoreInst, insts())
-
-        @test count(is_atomic, memops()) == 6
-        @test GPUCompiler.demote_atomics!(mod)
-        @test count(is_atomic, memops()) == 0
-        @test !occursin("atomic", string(mod))
-        @test (verify(mod); true)
-        # idempotent
-        @test !GPUCompiler.demote_atomics!(mod)
-    end
-
-    # end-to-end: Julia's own `:unordered` accesses (as codegen emits for heap-reference
-    # fields) must reach the AIR as plain loads and stores
-    function kernel(p::Core.LLVMPtr{Int,1}, q::Core.LLVMPtr{Int,1})
-        x = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Int}, p), :unordered)
-        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int}, q), x, :unordered)
+@testset "LLVM atomics are not demoted" begin
+    # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`) must reach the back-end
+    function kernel(p::Core.LLVMPtr{Int32,1}, q::Core.LLVMPtr{Int32,1})
+        x = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Int32}, p), :acquire)
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int32}, q), x, :release)
         return
     end
-    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int,1}, Core.LLVMPtr{Int,1}},
-                            Base.get_world_counter())
-    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
-    config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
-    job = CompilerJob(source, config)
 
-    # precondition: the accesses survive optimization as unordered atomics
-    ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true))
-    @test occursin(r"load atomic .* unordered", ir)
-    @test occursin(r"store atomic .* unordered", ir)
-
-    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
-    @test !occursin(r"(load|store) atomic", air)
-    @test occursin(r"load i64", air)
-    @test occursin(r"store i64", air)
-
-    # likewise for the `release` store of a pointer that codegen emits for an allocated
-    # object's type tag. Only Julia 1.12+ lowers `Ptr` values to LLVM pointers, which is
-    # what makes this the case Apple's back-end cannot legalize.
-    @static if VERSION >= v"1.12"
-    function tagged(p::Core.LLVMPtr{Int,1}, q::Core.LLVMPtr{Int,1})
-        x = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Ptr{Int}}, p), :acquire)
-        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Ptr{Int}}, q), x, :release)
-        return
-    end
-    source = methodinstance(typeof(tagged), Tuple{Core.LLVMPtr{Int,1}, Core.LLVMPtr{Int,1}},
-                            Base.get_world_counter())
-    job = CompilerJob(source, config)
-
-    ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true))
-    @test occursin(r"load atomic ptr.* acquire", ir)
-    @test occursin(r"store atomic ptr.* release", ir)
-
-    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
-    @test !occursin(r"(load|store) atomic", air)
+    @test @filecheck begin
+        @check "load atomic i32"
+        @check_same "acquire"
+        @check "store atomic i32"
+        @check_same "release"
+        Metal.code_native(kernel, Tuple{Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}};
+                          kernel=true, dump_module=true)
     end
 end
 

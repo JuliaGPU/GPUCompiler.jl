@@ -417,37 +417,32 @@ end
     end
 end
 
-
-@testset "atomic demotion" begin
-    # Julia's `unordered` heap-reference accesses and `release` type-tag stores cannot be
-    # expressed in SPIR-V when they involve pointers (OpAtomicLoad/OpAtomicStore take scalars
-    # only): the translator would emit an invalid pointer-typed atomic. They carry no meaning
-    # without a device GC, so `demote_atomics!` turns them into plain accesses.
+@testset "LLVM atomics" begin
+    # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`, Atomix' `get`/`set!`) must
+    # reach the back-end
     mod = @eval module $(gensym())
-        function kernel(p::Ptr{Ptr{Int}}, q::Ptr{Ptr{Int}})
-            x = Core.Intrinsics.atomic_pointerref(p, :unordered)
-            Core.Intrinsics.atomic_pointerset(q, x, :unordered)
-            y = Core.Intrinsics.atomic_pointerref(p, :acquire)
-            Core.Intrinsics.atomic_pointerset(q, y, :release)
+        function kernel(p::Ptr{Int32}, q::Ptr{Int32})
+            x = Core.Intrinsics.atomic_pointerref(p, :acquire)
+            Core.Intrinsics.atomic_pointerset(q, x, :release)
             return
         end
     end
-    tt = Tuple{Ptr{Ptr{Int}}, Ptr{Ptr{Int}}}
+    tt = Tuple{Ptr{Int32}, Ptr{Int32}}
 
     @test @filecheck begin
         @check_label "define spir_kernel void @_Z6kernel"
-        @check_not "load atomic"
-        @check_not "store atomic"
-        @check "ret void"
+        @check "load atomic i32"
+        @check_same "acquire"
+        @check "store atomic i32"
+        @check_same "release"
         SPIRV.code_llvm(mod.kernel, tt; backend, kernel=true)
     end
 
-    # the SPIR-V is validated by the helper, so an invalid pointer-typed atomic would fail here
     @test @filecheck begin
         @check "OpEntryPoint Kernel %[[KERNEL:[^ ]+]]"
         @check "%[[KERNEL]] = OpFunction %void None"
-        @check_not "OpAtomicLoad"
-        @check_not "OpAtomicStore"
+        @check "OpAtomicLoad"
+        @check "OpAtomicStore"
         SPIRV.code_native(mod.kernel, tt; backend, kernel=true)
     end
 end
