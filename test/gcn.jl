@@ -526,19 +526,19 @@ end
 @testset "float boxes" begin
     mod = @eval module $(gensym())
         function kernel(a,b)
-            # Int32(a) may fail, boxing the Float32 for the @nospecialize ctor
+            # Int32(a) may fail, throwing an `InexactError`, whose `@nospecialize`
+            # constructor would box the Float32
             c = Int32(a)
             unsafe_store!(b, c)
             return
         end
     end
 
+    # the exception object isn't constructed, as nothing looks at it
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
-        # 1.10 boxes through jl_box_float32; 1.11+ specializes the constructor
-        # and boxes through the GC pool allocator instead
-        @check cond=(VERSION < v"1.11-")  "jl_box_float32"
-        @check cond=(VERSION >= v"1.11-") "gpu_gc_pool_alloc"
+        @check_not "jl_box_float32"
+        @check_not "gpu_gc_pool_alloc"
         GCN.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}}; dump_module=true)
     end
     GCN.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})

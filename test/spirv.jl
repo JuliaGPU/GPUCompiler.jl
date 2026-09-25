@@ -322,6 +322,47 @@ end
     end
 end
 
+@testset "exception allocations" begin
+    # a thrown exception's construction is dead once `throw` is lowered, but it used to survive
+    # (e.g. as an un-inlined constructor call), allocating through the device allocator, with
+    # Julia's GC orderings on the stores into it, which SPIR-V cannot express for pointers
+    # (#924)
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..ExternalAllocatorRuntime
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = ExternalAllocatorRuntime
+        GPUCompiler.isintrinsic(job::CompilerJob{SPIRVCompilerTarget,Params}, fn::String) =
+            fn == "test_malloc" ||
+            @invoke GPUCompiler.isintrinsic(job::CompilerJob{SPIRVCompilerTarget}, fn::String)
+
+        # `InexactError` boxes its arguments in a tuple
+        function bool(out, x)
+            unsafe_store!(out, Bool(x))
+            return
+        end
+
+        # `DomainError` with a lazily-built message
+        function domain(out, x)
+            x < 0 && throw(DomainError(x, LazyString("log1p was called with ", x)))
+            unsafe_store!(out, x)
+            return
+        end
+    end
+
+    for (f, tt) in ((mod.bool, Tuple{Core.LLVMPtr{Bool,1},Int}),
+                    (mod.domain, Tuple{Core.LLVMPtr{Float32,1},Float32}))
+        source = methodinstance(typeof(f), tt, Base.get_world_counter())
+        target = SPIRVCompilerTarget(; backend, validate=true)
+        job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
+
+        @test @filecheck implicit_check_not=["{{(load|store) atomic|atomicrmw|cmpxchg}}", "call {{.*}}@test_malloc"] begin
+            @check "define spir_kernel void @_Z"
+            GPUCompiler.code_llvm(stdout, job; dump_module=true)
+        end
+    end
+end
+
 @testset "atomic demotion" begin
     # Julia's `unordered` heap-reference accesses and `release` type-tag stores cannot be
     # expressed in SPIR-V when they involve pointers (OpAtomicLoad/OpAtomicStore take scalars

@@ -354,6 +354,52 @@ end
     end
 end
 
+@static if hasfield(CC.InstructionStream, :stmt)
+    ir_stmts(ir::CC.IRCode) = ir.stmts.stmt
+else
+    ir_stmts(ir::CC.IRCode) = ir.stmts.inst
+end
+
+# remove the statements a pass made dead: `compact!` removes unused statements whose effects
+# allow it, transitively, and `adce_pass!` also dead phi cycles (as Julia's own pipeline does)
+function julia_ir_dce!(ir::CC.IRCode, opt::CC.OptimizationState)
+    ir = CC.compact!(ir)
+    res = CC.adce_pass!(ir, opt.inlining)
+    if res isa CC.IRCode    # 1.10
+        ir = CC.compact!(res, true)
+    else                    # 1.11+: `ir => made_changes`
+        ir, made_changes = res
+        made_changes && (ir = CC.compact!(ir, true))
+    end
+    return ir
+end
+
+# replace the argument of every `throw` by `nothing`
+#
+# Targets that cannot throw (see `can_throw`) lower `throw` to an exception report that does
+# not look at the thrown value (see `lower_throw!`), so building that value is wasted work.
+# Worse, it often survives: Julia does not inline into throw blocks, exception constructors
+# allocate (e.g. `InexactError`'s boxed `args` tuple) through the device allocator, which LLVM
+# cannot remove, and Julia's GC lowering puts atomic orderings on the stores into such dead
+# objects that some back-ends cannot express. Without the use, Julia's DCE removes every
+# construction whose effects it proved `removable_if_unused`, which covers the exceptions Base
+# throws with lazily-built messages. Constructions that are not proven removable, like eagerly
+# building a message string, stay.
+function drop_throw_arguments!(::CC.AbstractInterpreter, opt::CC.OptimizationState,
+                               ir::CC.IRCode)
+    stmts = ir_stmts(ir)
+    changed = false
+    for i in eachindex(stmts)
+        stmt = stmts[i]
+        (stmt isa Expr && stmt.head === :call && length(stmt.args) == 2) || continue
+        stmt.args[2] === nothing && continue
+        CC.singleton_type(CC.argextype(stmt.args[1], ir)) === Core.throw || continue
+        stmts[i] = Expr(:call, stmt.args[1], nothing)
+        changed = true
+    end
+    return changed ? julia_ir_dce!(ir, opt) : ir
+end
+
 
 ## driving inference and walking callees
 
