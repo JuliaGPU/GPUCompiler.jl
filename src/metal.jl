@@ -1442,8 +1442,7 @@ function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
 
     for inst in atomics
         action = metal_atomic_action(job, inst)
-        # (`validate_ir` rejects unsupported operations; without validation, select them as-is)
-        action isa String && continue
+        action isa String && continue   # unsupported, reported below
         if action === :demote
             demote_private_atomic!(inst)
             continue
@@ -1466,9 +1465,22 @@ function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
     end
 
     # select the atomics that are left, including the ones the expansions introduced
+    unsupported = IRError[]
     for f in functions(mod), bb in blocks(f), inst in collect(instructions(bb))
-        is_atomic_memop(inst) && select_atomic!(job, mod, inst)
+        is_atomic_memop(inst) || continue
+        action = metal_atomic_action(job, inst)
+        if action === :select
+            select_atomic!(job, mod, inst)
+        elseif action isa String
+            push!(unsupported, (action, backtrace(inst), string(inst)))
+        else
+            error("Atomic operation was not legalized ($action): $inst")
+        end
     end
+
+    # `validate_ir` rejects these, but validation can be disabled (e.g., for reflection).
+    # Rather than selecting AIR intrinsics that don't exist, fail here too.
+    isempty(unsupported) || throw(InvalidIRError(job, unsupported))
 
     # attach element type metadata to the declarations we introduced
     legalize_atomic_abi!(job, mod)
