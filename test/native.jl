@@ -1276,6 +1276,129 @@ end
     end
 end
 
+@testset "tabulated relocation of merged slots" begin
+    # LLVM merges loads from different slots into one load from a `phi` or `select` of their
+    # addresses (#959). The table has no address to take their place, so the lowering has to
+    # merge their table offsets instead.
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
+        mod = @eval module $(gensym())
+            f() = nothing
+        end
+        job, _ = Native.create_job(mod.f, Tuple{}; relocations=:table, jlruntime=false)
+        slots = ("merged_a", "merged_b", "merged_c")
+        relocations() = GPUCompiler.Relocations(
+            [GPUCompiler.Relocation(GPUCompiler.SlotSite, name, 0,
+                                    GPUCompiler.JuliaValueRef(Symbol(name)))
+             for name in slots])
+        word(name) =
+            GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(Symbol(name)))
+        JuliaContext() do ctx
+            m = parse(LLVM.Module, """
+                @merged_a = external global ptr
+                @merged_b = external global ptr
+                @merged_c = external global ptr
+                @jl_nothing = external global ptr
+
+                define i64 @pick(i64 %i) {
+                top:
+                    switch i64 %i, label %other [ i64 1, label %one
+                                                  i64 2, label %two ]
+                one:
+                    br label %join
+                two:
+                    br label %join
+                other:
+                    %large = icmp sgt i64 %i, 3
+                    %other.addr = select i1 %large, ptr @jl_nothing, ptr @merged_c
+                    br label %join
+                join:
+                    %addr = phi ptr [ @merged_a, %one ], [ @merged_b, %two ],
+                                    [ %other.addr, %other ]
+                    %word = load i64, ptr %addr
+                    ret i64 %word
+                }
+
+                define i64 @flip(i64 %n) {
+                top:
+                    br label %loop
+                loop:
+                    %k = phi i64 [ 0, %top ], [ %k.next, %loop ]
+                    %addr = phi ptr [ @merged_a, %top ], [ %addr.next, %loop ]
+                    %flip = icmp eq i64 %k, 2
+                    %addr.next = select i1 %flip, ptr @merged_b, ptr %addr
+                    %k.next = add i64 %k, 1
+                    %done = icmp sge i64 %k.next, %n
+                    br i1 %done, label %exit, label %loop
+                exit:
+                    %word = load ptr, ptr %addr.next
+                    %int = ptrtoint ptr %word to i64
+                    ret i64 %int
+                }
+
+                define i64 @cast(i1 %cond) {
+                    %addr = select i1 %cond, ptr @merged_a, ptr @merged_b
+                    %cast = addrspacecast ptr %addr to ptr addrspace(1)
+                    %word = load i64, ptr addrspace(1) %cast
+                    ret i64 %word
+                }""")
+            relocs = relocations()
+            obj, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.API.LLVMObjectFile)
+            # `jl_nothing` became a slot too, and all of them were replaced by the table
+            @test length(relocs) == length(slots) + 1
+            @test any(rec -> rec.target == GPUCompiler.CGlobalRef(:jl_nothing),
+                      relocs.records)
+            for rec in relocs.records
+                @test !haskey(globals(m), rec.name)
+            end
+            @test occursin("phi i32", string(m))
+
+            fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)), "pick", relocs;
+                                             table=true)
+            try
+                GC.@preserve table begin
+                    nothing_word = GPUCompiler.resolve_relocation_target(
+                        GPUCompiler.CGlobalRef(:jl_nothing))
+                    @test [ccall(fptr, UInt, (Int,), i) for i in 1:4] ==
+                          [word("merged_a"), word("merged_b"), word("merged_c"), nothing_word]
+                    flip = pointer(lookup(lljit, "flip"))
+                    @test [ccall(flip, UInt, (Int,), n) for n in 1:4] ==
+                          word.(["merged_a", "merged_a", "merged_b", "merged_b"])
+                    cast = pointer(lookup(lljit, "cast"))
+                    @test [ccall(cast, UInt, (Bool,), c) for c in (true, false)] ==
+                          word.(["merged_a", "merged_b"])
+                end
+            finally
+                dispose(lljit)
+            end
+
+            # the table holds no word for any other address...
+            m = parse(LLVM.Module, """
+                @merged_a = external global ptr
+
+                define i64 @mixed(i1 %cond, ptr %other) {
+                    %addr = select i1 %cond, ptr @merged_a, ptr %other
+                    %word = load i64, ptr %addr
+                    ret i64 %word
+                }""")
+            @test_throws "merged with unsupported address" GPUCompiler.emit_asm(
+                job, m, relocations(), LLVM.API.LLVMObjectFile)
+
+            # ...and has no address to give out
+            m = parse(LLVM.Module, """
+                @merged_a = external global ptr
+                @merged_b = external global ptr
+
+                define i1 @compare(i1 %cond) {
+                    %addr = select i1 %cond, ptr @merged_a, ptr @merged_b
+                    %same = icmp eq ptr %addr, @merged_a
+                    ret i1 %same
+                }""")
+            @test_throws "Unsupported use of merged relocation slot addresses" GPUCompiler.emit_asm(
+                job, m, relocations(), LLVM.API.LLVMObjectFile)
+        end
+    end
+end
+
 @testset "unlowered relocation table" begin
     # Emitting a `:table` module through the 3-argument `emit_asm` hands the lowering an
     # empty manifest, leaving the real one unlowered and the module's slots stranded. The
@@ -1469,6 +1592,53 @@ end
         @test occursin("@$(rec.name) = external global i64", string(mod))
         GPUCompiler.emit_patchable_relocations!(mod, relocs)
         @test occursin("externally_initialized global i64 0", string(mod))
+
+        # A global whose address is merged with others before being loaded from (e.g.
+        # `jl_nothing` with the relocation slots of other singletons) takes its slot's address.
+        merged_ir = """
+            @jl_float32_type = external global $word_ptr
+            @jl_float64_type = external global $word_ptr
+
+            define $word_ptr @entry(i1 %cond) {
+                %addr = select i1 %cond, $word_ptr_ptr @jl_float32_type,
+                                         $word_ptr_ptr @jl_float64_type
+                %value = load $word_ptr, $word_ptr_ptr %addr
+                ret $word_ptr %value
+            }"""
+        mod = parse(LLVM.Module, merged_ir)
+        relocs = GPUCompiler.Relocations()
+        @test GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
+        @test [rec.target for rec in relocs.records] ==
+              [GPUCompiler.CGlobalRef(:jl_float32_type), GPUCompiler.CGlobalRef(:jl_float64_type)]
+        addr = first(instructions(first(blocks(functions(mod)["entry"]))))
+        @test !occursin(r"@jl_float(32|64)_type\b", string(addr))
+        for rec in relocs.records
+            @test occursin("@$(rec.name)", string(addr))
+        end
+        mod = parse(LLVM.Module, merged_ir)
+        GPUCompiler.prepare_execution!(job, mod)
+        ir = string(mod)
+        for T in (Float32, Float64)
+            expected = GPUCompiler.resolve_relocation_target(
+                GPUCompiler.CGlobalRef(Symbol("jl_$(lowercase(string(T)))_type")))
+            @test expected == UInt(pointer_from_objref(T))
+            @test occursin("inttoptr (i64 $expected to $word_ptr)", ir)
+        end
+        # a slot only holds a word, so anything else loaded is left, and reported, as is
+        mod = parse(LLVM.Module, """
+            @jl_float32_type = external global i32
+            @jl_float64_type = external global i32
+
+            define i32 @entry(i1 %cond) {
+                %addr = select i1 %cond, $(ptr("i32")) @jl_float32_type,
+                                         $(ptr("i32")) @jl_float64_type
+                %value = load i32, $(ptr("i32")) %addr
+                ret i32 %value
+            }""")
+        relocs = GPUCompiler.Relocations()
+        @test !GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
+        @test isempty(relocs)
+        @test GPUCompiler.has_unresolved_cglobal_loads(mod, relocs)
 
         # Fold aggregate GEPs according to the module data layout.
         mod = parse(LLVM.Module, """

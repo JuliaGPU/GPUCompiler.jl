@@ -435,6 +435,44 @@ end
     end
 end
 
+@testset "merged relocation slots" begin
+    # With five possible values, inference widens `pick`'s result to `Val`, so `v` is boxed
+    # and `===` compares its address with those of the singletons. LLVM merges the loads of
+    # those addresses into one load from a `phi` of their slots, which the table lowering
+    # has to turn into a `phi` of table offsets (#959).
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
+        mod = @eval module $(gensym())
+            pick(i) = i == 1 ? Val(1) : i == 2 ? Val(2) : i == 3 ? Val(3) :
+                      i == 4 ? Val(4) : Val(5)
+            function kernel(ptr, i)
+                v = pick(unsafe_load(i))
+                unsafe_store!(ptr, v === Val(1) ? 1f0 : v === Val(2) ? 2f0 : 3f0)
+                return
+            end
+            # `nothing` is merged in through `jl_nothing`, which needs a slot of its own
+            function maybe_kernel(ptr, i)
+                x = unsafe_load(i)
+                v = x > 5 ? Base.inferencebarrier(nothing) : pick(x)
+                unsafe_store!(ptr, v === Val(1) ? 1f0 : v === nothing ? 2f0 : 3f0)
+                return
+            end
+        end
+        tt = (Core.LLVMPtr{Float32,1}, Core.LLVMPtr{Int,1})
+
+        @test @filecheck begin
+            @check "phi i32"
+            @check "load i64"
+            Metal.code_native_table(mod.kernel, tt; kernel=true)
+        end
+        for f in (mod.kernel, mod.maybe_kernel)
+            air = sprint(io -> Metal.code_native_table(io, f, tt; kernel=true))
+            @test occursin("reloc_table", air)
+            @test !occursin("jl_global", air)
+            @test !occursin("jl_nothing", air)
+        end
+    end
+end
+
 @testset "codegen counter normalization" begin
     # Julia's per-session codegen counter has to be scrubbed from everything that reaches the
     # bitcode, or the metallib is not reproducible: symbol names, the block labels inlining
