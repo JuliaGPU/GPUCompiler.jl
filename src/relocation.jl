@@ -912,8 +912,9 @@ end
 
 function referenced_object(value, relocs::Relocations)
     # This is best-effort: optimized shapes fall back to the unknown-binding error path.
-    while value isa ConstantExpr &&
-          opcode(value) in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)
+    while (value isa ConstantExpr &&
+           opcode(value) in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)) ||
+          value isa LLVM.BitCastInst || value isa LLVM.AddrSpaceCastInst
         value = first(operands(value))
     end
     if value isa LLVM.LoadInst

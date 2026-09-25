@@ -1692,6 +1692,70 @@ end
     end
 end
 
+
+@testset "unsupported allocations" begin
+    # without a garbage collector, device code can only allocate objects that do not
+    # reference other objects
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..ExternalAllocatorRuntime, ..Metal
+        struct Params <: GPUCompiler.AbstractCompilerParams
+            table::Bool     # use the `:table` relocation strategy, as Metal.jl does
+        end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = ExternalAllocatorRuntime
+        GPUCompiler.relocation_lowering(job::CompilerJob{<:Any,Params}) =
+            job.config.params.table ? (:table) : (:bake)
+        GPUCompiler.kernel_state_type(job::CompilerJob{<:Any,Params}) =
+            job.config.params.table ? Metal.TableKernelState : Nothing
+        GPUCompiler.isintrinsic(job::CompilerJob{MetalCompilerTarget,Params}, fn::String) =
+            fn == "test_malloc" ||
+            @invoke GPUCompiler.isintrinsic(job::CompilerJob{MetalCompilerTarget}, fn::String)
+
+        mutable struct Counter
+            x::Int
+        end
+        mutable struct Holder
+            c::Counter
+        end
+        @noinline bump!(c::Counter) = (c.x += 1; return)
+        @noinline bump!(h::Holder) = bump!(h.c)
+
+        # an escaping object with plain data
+        function plain(out, x)
+            c = Counter(x)
+            bump!(c)
+            unsafe_store!(out, c.x)
+            return
+        end
+
+        # one that references another object
+        function nested(out, x)
+            h = Holder(Counter(x))
+            bump!(h)
+            unsafe_store!(out, h.c.x)
+            return
+        end
+    end
+    function compile(f, table)
+        source = methodinstance(typeof(f), Tuple{Core.LLVMPtr{Int,1},Int},
+                                Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+        job = CompilerJob(source, CompilerConfig(target, mod.Params(table); kernel=true))
+        JuliaContext() do ctx
+            GPUCompiler.compile(:llvm, job)
+        end
+    end
+
+    # the allocated type is found through relocations of either strategy
+    for table in (false, true)
+        @test compile(mod.plain, table) isa Tuple
+        @test_throws_message(InvalidIRError, compile(mod.nested, table)) do msg
+            occursin("unsupported allocation of an object with references", msg) &&
+            occursin("Holder)", msg) && occursin("[2] nested", msg)
+        end
+    end
+end
+
 @testset "atomic demotion" begin
     # Demote every LLVM atomic load/store, whatever its ordering or value type.
     Context() do ctx
