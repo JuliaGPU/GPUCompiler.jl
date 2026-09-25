@@ -1770,8 +1770,9 @@ end
     targets = ((v"3.2", v"2.7"), (v"4.0", v"2.8"), (v"4.0", v"2.9"), (v"4.1", v"2.9"))
 
     @testset "orderings (Metal $metal, AIR $air)" for (metal, air) in targets
-        # MSL 4.1 has ordered atomics that order device and threadgroup memory (flags=3);
-        # before that, a relaxed atomic is bracketed by (sequentially-consistent) fences
+        # MSL 4.1 has ordered atomics that order device and threadgroup memory (flags=3),
+        # but sequentially-consistent stores need a trailing fence; before that, a relaxed
+        # atomic is bracketed by (sequentially-consistent) fences
         ordered = metal >= v"4.1"
         args(order, flags, volatile) = air >= v"2.9" ?
             "i32 $order, i32 2, i32 $flags, i1 $volatile" : "i32 $order, i32 2, i1 $volatile"
@@ -1794,7 +1795,8 @@ end
             @check_next cond=!ordered "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(rmw(5)))"
             @check cond=ordered "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(rmw(5)))"
             @check_next cond=!ordered fence
-            @check "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(rmw(2)))"
+            @check cond=!ordered "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(rmw(2)))"
+            @check_next cond=ordered "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(rmw(2)))"
             @check_next cond=!ordered fence
             @check_next cond=!ordered fence
             @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 {{%.+}}, $(op(3)))"
@@ -1804,11 +1806,36 @@ end
             @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(rmw(0)))"
             @check_next cond=!ordered fence
             @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 {{%.+}}, $(op(5)))"
-            @check_next cond=!ordered fence
+            @check_next fence
             @check_not "call void @air.atomic.fence"
             ir
         end
         @test !occursin(r"(atomicrmw|cmpxchg|load atomic|store atomic) |^\s*fence "m, ir)
+    end
+
+    @testset "sequentially-consistent stores" begin
+        # from MSL 4.1, only sequentially-consistent stores get a (trailing) fence, with the
+        # store's scope: other orderings and operations don't need one
+        ir = lower_metal_atomics(kernel("""
+            store atomic i32 1, ptr addrspace(1) %p seq_cst, align 4
+            store atomic i32 1, ptr addrspace(3) %t syncscope("workgroup") seq_cst, align 4
+            store atomic float 1.0, ptr addrspace(1) %p seq_cst, align 4
+            store atomic i32 1, ptr addrspace(1) %p release, align 4
+            %a = load atomic i32, ptr addrspace(1) %p seq_cst, align 4
+            %b = atomicrmw xchg ptr addrspace(1) %p, i32 1 seq_cst, align 4
+            %c = cmpxchg ptr addrspace(1) %p, i32 1, i32 2 seq_cst seq_cst, align 4
+            """); metal=v"4.1", air=v"2.9")
+        @test @filecheck begin
+            @check "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1, i32 5, i32 2, i32 3, i1 false)"
+            @check_next "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+            @check_next "call void @air.atomic.local.store.i32(ptr addrspace(3) %t, i32 1, i32 5, i32 1, i32 3, i1 false)"
+            @check_next "call void @air.atomic.fence(i32 3, i32 5, i32 1)"
+            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1065353216, i32 5, i32 2, i32 3, i1 false)"
+            @check_next "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1, i32 3, i32 2, i32 3, i1 false)"
+            @check_not "call void @air.atomic.fence"
+            ir
+        end
     end
 
     @testset "scopes" begin

@@ -1212,6 +1212,26 @@ function insert_atomic_fences!(inst::LLVM.Instruction)
     return true
 end
 
+# With ordered atomics (MSL ≥ 4.1), follow a sequentially-consistent store by a
+# sequentially-consistent fence (AtomicExpand's `shouldInsertTrailingSeqCstFenceForAtomicStore`,
+# which AArch64 uses for MSVC). Apple compiles such a store as a release store that doesn't
+# wait for the write, so a later sequentially-consistent load can be performed first:
+# `store x; load y` and `store y; load x` in two threads both return the old values (store
+# buffering, ~0.5% of the time on an M1), which sequential consistency forbids.
+# Read-modify-writes and compare-exchanges wait for their result and don't need this, and
+# fences before loads instead would cost more (loads are more common than stores).
+function insert_trailing_seq_cst_fence!(inst::LLVM.Instruction)
+    inst isa LLVM.StoreInst &&
+        atomic_ordering(inst) == LLVM.API.LLVMAtomicOrderingSequentiallyConsistent ||
+        return false
+    @dispose builder=IRBuilder() begin
+        position!(builder, nextinst(inst))
+        debuglocation!(builder, inst)
+        fence!(builder, LLVM.API.LLVMAtomicOrderingSequentiallyConsistent, syncscope(inst))
+    end
+    return true
+end
+
 # The ordering to lower an atomic operation with: without ordered atomics (MSL < 4.1), the
 # fences `insert_atomic_fences!` added provide the ordering, and the operation is relaxed.
 lowered_ordering(@nospecialize(job::CompilerJob{MetalCompilerTarget}), order::AtomicOrdering) =
@@ -1407,7 +1427,11 @@ function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
             demote_private_atomic!(inst)
             continue
         end
-        job.config.target.metal < v"4.1" && insert_atomic_fences!(inst)
+        if job.config.target.metal < v"4.1"
+            insert_atomic_fences!(inst)
+        else
+            insert_trailing_seq_cst_fence!(inst)
+        end
         if action === :cast
             inst = cast_atomic_to_int!(job, inst)
             action = metal_atomic_action(job, inst)   # e.g. a half-precision load is partword
