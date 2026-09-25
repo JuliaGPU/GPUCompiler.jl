@@ -1738,6 +1738,65 @@ function fuse_minmax3!(fun::LLVM.Function)
     return changed
 end
 
+# 1.0 of a floating-point type, splat across the lanes of a vector type
+fp_one(typ::LLVMType) = LLVM.Value(LLVM.API.LLVMConstReal(typ, 1.0))
+
+# `x^n` for a constant `n`, unrolled into multiplies like SelectionDAG's `ExpandPowI`
+function expand_powi!(builder::IRBuilder, x::LLVM.Value, n::Int)
+    m = unsigned(abs(n))    # also for `typemin(n)`, which `abs` returns as is
+    res = nothing           # 1.0, until the first set bit
+    sq = x                  # x^(2^i) for the current bit i
+    while m != 0
+        isodd(m) && (res = res === nothing ? sq : fmul!(builder, res, sq))
+        m >>= 1
+        m != 0 && (sq = fmul!(builder, sq, sq))
+    end
+    res = something(res, fp_one(value_type(x)))
+    return n < 0 ? fdiv!(builder, fp_one(value_type(x)), res) : res
+end
+
+# `x^n` for any other `n`, as a loop over the exponent's bits like compiler-rt's `__powisf2`
+function build_powi!(mod::LLVM.Module, fn::String, typ::LLVMType, ntyp::LLVMType)
+    f = LLVM.Function(mod, fn, LLVM.FunctionType(typ, LLVMType[typ, ntyp]))
+    linkage!(f, LLVM.API.LLVMInternalLinkage)
+    push!(function_attributes(f), EnumAttribute("alwaysinline"))
+    x, n = parameters(f)
+    one = fp_one(typ)
+    zero = LLVM.ConstantInt(ntyp, 0)
+
+    bb_entry = BasicBlock(f, "entry")
+    bb_loop = BasicBlock(f, "loop")
+    bb_done = BasicBlock(f, "done")
+    @dispose builder=IRBuilder() begin
+        position!(builder, bb_entry)
+        br!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, n, zero), bb_done, bb_loop)
+
+        # multiply the squares selected by the bits of `n`, least significant first. like
+        # `__powisf2`, shift the signed `n` by halving it (rounding towards zero), so as not
+        # to take `abs(n)`, which InstCombine would turn into an `llvm.abs` after that has
+        # already been lowered.
+        position!(builder, bb_loop)
+        acc = phi!(builder, typ, "acc")
+        sq = phi!(builder, typ, "sq")
+        rest = phi!(builder, ntyp, "rest")
+        bit = trunc!(builder, rest, LLVM.Int1Type())
+        acc′ = select!(builder, bit, fmul!(builder, acc, sq), acc)
+        sq′ = fmul!(builder, sq, sq)
+        rest′ = sdiv!(builder, rest, LLVM.ConstantInt(ntyp, 2))
+        br!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, rest′, zero), bb_done, bb_loop)
+        append!(incoming(acc), [(one, bb_entry), (acc′, bb_loop)])
+        append!(incoming(sq), [(x, bb_entry), (sq′, bb_loop)])
+        append!(incoming(rest), [(n, bb_entry), (rest′, bb_loop)])
+
+        position!(builder, bb_done)
+        pow = phi!(builder, typ, "pow")
+        append!(incoming(pow), [(one, bb_entry), (acc′, bb_loop)])
+        negative = icmp!(builder, LLVM.API.LLVMIntSLT, n, zero)
+        ret!(builder, select!(builder, negative, fdiv!(builder, one, pow), pow))
+    end
+    return f
+end
+
 # replace LLVM intrinsics with AIR equivalents
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
@@ -2141,6 +2200,42 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 new_value = call!(builder, op_ft, new_intr, call_args)
                 if promote_bf
                     new_value = fptrunc!(builder, new_value, typ)
+                end
+                replace_uses!(call, new_value)
+                erase!(call)
+                changed = true
+            end
+        end
+
+        # integer power, which AIR lacks (MSL has no `pown`, and `pow` is undefined for negative
+        # bases), by exponentiation by squaring as LLVM's back-ends expand it: a constant
+        # exponent is unrolled into multiplies, any other calls a loop over the exponent's bits.
+        # A negative exponent takes the reciprocal, and `x^0` is 1 (even for NaN). The exponent
+        # of a vector `powi` is a scalar.
+        if intr == LLVM.Intrinsic("llvm.powi")
+            x, n = arguments(call)
+
+            @dispose builder=IRBuilder() begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                new_value = if n isa LLVM.ConstantInt && width(value_type(n)) <= 64
+                    expand_powi!(builder, x, convert(Int, n))
+                else
+                    # the loop halves the exponent, which doesn't work for an `i1` (where 2
+                    # wraps to 0)
+                    if width(value_type(n)) < 32
+                        n = sext!(builder, n, LLVM.Int32Type())
+                    end
+
+                    # keep the mangled value type, e.g. llvm.powi.v2f32.i16 -> air.powi.v2f32.i32
+                    fn = "air.powi.$(split(LLVM.name(call_fun), '.')[3]).i$(width(value_type(n)))"
+                    new_intr = if haskey(functions(mod), fn)
+                        functions(mod)[fn]
+                    else
+                        build_powi!(mod, fn, value_type(x), value_type(n))
+                    end
+                    call!(builder, function_type(new_intr), new_intr, LLVM.Value[x, n])
                 end
                 replace_uses!(call, new_value)
                 erase!(call)
