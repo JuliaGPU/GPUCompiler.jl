@@ -86,8 +86,8 @@ Julia 1.11+, the job-level `cache_owner(job)` returns the pre-boxed token stored
 
 The default token covers the full `target` and `params` instances plus `always_inline`.
 That is sufficient because the inference inputs derived from a job — `method_table`,
-`method_table_view`, `inference_params` and `optimization_params` — must be pure
-functions of those values, so back-ends normally leave this untouched.
+`method_table_view`, `inference_params`, `optimization_params` and `julia_ir_passes` —
+must be pure functions of those values, so back-ends normally leave this untouched.
 
 When overriding, the returned value must match under `===`/`jl_egal` after package-image
 deserialization: use immutable containers, and only reference mutable objects (like method
@@ -383,7 +383,8 @@ function get_interpreter(@nospecialize(job::CompilerJob))
                    owner=cache_owner(job),
                    inf_params=inference_params(job),
                    opt_params=optimization_params(job),
-                   always_inline=job.config.always_inline)
+                   always_inline=job.config.always_inline,
+                   julia_ir_passes=julia_ir_passes(job))
 end
 else
 function get_interpreter(@nospecialize(job::CompilerJob))
@@ -392,7 +393,8 @@ function get_interpreter(@nospecialize(job::CompilerJob))
                    code_cache=get_code_cache(job),
                    inf_params=inference_params(job),
                    opt_params=optimization_params(job),
-                   always_inline=job.config.always_inline)
+                   always_inline=job.config.always_inline,
+                   julia_ir_passes=julia_ir_passes(job))
 end
 end
 
@@ -604,9 +606,10 @@ end # HAS_INTEGRATED_CACHE
 
 # the method table to use
 #
-# NOTE: these (like `inference_params` and `optimization_params` below) may only depend on
-#       the job's world and its config's `target`/`params` values (+ `always_inline`);
-#       [`cache_owner`](@ref) relies on that to partition inference results correctly.
+# NOTE: these (like `inference_params`, `optimization_params` and `julia_ir_passes` below)
+#       may only depend on the job's world and its config's `target`/`params` values
+#       (+ `always_inline`); [`cache_owner`](@ref) relies on that to partition inference
+#       results correctly.
 # deprecate method_table on next-breaking release
 method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
 method_table_view(@nospecialize(job::CompilerJob)) = get_method_table_view(job.world, method_table(job))
@@ -628,6 +631,24 @@ end
 # preserve specialization. Back-ends can override this hook to change the policy.
 optimization_params(@nospecialize(job::CompilerJob)) =
     CC.OptimizationParams(; compilesig_invokes=false)
+
+# the passes to run over the Julia IR of the functions inferred for this job (experimental)
+#
+# Each pass is called as `pass(interp, opt, ir)` with the interpreter, the function's
+# `CC.OptimizationState` and its `CC.IRCode`, after Julia's optimizer (including its IPO
+# analysis) and before Julia determines the function's inlineability and stores the IR for
+# inlining into callers, caching and code generation. It returns the new IR, compacted.
+# Passes run on optimized bodies, not once per compilation: cached results are reused, and
+# re-inference runs them again. They see internal data structures of Julia's compiler, so they
+# have to follow its changes across versions, and they must preserve what Julia already derived
+# from the IR (return type, effects, escapes), e.g. by only removing code that is dead.
+#
+# Like the inference parameters, the passes and their behavior may only depend on the job's
+# target and params (see `cache_owner`). Back-ends can add passes after GPUCompiler's own:
+#
+#     GPUCompiler.julia_ir_passes(job::CompilerJob{MyTarget}) =
+#         (@invoke(GPUCompiler.julia_ir_passes(job::CompilerJob))..., my_pass!)
+julia_ir_passes(@nospecialize(job::CompilerJob)) = ()
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))
