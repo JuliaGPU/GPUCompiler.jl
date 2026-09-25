@@ -1693,6 +1693,14 @@ end
             unsafe_store!(out, h.c.x)
             return
         end
+
+        # one whose type codegen refers to by its small tag instead of its address
+        @noinline svec_length(s::Core.SimpleVector) = length(s)
+        function svec(out, x)
+            s = Core.svec(x)
+            unsafe_store!(out, svec_length(s))
+            return
+        end
     end
     function compile(f, table)
         source = methodinstance(typeof(f), Tuple{Core.LLVMPtr{Int,1},Int},
@@ -1711,6 +1719,30 @@ end
             occursin("unsupported allocation of an object with references", msg) &&
             occursin("Holder)", msg) && occursin("[2] nested", msg)
         end
+        # older versions call `jl_f_svec` instead of allocating inline
+        if VERSION >= v"1.12"
+            @test_throws_message(InvalidIRError, compile(mod.svec, table)) do msg
+                occursin("unsupported allocation of an object with references", msg) &&
+                occursin("(Core.SimpleVector)", msg) && occursin("[1] svec", msg)
+            end
+        end
+    end
+
+    # small tags are resolved on every version, while addresses are still dereferenced
+    Context() do ctx
+        relocs = GPUCompiler.Relocations()
+        ref(addr) = GPUCompiler.referenced_object(
+            const_inttoptr(ConstantInt(UInt64(addr)), LLVM.PointerType(LLVM.Int8Type())),
+            relocs)
+        # the header of an object holds its type's small tag
+        obj = Core.svec(1, 2)
+        ptr = ccall(:jl_value_ptr, Ptr{UInt}, (Any,), obj)
+        tag = GC.@preserve obj unsafe_load(ptr - sizeof(UInt)) & ~UInt(15)
+        @test tag < 64 << 4
+        @test something(ref(tag)) === Core.SimpleVector
+        @test ref(63 << 4) === nothing  # unused tag
+        addr = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), Core.SimpleVector)
+        @test something(ref(UInt(addr))) === Core.SimpleVector
     end
 end
 

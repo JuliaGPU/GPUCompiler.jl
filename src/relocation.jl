@@ -930,8 +930,21 @@ function referenced_object(value, relocs::Relocations)
             end
         end
     elseif value isa ConstantExpr && opcode(value) == LLVM.API.LLVMIntToPtr
-        ptr = Ptr{Cvoid}(convert(Int, first(operands(value))))
-        return Some(Base.unsafe_pointer_to_objref(ptr))
+        addr = first(operands(value))
+        addr isa ConstantInt || return nothing
+        addr = convert(UInt, addr)
+        addr < UInt(64 << 4) && return small_typeof(addr)   # jl_max_tags << 4
+        return Some(Base.unsafe_pointer_to_objref(Ptr{Cvoid}(addr)))
     end
     return nothing
+end
+
+# Codegen refers to some types by their small tag instead of their address, e.g., in the
+# type operand of `julia.gc_alloc_obj`. Such a tag cannot be a heap address; like
+# `jl_to_typeof`, resolve it through Julia's table, whose unused entries are null.
+function small_typeof(tag::UInt)
+    table = cglobal(:jl_small_typeof, Ptr{Cvoid})
+    ptr = unsafe_load(table, tag ÷ sizeof(Ptr{Cvoid}) + 1)
+    ptr == C_NULL && return nothing
+    return Some(Base.unsafe_pointer_to_objref(ptr))
 end
