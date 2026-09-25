@@ -1728,6 +1728,30 @@ end
     end
 end
 
+@testset "non-singleton type arguments" begin
+    mod = @eval module $(gensym())
+        import ..sink
+        foo(::Type{T}) where {T} = (sink(Int(Missing <: T)); return)
+        bar(::Val{T}) where {T} = (sink(Int(Missing <: T)); return)
+    end
+
+    for T in (Union{Missing, Int}, Vector)
+        if isdefined(Core, :TypeEgal)
+            # `Core.TypeEgal` makes every closed type argument a singleton
+            Native.code_execution(mod.foo, Tuple{Type{T}})
+        else
+            @test_throws_message(KernelError,
+                                 Native.code_execution(mod.foo, Tuple{Type{T}})) do msg
+                occursin("passing a non-singleton type argument", msg) &&
+                occursin(string(T), msg)
+            end
+        end
+
+        # the suggested alternative
+        Native.code_execution(mod.bar, Tuple{Val{T}})
+    end
+end
+
 @testset "invalid LLVM IR" begin
     mod = @eval module $(gensym())
         foobar(i) = println(i)
