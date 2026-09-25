@@ -765,6 +765,25 @@ end
     end
 end
 
+@testset "atomic field modifications" begin
+    # from Julia 1.13, `@atomic x.f += 1` is a call to the `julia.atomicmodify`
+    # pseudo-intrinsic, which has to be expanded (JuliaLang/julia#57010)
+    mod = @eval module $(gensym())
+        mutable struct Counter
+            @atomic n::Int
+        end
+        function increment(c::Counter)
+            @atomic c.n += 1
+            return
+        end
+    end
+
+    @test @filecheck implicit_check_not=["julia.atomicmodify"] begin
+        @check "{{atomicrmw add|cmpxchg}}"
+        Native.code_llvm(mod.increment, Tuple{mod.Counter})
+    end
+end
+
 @testset "tracked pointers" begin
     mod = @eval module $(gensym())
         function kernel(a)
