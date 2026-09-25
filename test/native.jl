@@ -891,6 +891,33 @@ end
     end
 end
 
+@testset "Julia IR passes" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+
+        # a back-end adding a pass that records the functions it sees
+        const seen = Symbol[]
+        function record!(interp, opt, ir)
+            push!(seen, opt.linfo.def.name)
+            return ir
+        end
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        module Runtime end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = Runtime
+        GPUCompiler.julia_ir_passes(job::CompilerJob{<:Any,Params}) =
+            (@invoke(GPUCompiler.julia_ir_passes(job::CompilerJob))..., record!)
+
+        @noinline callee(x) = x + 1
+        caller(x) = callee(x) * 2
+    end
+
+    source = methodinstance(typeof(mod.caller), Tuple{Int}, Base.get_world_counter())
+    config = CompilerConfig(NativeCompilerTarget(), mod.Params(); kernel=false)
+    GPUCompiler.code_typed(CompilerJob(source, config))
+    @test :caller in mod.seen
+    @test :callee in mod.seen
+end
+
 @testset "function attributes" begin
     mod = @eval module $(gensym())
         @inline function convergent_barrier()
