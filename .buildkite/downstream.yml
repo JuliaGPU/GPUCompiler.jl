@@ -1,0 +1,177 @@
+# Tests of the packages that build on GPUCompiler, uploaded by `launch.sh`.
+#
+# Each step's `if_changed` lists the files that can affect that package: everything in
+# `src/` and `ext/`, `Project.toml` and the CI configuration, except the other back-ends'
+# target files. The `if:` conditions implement the commit message tags documented in the
+# Development section of the README; keep both in sync when adding a step.
+steps:
+  - label: "CUDA.jl"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.12"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+      unset LD_LIBRARY_PATH
+      julia -e 'println("--- :julia: Instantiating project")
+                using Pkg
+                Pkg.develop(; path=pwd())
+                Pkg.develop(; name="CUDA")' || exit 3
+
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("CUDA"; coverage=true)'
+    agents:
+      queue: "cuda"
+    if_changed:
+      include: &sources
+        - "src/**"
+        - "ext/**"
+        - "Project.toml"
+        - ".buildkite/**"
+      exclude:
+        - "src/{gcn,spirv,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|cuda|ptx)/ &&
+      (build.message =~ /\[only [^\]]*(cuda|ptx)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
+    soft_fail:
+      - exit_status: 3
+
+  - label: "oneAPI.jl"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.12"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+      julia -e 'using Pkg;
+
+                println("--- :julia: Instantiating project")
+                Pkg.develop(; path=pwd())
+                Pkg.develop(; name="oneAPI")
+
+                println("+++ :julia: Building support library")
+                include(joinpath(Pkg.devdir(), "oneAPI", "deps", "build_ci.jl"))' || exit 3
+
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("oneAPI"; coverage=true)'
+    agents:
+      queue: "oneapi"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|oneapi|spirv)/ &&
+      (build.message =~ /\[only [^\]]*(oneapi|spirv)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 60
+    soft_fail:
+      - exit_status: 3
+
+  - label: "AMDGPU.jl"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.12"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+       julia -e 'println("--- :julia: Instantiating project")
+                 using Pkg
+                 Pkg.develop(; path=pwd())
+                 Pkg.develop(; name="AMDGPU")' || exit 3
+
+       julia -e 'println("+++ :julia: Running tests")
+                 using Pkg
+                 Pkg.test("AMDGPU"; coverage=true)'
+    agents:
+      queue: "rocm"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,spirv,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|amdgpu|gcn)/ &&
+      (build.message =~ /\[only [^\]]*(amdgpu|gcn)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 60
+    soft_fail:
+      - exit_status: 3
+
+  - label: "Metal.jl"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.12"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+      julia -e 'println("--- :julia: Instantiating project")
+                using Pkg
+                withenv("JULIA_PKG_PRECOMPILE_AUTO" => 0) do
+                    Pkg.develop(; path=pwd())
+                    Pkg.develop(; name="Metal")
+
+                    # Metal runs its example suites in their own workspace
+                    # environments, which resolve through the manifest of the
+                    # Metal checkout; instantiate that workspace, against this
+                    # GPUCompiler, so those environments can actually load.
+                    gpucompiler = pwd()
+                    Pkg.activate(joinpath(Pkg.devdir(), "Metal"))
+                    Pkg.develop(; path=gpucompiler)
+                    Pkg.instantiate(workspace=true)
+                end' || exit 3
+
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("Metal"; coverage=true)'
+    agents:
+      queue: "metal"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,spirv,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|metal)/ &&
+      (build.message =~ /\[only [^\]]*metal/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
+    soft_fail:
+      - exit_status: 3
+
+  - label: "OpenCL.jl"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.12"
+      - JuliaCI/julia-coverage#v1:
+          codecov: true
+    command: |
+      julia -e 'println("--- :julia: Instantiating project")
+                using Pkg
+                Pkg.develop(; path=pwd())
+                Pkg.develop(; name="OpenCL")
+                Pkg.develop(; name="SPIRVIntrinsics")' || exit 3
+
+       julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("OpenCL"; coverage=true)'
+    agents:
+      # XXX: not on "juliaecosystem" because those workers don't have libc-dev
+      #      see JuliaGPU/OpenCL.jl#303
+      queue: "cuda"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|opencl|spirv)/ &&
+      (build.message =~ /\[only [^\]]*(opencl|spirv)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
+    soft_fail:
+      - exit_status: 3
+
+env:
+  JULIA_PKG_SERVER: "" # it often struggles with our large artifacts
