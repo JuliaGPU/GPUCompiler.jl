@@ -23,6 +23,11 @@ steps:
                 Pkg.test("CUDA"; coverage=true)'
     agents:
       queue: "cuda"
+    env:
+      # The agents budget 2 threads per job, but CUDA.jl's test suite is compile-bound
+      # and the CI hosts have CPU to spare. This raises the number of test workers,
+      # which CUDA.jl's runtests.jl still caps by the available GPU memory.
+      JULIA_CPU_THREADS: "3"
     if_changed:
       include: &sources
         - "src/**"
