@@ -1643,36 +1643,53 @@ end
     end
 end
 
-@testset "Bool conversion exception allocation" begin
+@testset "exception allocations" begin
+    # a thrown exception's construction is dead once `throw` is lowered, but it used to survive
+    # (e.g. as an un-inlined constructor call), allocating through the device allocator, with
+    # Julia's GC orderings on the stores into it (`unordered`, `release`) that AIR cannot
+    # express (#904, Metal.jl#955)
     mod = @eval module $(gensym())
         using ..GPUCompiler
-        module Runtime
-            # Keep allocation visible to LLVM; a constant-null allocator erases
-            # the heap-reference stores which exposed #904.
-            malloc(sz) = ccall("extern test_malloc", llvmcall, Ptr{Nothing}, (Csize_t,), sz)
-            signal_exception() = return
-            report_oom(sz) = return
-            report_exception(ex) = return
-            report_exception_name(ex) = return
-            report_exception_frame(idx, func, file, line) = return
-        end
+        import ..ExternalAllocatorRuntime
         struct Params <: GPUCompiler.AbstractCompilerParams end
-        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = Runtime
-        function kernel(out, x)
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = ExternalAllocatorRuntime
+        GPUCompiler.isintrinsic(job::CompilerJob{MetalCompilerTarget,Params}, fn::String) =
+            fn == "test_malloc" ||
+            @invoke GPUCompiler.isintrinsic(job::CompilerJob{MetalCompilerTarget}, fn::String)
+
+        # `InexactError` boxes its arguments in a tuple (#904)
+        function bool(out, x)
             unsafe_store!(out, Bool(x))
             return
         end
+
+        # `DomainError` with a lazily-built message (Metal.jl#955)
+        function domain(out, x)
+            x < 0 && throw(DomainError(x, LazyString("log1p was called with ", x)))
+            unsafe_store!(out, x)
+            return
+        end
+
+        # throws emitted by codegen
+        function tuple_index(out, t, i)
+            unsafe_store!(out, t[i])
+            return
+        end
     end
-    source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Bool,1},Int},
-                            Base.get_world_counter())
-    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
-    job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
-    ir = sprint(io -> GPUCompiler.code_llvm(io, job; dump_module=true))
-    if VERSION >= v"1.12-"
-        @test occursin(r"store atomic .* unordered", ir)
+
+    for (f, tt) in ((mod.bool, Tuple{Core.LLVMPtr{Bool,1},Int}),
+                    (mod.domain, Tuple{Core.LLVMPtr{Float32,1},Float32}),
+                    (mod.tuple_index, Tuple{Core.LLVMPtr{Int,1},NTuple{3,Int},Int}))
+        source = methodinstance(typeof(f), tt, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+        job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
+
+        @test @filecheck implicit_check_not=["{{(load|store) atomic|atomicrmw|cmpxchg}}", "call {{.*}}@test_malloc"] begin
+            @check "define void @_Z"
+            @check "call void @llvm.trap()"
+            GPUCompiler.code_llvm(stdout, job; dump_module=true)
+        end
     end
-    air = sprint(io -> GPUCompiler.code_native(io, job; dump_module=true))
-    @test !occursin(r"(load|store) atomic", air)
 end
 
 @testset "atomic demotion" begin

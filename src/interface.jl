@@ -399,7 +399,9 @@ end
 end
 
 # does this target support throwing Julia exceptions with jl_throw?
-# if not, calls to throw will be replaced with calls to the GPU runtime
+# if not, calls to throw will be replaced with calls to the GPU runtime, which report the
+# exception without looking at the thrown value, so that value is not computed at all
+# (see `drop_throw_arguments!`)
 can_throw(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 
 # does this target support loading from Julia safepoints?
@@ -648,7 +650,13 @@ optimization_params(@nospecialize(job::CompilerJob)) =
 #
 #     GPUCompiler.julia_ir_passes(job::CompilerJob{MyTarget}) =
 #         (@invoke(GPUCompiler.julia_ir_passes(job::CompilerJob))..., my_pass!)
-julia_ir_passes(@nospecialize(job::CompilerJob)) = ()
+function julia_ir_passes(@nospecialize(job::CompilerJob))
+    passes = ()
+    if !can_throw(job)
+        passes = (passes..., drop_throw_arguments!)
+    end
+    return passes
+end
 
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))
