@@ -156,13 +156,10 @@ end
 
 ## exception handling
 
-# this pass lowers `jl_throw` and friends to GPU-compatible exceptions.
-# this isn't strictly necessary, but has a couple of advantages:
-# - we can kill off unused exception arguments that otherwise would allocate or invoke
-# - we can fake debug information (lacking a stack unwinder)
-#
-# once we have thorough inference (ie. discarding `@nospecialize` and thus supporting
-# exception arguments) and proper debug info to unwind the stack, this pass can go.
+# this pass lowers `jl_throw` and friends to GPU-compatible exceptions, reporting the kind of
+# exception and faking debug information (lacking a stack unwinder). the thrown values are not
+# used: throws in Julia code already throw `nothing` (see `drop_throw_arguments!`), and what
+# remains of the arguments of codegen's own throws (e.g. `jl_type_error`) is left to DCE.
 function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "lower throw" begin
@@ -200,23 +197,7 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                 end
 
                 # remove the call
-                call_args = arguments(call)
                 erase!(call)
-
-                # HACK: kill the exceptions' unused arguments
-                #       this is needed for throwing objects with @nospecialize constructors.
-                for arg in call_args
-                    # peek through casts
-                    if isa(arg, LLVM.AddrSpaceCastInst)
-                        cast = arg
-                        arg = first(operands(cast))
-                        isempty(uses(cast)) && erase!(cast)
-                    end
-
-                    if isa(arg, LLVM.Instruction) && isempty(uses(arg))
-                        erase!(arg)
-                    end
-                end
 
                 changed = true
             end
