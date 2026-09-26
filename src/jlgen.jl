@@ -252,7 +252,12 @@ end
 
 CC.may_optimize(interp::GPUInterpreter) = true
 CC.may_compress(interp::GPUInterpreter) = true
-CC.may_discard_trees(interp::GPUInterpreter) = true
+# before Julia 1.12, codegen looks up callees in our cache itself (see
+# `compile_method_instance`), and re-infers those whose inferred source was discarded
+# (non-inlineable functions with a non-compileable signature, e.g. `@nospecialize` helpers)
+# with Julia's native interpreter, bypassing our method tables. keep the source of
+# everything we infer there; later versions recover it using our interpreter.
+CC.may_discard_trees(interp::GPUInterpreter) = VERSION >= v"1.12.0-DEV.1823"
 @static if VERSION <= v"1.12.0-DEV.1531"
 CC.verbose_stmt_info(interp::GPUInterpreter) = false
 end

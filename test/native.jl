@@ -1916,25 +1916,15 @@ end
         kernel(a, b) = (unsafe_store!(b, nospecialize_child(a)); return)
     end
 
-    if VERSION >= v"1.11-"
-        # Preserve the inferred specialization despite @nospecialize.
-        @test @filecheck begin
-            @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
-            @check_not "jl_invoke"
-            @check_not "apply_generic"
-            Native.code_llvm(mod.kernel, Tuple{Int,Ptr{Int}}; dump_module=true)
-        end
-        Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})
-    else
-        # 1.10 still emits a dynamic invoke for this @nospecialize call
-        @test_throws_message(InvalidIRError,
-                             Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})) do msg
-            occursin("invalid LLVM IR", msg) &&
-            occursin(GPUCompiler.DYNAMIC_CALL, msg) &&
-            occursin("call to nospecialize_child", msg) &&
-            occursin(r"\[\d+\] kernel", msg)
-        end
+    # Preserve the inferred specialization despite @nospecialize (on 1.10, this relies on
+    # keeping the inferred source, see `may_discard_trees`)
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+        @check_not "jl_invoke"
+        @check_not "apply_generic"
+        Native.code_llvm(mod.kernel, Tuple{Int,Ptr{Int}}; dump_module=true)
     end
+    Native.code_execution(mod.kernel, Tuple{Int,Ptr{Int}})
 end
 
 @testset "dynamic call (apply)" begin
