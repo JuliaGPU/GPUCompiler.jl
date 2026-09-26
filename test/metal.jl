@@ -112,6 +112,56 @@ end
     #      or just defer to execution testing in Metal.jl?
 end
 
+@testset "dynamic threadgroup memory" begin
+    # an externally-initialized constant holding a threadgroup pointer (the pattern
+    # Metal.jl emits for dynamically-sized threadgroup memory) lowers to an implicit
+    # kernel parameter in the threadgroup address space, like Apple's own toolchain
+    # produces for `threadgroup T* x [[threadgroup(N)]]` arguments.
+    mod = @eval module $(gensym())
+        using LLVM
+        @generated function dynamic_threadgroup_memory(::Type{T}) where {T}
+            LLVM.Context() do ctx
+                T_ptr = convert(LLVM.LLVMType, Core.LLVMPtr{T, 3})
+                llvm_f, _ = LLVM.Interop.create_function(T_ptr)
+                mod = LLVM.parent(llvm_f)
+                gv = GlobalVariable(mod, T_ptr, "dyn_threadgroup_memory", 2)
+                linkage!(gv, LLVM.API.LLVMInternalLinkage)
+                initializer!(gv, UndefValue(T_ptr))
+                alignment!(gv, 8)
+                constant!(gv, true)
+                unnamed_addr!(gv, true)
+                extinit!(gv, true)
+                IRBuilder() do builder
+                    entry = BasicBlock(llvm_f, "entry")
+                    position!(builder, entry)
+                    val = load!(builder, T_ptr, gv)
+                    ret!(builder, val)
+                end
+                LLVM.Interop.call_function(llvm_f, Core.LLVMPtr{T, 3})
+            end
+        end
+        kernel() = (ptr = dynamic_threadgroup_memory(Float32);
+                    unsafe_store!(ptr, 1f0, 1);
+                    return)
+    end
+
+    @test @filecheck begin
+        # the allocation becomes a trailing threadgroup kernel parameter ...
+        @check "ptr addrspace(3) %dynamic_threadgroup_memory"
+        # ... described by a regular threadgroup-space buffer entry
+        @check "air.buffer"
+        @check "air.location_index"
+        @check "air.address_space"
+        @check "dynamic_threadgroup_memory"
+        Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
+    end
+
+    # ... and the global it was lowered from is gone
+    ir = sprint(io -> Metal.code_llvm(io, mod.kernel, Tuple{};
+                                      dump_module=true, kernel=true))
+    @test !occursin("@dyn_threadgroup_memory =", ir)
+end
+
 @testset "input arguments" begin
     mod = @eval module $(gensym())
         function kernel(ptr)

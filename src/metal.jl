@@ -637,7 +637,10 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
             run!(pb, mod)
         end
 
-        add_argument_metadata!(job, mod, entry)
+        # rewrite dynamically-sized threadgroup allocations into kernel parameters
+        entry, tg_params = lower_dynamic_threadgroup_memory!(job, mod, entry)
+
+        add_argument_metadata!(job, mod, entry, tg_params)
 
         add_module_metadata!(job, mod)
     end
@@ -1672,12 +1675,122 @@ function argument_type_name(typ)
     end
 end
 
+# dynamic threadgroup memory
+#
+# Kernels can request dynamically-sized threadgroup memory -- storage that is sized at
+# dispatch time with `setThreadgroupMemoryLength:atIndex:` through an
+# externally-initialized constant holding a threadgroup pointer. 
+# Following the Metal Shading Language
+# Specification (section 4.4), Apple's toolchain represents such an allocation as a
+# kernel parameter: a pointer in the threadgroup address space, described by a regular
+# `air.buffer` argument entry with its own threadgroup-space location index.
+#
+# So rewrite each such global into a single shared implicit kernel parameter, replacing
+# all loads of the globals with it. All dynamic arrays in a kernel alias the same
+# allocation, which a single `shmem` launch argument
+# sizes.
+#
+# Returns the (possibly rewritten) entry function, and for each new parameter a named
+# tuple with its 1-based parameter index, size, alignment and names, for use by
+# `add_argument_metadata!`.
+function lower_dynamic_threadgroup_memory!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                                           entry::LLVM.Function)
+    infos = NamedTuple{(:index, :size, :align, :name, :typename),
+                       Tuple{Int, Int, Int, String, String}}[]
+
+    # find dynamically-sized threadgroup allocations: externally-initialized constants
+    # holding a threadgroup pointer. nothing else in a kernel module looks like this.
+    dyn_globals = LLVM.GlobalVariable[]
+    for gv in globals(mod)
+        isconstant(gv) || continue
+        isextinit(gv) || continue
+        gv_typ = global_value_type(gv)
+        (gv_typ isa LLVM.PointerType && addrspace(gv_typ) == 3) || continue
+        push!(dyn_globals, gv)
+    end
+    isempty(dyn_globals) && return entry, infos
+
+    # materialize constant-expression uses, so that every use is an instruction.
+    for gv in dyn_globals
+        LLVM.convert_users_to_instructions!([gv])
+    end
+
+    # every use must be a load of the pointer, inlined into the entry function.
+    for gv in dyn_globals, use in uses(gv)
+        u = user(use)
+        if !(u isa LLVM.Instruction && opcode(u) == LLVM.API.LLVMLoad &&
+             LLVM.parent(LLVM.parent(u)) === entry)
+            error("Dynamic threadgroup memory global '$(LLVM.name(gv))' is used outside the kernel entry; cannot lower it to a kernel parameter. Please file an issue.")
+        end
+    end
+
+    dl = datalayout(mod)
+    gv0 = dyn_globals[1]
+    tg_size = sizeof(dl, global_value_type(gv0))
+    tg_align = Int(alignment(gv0))
+    tg_typename = string(global_value_type(gv0))
+
+    # append a single shared threadgroup parameter to the entry function. like
+    # `add_parameter_address_spaces!`, build a new function and clone the body over.
+    ft = function_type(entry)
+    tg_typ = LLVM.PointerType(3)
+    new_ft = LLVM.FunctionType(return_type(ft), LLVMType[parameters(ft)..., tg_typ])
+    new_entry = LLVM.Function(mod, "", new_ft)
+    linkage!(new_entry, linkage(entry))
+    for (arg, new_arg) in zip(parameters(entry), parameters(new_entry))
+        LLVM.name!(new_arg, LLVM.name(arg))
+    end
+    tg_param = parameters(new_entry)[end]
+    tg_index = length(parameters(new_entry))
+    LLVM.name!(tg_param, "dynamic_threadgroup_memory")
+
+    # map the arguments
+    value_map = Dict{LLVM.Value, LLVM.Value}(
+        param => new_param for (param, new_param) in zip(parameters(entry),
+                                                         parameters(new_entry))
+    )
+    value_map[entry] = new_entry
+    clone_into!(new_entry, entry; value_map,
+                changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+
+    # point the cloned loads at the new parameter, then drop the globals. loads in the
+    # old function vanish with it, so only loads cloned into the new entry are handled.
+    for gv in dyn_globals
+        for use in collect(uses(gv))
+            u = user(use)
+            u isa LLVM.Instruction || continue
+            LLVM.parent(LLVM.parent(u)) === new_entry || continue
+            @assert opcode(u) == LLVM.API.LLVMLoad
+            replace_uses!(u, tg_param)
+            erase!(u)
+        end
+    end
+
+    # remove the old function
+    fn = LLVM.name(entry)
+    prune_constexpr_uses!(entry)
+    @assert isempty(uses(entry))
+    replace_metadata_uses!(entry, new_entry)
+    erase!(entry)
+    LLVM.name!(new_entry, fn)
+
+    # the globals should now be dead
+    for gv in dyn_globals
+        @assert isempty(uses(gv)) "dynamic threadgroup memory global '$(LLVM.name(gv))' still has uses after lowering"
+        erase!(gv)
+    end
+
+    push!(infos, (; index=tg_index, size=tg_size, align=tg_align,
+                    name="dynamic_threadgroup_memory", typename=tg_typename))
+    return new_entry, infos
+end
+
 # argument metadata generation
 #
 # module metadata is used to identify buffers that are passed as kernel arguments.
 
 function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                entry::LLVM.Function)
+                                entry::LLVM.Function, tg_params)
     entry_ft = function_type(entry)
 
     ## argument info
@@ -1752,8 +1865,9 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         i += 1
     end
 
-    # Create metadata for argument intrinsics last
-    for intr_arg in parameters(entry)[i:end]
+    # Create metadata for argument intrinsics last, but before any dynamically-sized
+    # threadgroup memory parameters (which are always appended last)
+    for intr_arg in parameters(entry)[i:end-length(tg_params)]
         intr_fn = LLVM.name(intr_arg)
 
         arg_info = Metadata[]
@@ -1768,6 +1882,51 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(arg_infos, arg_info)
 
         i += 1
+    end
+
+    # dynamically-sized threadgroup memory (cf. `lower_dynamic_threadgroup_memory!`):
+    # like Apple's own toolchain, describe each allocation as a regular `air.buffer`
+    # argument in the threadgroup address space, with its own location index.
+    tg_location = 0
+    for tg in tg_params
+        tg_arg = parameters(entry)[tg.index]
+        @assert value_type(tg_arg) isa LLVM.PointerType &&
+                addrspace(value_type(tg_arg)) == 3
+
+        md = Metadata[]
+
+        # argument index
+        push!(md, Metadata(ConstantInt(Int32(i-1))))
+
+        push!(md, MDString("air.buffer"))
+
+        push!(md, MDString("air.location_index"))
+        push!(md, Metadata(ConstantInt(Int32(tg_location))))
+
+        # XXX: unknown
+        push!(md, Metadata(ConstantInt(Int32(1))))
+
+        push!(md, MDString("air.read_write"))
+
+        push!(md, MDString("air.address_space"))
+        push!(md, Metadata(ConstantInt(Int32(3))))
+
+        push!(md, MDString("air.arg_type_size"))
+        push!(md, Metadata(ConstantInt(Int32(tg.size))))
+
+        push!(md, MDString("air.arg_type_align_size"))
+        push!(md, Metadata(ConstantInt(Int32(tg.align))))
+
+        push!(md, MDString("air.arg_type_name"))
+        push!(md, MDString(tg.typename))
+
+        push!(md, MDString("air.arg_name"))
+        push!(md, MDString(tg.name))
+
+        push!(arg_infos, MDNode(md))
+
+        i += 1
+        tg_location += 1
     end
     arg_infos = MDNode(arg_infos)
 
