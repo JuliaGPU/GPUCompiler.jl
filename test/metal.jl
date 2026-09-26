@@ -427,7 +427,7 @@ end
         # the table base is loaded out of the kernel-state argument, and the words out of the
         # table -- a bake would instead leave a private constant holding the resolved address
         @test occursin("reloc_table", air)
-        @test occursin(r"load i64, (i64 addrspace\(1\)\*|ptr addrspace\(1\))", air)
+        @test occursin(r"load (i64|ptr), (i64 addrspace\(1\)\*|ptr addrspace\(1\))", air)
         # nothing is left of the site globals the records named
         for rec in relocs.records
             @test !occursin("@$(rec.name) ", air)
@@ -439,7 +439,7 @@ end
     # With five possible values, inference widens `pick`'s result to `Val`, so `v` is boxed
     # and `===` compares its address with those of the singletons. LLVM merges the loads of
     # those addresses into one load from a `phi` of their slots, which the table lowering
-    # has to turn into a `phi` of table offsets (#959).
+    # redirects to the device-space table (#959).
     if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
         mod = @eval module $(gensym())
             pick(i) = i == 1 ? Val(1) : i == 2 ? Val(2) : i == 3 ? Val(3) :
@@ -456,19 +456,28 @@ end
                 unsafe_store!(ptr, v === Val(1) ? 1f0 : v === nothing ? 2f0 : 3f0)
                 return
             end
+            function loop_kernel(ptr, i)
+                n = unsafe_load(i)
+                v = pick(n)
+                for k in 1:n
+                    v = k == 3 ? pick(k) : v
+                end
+                unsafe_store!(ptr, v === Val(1) ? 1f0 : v === Val(2) ? 2f0 : 3f0)
+                return
+            end
         end
         tt = (Core.LLVMPtr{Float32,1}, Core.LLVMPtr{Int,1})
 
         @test @filecheck begin
-            @check "phi i32"
-            @check "load i64"
+            @check "phi ptr addrspace(1)"
+            @check "load ptr, ptr addrspace(1)"
             Metal.code_native_table(mod.kernel, tt; kernel=true)
         end
-        for f in (mod.kernel, mod.maybe_kernel)
+        for f in (mod.kernel, mod.maybe_kernel, mod.loop_kernel)
             air = sprint(io -> Metal.code_native_table(io, f, tt; kernel=true))
             @test occursin("reloc_table", air)
-            @test !occursin("jl_global", air)
-            @test !occursin("jl_nothing", air)
+            @test !occursin(r"(?m)^@.*jl_global", air)
+            @test !occursin(r"(?m)^@.*jl_nothing", air)
         end
     end
 end

@@ -500,44 +500,8 @@ function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::DataLayout)
     return nothing
 end
 
-# Rewrite word-sized loads derived through constant casts or GEPs from `value`. The producer
-# receives the byte offset; reject paths whose offset is not static.
-function rewrite_word_loads!(produce_word, @nospecialize(value), what::String;
-                             offset::Union{Int,Nothing}=0,
-                             dl::DataLayout=datalayout(LLVM.parent(value)::LLVM.Module))
-    changed = false
-    for use in collect(uses(value))
-        val = user(use)
-        if isa(val, LLVM.ConstantExpr)
-            delta = constexpr_byte_offset(val, dl)
-            inner = (offset === nothing || delta === nothing) ? nothing : offset + delta
-            changed |= rewrite_word_loads!(produce_word, val, what; offset=inner, dl)
-        elseif isa(val, LLVM.LoadInst)
-            offset === nothing &&
-                error("Unsupported $what load through constant expression $(operands(val)[1])")
-            replace_word_load!(builder -> produce_word(builder, offset), val, what)
-            changed = true
-        end
-    end
-    return changed
-end
-
 is_word_type(T::LLVMType) =
     T isa LLVM.PointerType || (T isa LLVM.IntegerType && width(T) == 8sizeof(UInt))
-
-# Replace a word-sized `load` with the word `produce_word(builder)` emits in its place.
-function replace_word_load!(produce_word, load::LLVM.LoadInst, what::String)
-    T = value_type(load)
-    is_word_type(T) || error("Unsupported $what load of LLVM type $T")
-    @dispose builder=IRBuilder() begin
-        position!(builder, load)
-        replacement = produce_word(builder)
-        T isa LLVM.PointerType && (replacement = inttoptr!(builder, replacement, T))
-        replace_uses!(load, replacement)
-    end
-    erase!(load)
-    return
-end
 
 # The addresses an instruction merely forwards: those a `phi` or `select` picks from, or the
 # operand of a pointer cast. `nothing` for any other instruction.
@@ -548,32 +512,6 @@ function forwarded_addresses(inst::LLVM.Instruction)
         return LLVM.Value[operands(inst)[2], operands(inst)[3]]
     elseif inst isa LLVM.BitCastInst || inst isa LLVM.AddrSpaceCastInst
         return LLVM.Value[operands(inst)[1]]
-    end
-    return nothing
-end
-
-# LLVM merges loads from different addresses into one load from a `phi` or `select` of those
-# addresses, e.g. when sinking the loads of a boxed value's possible singletons out of their
-# branches. Starting from such an instruction, collect into `merged` the instructions the
-# address flows through, and into `loads` the loads it ends up in. Returns the first user that
-# does anything else with it, or `nothing`.
-function merged_address_loads!(merged::Vector{LLVM.Instruction}, loads::Vector{LLVM.LoadInst},
-                               inst::LLVM.Instruction)
-    push!(merged, inst)
-    worklist = LLVM.Instruction[inst]
-    while !isempty(worklist)
-        for use in uses(pop!(worklist))
-            val = user(use)
-            if val isa LLVM.LoadInst
-                push!(loads, val)
-            elseif val isa LLVM.Instruction && forwarded_addresses(val) !== nothing
-                val in merged && continue
-                push!(merged, val)
-                push!(worklist, val)
-            else
-                return val
-            end
-        end
     end
     return nothing
 end
@@ -927,28 +865,32 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
 
     # One base pointer per function, materialized at the top of its entry block (the state
     # it derives from is a function argument, so it dominates every use).
-    bases = Dict{LLVM.Function, LLVM.Value}()
+    bases = Dict{LLVM.Function, Tuple{LLVM.Value, LLVM.Instruction}}()
     function table_base(f::LLVM.Function)
         get!(bases, f) do
+            entry = first(instructions(first(blocks(f))))
             @dispose builder=IRBuilder() begin
-                position!(builder, first(instructions(first(blocks(f)))))
-                relocation_table_pointer(job, builder, f)
+                position!(builder, entry)
+                relocation_table_pointer(job, builder, f), entry
             end
         end
     end
-    table_offset(index::Int) = ConstantInt(LLVM.Int32Type(), index - 1)
-    function table_word(builder::IRBuilder, offset::LLVM.Value)
-        f = LLVM.parent(position(builder))
-        ptr = inbounds_gep!(builder, T_word, table_base(f), [offset])
-        load!(builder, T_word, ptr)
+    function table_address(builder::IRBuilder, base::LLVM.Value, index::Int)
+        inbounds_gep!(builder, T_word, base, [ConstantInt(LLVM.Int32Type(), index - 1)])
     end
-    table_word(builder::IRBuilder, index::Int) = table_word(builder, table_offset(index))
+    function table_word(builder::IRBuilder, index::Int)
+        f = LLVM.parent(position(builder))
+        base, _ = table_base(f)
+        load!(builder, T_word, table_address(builder, base, index))
+    end
 
     mod_gvs = globals(mod)
-    rewrite_merged_slot_loads!(table_word, mod,
-        Pair{LLVM.Value,LLVM.Value}[mod_gvs[rec.name] => table_offset(index)
-                                    for (index, rec) in enumerate(relocs.records)
-                                    if rec.kind === SlotSite && haskey(mod_gvs, rec.name)])
+    slots = LLVM.GlobalVariable[mod_gvs[rec.name] for rec in relocs.records
+                       if rec.kind === SlotSite && haskey(mod_gvs, rec.name)]
+    check_relocation_slot_uses!(mod, slots)
+    # Expand all constant users before choosing entry insertion points. Expanding a later
+    # slot could otherwise insert a use before the entry instruction saved for an earlier one.
+    convert_users_to_instructions!(slots)
 
     for (index, rec) in enumerate(relocs.records)
         haskey(mod_gvs, rec.name) || error("Missing relocation global '$(rec.name)'")
@@ -956,105 +898,72 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
         check_relocation(mod, rec, gv)
 
         if rec.kind === SlotSite
-            rewrite_word_loads!(gv, "relocation slot '$(rec.name)'") do builder, offset
-                offset == 0 ||
-                    error("Relocation slot '$(rec.name)' is loaded at offset $offset")
-                table_word(builder, index)
+            addresses = Dict{LLVM.Function, LLVM.Value}()
+            function slot_address(f::LLVM.Function)
+                get!(addresses, f) do
+                    base, entry = table_base(f)
+                    @dispose builder=IRBuilder() begin
+                        # After the base, but before any original instruction or PHI edge use.
+                        position!(builder, entry)
+                        ptr = table_address(builder, base, index)
+                        pointercast!(builder, ptr, value_type(gv))
+                    end
+                end
             end
-            prune_constexpr_uses!(gv)
-            isempty(uses(gv)) ||
-                error("Relocation slot '$(rec.name)' still has uses after redirection")
-            erase!(gv)
+            replace_global_with_local!(gv, slot_address)
         else
             demote_relocatable_box!(mod, gv, rec, table_word, index)
         end
     end
+
+    # Table addresses may be in a different address space from the original slots.
+    # Let LLVM propagate that space through the existing PHIs, selects and casts.
+    @dispose pb=NewPMPassBuilder() begin
+        tti = llvm_targetinfo(job.config.target)
+        tti === nothing || LLVM.target_transform_info!(pb, tti)
+        add!(pb, NewPMFunctionPassManager()) do fpm
+            add!(fpm, InferAddressSpacesPass())
+        end
+        run!(pb, mod, llvm_machine(job.config.target))
+    end
     return
 end
 
-# Loads from a `phi` or `select` of slot addresses (see `merged_address_loads!`) cannot be
-# redirected one slot at a time, so merge the slots' table offsets the same way instead and
-# load the word at the merged offset. `slots` maps each slot to its offset, in table order.
-# The offsets are constants and each merge is rebuilt next to the one it replaces, so the new
-# values dominate wherever the old ones did.
-function rewrite_merged_slot_loads!(table_word, mod::LLVM.Module,
-                                    slots::Vector{Pair{LLVM.Value,LLVM.Value}})
+# Slots denote read-only words, not general storage. In particular, don't merge a table
+# address with an unrelated pointer: a back-end may not have a common address space for them.
+function check_relocation_slot_uses!(mod::LLVM.Module, slots::Vector{LLVM.GlobalVariable})
     dl = datalayout(mod)
-    offsets = Dict{LLVM.Value,LLVM.Value}(slots)
-    function slot_offset(value)
-        while value isa LLVM.ConstantExpr && constexpr_byte_offset(value, dl) == 0
-            value = first(operands(value))
-        end
-        return get(offsets, value, nothing)
-    end
-
-    merged = LLVM.Instruction[]
-    loads = LLVM.LoadInst[]
-    function find_merges(value)
-        for use in uses(value)
+    seen = Set{LLVM.Value}(slots)
+    worklist = LLVM.Value[slots...]
+    while !isempty(worklist)
+        for use in uses(pop!(worklist))
             val = user(use)
-            if val isa LLVM.ConstantExpr
-                constexpr_byte_offset(val, dl) == 0 && find_merges(val)
-            elseif val isa LLVM.Instruction && forwarded_addresses(val) !== nothing &&
-                   !(val in merged)
-                other = merged_address_loads!(merged, loads, val)
-                other === nothing ||
-                    error("Unsupported use of merged relocation slot addresses: $other")
+            if val isa LLVM.LoadInst
+                is_word_type(value_type(val)) ||
+                    error("Unsupported relocation slot load of LLVM type $(value_type(val))")
+                # Julia names these loads after globals with session-specific counters.
+                LLVM.name!(val, "")
+                # The packed table guarantees word alignment, even if the old global had more.
+                alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+                continue
+            elseif val isa LLVM.ConstantExpr
+                constexpr_byte_offset(val, dl) == 0 ||
+                    error("Unsupported relocation slot address $val")
+            elseif !(val isa LLVM.Instruction && forwarded_addresses(val) !== nothing)
+                error("Unsupported use of relocation slot address: $val")
             end
+            val in seen && continue
+            push!(seen, val)
+            push!(worklist, val)
         end
     end
-    foreach(find_merges ∘ first, slots)
-    isempty(merged) && return
-
-    # A slot can only be merged with other slots: the table holds no word for other addresses.
-    for inst in merged, value in forwarded_addresses(inst)
-        value in merged || slot_offset(value) !== nothing ||
-            error("Relocation slot address merged with unsupported address $value in $inst")
-    end
-
-    T_offset = LLVM.Int32Type()
-    merged_offsets = Dict{LLVM.Value,LLVM.Value}()
-    @dispose builder=IRBuilder() begin
-        # `phi`s first, as they may be merged with themselves through a loop
-        for inst in merged
-            inst isa LLVM.PHIInst || continue
-            position!(builder, inst)
-            merged_offsets[inst] = phi!(builder, T_offset)
-        end
-        function merged_offset(value)
-            haskey(merged_offsets, value) && return merged_offsets[value]
-            offset = slot_offset(value)
-            offset === nothing || return offset
-            if value isa LLVM.SelectInst
-                cond, a, b = operands(value)
-                a, b = merged_offset(a), merged_offset(b)
-                position!(builder, value)
-                offset = select!(builder, cond, a, b)
-            else
-                offset = merged_offset(first(forwarded_addresses(value)))
-            end
-            merged_offsets[value] = offset
-        end
-        for inst in merged
-            if inst isa LLVM.PHIInst
-                append!(incoming(merged_offsets[inst]),
-                        Tuple{LLVM.Value,LLVM.BasicBlock}[(merged_offset(value), block)
-                                                          for (value, block) in incoming(inst)])
-            else
-                merged_offset(inst)
-            end
+    for val in seen
+        val isa LLVM.Instruction || continue
+        for address in forwarded_addresses(val)
+            address in seen ||
+                error("Relocation slot address merged with unsupported address $address in $val")
         end
     end
-
-    for load in loads
-        offset = merged_offsets[first(operands(load))]
-        replace_word_load!(builder -> table_word(builder, offset), load,
-                           "merged relocation slot")
-    end
-    for inst in merged
-        replace_uses!(inst, PoisonValue(value_type(inst)))
-    end
-    foreach(erase!, merged)
     return
 end
 

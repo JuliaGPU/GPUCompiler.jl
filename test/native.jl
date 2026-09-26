@@ -1278,14 +1278,14 @@ end
 
 @testset "tabulated relocation of merged slots" begin
     # LLVM merges loads from different slots into one load from a `phi` or `select` of their
-    # addresses (#959). The table has no address to take their place, so the lowering has to
-    # merge their table offsets instead.
+    # addresses (#959). The lowering substitutes table entry addresses while preserving
+    # the existing PHIs and selects.
     if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
         mod = @eval module $(gensym())
             f() = nothing
         end
         job, _ = Native.create_job(mod.f, Tuple{}; relocations=:table, jlruntime=false)
-        slots = ("merged_a", "merged_b", "merged_c")
+        slots = ("merged_a", "merged_b", "merged_c", "merged_d")
         relocations() = GPUCompiler.Relocations(
             [GPUCompiler.Relocation(GPUCompiler.SlotSite, name, 0,
                                     GPUCompiler.JuliaValueRef(Symbol(name)))
@@ -1297,6 +1297,7 @@ end
                 @merged_a = external global ptr
                 @merged_b = external global ptr
                 @merged_c = external global ptr
+                @merged_d = external addrspace(1) global ptr
                 @jl_nothing = external global ptr
 
                 define i64 @pick(i64 %i) {
@@ -1314,6 +1315,13 @@ end
                 join:
                     %addr = phi ptr [ @merged_a, %one ], [ @merged_b, %two ],
                                     [ %other.addr, %other ]
+                    %word = load i64, ptr %addr, align 16
+                    ret i64 %word
+                }
+
+                define i64 @constant_cast(i1 %cond) {
+                    %addr = select i1 %cond, ptr @merged_a,
+                        ptr addrspacecast (ptr addrspace(1) @merged_d to ptr)
                     %word = load i64, ptr %addr
                     ret i64 %word
                 }
@@ -1350,7 +1358,10 @@ end
             for rec in relocs.records
                 @test !haskey(globals(m), rec.name)
             end
-            @test occursin("phi i32", string(m))
+            LLVM.verify(m)
+            @test all(alignment(inst) <= sizeof(UInt)
+                      for bb in blocks(functions(m)["pick"]) for inst in instructions(bb)
+                      if inst isa LLVM.LoadInst)
 
             fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)), "pick", relocs;
                                              table=true)
@@ -1360,6 +1371,9 @@ end
                         GPUCompiler.CGlobalRef(:jl_nothing))
                     @test [ccall(fptr, UInt, (Int,), i) for i in 1:4] ==
                           [word("merged_a"), word("merged_b"), word("merged_c"), nothing_word]
+                    constant_cast = pointer(lookup(lljit, "constant_cast"))
+                    @test [ccall(constant_cast, UInt, (Bool,), c) for c in (true, false)] ==
+                          word.(["merged_a", "merged_d"])
                     flip = pointer(lookup(lljit, "flip"))
                     @test [ccall(flip, UInt, (Int,), n) for n in 1:4] ==
                           word.(["merged_a", "merged_a", "merged_b", "merged_b"])
@@ -1371,7 +1385,7 @@ end
                 dispose(lljit)
             end
 
-            # the table holds no word for any other address...
+            # Mixed addresses need not share an address space on the target.
             m = parse(LLVM.Module, """
                 @merged_a = external global ptr
 
@@ -1383,7 +1397,22 @@ end
             @test_throws "merged with unsupported address" GPUCompiler.emit_asm(
                 job, m, relocations(), LLVM.API.LLVMObjectFile)
 
-            # ...and has no address to give out
+            # The table contains whole, read-only words.
+            for (body, message) in (
+                ("%word = load i32, ptr %addr; ret i32 %word", "Unsupported relocation slot load"),
+                ("store i64 0, ptr %addr; ret i32 0", "Unsupported use of relocation slot address"))
+                m = parse(LLVM.Module, """
+                    @merged_a = external global ptr
+                    @merged_b = external global ptr
+                    define i32 @unsupported(i1 %cond) {
+                        %addr = select i1 %cond, ptr @merged_a, ptr @merged_b
+                        $(replace(body, "; " => "\n"))
+                    }""")
+                @test_throws message GPUCompiler.emit_asm(
+                    job, m, relocations(), LLVM.API.LLVMObjectFile)
+            end
+
+            # Slot addresses are not exposed as general storage.
             m = parse(LLVM.Module, """
                 @merged_a = external global ptr
                 @merged_b = external global ptr
@@ -1393,7 +1422,7 @@ end
                     %same = icmp eq ptr %addr, @merged_a
                     ret i1 %same
                 }""")
-            @test_throws "Unsupported use of merged relocation slot addresses" GPUCompiler.emit_asm(
+            @test_throws "Unsupported use of relocation slot address" GPUCompiler.emit_asm(
                 job, m, relocations(), LLVM.API.LLVMObjectFile)
         end
     end
