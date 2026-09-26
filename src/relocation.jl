@@ -578,32 +578,58 @@ function merged_address_loads!(merged::Vector{LLVM.Instruction}, loads::Vector{L
     return nothing
 end
 
-# Where `value`'s address is merged with others before a word is loaded from it, substitute
-# the address of a slot that holds the same word, `slot_address(offset)` for the word at byte
-# `offset`. Other uses of `value` are left alone.
-function redirect_merged_addresses!(slot_address, @nospecialize(value); offset::Int=0,
-                                    dl::DataLayout=datalayout(LLVM.parent(value)::LLVM.Module))
+# Check forwarded addresses and relax load alignment to what a word slot guarantees.
+# Cycles can arise from loop PHIs.
+function check_word_loads!(value, seen=Set{LLVM.Value}())
+    value in seen && return true
+    push!(seen, value)
+    for use in uses(value)
+        val = user(use)
+        if val isa LLVM.LoadInst
+            is_word_type(value_type(val)) || return false
+            alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+        elseif val isa LLVM.Instruction && forwarded_addresses(val) !== nothing
+            check_word_loads!(val, seen) || return false
+        else
+            return false
+        end
+    end
+    return true
+end
+
+# Substitute a slot holding the same word for each loaded cglobal address. Replacing the
+# address preserves the loads and any PHIs/selects LLVM has introduced between them.
+function redirect_word_addresses!(slot_address, @nospecialize(value), what::String;
+                                  offset::Union{Int,Nothing}=0,
+                                  dl::DataLayout=datalayout(LLVM.parent(value)::LLVM.Module))
     changed = false
     for use in collect(uses(value))
         val = user(use)
-        if isa(val, LLVM.ConstantExpr)
+        if val isa LLVM.ConstantExpr
             delta = constexpr_byte_offset(val, dl)
-            delta === nothing && continue
-            changed |= redirect_merged_addresses!(slot_address, val; offset=offset + delta, dl)
-        elseif isa(val, LLVM.Instruction) && forwarded_addresses(val) !== nothing
-            # slots live in the default address space
-            T = value_type(value)
-            addrspace(T) == 0 || continue
-            loads = LLVM.LoadInst[]
-            merged_address_loads!(LLVM.Instruction[], loads, val) === nothing || continue
-            all(load -> is_word_type(value_type(load)), loads) || continue
-            slot = slot_address(offset)
-            ops = operands(val)
-            for i in 1:length(ops)
-                ops[i] == value && (ops[i] = const_pointercast(slot, T))
-            end
-            changed = true
+            inner = (offset === nothing || delta === nothing) ? nothing : offset + delta
+            changed |= redirect_word_addresses!(slot_address, val, what; offset=inner, dl)
+            continue
+        elseif val isa LLVM.LoadInst
+            offset === nothing &&
+                error("Unsupported $what load through constant expression $(operands(val)[1])")
+            is_word_type(value_type(val)) ||
+                error("Unsupported $what load of LLVM type $(value_type(val))")
+            alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+        elseif val isa LLVM.Instruction && forwarded_addresses(val) !== nothing
+            offset === nothing && continue
+            # Slots live in the default address space.
+            addrspace(value_type(value)) == 0 || continue
+            check_word_loads!(val) || continue
+        else
+            continue
         end
+        slot = const_pointercast(slot_address(offset), value_type(value))
+        ops = operands(val)
+        for i in 1:length(ops)
+            ops[i] == value && (ops[i] = slot)
+        end
+        changed = true
     end
     return changed
 end
@@ -639,18 +665,14 @@ function collect_cglobal_relocations!(@nospecialize(job::CompilerJob), mod::LLVM
             end
         end
 
-        changed |= rewrite_word_loads!(f, "cglobal '$fn'") do builder, offset
-            load!(builder, relocation_word_type(), cglobal_slot(offset))
-        end
-        # e.g. `jl_nothing` merged with the relocation slots of other singletons
-        changed |= redirect_merged_addresses!(cglobal_slot, f)
+        changed |= redirect_word_addresses!(cglobal_slot, f, "cglobal '$fn'")
     end
 
     return changed
 end
 
 function has_unresolved_cglobal_loads(mod::LLVM.Module, relocs::Relocations)
-    # also through merged addresses that `redirect_merged_addresses!` had to leave alone
+    # also through merged addresses that `redirect_word_addresses!` had to leave alone
     function has_load(value, seen=Set{LLVM.Value}())
         for use in uses(value)
             val = user(use)

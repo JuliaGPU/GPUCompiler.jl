@@ -1599,10 +1599,15 @@ end
             @jl_float32_type = external global $word_ptr
             @jl_float64_type = external global $word_ptr
 
+            define $word_ptr @direct() {
+                %value = load $word_ptr, $word_ptr_ptr @jl_float32_type, align 16
+                ret $word_ptr %value
+            }
+
             define $word_ptr @entry(i1 %cond) {
                 %addr = select i1 %cond, $word_ptr_ptr @jl_float32_type,
                                          $word_ptr_ptr @jl_float64_type
-                %value = load $word_ptr, $word_ptr_ptr %addr
+                %value = load $word_ptr, $word_ptr_ptr %addr, align 16
                 ret $word_ptr %value
             }"""
         mod = parse(LLVM.Module, merged_ir)
@@ -1615,6 +1620,15 @@ end
         for rec in relocs.records
             @test occursin("@$(rec.name)", string(addr))
         end
+        # Direct and merged references retain the same load type. Mixing pointer loads
+        # with rebuilt integer loads/inttoptr miscompiles the `nothing` case on Metal.
+        for f in ("direct", "entry")
+            load = only(inst for bb in blocks(functions(mod)[f]) for inst in instructions(bb)
+                        if inst isa LLVM.LoadInst)
+            @test value_type(load) isa LLVM.PointerType
+            @test alignment(load) == sizeof(UInt)
+        end
+        LLVM.verify(mod)
         mod = parse(LLVM.Module, merged_ir)
         GPUCompiler.prepare_execution!(job, mod)
         ir = string(mod)
