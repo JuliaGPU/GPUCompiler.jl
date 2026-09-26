@@ -481,6 +481,25 @@ end
         @check_not "gpu_gc_pool_alloc"
         PTX.code_native(mod.ref_kernel, Tuple{Ptr{Int64}, Int})
     end
+
+    # storing a heap object into a field of another one emits a write barrier
+    # (split into object and field-aware variants on Julia 1.14)
+    mod = @eval module $(gensym())
+        mutable struct Outer
+            x::Any
+        end
+
+        function store_field(outer, inner)
+            outer.x = inner
+            nothing
+        end
+    end
+
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_store_field_[0-9]+}}"
+        @check_not "write_barrier"
+        PTX.code_llvm(mod.store_field, Tuple{mod.Outer, Base.RefValue{Int}})
+    end
 end
 
 @testset "unknown intrinsics" begin

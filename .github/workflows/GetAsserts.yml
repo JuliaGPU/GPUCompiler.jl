@@ -26,8 +26,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # NOTE: 'master' is currently disabled; keep in sync with TestAsserts
-        version: ['1.12', '1.13']
+        # keep in sync with TestAsserts
+        version: ['1.12', '1.13', 'master']
         build: ['x86_64-linux-gnuassert']
     steps:
       # Only checks out the base branch (never PR code)
