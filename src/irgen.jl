@@ -185,6 +185,10 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         "jl_eof_error"                  => "EOF error",
     ]
 
+    # Julia's codegen replaces an `llvmcall` of an intrinsic it doesn't know (e.g. one
+    # removed from LLVM) by a run-time `jl_error`. report those at compile time instead.
+    errors = IRError[]
+
     for f in functions(mod)
         fn = LLVM.name(f)
         for (throw_fn, name) in throw_functions
@@ -192,6 +196,9 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
             for use in uses(f)
                 call = user(use)::LLVM.CallInst
+                if is_unknown_intrinsic_error(call)
+                    push!(errors, (UNKNOWN_INTRINSIC, backtrace(call), nothing))
+                end
 
                 # replace the throw with a PTX-compatible exception
                 @dispose builder=IRBuilder() begin
@@ -227,6 +234,7 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
      end
 
     end
+    isempty(errors) || throw(InvalidIRError(job, errors))
     return changed
 end
 

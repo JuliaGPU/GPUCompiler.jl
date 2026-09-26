@@ -483,6 +483,20 @@ end
     end
 end
 
+@testset "unknown intrinsics" begin
+    # an `llvmcall` of an unknown intrinsic becomes a run-time error in Julia's codegen,
+    # which would otherwise be lowered to an ordinary device-side exception
+    mod = @eval module $(gensym())
+        kernel() = (ccall("llvm.nvvm.nonexistent", llvmcall, Cvoid, ()); return)
+    end
+
+    @test_throws_message(InvalidIRError,
+                         PTX.code_execution(mod.kernel, Tuple{})) do msg
+        occursin(GPUCompiler.UNKNOWN_INTRINSIC, msg) &&
+        occursin(r"\[\d+\] kernel", msg)
+    end
+end
+
 @testset "float boxes" begin
     mod = @eval module $(gensym())
         function kernel(a,b)

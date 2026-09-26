@@ -1768,6 +1768,19 @@ end
     end
 end
 
+@testset "unknown intrinsics" begin
+    # Julia's codegen lowers these to a run-time error, which we report at compile time
+    mod = @eval module $(gensym())
+        kernel() = (ccall("llvm.nonexistent.intrinsic", llvmcall, Cvoid, ()); return)
+    end
+
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{})) do msg
+        occursin(GPUCompiler.UNKNOWN_INTRINSIC, msg) &&
+        occursin(r"\[\d+\] kernel", msg)
+    end
+end
+
 @testset "static assertions" begin
     mod = @eval module $(gensym())
         using ..GPUCompiler
