@@ -1727,7 +1727,10 @@ function lower_dynamic_threadgroup_memory!(@nospecialize(job::CompilerJob), mod:
     dl = datalayout(mod)
     gv0 = dyn_globals[1]
     tg_size = sizeof(dl, global_value_type(gv0))
-    tg_align = Int(alignment(gv0))
+    # Each global's alignment carries its array's element alignment (see
+    # `emit_dynamic_threadgroup_memory`); all arrays share this one parameter,
+    # so report the max.
+    tg_align = maximum(Int(alignment(gv)) for gv in dyn_globals)
     tg_typename = string(global_value_type(gv0))
 
     # append a single shared threadgroup parameter to the entry function. like
