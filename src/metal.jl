@@ -699,15 +699,6 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         end
     end
 
-    # perform codegen passes that would normally run during machine code emission
-    if LLVM.has_oldpm()
-        # XXX: codegen passes don't seem available in the new pass manager yet
-        @dispose pm=ModulePassManager() begin
-            expand_reductions!(pm)
-            run!(pm, mod)
-        end
-    end
-
     # flatten chained byte GEPs that the AGX back-end miscompiles for 1-byte accesses on a
     # 2-threadgroup grid (see `merge_byte_gep_chains!`). run last, after the intrinsic-lowering
     # cleanup above, so the merged form is what reaches the AIR downgrader / back-end.
@@ -1987,6 +1978,68 @@ function scalarize_vector_minmax!(fun::LLVM.Function)
     end
 end
 
+# AIR has no vector reductions either, and Apple's back-end rejects `llvm.vector.reduce.*` or
+# crashes its compiler service on it. Expand each reduction into a chain of its scalar operation
+# over the lanes, in lane order, as SelectionDAG does for targets without vector operations
+# (`TargetLowering::expandVecReduce` and `expandVecReduceSeq`): that is how the ordered
+# `fadd`/`fmul` reductions are defined, and a valid order for the others. LLVM's IR-level
+# `ExpandReductions` pass doesn't fit here: it leaves non-power-of-2 vectors and `fmin`/`fmax`
+# without `nnan` for SelectionDAG to handle, it turns `and`/`or` over `i1` lanes into an `iN`
+# bitcast that Apple's back-end rejects, and the new pass manager doesn't have it before LLVM 21.
+#
+# llvm reduction => IRBuilder function, or the scalar intrinsic to chain
+const VECTOR_REDUCTIONS = Dict(
+    "llvm.vector.reduce.add"      => add!,
+    "llvm.vector.reduce.mul"      => mul!,
+    "llvm.vector.reduce.and"      => and!,
+    "llvm.vector.reduce.or"       => or!,
+    "llvm.vector.reduce.xor"      => xor!,
+    "llvm.vector.reduce.fadd"     => fadd!,
+    "llvm.vector.reduce.fmul"     => fmul!,
+    "llvm.vector.reduce.smax"     => "llvm.smax",
+    "llvm.vector.reduce.smin"     => "llvm.smin",
+    "llvm.vector.reduce.umax"     => "llvm.umax",
+    "llvm.vector.reduce.umin"     => "llvm.umin",
+    "llvm.vector.reduce.fmax"     => "llvm.maxnum",
+    "llvm.vector.reduce.fmin"     => "llvm.minnum",
+    # LLVM 17+; older versions don't know these names, which then match no call
+    "llvm.vector.reduce.fmaximum" => "llvm.maximum",
+    "llvm.vector.reduce.fminimum" => "llvm.minimum",
+)
+# AIR has no integer min/max on `i1`, where they are logic operations (true is -1 when signed)
+const I1_MINMAX = Dict("llvm.smax" => and!, "llvm.smin" => or!,
+                       "llvm.umax" => or!,  "llvm.umin" => and!)
+
+function expand_vector_reductions!(fun::LLVM.Function)
+    reductions = intrinsic_table(VECTOR_REDUCTIONS)
+    mod = LLVM.parent(fun)
+    return lower_intrinsic_calls!(fun) do builder, call, intr
+        op = get(reductions, intr, nothing)
+        op === nothing && return nothing
+        args = collect(LLVM.Value, arguments(call))
+        vec = last(args)                            # `fadd`/`fmul` take a start value first
+        elty = eltype(value_type(vec))
+        if op isa String && elty == LLVM.Int1Type()
+            op = I1_MINMAX[op]
+        elseif op isa String
+            f = LLVM.Function(mod, LLVM.Intrinsic(op), LLVMType[elty])
+            op = (builder, a, b) -> call!(builder, function_type(f), f, LLVM.Value[a, b])
+        end
+        # each step carries the reduction's fast-math flags, as in SelectionDAG; min/max rely
+        # on them to select the relaxed AIR builtins (see `lower_minimum_maximum!`)
+        fmf = elty isa LLVM.FloatingPointType ? LLVM.fast_math(call) : nothing
+        res = length(args) == 2 ? args[1] : nothing
+        for i in 0:Int(length(value_type(vec)))-1
+            lane = extract_element!(builder, vec, ConstantInt(LLVM.Int32Type(), i))
+            res === nothing && (res = lane; continue)
+            res = op(builder, res, lane)
+            # (steps on constants fold to constants, which carry no flags)
+            fmf !== nothing && res isa LLVM.Instruction && LLVM.fast_math!(res; fmf...)
+        end
+        res
+    end
+end
+
 # floating-point math intrinsics that Julia emits as plain `llvm.*` and that Metal exposes as
 # AIR device functions. Each has a precise `air.<op>` for f16/f32; some additionally have a
 # relaxed, f32-only `air.fast_<op>` that we select when the call is `afn`-flagged — set per-op
@@ -2396,8 +2449,10 @@ end
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
 
-    # AIR lacks vector min/max intrinsics; scalarize so the per-call lowering below applies.
+    # AIR lacks vector min/max intrinsics and vector reductions; scalarize them so the per-call
+    # lowering below applies.
     changed = scalarize_vector_minmax!(fun)
+    changed |= expand_vector_reductions!(fun)
 
     # lower the floating-point math intrinsics Julia emits (sqrt, fma, floor, ...) to their
     # AIR device functions, picking the relaxed `air.fast_*` variant for `afn`-flagged calls.
