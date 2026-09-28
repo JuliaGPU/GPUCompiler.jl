@@ -1149,30 +1149,10 @@ function kernel_state_intr(mod::LLVM.Module, T_state)
 end
 
 # run-time equivalent
-function kernel_state_value(state)
-    @dispose ctx=Context() begin
-        T_state = convert(LLVMType, state)
-
-        # create function
-        llvm_f, _ = create_function(T_state)
-        mod = LLVM.parent(llvm_f)
-
-        # get intrinsic
-        state_intr = kernel_state_intr(mod, T_state)
-        state_intr_ft = function_type(state_intr)
-
-        # generate IR
-        @dispose builder=IRBuilder() begin
-            entry = BasicBlock(llvm_f, "entry")
-            position!(builder, entry)
-
-            val = call!(builder, state_intr_ft, state_intr, Value[], "state")
-
-            ret!(builder, val)
-        end
-
-        call_function(llvm_f, state)
-    end
+kernel_state_value(state) = generate_llvmcall(state, Tuple{}) do builder
+    T_state = convert(LLVMType, state)
+    state_intr = kernel_state_intr(current_module(builder), T_state)
+    call!(builder, function_type(state_intr), state_intr, Value[], "state")
 end
 
 
@@ -1197,30 +1177,9 @@ end
 
 # run-time equivalent: emits a call to the debug-level intrinsic, returning the job's
 # configured `debug_level` as an `Int32` (lowered to a constant by `lower_debug_level!`).
-function kernel_debug_level_value()
-    @dispose ctx=Context() begin
-        T_int32 = LLVM.Int32Type()
-
-        # create function
-        llvm_f, _ = create_function(T_int32)
-        mod = LLVM.parent(llvm_f)
-
-        # get intrinsic
-        intr = debug_level_intr(mod)
-        intr_ft = function_type(intr)
-
-        # generate IR
-        @dispose builder=IRBuilder() begin
-            entry = BasicBlock(llvm_f, "entry")
-            position!(builder, entry)
-
-            val = call!(builder, intr_ft, intr, Value[], "debug_level")
-
-            ret!(builder, val)
-        end
-
-        call_function(llvm_f, Int32)
-    end
+kernel_debug_level_value() = generate_llvmcall(Int32, Tuple{}) do builder
+    intr = debug_level_intr(current_module(builder))
+    call!(builder, function_type(intr), intr, Value[], "debug_level")
 end
 
 # device-facing accessor: the compiling job's debug level as an `Int32` compile-time constant.
@@ -1296,32 +1255,14 @@ function alloca_value(@nospecialize(T), N::Int, AS::Int)
         return :(reinterpret(Core.LLVMPtr{$T,$AS}, C_NULL))
     end
 
-    @dispose ctx=Context() begin
+    generate_llvmcall(Core.LLVMPtr{T,AS}, Tuple{}) do builder
         # `LLVMPtr{T,AS}` lowers to an (i8/opaque) pointer in address space `AS`; match that
         # as the intrinsic's return type so the `llvmcall` boundary type-checks.
         T_ptr = convert(LLVMType, Core.LLVMPtr{T,AS})
-
-        # create function
-        llvm_f, _ = create_function(T_ptr)
-        mod = LLVM.parent(llvm_f)
-
-        # get intrinsic
-        intr = alloca_intr(mod, T_ptr)
-        intr_ft = function_type(intr)
-
-        # generate IR
-        @dispose builder=IRBuilder() begin
-            entry = BasicBlock(llvm_f, "entry")
-            position!(builder, entry)
-
-            args = Value[ConstantInt(LLVM.Int64Type(), bytes),
-                         ConstantInt(LLVM.Int64Type(), align)]
-            ptr = call!(builder, intr_ft, intr, args, "alloca")
-
-            ret!(builder, ptr)
-        end
-
-        call_function(llvm_f, Core.LLVMPtr{T,AS})
+        intr = alloca_intr(current_module(builder), T_ptr)
+        args = Value[ConstantInt(LLVM.Int64Type(), bytes),
+                     ConstantInt(LLVM.Int64Type(), align)]
+        call!(builder, function_type(intr), intr, args, "alloca")
     end
 end
 
