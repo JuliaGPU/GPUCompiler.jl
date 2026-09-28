@@ -500,35 +500,74 @@ function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::DataLayout)
     return nothing
 end
 
-# Rewrite word-sized loads derived through constant casts or GEPs from `value`. The producer
-# receives the byte offset; reject paths whose offset is not static.
-function rewrite_word_loads!(produce_word, @nospecialize(value), what::String;
-                             offset::Union{Int,Nothing}=0,
-                             dl::DataLayout=datalayout(LLVM.parent(value)::LLVM.Module))
+is_word_type(T::LLVMType) =
+    T isa LLVM.PointerType || (T isa LLVM.IntegerType && width(T) == 8sizeof(UInt))
+
+# The addresses an instruction merely forwards: those a `phi` or `select` picks from, or the
+# operand of a pointer cast. `nothing` for any other instruction.
+function forwarded_addresses(inst::LLVM.Instruction)
+    if inst isa LLVM.PHIInst
+        return LLVM.Value[value for (value, _) in incoming(inst)]
+    elseif inst isa LLVM.SelectInst
+        return LLVM.Value[operands(inst)[2], operands(inst)[3]]
+    elseif inst isa LLVM.BitCastInst || inst isa LLVM.AddrSpaceCastInst
+        return LLVM.Value[operands(inst)[1]]
+    end
+    return nothing
+end
+
+# Check forwarded addresses and relax load alignment to what a word slot guarantees.
+# Cycles can arise from loop PHIs.
+function check_word_loads!(value, seen=Set{LLVM.Value}())
+    value in seen && return true
+    push!(seen, value)
+    for use in uses(value)
+        val = user(use)
+        if val isa LLVM.LoadInst
+            is_word_type(value_type(val)) || return false
+            alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+        elseif val isa LLVM.Instruction && forwarded_addresses(val) !== nothing
+            check_word_loads!(val, seen) || return false
+        else
+            return false
+        end
+    end
+    return true
+end
+
+# Substitute a slot holding the same word for each loaded cglobal address. Replacing the
+# address preserves the loads and any PHIs/selects LLVM has introduced between them.
+function redirect_word_addresses!(slot_address, @nospecialize(value), what::String;
+                                  offset::Union{Int,Nothing}=0,
+                                  dl::DataLayout=datalayout(LLVM.parent(value)::LLVM.Module))
     changed = false
     for use in collect(uses(value))
         val = user(use)
-        if isa(val, LLVM.ConstantExpr)
+        if val isa LLVM.ConstantExpr
             delta = constexpr_byte_offset(val, dl)
             inner = (offset === nothing || delta === nothing) ? nothing : offset + delta
-            changed |= rewrite_word_loads!(produce_word, val, what; offset=inner, dl)
-        elseif isa(val, LLVM.LoadInst)
+            changed |= redirect_word_addresses!(slot_address, val, what; offset=inner, dl)
+            continue
+        elseif val isa LLVM.LoadInst
             offset === nothing &&
                 error("Unsupported $what load through constant expression $(operands(val)[1])")
-            T = value_type(val)
-            (T isa LLVM.PointerType ||
-             (T isa LLVM.IntegerType && width(T) == 8sizeof(UInt))) ||
-                error("Unsupported $what load of LLVM type $T")
-            @dispose builder=IRBuilder() begin
-                position!(builder, val)
-                replacement = produce_word(builder, offset)
-                T isa LLVM.PointerType &&
-                    (replacement = inttoptr!(builder, replacement, T))
-                replace_uses!(val, replacement)
-            end
-            erase!(val)
-            changed = true
+            is_word_type(value_type(val)) ||
+                error("Unsupported $what load of LLVM type $(value_type(val))")
+            alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+        elseif val isa LLVM.Instruction && forwarded_addresses(val) !== nothing
+            offset === nothing && continue
+            # Slots live in the default address space.
+            addrspace(value_type(value)) == 0 || continue
+            check_word_loads!(val) || continue
+        else
+            continue
         end
+        slot = const_pointercast(slot_address(offset), value_type(value))
+        ops = operands(val)
+        for i in 1:length(ops)
+            ops[i] == value && (ops[i] = slot)
+        end
+        changed = true
     end
     return changed
 end
@@ -564,20 +603,24 @@ function collect_cglobal_relocations!(@nospecialize(job::CompilerJob), mod::LLVM
             end
         end
 
-        changed |= rewrite_word_loads!(f, "cglobal '$fn'") do builder, offset
-            load!(builder, relocation_word_type(), cglobal_slot(offset))
-        end
+        changed |= redirect_word_addresses!(cglobal_slot, f, "cglobal '$fn'")
     end
 
     return changed
 end
 
 function has_unresolved_cglobal_loads(mod::LLVM.Module, relocs::Relocations)
-    function has_load(value)
+    # also through merged addresses that `redirect_word_addresses!` had to leave alone
+    function has_load(value, seen=Set{LLVM.Value}())
         for use in uses(value)
             val = user(use)
             val isa LLVM.LoadInst && return true
-            val isa LLVM.ConstantExpr && has_load(val) && return true
+            if val isa LLVM.ConstantExpr ||
+               (val isa LLVM.Instruction && forwarded_addresses(val) !== nothing)
+                val in seen && continue
+                push!(seen, val)
+                has_load(val, seen) && return true
+            end
         end
         return false
     end
@@ -822,40 +865,103 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
 
     # One base pointer per function, materialized at the top of its entry block (the state
     # it derives from is a function argument, so it dominates every use).
-    bases = Dict{LLVM.Function, LLVM.Value}()
+    bases = Dict{LLVM.Function, Tuple{LLVM.Value, LLVM.Instruction}}()
     function table_base(f::LLVM.Function)
         get!(bases, f) do
+            entry = first(instructions(first(blocks(f))))
             @dispose builder=IRBuilder() begin
-                position!(builder, first(instructions(first(blocks(f)))))
-                relocation_table_pointer(job, builder, f)
+                position!(builder, entry)
+                relocation_table_pointer(job, builder, f), entry
             end
         end
     end
+    function table_address(builder::IRBuilder, base::LLVM.Value, index::Int)
+        inbounds_gep!(builder, T_word, base, [ConstantInt(LLVM.Int32Type(), index - 1)])
+    end
     function table_word(builder::IRBuilder, index::Int)
         f = LLVM.parent(position(builder))
-        ptr = inbounds_gep!(builder, T_word, table_base(f),
-                            [ConstantInt(LLVM.Int32Type(), index - 1)])
-        load!(builder, T_word, ptr)
+        base, _ = table_base(f)
+        load!(builder, T_word, table_address(builder, base, index))
     end
 
     mod_gvs = globals(mod)
+    slots = LLVM.GlobalVariable[mod_gvs[rec.name] for rec in relocs.records
+                       if rec.kind === SlotSite && haskey(mod_gvs, rec.name)]
+    check_relocation_slot_uses!(mod, slots)
+    # Expand all constant users before choosing entry insertion points. Expanding a later
+    # slot could otherwise insert a use before the entry instruction saved for an earlier one.
+    convert_users_to_instructions!(slots)
+
     for (index, rec) in enumerate(relocs.records)
         haskey(mod_gvs, rec.name) || error("Missing relocation global '$(rec.name)'")
         gv = mod_gvs[rec.name]
         check_relocation(mod, rec, gv)
 
         if rec.kind === SlotSite
-            rewrite_word_loads!(gv, "relocation slot '$(rec.name)'") do builder, offset
-                offset == 0 ||
-                    error("Relocation slot '$(rec.name)' is loaded at offset $offset")
-                table_word(builder, index)
+            addresses = Dict{LLVM.Function, LLVM.Value}()
+            function slot_address(f::LLVM.Function)
+                get!(addresses, f) do
+                    base, entry = table_base(f)
+                    @dispose builder=IRBuilder() begin
+                        # After the base, but before any original instruction or PHI edge use.
+                        position!(builder, entry)
+                        ptr = table_address(builder, base, index)
+                        pointercast!(builder, ptr, value_type(gv))
+                    end
+                end
             end
-            prune_constexpr_uses!(gv)
-            isempty(uses(gv)) ||
-                error("Relocation slot '$(rec.name)' still has uses after redirection")
-            erase!(gv)
+            replace_global_with_local!(gv, slot_address)
         else
             demote_relocatable_box!(mod, gv, rec, table_word, index)
+        end
+    end
+
+    # Table addresses may be in a different address space from the original slots.
+    # Let LLVM propagate that space through the existing PHIs, selects and casts.
+    @dispose pb=NewPMPassBuilder() begin
+        tti = llvm_targetinfo(job.config.target)
+        tti === nothing || LLVM.target_transform_info!(pb, tti)
+        add!(pb, NewPMFunctionPassManager()) do fpm
+            add!(fpm, InferAddressSpacesPass())
+        end
+        run!(pb, mod, llvm_machine(job.config.target))
+    end
+    return
+end
+
+# Slots denote read-only words, not general storage. In particular, don't merge a table
+# address with an unrelated pointer: a back-end may not have a common address space for them.
+function check_relocation_slot_uses!(mod::LLVM.Module, slots::Vector{LLVM.GlobalVariable})
+    dl = datalayout(mod)
+    seen = Set{LLVM.Value}(slots)
+    worklist = LLVM.Value[slots...]
+    while !isempty(worklist)
+        for use in uses(pop!(worklist))
+            val = user(use)
+            if val isa LLVM.LoadInst
+                is_word_type(value_type(val)) ||
+                    error("Unsupported relocation slot load of LLVM type $(value_type(val))")
+                # Julia names these loads after globals with session-specific counters.
+                LLVM.name!(val, "")
+                # The packed table guarantees word alignment, even if the old global had more.
+                alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+                continue
+            elseif val isa LLVM.ConstantExpr
+                constexpr_byte_offset(val, dl) == 0 ||
+                    error("Unsupported relocation slot address $val")
+            elseif !(val isa LLVM.Instruction && forwarded_addresses(val) !== nothing)
+                error("Unsupported use of relocation slot address: $val")
+            end
+            val in seen && continue
+            push!(seen, val)
+            push!(worklist, val)
+        end
+    end
+    for val in seen
+        val isa LLVM.Instruction || continue
+        for address in forwarded_addresses(val)
+            address in seen ||
+                error("Relocation slot address merged with unsupported address $address in $val")
         end
     end
     return
