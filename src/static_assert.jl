@@ -26,22 +26,14 @@ const STATIC_ASSERT_MARKER = "gpu_static_assert"
 const STATIC_ASSERTION = "static assertion failed"
 
 function static_assert_marker(message::String)
-    LLVM.Context() do _
-        entry, entry_type = LLVM.Interop.create_function()
-        mod = LLVM.parent(entry)
-        @dispose builder=IRBuilder() begin
-            block = BasicBlock(entry, "entry")
-            position!(builder, block)
-
-            # LLVM.jl owns the pointer representation and creates an anonymous private
-            # string global, just like LLVM's annotation helpers.
-            string = globalstring_ptr!(builder, message)
-            marker_type = LLVM.FunctionType(LLVM.VoidType(), [value_type(string)])
-            marker = LLVM.Function(mod, STATIC_ASSERT_MARKER, marker_type)
-            call!(builder, marker_type, marker, [string])
-            ret!(builder)
-        end
-        return LLVM.Interop.call_function(entry, Nothing, Tuple{})
+    generate_llvmcall(Nothing, Tuple{}) do builder
+        # LLVM.jl owns the pointer representation and creates an anonymous private
+        # string global, just like LLVM's annotation helpers.
+        string = globalstring_ptr!(builder, message)
+        marker_type = LLVM.FunctionType(LLVM.VoidType(), [value_type(string)])
+        marker = LLVM.Function(current_module(builder), STATIC_ASSERT_MARKER, marker_type)
+        call!(builder, marker_type, marker, [string])
+        nothing
     end
 end
 
