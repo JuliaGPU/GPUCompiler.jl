@@ -237,9 +237,7 @@ lljit = LLJIT(;tm)
 
 jd_main = JITDylib(lljit)
 
-prefix = LLVM.get_prefix(lljit)
-dg = LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix)
-add!(jd_main, dg)
+add!(jd_main, LLVM.DynamicLibrarySearchGenerator(lljit))
 if Sys.iswindows() && Int === Int64
     # TODO can we check isGNU?
     define_absolute_symbol(jd_main, mangle(lljit, "___chkstk_ms"))
