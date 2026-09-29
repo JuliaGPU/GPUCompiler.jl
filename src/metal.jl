@@ -2040,8 +2040,8 @@ function expand_vector_reductions!(fun::LLVM.Function)
     end
 end
 
-# floating-point math intrinsics that Julia emits as plain `llvm.*` and that Metal exposes as
-# AIR device functions. Each has a precise `air.<op>` for f16/f32; some additionally have a
+# floating-point math intrinsics that reach the back-end as plain `llvm.*` and that Metal
+# exposes as AIR device functions. Each has a precise `air.<op>` for f16/f32; some additionally have a
 # relaxed, f32-only `air.fast_<op>` that we select when the call is `afn`-flagged — set per-op
 # by `@fastmath` or module-wide by `apply_fastmath!` when `target.fastmath` is on.
 #
@@ -2053,8 +2053,8 @@ end
 # llvm intrinsic => (precise air op, relaxed f32 air op or `nothing`)
 # Verified against Apple's frontend (`xcrun metal -S -emit-llvm`, precise vs -ffast-math):
 # every op has an `air.<op>.f16` and `air.<op>.f32`; all but `fma` also have an f32-only
-# `air.fast_<op>` that Apple selects under fast math. Half always stays precise, and `fma`
-# is exact so even fast math keeps `air.fma.{f16,f32}`.
+# `air.fast_<op>` that Apple selects under fast math. Half never uses a fast variant, and
+# `fma` rounds once so even fast math keeps `air.fma.{f16,f32}`.
 const AIR_MATH_INTRINSICS = Dict(
     "llvm.sqrt"  => ("air.sqrt",  "air.fast_sqrt"),
     "llvm.fma"   => ("air.fma",   nothing),
@@ -2062,6 +2062,12 @@ const AIR_MATH_INTRINSICS = Dict(
     "llvm.ceil"  => ("air.ceil",  "air.fast_ceil"),
     "llvm.trunc" => ("air.trunc", "air.fast_trunc"),
     "llvm.rint"  => ("air.rint",  "air.fast_rint"),
+    # Julia doesn't emit these (Metal.jl calls `air.sin`/`air.cos` directly), but Enzyme's
+    # derivatives of those calls do, and Apple's back-end crashes on them. The f16 builtins
+    # are less accurate than rounding the f32 ones on some GPUs (M1), but match what Apple's
+    # frontend and Metal.jl use for half.
+    "llvm.sin"   => ("air.sin",   "air.fast_sin"),
+    "llvm.cos"   => ("air.cos",   "air.fast_cos"),
 )
 function lower_math_intrinsics!(fun::LLVM.Function)
     math_intrinsics = intrinsic_table(AIR_MATH_INTRINSICS)
