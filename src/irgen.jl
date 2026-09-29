@@ -343,6 +343,30 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
     return changed
 end
 
+# demote `unordered` LLVM atomic loads and stores to plain ones
+#
+# Julia marks accesses to heap references `unordered`, so that a read racing with the GC or
+# with another thread's write cannot observe a torn pointer. There is no device GC, and
+# aligned accesses don't tear, so the ordering carries no meaning here. Not every back-end can
+# express it, though: SPIR-V's OpAtomicLoad/OpAtomicStore only take scalar integer or
+# floating-point operands, so the Khronos translator turns an atomic access of a pointer into
+# an invalid pointer-typed atomic, and Metal only has atomics on device and threadgroup memory,
+# while these accesses are often of objects passed by reference (e.g. an immutable struct
+# with a `DataType` field, or with a reference to a mutable object). Rejecting allocations of
+# objects with references (see `check_allocation!`) does not remove them, as they don't
+# involve an allocation. Other orderings are left alone, because they are user atomics (e.g.
+# UnsafeAtomics' `load`/`store!`) that the back-end must see.
+function demote_unordered_atomics!(mod::LLVM.Module)
+    changed = false
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) || continue
+        is_atomic(inst) && ordering(inst) == LLVM.API.LLVMAtomicOrderingUnordered || continue
+        ordering!(inst, LLVM.API.LLVMAtomicOrderingNotAtomic)
+        changed = true
+    end
+    return changed
+end
+
 # lower `trap` to a clean return to get rid of `unreachable` and `noreturn`
 #
 # this is for compatibility with back-ends that don't support (SPIR-V) or have

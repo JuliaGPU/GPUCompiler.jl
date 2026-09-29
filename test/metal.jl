@@ -1901,19 +1901,26 @@ end
     end
 end
 
-@testset "LLVM atomics are not demoted" begin
-    # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`) must reach the back-end
+@testset "LLVM atomics" begin
+    # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`) must reach the back-end,
+    # while Julia's `unordered` heap-reference accesses, which AIR cannot express when they
+    # are of pointers or outside device and threadgroup memory, become plain ones
     function kernel(p::Core.LLVMPtr{Int32,1}, q::Core.LLVMPtr{Int32,1})
+        r = reinterpret(Ptr{Ptr{Int32}}, p)
+        y = Core.Intrinsics.atomic_pointerref(r, :unordered)
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Ptr{Int32}}, q), y, :unordered)
         x = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Int32}, p), :acquire)
         Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int32}, q), x, :release)
         return
     end
 
     @test @filecheck begin
+        @check_not "unordered"
         @check "load atomic i32"
         @check_same "acquire"
         @check "store atomic i32"
         @check_same "release"
+        @check_not "unordered"
         Metal.code_native(kernel, Tuple{Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}};
                           kernel=true, dump_module=true)
     end

@@ -419,9 +419,12 @@ end
 
 @testset "LLVM atomics" begin
     # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`, Atomix' `get`/`set!`) must
-    # reach the back-end
+    # reach the back-end, while Julia's `unordered` heap-reference accesses, which SPIR-V
+    # cannot express when they are of pointers, become plain ones
     mod = @eval module $(gensym())
         function kernel(p::Ptr{Int32}, q::Ptr{Int32})
+            y = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Ptr{Int32}}, p), :unordered)
+            Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Ptr{Int32}}, q), y, :unordered)
             x = Core.Intrinsics.atomic_pointerref(p, :acquire)
             Core.Intrinsics.atomic_pointerset(q, x, :release)
             return
@@ -431,13 +434,17 @@ end
 
     @test @filecheck begin
         @check_label "define spir_kernel void @_Z6kernel"
+        @check_not "unordered"
         @check "load atomic i32"
         @check_same "acquire"
         @check "store atomic i32"
         @check_same "release"
+        @check_not "unordered"
+        @check "ret void"
         SPIRV.code_llvm(mod.kernel, tt; backend, kernel=true)
     end
 
+    # the SPIR-V is validated by the helper, so an invalid pointer-typed atomic would fail here
     @test @filecheck begin
         @check "OpEntryPoint Kernel %[[KERNEL:[^ ]+]]"
         @check "%[[KERNEL]] = OpFunction %void None"

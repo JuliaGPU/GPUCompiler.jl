@@ -597,6 +597,10 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
                                   entry::LLVM.Function)
     entry_fn = LLVM.name(entry)
 
+    # Julia's `unordered` heap-reference accesses are pointer-sized, and often of thread
+    # memory, neither of which AIR has atomics for (see `demote_unordered_atomics!`)
+    demote_unordered_atomics!(mod)
+
     # convert the kernel state argument to a reference
     if job.config.kernel && kernel_state_type(job) !== Nothing
         entry = kernel_state_to_reference!(job, mod, entry)
