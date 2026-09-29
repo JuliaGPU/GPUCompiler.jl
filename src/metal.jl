@@ -1563,6 +1563,12 @@ function lower_math_intrinsics!(fun::LLVM.Function)
         LLVM.Intrinsic("llvm.ceil")  => ("air.ceil",  "air.fast_ceil"),
         LLVM.Intrinsic("llvm.trunc") => ("air.trunc", "air.fast_trunc"),
         LLVM.Intrinsic("llvm.rint")  => ("air.rint",  "air.fast_rint"),
+        # Julia doesn't emit these (Metal.jl calls `air.sin`/`air.cos` directly), but Enzyme's
+        # derivatives of those calls do, and Apple's back-end crashes on them. The f16 builtins
+        # are less accurate than rounding the f32 ones on some GPUs (M1), but match what Apple's
+        # frontend and Metal.jl use for half.
+        LLVM.Intrinsic("llvm.sin")   => ("air.sin",   "air.fast_sin"),
+        LLVM.Intrinsic("llvm.cos")   => ("air.cos",   "air.fast_cos"),
     )
 
     worklist = Tuple{LLVM.CallBase, String, Union{String,Nothing}}[]

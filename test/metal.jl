@@ -881,6 +881,10 @@ end
         declare float @llvm.fma.f32(float, float, float)
         declare half  @llvm.fma.f16(half, half, half)
         declare <4 x float> @llvm.sqrt.v4f32(<4 x float>)
+        declare float @llvm.sin.f32(float)
+        declare half  @llvm.sin.f16(half)
+        declare float @llvm.cos.f32(float)
+        declare half  @llvm.cos.f16(half)
         define void @f(float %x, half %h, <4 x float> %v) {
           %a = call float @llvm.sqrt.f32(float %x)
           %b = call afn float @llvm.sqrt.f32(float %x)
@@ -893,6 +897,12 @@ end
           %j = call float @llvm.fma.f32(float %x, float %x, float %x)
           %l = call half @llvm.fma.f16(half %h, half %h, half %h)
           %k = call <4 x float> @llvm.sqrt.v4f32(<4 x float> %v)
+          %m = call float @llvm.sin.f32(float %x)
+          %m2 = call afn float @llvm.sin.f32(float %x)
+          %m3 = call half @llvm.sin.f16(half %h)
+          %n = call float @llvm.cos.f32(float %x)
+          %n2 = call afn float @llvm.cos.f32(float %x)
+          %n3 = call afn half @llvm.cos.f16(half %h)
           ret void
         }
         """
@@ -917,6 +927,14 @@ end
         @test "air.fma.f32" in names
         @test "air.fma.f16" in names
         @test !("air.fast_fma.f32" in names)
+        # sin and cos (emitted by Enzyme's derivatives, not by Julia) follow the same rules
+        @test "air.sin.f32" in names
+        @test "air.fast_sin.f32" in names
+        @test "air.sin.f16" in names
+        @test "air.cos.f32" in names
+        @test "air.fast_cos.f32" in names
+        @test "air.cos.f16" in names
+        @test !("air.fast_cos.f16" in names)
         # no scalar llvm.* math intrinsics survive; the vector one is left (no air.<op>.v4f32)
         @test !any(n -> startswith(n, "llvm.") && !endswith(n, "v4f32"), names)
         @test "llvm.sqrt.v4f32" in names
