@@ -479,27 +479,8 @@ function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::LLVM.DataLayout)
     if op == LLVM.Opcode.BitCast || op == LLVM.Opcode.AddrSpaceCast
         return 0
     elseif op == LLVM.Opcode.GetElementPtr
-        ops = ce.operands
-        indices = ops[2:end]
-        all(idx -> idx isa LLVM.ConstantInt, indices) || return nothing
-        # LLVM.jl only exposes the source element type of GEP instructions, not of constant
-        # expressions, so use the C API
-        T = LLVMType(LLVM.API.LLVMGetGEPSourceElementType(ce))
-        offset = convert(Int, indices[1]) * LLVM.abi_size(dl, T)
-        for idx in indices[2:end]
-            # `i` is a zero-based GEP index, `LLVM.offsetof` numbers fields from 1
-            i = convert(Int, idx)
-            if T isa LLVM.StructType
-                offset += LLVM.offsetof(dl, T, i + 1)
-                T = T.elements[i+1]
-            elseif T isa LLVM.ArrayType || T isa LLVM.VectorType
-                T = T.element_type
-                offset += i * LLVM.abi_size(dl, T)
-            else
-                return nothing
-            end
-        end
-        return offset
+        offset = LLVM.constant_offset(ce, dl)
+        return offset === nothing ? nothing : Int(offset)
     end
     return nothing
 end
@@ -821,7 +802,9 @@ function inline_relocation_users!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
 
         @dispose pb=PassBuilder() begin
             add!(pb, AlwaysInlinerPass())
-            run!(pb, mod, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, mod, tm)
+            end
         end
     end
     return
@@ -918,7 +901,9 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
         add!(pb, FunctionPassManager()) do fpm
             add!(fpm, InferAddressSpacesPass())
         end
-        run!(pb, mod, llvm_machine(job.config.target))
+        with_llvm_machine(job.config.target) do tm
+            run!(pb, mod, tm)
+        end
     end
     return
 end
@@ -976,9 +961,8 @@ function demote_relocatable_box!(mod::LLVM.Module, gv::GlobalVariable, rec::Relo
         get!(allocas, f) do
             @dispose builder=IRBuilder() begin
                 position!(builder, LLVM.before(first(f.entry.instructions)))
-                ptr = alloca!(builder, boxty)
                 # keep Julia's heap alignment, which the payload's `isbits` layout assumes
-                ptr.alignment = max(gv.alignment, 16)
+                ptr = alloca!(builder, boxty; align=max(gv.alignment, 16))
                 store!(builder, init, ptr)
                 # overwrite the (zeroed) header field with the resolved relocation word
                 word = table_word(builder, index)

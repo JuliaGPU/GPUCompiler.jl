@@ -538,18 +538,17 @@ end
 
 @testset "replace i128 allocas" begin
     mod = @eval module $(gensym())
+        using LLVM, LLVM.Build, LLVM.Interop
+
         # reimplement some of SIMD.jl
         struct Vec{N, T}
             data::NTuple{N, Core.VecElement{T}}
         end
-        @generated function fadd(x::Vec{N, Float32}, y::Vec{N, Float32}) where {N}
-            quote
-                Vec(Base.llvmcall($"""
-                    %ret = fadd <$N x float> %0, %1
-                    ret <$N x float> %ret
-                """, NTuple{N, Core.VecElement{Float32}}, NTuple{2, NTuple{N, Core.VecElement{Float32}}}, x.data, y.data))
-            end
+        const VF32{N} = NTuple{N, Core.VecElement{Float32}}
+        @llvmgenerated builder function vfadd(x::VF32{N}, y::VF32{N})::VF32{N} where {N}
+            fadd!(builder, x, y)
         end
+        fadd(x::Vec{N, Float32}, y::Vec{N, Float32}) where {N} = Vec(vfadd(x.data, y.data))
         kernel(x, y) = @noinline fadd(x, y)
     end
 

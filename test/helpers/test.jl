@@ -18,27 +18,20 @@ macro test_throws_message(f, typ, ex...)
     end
 end
 
-# helper function for sinking a value to prevent the callee from getting optimized away
-@inline @generated function sink(i::T, ::Val{addrspace}=Val(0)) where {T <: Union{Int32,UInt32}, addrspace}
-    as_str = addrspace > 0 ? " addrspace($addrspace)" : ""
-    llvmcall_str = """%slot = alloca i32$(addrspace > 0 ? ", addrspace($addrspace)" : "")
-                     store volatile i32 %0, i32$(as_str)* %slot
-                     %value = load volatile i32, i32$(as_str)* %slot
-                     ret i32 %value"""
-    return :(Base.llvmcall($llvmcall_str, T, Tuple{T}, i))
-end
-@inline @generated function sink(i::T, ::Val{addrspace}=Val(0)) where {T <: Union{Int64,UInt64}, addrspace}
-    as_str = addrspace > 0 ? " addrspace($addrspace)" : ""
-    llvmcall_str = """%slot = alloca i64$(addrspace > 0 ? ", addrspace($addrspace)" : "")
-                     store volatile i64 %0, i64$(as_str)* %slot
-                     %value = load volatile i64, i64$(as_str)* %slot
-                     ret i64 %value"""
-    return :(Base.llvmcall($llvmcall_str, T, Tuple{T}, i))
+# helper function for sinking a value to prevent the callee from getting optimized away:
+# a volatile round trip through a stack slot (in the given address space)
+using LLVM, LLVM.IR, LLVM.Build, LLVM.Interop
+@inline @llvmgenerated builder function sink(i::T, ::Val{addrspace}=Val(0))::T where {
+        T <: Union{Int32,UInt32,Int64,UInt64}, addrspace}
+    slot = alloca!(builder, i.value_type, "slot"; addrspace)
+    store!(builder, i, slot).volatile = true
+    value = load!(builder, i.value_type, slot, "value")
+    value.volatile = true
+    value
 end
 
 # typed/opaque pointer detection for conditional FileCheck checks
 
-using LLVM, LLVM.IR
 const typed_ptrs = JuliaContext() do ctx
     supports_typed_pointers(ctx)
 end

@@ -51,29 +51,30 @@ end
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                    relocs::Relocations; opt_level=2)
-    tm = llvm_machine(job.config.target)
-    tti = llvm_targetinfo(job.config.target)
+    with_llvm_machine(job.config.target) do tm
+        tti = llvm_targetinfo(job.config.target)
 
-    @dispose pb=PassBuilder() begin
-        tti === nothing || LLVM.target_transform_info!(pb, tti)
+        @dispose pb=PassBuilder() begin
+            tti === nothing || LLVM.target_transform_info!(pb, tti)
 
-        register!(pb, GPULowerCPUFeaturesPass(job))
-        register!(pb, GPULowerPTLSPass(job))
-        register!(pb, GPULowerGCFramePass(job, relocs))
-        register!(pb, GPULinkRuntimePass(job, relocs))
-        register!(pb, GPULinkLibrariesPass(job))
-        register!(pb, GPUFinishRuntimeIntrinsicsPass(job))
-        register!(pb, AddKernelStatePass(job))
-        register!(pb, LowerKernelStatePass(job))
-        register!(pb, CleanupKernelStatePass(job))
+            register!(pb, GPULowerCPUFeaturesPass(job))
+            register!(pb, GPULowerPTLSPass(job))
+            register!(pb, GPULowerGCFramePass(job, relocs))
+            register!(pb, GPULinkRuntimePass(job, relocs))
+            register!(pb, GPULinkLibrariesPass(job))
+            register!(pb, GPUFinishRuntimeIntrinsicsPass(job))
+            register!(pb, AddKernelStatePass(job))
+            register!(pb, LowerKernelStatePass(job))
+            register!(pb, CleanupKernelStatePass(job))
 
-        add!(pb, ModulePassManager()) do mpm
-            buildNewPMPipeline!(mpm, job, opt_level)
+            add!(pb, ModulePassManager()) do mpm
+                buildNewPMPipeline!(mpm, job, opt_level)
+            end
+            run!(pb, mod, tm)
         end
-        run!(pb, mod, tm)
+        optimize_module!(job, mod)
+        run!(DeadArgumentEliminationPass(), mod, tm)
     end
-    optimize_module!(job, mod)
-    run!(DeadArgumentEliminationPass(), mod, tm)
     return
 end
 

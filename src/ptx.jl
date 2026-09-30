@@ -246,48 +246,49 @@ end
 
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
-    tm = llvm_machine(job.config.target)
-    # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
-    @dispose pb=PassBuilder() begin
-        register!(pb, PTXRSqrtFastPass())
-        register!(pb, PTXFDivFastPass())
-        register!(pb, PTXFSqrtFastPass())
-        if get(optimization_options(job), :fastmath, true)
-            add!(pb, PTXRSqrtFastPass())
-            add!(pb, PTXFDivFastPass())
-            add!(pb, PTXFSqrtFastPass())
-        end
-
-        add!(pb, FunctionPassManager()) do fpm
-            # needed by GemmKernels.jl-like code
-            add!(fpm, SpeculativeExecutionPass())
-
-            # NVPTX's target machine info enables runtime unrolling,
-            # but Julia's pass sequence only invokes the simple unroller.
-            add!(fpm, LoopUnrollPass(; job.config.opt_level))
-            add!(fpm, instcombine_pass(job))        # clean-up redundancy
-            add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
-                add!(lpm, LICMPass())           # the inner runtime check might be
-                                                # outer loop invariant
+    with_llvm_machine(job.config.target) do tm
+        # TODO: Use the registered target passes (JuliaGPU/GPUCompiler.jl#450)
+        @dispose pb=PassBuilder() begin
+            register!(pb, PTXRSqrtFastPass())
+            register!(pb, PTXFDivFastPass())
+            register!(pb, PTXFSqrtFastPass())
+            if get(optimization_options(job), :fastmath, true)
+                add!(pb, PTXRSqrtFastPass())
+                add!(pb, PTXFDivFastPass())
+                add!(pb, PTXFSqrtFastPass())
             end
 
-            # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
-            # that code still needs to be optimized (arguably, multiple unroll passes should be
-            # scheduled by the Julia optimizer). do so here, instead of re-optimizing entirely.
-            if job.config.opt_level == 2
-                add!(fpm, GVNPass())
-            elseif job.config.opt_level == 1
-                add!(fpm, EarlyCSEPass())
+            add!(pb, FunctionPassManager()) do fpm
+                # needed by GemmKernels.jl-like code
+                add!(fpm, SpeculativeExecutionPass())
+
+                # NVPTX's target machine info enables runtime unrolling,
+                # but Julia's pass sequence only invokes the simple unroller.
+                add!(fpm, LoopUnrollPass(; job.config.opt_level))
+                add!(fpm, instcombine_pass(job))        # clean-up redundancy
+                add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
+                    add!(lpm, LICMPass())           # the inner runtime check might be
+                                                    # outer loop invariant
+                end
+
+                # the above loop unroll pass might have unrolled regular, non-runtime nested loops.
+                # that code still needs to be optimized (arguably, multiple unroll passes should be
+                # scheduled by the Julia optimizer). do so here, instead of re-optimizing entirely.
+                if job.config.opt_level == 2
+                    add!(fpm, GVNPass())
+                elseif job.config.opt_level == 1
+                    add!(fpm, EarlyCSEPass())
+                end
+                add!(fpm, DSEPass())
+
+                add!(fpm, SimplifyCFGPass())
             end
-            add!(fpm, DSEPass())
 
-            add!(fpm, SimplifyCFGPass())
+            # get rid of the internalized functions; now possible unused
+            add!(pb, GlobalDCEPass())
+
+            run!(pb, mod, tm)
         end
-
-        # get rid of the internalized functions; now possible unused
-        add!(pb, GlobalDCEPass())
-
-        run!(pb, mod, tm)
     end
 end
 
@@ -406,14 +407,14 @@ function nvvm_reflect!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                            Operand should be a global variable, got a $(typeof(sym)). Please file an issue."""
             continue
         end
-        sym_op = sym.operands[1]
-        if !isa(sym_op, LLVM.ConstantArray) && !isa(sym_op, LLVM.ConstantDataArray)
+        sym_op = sym.initializer
+        if sym_op === nothing || !isstring(sym_op)
             @safe_error """Unrecognized format of __nvvm_reflect call:
                            $(string(call))
-                           Operand should be a constant array, got a $(typeof(sym_op)). Please file an issue."""
+                           Operand should be a constant string, got a $(typeof(sym_op)). Please file an issue."""
+            continue
         end
-        chars = convert.(Ref(UInt8), collect(sym_op.elements))
-        reflect_arg = String(chars[1:end-1])
+        reflect_arg = chop(String(sym_op))  # without the terminating NUL
 
         # match LLVM's NVVMReflectPass: unknown keys fold to 0.
         reflect_val = if reflect_arg == "__CUDA_ARCH"

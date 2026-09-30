@@ -393,11 +393,11 @@ function lower_minimum_maximum!(mod::LLVM.Module)
 
         typ = f.function_type.return_type
         eltyp = typ isa LLVM.VectorType ? typ.element_type : typ
-        bits = if eltyp == LLVM.HalfType()
+        bits = if eltyp isa LLVM.HalfType
             16
-        elseif eltyp == LLVM.FloatType()
+        elseif eltyp isa LLVM.FloatType
             32
-        elseif eltyp == LLVM.DoubleType()
+        elseif eltyp isa LLVM.DoubleType
             64
         else
             continue
@@ -482,8 +482,7 @@ function convert_i128_allocas!(mod::LLVM.Module)
                     # Create new alloca with vector type
                     @dispose builder=IRBuilder() begin
                         position!(builder, LLVM.before(inst))
-                        new_alloca = alloca!(builder, new_alloca_type)
-                        new_alloca.alignment = align_val
+                        new_alloca = alloca!(builder, new_alloca_type; align=align_val)
 
                         # Bitcast the new alloca back to the original pointer type
                         # XXX: The issue only seems to manifest itself on LLVM >= 18
@@ -540,7 +539,9 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     if job.config.target.backend === :khronos
         @dispose pb=PassBuilder() begin
             add!(pb, SimplifyCFGPass())
-            run!(pb, new_f, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, new_f, tm)
+            end
         end
     end
     return new_f

@@ -143,7 +143,7 @@ function emit_fake_return!(builder::IRBuilder, rt::LLVMType)
         ret!(builder, const_inttoptr(ConstantInt(i64, 1), rt))
     elseif rt isa LLVM.IntegerType
         ret!(builder, ConstantInt(rt, 0))
-    elseif rt == LLVM.FloatType() || rt == LLVM.DoubleType()
+    elseif rt isa LLVM.FloatType || rt isa LLVM.DoubleType
         ret!(builder, ConstantFP(rt, 0.0))
     else
         error("Unsupported runtime stub return type: $rt")

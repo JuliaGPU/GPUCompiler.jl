@@ -23,18 +23,15 @@ function JuliaContext(; opaque_pointers=nothing)
     ThreadSafeContext(; opaque_pointers)
 end
 function JuliaContext(f; kwargs...)
-    ts_ctx = JuliaContext(; kwargs...)
-    # for now, also activate the underlying context
-    # XXX: this is wrong; we can't expose the underlying LLVM context, but should
-    #      instead always go through the callback in order to unlock it properly.
-    #      rework this once we depend on Julia 1.9 or later.
-    ctx = context(ts_ctx)
-    activate(ctx)
-    try
-        f(ctx)
-    finally
-        deactivate(ctx)
-        dispose(ts_ctx)
+    ThreadSafeContext(; kwargs...) do ts_ctx
+        # for now, also activate the underlying context
+        # XXX: this is wrong; we can't expose the underlying LLVM context, but should
+        #      instead always go through the callback in order to unlock it properly.
+        #      rework this once we depend on Julia 1.9 or later.
+        ctx = context(ts_ctx)
+        context!(ctx) do
+            f(ctx)
+        end
     end
 end
 
@@ -273,7 +270,9 @@ const __llvm_initialized = Ref(false)
                 add!(pb, FunctionPassManager()) do fpm
                     add!(fpm, instcombine_pass(job))
                 end
-                run!(pb, ir, llvm_machine(job.config.target))
+                with_llvm_machine(job.config.target) do tm
+                    run!(pb, ir, tm)
+                end
             end
         end
 
@@ -323,7 +322,9 @@ const __llvm_initialized = Ref(false)
                     push!(preserved_gvs, gvar.name)
                 end
             end
-            run!(InternalizePass(; preserved_gvs), ir, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(InternalizePass(; preserved_gvs), ir, tm)
+            end
 
             finish_linked_module!(job, ir)
 
@@ -352,7 +353,9 @@ const __llvm_initialized = Ref(false)
                                 add!(fpm, GVNPass())
                             end
                             add!(pb, MergeFunctionsPass())
-                            run!(pb, ir, llvm_machine(job.config.target))
+                            with_llvm_machine(job.config.target) do tm
+                                run!(pb, ir, tm)
+                            end
                         end
                     end
                 end
@@ -372,7 +375,9 @@ const __llvm_initialized = Ref(false)
                         add!(pb, GlobalDCEPass())
                         add!(pb, StripDeadPrototypesPass())
                         add!(pb, ConstantMergePass())
-                        run!(pb, ir, llvm_machine(job.config.target))
+                        with_llvm_machine(job.config.target) do tm
+                            run!(pb, ir, tm)
+                        end
                     end
                 end
             end

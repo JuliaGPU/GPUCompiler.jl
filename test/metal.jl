@@ -489,7 +489,7 @@ end
     # Julia's alias scopes) that mention them. The rewrite is deterministic but it must not
     # reach into names that merely resemble the pattern.
     JuliaContext() do ctx
-        m = parse(LLVM.Module, """
+        @dispose m=parse(LLVM.Module, """
             define void @julia_probe_4242() {
             julia_inlinee_77.exit:
               ret void, !alias.scope !0
@@ -514,28 +514,28 @@ end
             !0 = !{!1}
             !1 = distinct !{!1, !"julia_inlinee_77: %union_bytes_return"}
             !2 = !{!3}
-            !3 = distinct !{!3, !"julia_record_exception!_18521"}""")
-        GPUCompiler.normalize_julia_symbol_names!(m)
-        ir = string(m)
+            !3 = distinct !{!3, !"julia_record_exception!_18521"}""") begin
+            GPUCompiler.normalize_julia_symbol_names!(m)
+            ir = string(m)
 
-        # a codegen name is replaced by a deterministic module-local rank, wherever it sits
-        @test !occursin("@julia_probe_4242", ir)
-        @test !occursin("julia_inlinee_77", ir)
-        @test occursin("@julia_probe_1(", ir)
-        @test occursin(r"julia_inlinee_[0-9]+\.exit", ir)
-        @test occursin(r"!\"julia_inlinee_[0-9]+: %union_bytes_return\"", ir)
+            # a codegen name is replaced by a deterministic module-local rank, wherever it sits
+            @test !occursin("@julia_probe_4242", ir)
+            @test !occursin("julia_inlinee_77", ir)
+            @test occursin("@julia_probe_1(", ir)
+            @test occursin(r"julia_inlinee_[0-9]+\.exit", ir)
+            @test occursin(r"!\"julia_inlinee_[0-9]+: %union_bytes_return\"", ir)
 
-        # names outside `\w` — mutating `!`, closure `#` — are codegen names too
-        @test !occursin("julia_record_exception!_18521", ir)
-        @test !occursin("julia_#closure#42_777", ir)
-        @test occursin(r"@\"julia_record_exception!_[0-9]+\"", ir)
-        @test occursin(r"!\"julia_record_exception!_[0-9]+\"", ir)
-        @test occursin(r"@\"julia_#closure#42_[0-9]+\"", ir)
+            # names outside `\w` — mutating `!`, closure `#` — are codegen names too
+            @test !occursin("julia_record_exception!_18521", ir)
+            @test !occursin("julia_#closure#42_777", ir)
+            @test occursin(r"@\"julia_record_exception!_[0-9]+\"", ir)
+            @test occursin(r"!\"julia_record_exception!_[0-9]+\"", ir)
+            @test occursin(r"@\"julia_#closure#42_[0-9]+\"", ir)
 
-        # ...but a user symbol that merely ends or contains the pattern is left alone
-        @test occursin("@myjulia_probe_4242", ir)
-        @test occursin("@julia_probe_12bar", ir)
-        dispose(m)
+            # ...but a user symbol that merely ends or contains the pattern is left alone
+            @test occursin("@myjulia_probe_4242", ir)
+            @test occursin("@julia_probe_12bar", ir)
+        end
     end
 
     # A function's value symbol table retains name-insertion order even though textual IR
@@ -567,15 +567,13 @@ end
     end
 
     JuliaContext() do ctx
-        a = named_block_module(1:4)
-        b = named_block_module((4, 2, 1, 3))
-        @test string(a) == string(b)
-        GPUCompiler.normalize_julia_symbol_names!(a)
-        GPUCompiler.normalize_julia_symbol_names!(b)
-        bytes(mod) = (io = IOBuffer(); write(io, mod); take!(io))
-        @test bytes(a) == bytes(b)
-        dispose(a)
-        dispose(b)
+        @dispose a=named_block_module(1:4) b=named_block_module((4, 2, 1, 3)) begin
+            @test string(a) == string(b)
+            GPUCompiler.normalize_julia_symbol_names!(a)
+            GPUCompiler.normalize_julia_symbol_names!(b)
+            bytes(mod) = (io = IOBuffer(); write(io, mod); take!(io))
+            @test bytes(a) == bytes(b)
+        end
     end
 end
 

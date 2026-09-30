@@ -70,24 +70,26 @@ function get_trampoline(job)
     sym = mangle(lljit, target_sym) => flags
 
     function materialize(mr)
-        buf = JuliaContext() do ctx
+        JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
 
             # Rename entry to match target_sym
             meta.entry.name = target_sym
 
             # So 1. serialize the module
-            buf = convert(MemoryBuffer, ir)
+            @dispose buf=convert(MemoryBuffer, ir) begin
+                dispose(ir)
 
-            # 2. deserialize and wrap by a ThreadSafeModule
-            ThreadSafeContext() do ts_ctx
-                tsm = context!(context(ts_ctx)) do
-                    mod = parse(LLVM.Module, buf)
-                    ThreadSafeModule(mod)
+                # 2. deserialize and wrap by a ThreadSafeModule
+                ThreadSafeContext() do ts_ctx
+                    tsm = context!(context(ts_ctx)) do
+                        mod = parse(LLVM.Module, buf)
+                        ThreadSafeModule(mod)
+                    end
+
+                    il = lljit.ir_transform_layer
+                    emit!(il, mr, tsm)
                 end
-
-                il = lljit.ir_transform_layer
-                emit!(il, mr, tsm)
             end
         end
 

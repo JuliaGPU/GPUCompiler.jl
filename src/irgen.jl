@@ -125,7 +125,9 @@ function irgen(@nospecialize(job::CompilerJob))
         @dispose pb=PassBuilder() begin
             add!(pb, InternalizePass(; preserved_gvs))
             add!(pb, AlwaysInlinerPass())
-            run!(pb, mod, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, mod, tm)
+            end
         end
 
         can_throw(job) || lower_throw!(job, mod)
@@ -317,7 +319,9 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
 
         @dispose pb=PassBuilder() begin
             add!(pb, AlwaysInlinerPass())
-            run!(pb, mod, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, mod, tm)
+            end
         end
         changed = true
     end
@@ -374,7 +378,9 @@ function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::L
     # regular `cleanup` DCE ran before `finish_ir!` and won't see anything produced above.
     @dispose pb=PassBuilder() begin
         add!(pb, GlobalDCEPass())
-        run!(pb, mod, llvm_machine(job.config.target))
+        with_llvm_machine(job.config.target) do tm
+            run!(pb, mod, tm)
+        end
     end
 
     # lower the unreachable control flow, but *only* in the kernels: there, turning an `unreachable`
@@ -763,8 +769,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 end
 
 const JuliaConstRegionMetadataKinds =
-    (LLVM.MD_invariant_load, LLVM.MD_tbaa, LLVM.MD_tbaa_struct,
-     LLVM.MD_alias_scope, LLVM.MD_noalias)
+    (MD_invariant_load, MD_tbaa, MD_tbaa_struct, MD_alias_scope, MD_noalias)
 
 function strip_julia_const_region_metadata!(inst::LLVM.Instruction)
     changed = false
@@ -1114,7 +1119,7 @@ function kernel_state_intr(mod::LLVM.Module, T_state)
     state_intr = get!(mod.functions, "julia.gpu.state_getter") do
         LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_state))
     end
-    push!(state_intr.function_attributes, EnumAttribute(:readnone))
+    state_intr.memory_effects = MemoryEffects(:none)
 
     return state_intr
 end
@@ -1139,7 +1144,7 @@ function debug_level_intr(mod::LLVM.Module)
     intr = get!(mod.functions, "julia.gpu.debug_level") do
         LLVM.Function(mod, "julia.gpu.debug_level", LLVM.FunctionType(LLVM.Int32Type()))
     end
-    push!(intr.function_attributes, EnumAttribute(:readnone))
+    intr.memory_effects = MemoryEffects(:none)
 
     return intr
 end
@@ -1267,9 +1272,8 @@ function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
             # materialize the slot at the top of the entry block so that it is a static
             # alloca (promotable, and allocated once rather than per loop iteration).
-            position!(builder, LLVM.before(first(f.entry.instructions)))
-            slot = alloca!(builder, alloca_slot_type(bytes, align), "alloca")
-            slot.alignment = align
+            position!(builder, LLVM.at_begin(f.entry))
+            slot = alloca!(builder, alloca_slot_type(bytes, align), "alloca"; align)
 
             # `alloca!` placed the slot in the datalayout's alloca address space; cast it to
             # the intrinsic's return type, i.e. the address space requested by the caller
@@ -1335,7 +1339,9 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
         # minimal optimization
         @dispose pb=PassBuilder() begin
             add!(pb, SimplifyCFGPass())
-            run!(pb, new_f, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, new_f, tm)
+            end
         end
 
         return new_f

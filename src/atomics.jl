@@ -13,7 +13,7 @@ is_atomic_memop(inst::LLVM.Instruction) = inst isa LLVM.MemAccessInst && isatomi
 # the type of the value an atomic memory operation accesses
 atomic_value_type(inst::LLVM.LoadInst) = inst.value_type
 atomic_value_type(inst::Union{LLVM.StoreInst,LLVM.AtomicRMWInst}) = inst.value_operand.value_type
-atomic_value_type(inst::LLVM.AtomicCmpXchgInst) = inst.operands[2].value_type   # the comparand
+atomic_value_type(inst::LLVM.AtomicCmpXchgInst) = inst.compare_operand.value_type
 
 # the ordering of an atomic memory operation, merging a compare-exchange's orderings
 atomic_ordering(inst::LLVM.AtomicCmpXchgInst) = merged_ordering(inst)

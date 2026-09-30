@@ -97,16 +97,17 @@ function finish_ir!(
 
         # optimize after address space rewriting: propagate addrspace(4) through
         # the addrspacecast chains, then clean up newly-exposed opportunities
-        tm = llvm_machine(job.config.target)
-        @dispose pb=PassBuilder() begin
-            add!(pb, FunctionPassManager()) do fpm
-                add!(fpm, InferAddressSpacesPass())
-                add!(fpm, SROAPass())
-                add!(fpm, instcombine_pass(job))
-                add!(fpm, EarlyCSEPass())
-                add!(fpm, SimplifyCFGPass())
+        with_llvm_machine(job.config.target) do tm
+            @dispose pb=PassBuilder() begin
+                add!(pb, FunctionPassManager()) do fpm
+                    add!(fpm, InferAddressSpacesPass())
+                    add!(fpm, SROAPass())
+                    add!(fpm, instcombine_pass(job))
+                    add!(fpm, EarlyCSEPass())
+                    add!(fpm, SimplifyCFGPass())
+                end
+                run!(pb, mod, tm)
             end
-            run!(pb, mod, tm)
         end
     end
     return entry

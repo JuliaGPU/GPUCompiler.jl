@@ -269,7 +269,8 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=job.c
         ts_mod = ThreadSafeModule(ir)
         entry_fn = meta.entry
         GC.@preserve ts_mod entry_fn begin
-            value = Ref(jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
+            # `jl_dump_function_ir` takes ownership of the thread-safe module
+            value = Ref(jl_llvmf_dump(LLVM.consume!(ts_mod), entry_fn.ref))
             ccall(:jl_dump_function_ir, Ref{String},
                     (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
                     value, !raw, dump_module, debuginfo)

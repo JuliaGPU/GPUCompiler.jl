@@ -554,42 +554,42 @@ end
 # boxed value (fixed in 1.12). That's invalid IR on targets that put globals in another
 # address space, like SPIR-V, so turn those bitcasts into address space casts.
 function fix_small_typeof_casts!(mod::LLVM.Module)
-    haskey(globals(mod), "jl_small_typeof") || return false
+    haskey(mod.globals, "jl_small_typeof") || return false
 
     function isaddrspacechange(val)
-        isa(val, LLVM.ConstantExpr) && opcode(val) == LLVM.API.LLVMBitCast ||
+        isa(val, LLVM.ConstantExpr) && val.opcode == LLVM.Opcode.BitCast ||
             isa(val, LLVM.BitCastInst) || return false
-        src_typ = value_type(operands(val)[1])
-        dst_typ = value_type(val)
+        src_typ = first(val.operands).value_type
+        dst_typ = val.value_type
         return isa(src_typ, LLVM.PointerType) && isa(dst_typ, LLVM.PointerType) &&
-               addrspace(src_typ) != addrspace(dst_typ)
+               src_typ.addrspace != dst_typ.addrspace
     end
 
     # find the bad casts first, looking through the GEPs that index the table
     casts = LLVM.Value[]
-    worklist = LLVM.Value[globals(mod)["jl_small_typeof"]]
+    worklist = LLVM.Value[mod.globals["jl_small_typeof"]]
     while !isempty(worklist)
         val = pop!(worklist)
-        for use in uses(val)
-            usr = user(use)
+        for use in val.uses
+            usr = use.user
             if isaddrspacechange(usr)
                 push!(casts, usr)
             elseif isa(usr, LLVM.GetElementPtrInst) || isa(usr, LLVM.BitCastInst) ||
                    isa(usr, LLVM.ConstantExpr) &&
-                   opcode(usr) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast)
+                   usr.opcode in (LLVM.Opcode.GetElementPtr, LLVM.Opcode.BitCast)
                 push!(worklist, usr)
             end
         end
     end
 
     for cast in unique(casts)
-        src = operands(cast)[1]
-        typ = value_type(cast)
+        src = first(cast.operands)
+        typ = cast.value_type
         if isa(cast, LLVM.ConstantExpr)
             replace_uses!(cast, const_addrspacecast(src, typ))
         else
             @dispose builder=IRBuilder() begin
-                position!(builder, cast)    # also picks up its debug location
+                position!(builder, LLVM.before(cast))    # also picks up its debug location
                 replace_uses!(cast, addrspacecast!(builder, src, typ))
             end
             erase!(cast)
@@ -676,8 +676,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         ts_mod = ThreadSafeModule("start")
         ts_mod() do mod
             mod.triple = llvm_triple(job.config.target)
-            if julia_datalayout(job.config.target) !== nothing
-                mod.datalayout = julia_datalayout(job.config.target)
+            dl = julia_datalayout(job.config.target)
+            if dl !== nothing
+                @dispose dl=dl begin
+                    mod.datalayout = dl
+                end
             end
             mod.flags["Dwarf Version", LLVM.ModuleFlagBehavior.Warning] =
                 Metadata(ConstantInt(dwarf_version(job.config.target)))
@@ -714,15 +717,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                   (Ptr{Cvoid},), native_code)
         @assert llvm_mod_ref != C_NULL
 
-        # XXX: this is wrong; we can't expose the underlying LLVM module, but should
-        #      instead always go through the callback in order to unlock it properly.
-        # the module is owned by `native_code`: wrap it as borrowed, so that LLVM.jl doesn't
-        # consider it ours to dispose of (which would also be reported as a leak by memcheck)
+        # the thread-safe module is owned by `native_code`, which is never freed, so we can
+        # keep using the module after returning it (from the thread that holds the context)
         llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref; borrowed=true)
-        llvm_mod = nothing
-        llvm_ts_mod() do mod
-            llvm_mod = mod
-        end
+        llvm_mod = LLVM.unsafe_module(llvm_ts_mod)
     end
 
     # Older Julia merges the per-CodeInstance modules in pointer order; restore emission

@@ -37,21 +37,8 @@ function static_assert_marker(message::String)
     end
 end
 
+# the message passed to the marker (see `constant_string` in validation.jl), or `nothing`
 function static_assert_message(inst::LLVM.CallInst)
-    try
-        value = only(inst.arguments)
-        while value isa ConstantExpr
-            value = first(value.operands)
-        end
-        value isa GlobalVariable || return nothing
-        initializer = value.initializer
-        initializer isa ConstantDataSequential || initializer isa ConstantArray || return nothing
-        values = initializer.elements
-        bytes = UInt8[convert(UInt8, byte) for byte in values]
-        !isempty(bytes) && bytes[end] == 0x00 && pop!(bytes)
-        return String(bytes)
-    catch err
-        err isa ArgumentError || err isa BoundsError || rethrow()
-        return nothing
-    end
+    length(inst.arguments) == 1 || return nothing
+    return constant_string(only(inst.arguments))
 end

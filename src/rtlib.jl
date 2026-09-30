@@ -101,7 +101,7 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     ci, res = runtime_function_results(rt_job)
     if res !== nothing && res.bitcode !== nothing
         link_relocatable!(mod, relocs,
-                          parse(LLVM.Module, MemoryBuffer(res.bitcode)),
+                          parse(LLVM.Module, res.bitcode),
                           res.relocations)
         ci === nothing && (ci = runtime_code_instance(rt_job))
         return ci::CodeInstance
@@ -117,7 +117,9 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
-    run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
+    with_llvm_machine(config.target) do tm
+        run!(StripDeadPrototypesPass(), new_mod, tm)
+    end
     prune_dead_relocations!(new_mod, meta.relocations)
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
@@ -199,26 +201,32 @@ function runtime_config(@nospecialize(job::CompilerJob))
                    toplevel=false, only_entry=false, strip=false, name=nothing)
 end
 
+# build the runtime library, returning its bitcode
 function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
-    mod = LLVM.Module("GPUCompiler run-time library")
-    sources = MethodInstance[]
-    code_instances = CodeInstance[]
-    relocs = Relocations()
+    @dispose mod=LLVM.Module("GPUCompiler run-time library") begin
+        sources = MethodInstance[]
+        code_instances = CodeInstance[]
+        relocs = Relocations()
 
-    for method in runtime_methods()
-        resolved = runtime_method_instance(job, method)
-        resolved === nothing && continue
-        source = resolved
-        push!(sources, source)
-        push!(code_instances, emit_function!(mod, relocs, config, source, method, job.world))
+        for method in runtime_methods()
+            resolved = runtime_method_instance(job, method)
+            resolved === nothing && continue
+            source = resolved
+            push!(sources, source)
+            push!(code_instances,
+                  emit_function!(mod, relocs, config, source, method, job.world))
+        end
+
+        # we cannot optimize the runtime library, because the code would then be optimized
+        # again during main compilation (and optimizing twice isn't safe). for example,
+        # optimization removes Julia address spaces, which would then lead to type
+        # mismatches when using functions from the runtime library from IR that has not been
+        # stripped of AS info.
+
+        io = IOBuffer()
+        write(io, mod)
+        return take!(io), sources, code_instances, relocs
     end
-
-    # we cannot optimize the runtime library, because the code would then be optimized again
-    # during main compilation (and optimizing twice isn't safe). for example, optimization
-    # removes Julia address spaces, which would then lead to type mismatches when using
-    # functions from the runtime library from IR that has not been stripped of AS info.
-
-    return mod, sources, code_instances, relocs
 end
 
 # Runtime.methods is a Dict, but library layout and source validation require the same order.
@@ -273,11 +281,8 @@ const runtime_libs_lock = ReentrantLock()
     cached = Base.@lock runtime_libs_lock begin
         cached = get(runtime_libs, key, nothing)
         if cached === nothing || !runtime_library_valid(cached, job)
-            lib, sources, code_instances, relocations = build_runtime(job, config)
-            io = IOBuffer()
-            write(io, lib)
-            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world,
-                                    relocations)
+            bytes, sources, code_instances, relocations = build_runtime(job, config)
+            cached = RuntimeLibrary(bytes, sources, code_instances, job.world, relocations)
             runtime_libs[key] = cached
         end
         cached

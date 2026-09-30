@@ -404,7 +404,7 @@ end
                    !GPUCompiler.supports_typed_pointers(ctx))
             lib = Base.@lock GPUCompiler.runtime_libs_lock GPUCompiler.runtime_libs[key]
             # NOTE: parse eagerly; a lazily-parsed module doesn't expose uses
-            rt = parse(LLVM.Module, MemoryBuffer(lib.bytes))
+            rt = parse(LLVM.Module, lib.bytes)
             used = 0
             for gv in rt.globals
                 haskey(gv.metadata, "julia.constgv") || continue
@@ -513,101 +513,106 @@ end
             end
 
             # Bool JuliaVariables are absent from `gv_to_value`.
-            m = LLVM.Module("bool singletons")
-            for name in ("jl_true", "jl_false")
-                gv = LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()), name)
-                gv.constant = true
+            @dispose m=LLVM.Module("bool singletons") begin
+                for name in ("jl_true", "jl_false")
+                    gv = LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()), name)
+                    gv.constant = true
+                end
+                relocs = collect!(m, Dict{String, Ptr{Cvoid}}())
+                @test isempty(relocs)
+                GPUCompiler.bake_relocations!(m, relocs)
+                bool_ir = string(m)
+                for name in ("jl_true", "jl_false")
+                    # a fully-materialized box is private, so it needs no per-job namespace
+                    @test haskey(m.globals, "$(name)_box")
+                    @test occursin("@$name = private constant", bool_ir)
+                end
+                @test !occursin("external", bool_ir)
+                @test !occursin("inttoptr", bool_ir)
             end
-            relocs = collect!(m, Dict{String, Ptr{Cvoid}}())
-            @test isempty(relocs)
-            GPUCompiler.bake_relocations!(m, relocs)
-            bool_ir = string(m)
-            for name in ("jl_true", "jl_false")
-                # a fully-materialized box is private, so it needs no per-job namespace
-                @test haskey(m.globals, "$(name)_box")
-                @test occursin("@$name = private constant", bool_ir)
-            end
-            @test !occursin("external", bool_ir)
-            @test !occursin("inttoptr", bool_ir)
-            dispose(m)
 
             GC.@preserve objs begin
                 # smalltag isbits: materialized, portable
                 m, map = slot_module(ptrs[1])
-                relocs = collect!(m, map)
-                @test isempty(relocs)
-                GPUCompiler.bake_relocations!(m, relocs)
-                @test haskey(m.globals, "jl_global_0_box")
-                dispose(m)
+                @dispose m=m begin
+                    relocs = collect!(m, map)
+                    @test isempty(relocs)
+                    GPUCompiler.bake_relocations!(m, relocs)
+                    @test haskey(m.globals, "jl_global_0_box")
+                end
 
                 # Float64: the non-smalltag header is an interior relocation.
                 m, map = slot_module(ptrs[2])
-                relocs = collect!(m, map)
-                @test length(relocs) == 1
-                rec = only(relocs.records)
-                @test rec.kind === GPUCompiler.InteriorSite
-                @test rec.offset == 0
-                @test rec.target.value === Float64
-                # a relocatable box is addressed by name, so its name carries the namespace
-                @test startswith(rec.name, namespace)
-                box = m.globals[rec.name]
-                @test box.externally_initialized
-                @test box.linkage == LLVM.Linkage.External
-                header_idx = LLVM.element_at(m.datalayout, box.global_value_type, rec.offset)
-                @test convert(UInt, box.initializer.elements[header_idx]) == 0
-                GPUCompiler.bake_relocations!(m, relocs)
-                @test isempty(relocs)
-                @test !box.externally_initialized
-                @test box.constant
-                @test box.linkage == LLVM.Linkage.Private
-                @test convert(UInt, box.initializer.elements[header_idx]) ==
-                      GPUCompiler.resolve_relocation_target(rec.target)
-                dispose(m)
+                @dispose m=m begin
+                    relocs = collect!(m, map)
+                    @test length(relocs) == 1
+                    rec = only(relocs.records)
+                    @test rec.kind === GPUCompiler.InteriorSite
+                    @test rec.offset == 0
+                    @test rec.target.value === Float64
+                    # a relocatable box is addressed by name, so its name carries the namespace
+                    @test startswith(rec.name, namespace)
+                    box = m.globals[rec.name]
+                    @test box.externally_initialized
+                    @test box.linkage == LLVM.Linkage.External
+                    header_idx = LLVM.element_at(m.datalayout, box.global_value_type, rec.offset)
+                    @test convert(UInt, box.initializer.elements[header_idx]) == 0
+                    GPUCompiler.bake_relocations!(m, relocs)
+                    @test isempty(relocs)
+                    @test !box.externally_initialized
+                    @test box.constant
+                    @test box.linkage == LLVM.Linkage.Private
+                    @test convert(UInt, box.initializer.elements[header_idx]) ==
+                          GPUCompiler.resolve_relocation_target(rec.target)
+                end
 
                 # Symbol: resolved address
                 m, map = slot_module(ptrs[3])
-                relocs = collect!(m, map)
-                rec = only(relocs.records)
-                @test rec.kind === GPUCompiler.SlotSite
-                @test rec.target.value === objs[3]
-                @test startswith(rec.name, namespace)
-                GPUCompiler.bake_relocations!(m, relocs)
-                @test isempty(relocs)
-                @test !haskey(m.globals, "jl_global_0_box")
-                @test occursin("inttoptr", string(m))
-                dispose(m)
+                @dispose m=m begin
+                    relocs = collect!(m, map)
+                    rec = only(relocs.records)
+                    @test rec.kind === GPUCompiler.SlotSite
+                    @test rec.target.value === objs[3]
+                    @test startswith(rec.name, namespace)
+                    GPUCompiler.bake_relocations!(m, relocs)
+                    @test isempty(relocs)
+                    @test !haskey(m.globals, "jl_global_0_box")
+                    @test occursin("inttoptr", string(m))
+                end
 
                 # Empty type objects have a zero-sized singleton representation.
                 m, map = slot_module(ptrs[5])
-                relocs = collect!(m, map)
-                rec = only(relocs.records)
-                @test rec.kind === GPUCompiler.SlotSite
-                @test rec.target.value === Union{}
-                dispose(m)
+                @dispose m=m begin
+                    relocs = collect!(m, map)
+                    rec = only(relocs.records)
+                    @test rec.kind === GPUCompiler.SlotSite
+                    @test rec.target.value === Union{}
+                end
 
                 # 16-byte-aligned payloads get padded past the header word
                 m, map = slot_module(ptrs[4])
-                relocs = collect!(m, map)
-                rec = only(relocs.records)
-                @test rec.offset == 8
-                GPUCompiler.bake_relocations!(m, relocs)
-                box = m.globals[rec.name]
-                @test length(box.global_value_type.elements) == 3
-                dispose(m)
+                @dispose m=m begin
+                    relocs = collect!(m, map)
+                    rec = only(relocs.records)
+                    @test rec.offset == 8
+                    GPUCompiler.bake_relocations!(m, relocs)
+                    box = m.globals[rec.name]
+                    @test length(box.global_value_type.elements) == 3
+                end
 
                 # Codegen can emit several slots for one value in a module (observed on
                 # 1.11, whose backported GV API does not deduplicate); their
                 # content-derived names collide, so later slots must alias the first.
-                m = LLVM.Module("duplicate slots")
-                gvs = [LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()),
-                                           "jl_global#$i") for i in 1:2]
-                relocs = collect!(m, Dict("jl_global#1" => ptrs[3],
-                                          "jl_global#2" => ptrs[3]))
-                rec = only(relocs.records)
-                @test rec.target.value === objs[3]
-                @test count(gv -> startswith(gv.name, namespace), m.globals) == 1
-                @test !any(gv -> startswith(gv.name, "jl_global#"), m.globals)
-                dispose(m)
+                @dispose m=LLVM.Module("duplicate slots") begin
+                    gvs = [LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()),
+                                               "jl_global#$i") for i in 1:2]
+                    relocs = collect!(m, Dict("jl_global#1" => ptrs[3],
+                                              "jl_global#2" => ptrs[3]))
+                    rec = only(relocs.records)
+                    @test rec.target.value === objs[3]
+                    @test count(gv -> startswith(gv.name, namespace), m.globals) == 1
+                    @test !any(gv -> startswith(gv.name, "jl_global#"), m.globals)
+                end
             end
         end
     end
@@ -1107,7 +1112,7 @@ end
 
                 fptr, lljit, _table = Native.load(Vector{UInt8}(codeunits(obj)),
                                                   meta.entry.name, relocs)
-                try
+                @dispose lljit=lljit begin
                     boxed_args = Any[args...]
                     r = GC.@preserve boxed_args ccall(fptr, Any, (Any, Ptr{Any}, Int32),
                                                       f, pointer(boxed_args), length(args))
@@ -1122,8 +1127,6 @@ end
                     keep = Any[r]
                     GC.gc(true)
                     @test keep == Any[expected]
-                finally
-                    dispose(lljit)
                 end
             end
         end
@@ -1165,7 +1168,7 @@ end
 
             # a fresh session resolves the records into its own copy of the module, and only
             # then emits an object
-            session_mod = parse(LLVM.Module, MemoryBuffer(bitcode))
+            session_mod = parse(LLVM.Module, bitcode)
             GPUCompiler.apply_relocations!(session_mod, relocs)
             @test !isempty(relocs)   # the metadata is not consumed
             obj, _ = GPUCompiler.emit_asm(job, session_mod, LLVM.CodeGenFileType.Object)
@@ -1175,15 +1178,13 @@ end
                            GPUCompiler.JuliaValueRef(:applied_probe))
             fptr, lljit, _table = Native.load(Vector{UInt8}(codeunits(obj)), entry,
                                               GPUCompiler.Relocations())
-            try
+            @dispose lljit=lljit begin
                 # the boxed alternative: its header tag decides the `isa`, so a stranded
                 # interior record would show up as a wrong result rather than a crash
                 @test ccall(fptr, UInt, (Bool,), false) == expected
                 @test ccall(fptr, UInt, (Bool,), false) == mod.f(false)
                 # ...and the inline alternative, which only reads the Symbol slot
                 @test ccall(fptr, UInt, (Bool,), true) == mod.f(true)
-            finally
-                dispose(lljit)
             end
         end
     end
@@ -1241,10 +1242,8 @@ end
                                        rec.target.value === :patch_probe, relocs.records))
             expected = GPUCompiler.resolve_relocation_target(probe.target)
             fptr, lljit, _table = Native.load(bytes, entry, relocs)
-            try
+            @dispose lljit=lljit begin
                 @test ccall(fptr, UInt, ()) == expected
-            finally
-                dispose(lljit)
             end
 
             # The manifest now describes an emitted object, so dropping a record would leave
@@ -1296,8 +1295,7 @@ end
             obj_b, _ = shared_object("shared_entry_b")
             expected = GPUCompiler.resolve_relocation_target(ref)
 
-            lljit = LLJIT(; tm=LLVM.JITTargetMachine())
-            try
+            @dispose lljit=LLJIT(; tm=LLVM.JITTargetMachine()) begin
                 jd = lljit.main_dylib
                 add!(lljit, jd, MemoryBuffer(obj_a))
                 add!(lljit, jd, MemoryBuffer(obj_b))   # the duplicate definition
@@ -1310,8 +1308,6 @@ end
                 for entry in ("shared_entry_a", "shared_entry_b")
                     @test ccall(pointer(lookup(lljit, entry)), UInt, ()) == expected
                 end
-            finally
-                dispose(lljit)
             end
         end
     end
@@ -1352,14 +1348,12 @@ end
                            GPUCompiler.JuliaValueRef(:table_probe))
             fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)),
                                              meta.entry.name, relocs; table=true)
-            try
+            @dispose lljit=lljit begin
                 GC.@preserve table begin
                     @test ccall(fptr, UInt, (Bool,), false) == expected
                     @test ccall(fptr, UInt, (Bool,), false) == mod.f(false)
                     @test ccall(fptr, UInt, (Bool,), true) == mod.f(true)
                 end
-            finally
-                dispose(lljit)
             end
 
             # A record's index is its rank in the manifest, and that index is baked into the
@@ -1476,7 +1470,7 @@ end
 
             fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)), "pick", relocs;
                                              table=true)
-            try
+            @dispose lljit=lljit begin
                 GC.@preserve table begin
                     nothing_word = GPUCompiler.resolve_relocation_target(
                         GPUCompiler.CGlobalRef(:jl_nothing))
@@ -1492,8 +1486,6 @@ end
                     @test [ccall(cast, UInt, (Bool,), c) for c in (true, false)] ==
                           word.(["merged_a", "merged_b"])
                 end
-            finally
-                dispose(lljit)
             end
 
             # Mixed addresses need not share an address space on the target.

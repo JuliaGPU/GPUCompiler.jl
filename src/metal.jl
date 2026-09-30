@@ -426,7 +426,9 @@ function optimize_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
             add!(fpm, instcombine_pass(job))
             add!(fpm, SimplifyCFGPass())
         end
-        run!(pb, mod, llvm_machine(job.config.target))
+        with_llvm_machine(job.config.target) do tm
+            run!(pb, mod, tm)
+        end
     end
     return
 end
@@ -500,7 +502,7 @@ end
 # valid because the aggregate base load is at least that aligned, and AA metadata is copied
 # from the wide load (sound for the narrower field loads it subsumes).
 function split_aggregate_loads!(mod::LLVM.Module)
-    aa_kinds = (LLVM.MD_tbaa, LLVM.MD_tbaa_struct, LLVM.MD_alias_scope, LLVM.MD_noalias)
+    aa_kinds = (MD_tbaa, MD_tbaa_struct, MD_alias_scope, MD_noalias)
     changed = false
     for f in mod.functions
         isdeclaration(f) && continue
@@ -760,14 +762,14 @@ const METAL_MEM_FLAGS = 1 | 2   # mem_device | mem_threadgroup
 # for it. Returns `nothing` for other scopes, which `validate_ir` rejects (like the NVPTX and
 # AMDGPU back-ends do) rather than guessing what they mean.
 function metal_thread_scope(inst::LLVM.Instruction, as::Union{Nothing,Int}=nothing)
-    ss = inst.syncscope
-    scope = if ss == SyncScope("singlethread")
+    ss = inst.syncscope.name
+    scope = if ss == "singlethread"
         0
-    elseif ss == SyncScope("subgroup")
+    elseif ss == "subgroup"
         4
-    elseif ss == SyncScope("workgroup")
+    elseif ss == "workgroup"
         1
-    elseif ss == SyncScope("device") || ss == SyncScope("system")
+    elseif ss == "device" || ss == "system"
         2
     else
         return nothing
@@ -790,10 +792,10 @@ const EXPANDABLE_ATOMICRMW_OPS =
 
 function atomic_bits(T::LLVMType)
     T isa LLVM.IntegerType && return Int(T.width)
-    T == LLVM.HalfType() && return 16
-    T == LLVM.BFloatType() && return 16
-    T == LLVM.FloatType() && return 32
-    T == LLVM.DoubleType() && return 64
+    T isa LLVM.HalfType && return 16
+    T isa LLVM.BFloatType && return 16
+    T isa LLVM.FloatType && return 32
+    T isa LLVM.DoubleType && return 64
     T isa LLVM.PointerType && return 64
     return nothing
 end
@@ -845,7 +847,7 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
     target = job.config.target
     op = inst isa LLVM.AtomicRMWInst ? inst.binop : nothing
     if op !== nothing && !haskey(AIR_ATOMICRMW_OPS, op) && !(op in EXPANDABLE_ATOMICRMW_OPS)
-        return "atomicrmw $op operation"
+        return "atomicrmw $(LLVM.irname(op)) operation"
     end
 
     is_thread_private(inst.pointer_operand) && return :demote
@@ -1061,7 +1063,7 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
     as = T_ptr.addrspace
     T = atomic_value_type(inst)
     mem = as == 1 ? "global" : "local"
-    suffix = T == LLVM.FloatType() ? "f32" : "i$(T.width)"
+    suffix = T isa LLVM.FloatType ? "f32" : "i$(T.width)"
     T_i32, T_i1 = LLVM.Int32Type(), LLVM.Int1Type()
 
     # the operands after the memory order(s): scope, flags (from AIR 2.9), volatile
@@ -1107,7 +1109,7 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
         else
             # AIR only has a weak compare-exchange, which takes the expected value by
             # reference. Like MSL, derive the success flag from the returned old value.
-            cmp, desired = inst.operands[2:3]
+            cmp, desired = inst.compare_operand, inst.new_value_operand
             fn = inst.parent.parent
             expected = @dispose entry_builder=IRBuilder() begin
                 position!(entry_builder, LLVM.at_begin(fn.entry))
@@ -1366,8 +1368,7 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
     # the instruction metadata that can name a function: a debug location points at the
     # subprogram it came from (orphaned once that function is inlined away), and Julia's alias
     # scopes are labelled with the function they were derived for
-    md_kinds = (LLVM.MD_dbg, LLVM.MD_alias_scope, LLVM.MD_noalias, LLVM.MD_tbaa,
-                LLVM.MD_tbaa_struct, LLVM.MD_loop)
+    md_kinds = (MD_dbg, MD_alias_scope, MD_noalias, MD_tbaa, MD_tbaa_struct, MD_loop)
 
     # Symbols first, so that a subprogram can adopt its function's final name...
     for f in mod.functions
@@ -2408,19 +2409,19 @@ end
 # the suffix LLVM and AIR use to mangle overloaded intrinsics on `typ`, e.g. `v4f32`
 function type_suffix(@nospecialize(typ::LLVMType))
     typ isa LLVM.IntegerType && return "i$(typ.width)"
-    typ == LLVM.HalfType() && return "f16"
-    typ == LLVM.BFloatType() && return "bf16"
-    typ == LLVM.FloatType() && return "f32"
-    typ == LLVM.DoubleType() && return "f64"
+    typ isa LLVM.HalfType && return "f16"
+    typ isa LLVM.BFloatType && return "bf16"
+    typ isa LLVM.FloatType && return "f32"
+    typ isa LLVM.DoubleType && return "f64"
     typ isa LLVM.VectorType && return "v$(typ.length)$(type_suffix(typ.element_type))"
     error("Unsupported intrinsic type: $typ")
 end
 
 # the Julia floating-point type of an LLVM one (the C API lacks getPrimitiveSizeInBits)
 function julia_float_type(typ::LLVMType)
-    typ == LLVM.HalfType() && return Float16
-    typ == LLVM.FloatType() && return Float32
-    typ == LLVM.DoubleType() && return Float64
+    typ isa LLVM.HalfType && return Float16
+    typ isa LLVM.FloatType && return Float32
+    typ isa LLVM.DoubleType && return Float64
     error("Unsupported floating-point type: $typ")
 end
 
@@ -2595,10 +2596,10 @@ function lower_math_intrinsics!(fun::LLVM.Function)
         # Metal floats are f16/f32 only; skip f64 (rejected by validate_ir) and vector types
         # (these ops have no `air.<op>.v4f32`) rather than synthesize a nonexistent intrinsic.
         typ = call.value_type
-        (typ == LLVM.HalfType() || typ == LLVM.FloatType()) || return nothing
+        (typ isa LLVM.HalfType || typ isa LLVM.FloatType) || return nothing
         precise, fast = mapping
         # the relaxed variant exists for f32 only; f16 always uses the precise op
-        use_fast = fast !== nothing && typ == LLVM.FloatType() && call.fast_math.afn
+        use_fast = fast !== nothing && typ isa LLVM.FloatType && call.fast_math.afn
         call_declared!(builder, "$(use_fast ? fast : precise).$(type_suffix(typ))", typ,
                        collect(LLVM.Value, call.arguments))
     end
@@ -2693,7 +2694,7 @@ function lower_value_intrinsic!(builder::IRBuilder, call::LLVM.CallBase, fn::Str
     # AIR has no native bfloat fabs/fmin/fmax (MSL promotes bfloat to float for them), so do
     # the same: call the float function on fpext'd operands and fptrunc the result back.
     # `optyp` is the type the AIR call actually uses.
-    promote_bf = elty == LLVM.BFloatType()
+    promote_bf = elty isa LLVM.BFloatType
     optyp = if !promote_bf
         typ
     elseif typ isa LLVM.VectorType
@@ -2789,7 +2790,7 @@ function lower_minimum_maximum!(builder::IRBuilder, call::LLVM.CallBase, minmax:
 
     # AIR has no bfloat min/max, so promote to float as MSL does: build the wrapper
     # in float and fpext/fptrunc around it. `optyp` is the type it operates on.
-    promote_bf = typ == LLVM.BFloatType()
+    promote_bf = typ isa LLVM.BFloatType
     optyp = promote_bf ? LLVM.FloatType() : typ
     op_ft = LLVM.FunctionType(optyp, LLVMType[optyp, optyp])
     jltyp = julia_float_type(optyp)
@@ -2803,7 +2804,7 @@ function lower_minimum_maximum!(builder::IRBuilder, call::LLVM.CallBase, minmax:
     nnan = call.fast_math.nnan
     fn = if !nnan
         "air.$(minmax)imum.f$bits"
-    elseif optyp == LLVM.FloatType()
+    elseif optyp isa LLVM.FloatType
         "air.fast_f$minmax.f32"
     else
         "air.f$minmax.f$bits"
@@ -2842,8 +2843,8 @@ function lower_powi!(builder::IRBuilder, call::LLVM.CallBase)
 end
 
 # 1.0 of a floating-point type, splat across the lanes of a vector type
-# (using the C API: LLVM.jl's `ConstantFP` cannot create vector splats)
-fp_one(typ::LLVMType) = LLVM.Value(LLVM.API.LLVMConstReal(typ, 1.0))
+fp_one(typ::LLVMType) = typ isa LLVM.VectorType ?
+    const_splat(typ, ConstantFP(typ.element_type, 1.0)) : ConstantFP(typ, 1.0)
 
 function expand_powi!(builder::IRBuilder, x::LLVM.Value, n::Int)
     m = unsigned(abs(n))    # also for `typemin(n)`, which `abs` returns as is

@@ -15,7 +15,9 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             add!(pb, GlobalOptPass())
             add!(pb, GlobalDCEPass())
             add!(pb, StripDeadPrototypesPass())
-            run!(pb, mod, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, mod, tm)
+            end
         end
     end
     cleanup()
@@ -49,7 +51,7 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 end
 
 function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
-    tm = llvm_machine(job.config.target)
-
-    return String(LLVM.emit(tm, mod, format))
+    with_llvm_machine(job.config.target) do tm
+        String(LLVM.emit(tm, mod, format))
+    end
 end
