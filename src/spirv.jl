@@ -114,11 +114,15 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     if job.config.kernel
         state = kernel_state_type(job)
         if state !== Nothing
-            entry = kernel_state_to_reference!(job, mod, entry)
+            new_entry = kernel_state_to_reference!(job, mod, entry)
 
-            T_state = convert(LLVMType, state)
-            attr = TypeAttribute("byval", T_state)
-            push!(entry.parameter_attributes[1], attr)
+            # only if there was a kernel state parameter to convert, which optimization adds
+            # (so not when emitting unoptimized IR)
+            if new_entry != entry
+                entry = new_entry
+                T_state = convert(LLVMType, state)
+                push!(entry.parameter_attributes[1], TypeAttribute("byval", T_state))
+            end
         end
     end
 
