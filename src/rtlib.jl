@@ -30,17 +30,15 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     mod = f.parent
 
     # get or create a function prototype
-    if haskey(mod.functions, rt.llvm_name)
-        f = mod.functions[rt.llvm_name]
-        ft = f.function_type
-    else
+    f = get!(mod.functions, rt.llvm_name) do
         ft = if job === nothing
             convert(LLVM.FunctionType, rt)
         else
             runtime_function_type(job, rt)
         end
-        f = LLVM.Function(mod, rt.llvm_name, ft)
+        LLVM.Function(mod, rt.llvm_name, ft)
     end
+    ft = f.function_type
     if !isdeclaration(f) && (rt.name !== :gc_pool_alloc && rt.name !== :report_exception)
         # XXX: uses of the gc_pool_alloc intrinsic can be introduced _after_ the runtime
         #      is linked, as part of the lower_gc_frame! optimization pass.
@@ -124,8 +122,8 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
-    if haskey(new_mod.functions, name) && new_mod.functions[name] !== meta.entry
-        decl = new_mod.functions[name]
+    decl = get(new_mod.functions, name, nothing)
+    if decl !== nothing && decl != meta.entry
         @assert decl.value_type == meta.entry.value_type
         replace_uses!(decl, meta.entry)
         erase!(decl)

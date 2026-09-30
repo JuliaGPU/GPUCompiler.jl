@@ -21,7 +21,7 @@ function apply_fastmath!(mod::LLVM.Module)
         isdeclaration(f) && continue
         push!(f.function_attributes, StringAttribute("unsafe-fp-math", "true"))
         for bb in f.blocks, inst in bb.instructions
-            if Bool(LLVM.API.LLVMCanValueUseFastMathFlags(inst))
+            if supports_fast_math(inst)
                 inst.fast_math = (; fast=true)
             end
         end
@@ -545,8 +545,8 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
     changed = false
 
     # plain alloc
-    if haskey(mod.functions, "julia.gc_alloc_obj")
-        alloc_obj = mod.functions["julia.gc_alloc_obj"]
+    alloc_obj = get(mod.functions, "julia.gc_alloc_obj", nothing)
+    if alloc_obj !== nothing
         alloc_obj_ft = alloc_obj.function_type
         T_prjlvalue = alloc_obj_ft.return_type
         T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
@@ -580,8 +580,8 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
     # object and field-aware variants, the latter specialized on the slot address space.
     for name in ("julia.write_barrier", "julia.object_write_barrier",
                  "julia.field_write_barrier.p11", "julia.field_write_barrier.p13")
-        haskey(mod.functions, name) || continue
-        barrier = mod.functions[name]
+        barrier = get(mod.functions, name, nothing)
+        barrier === nothing && continue
 
         for use in barrier.uses
             call = use.user::LLVM.CallInst
@@ -620,9 +620,7 @@ function check_allocation!(builder::IRBuilder, typ::LLVM.Value, relocs::Relocati
     mod = bb.parent.parent
     name = globalstring_ptr!(builder, string(T), "allocated_type")
     marker_type = LLVM.FunctionType(LLVM.VoidType(), [name.value_type])
-    marker = if haskey(mod.functions, UNSUPPORTED_ALLOCATION_MARKER)
-        mod.functions[UNSUPPORTED_ALLOCATION_MARKER]
-    else
+    marker = get!(mod.functions, UNSUPPORTED_ALLOCATION_MARKER) do
         LLVM.Function(mod, UNSUPPORTED_ALLOCATION_MARKER, marker_type)
     end
     call!(builder, marker_type, marker, [name])
@@ -644,8 +642,8 @@ function (self::LowerPTLS)(mod::LLVM.Module)
 
     intrinsic = "julia.get_pgcstack"
 
-    if haskey(mod.functions, intrinsic)
-        ptls_getter = mod.functions[intrinsic]
+    ptls_getter = get(mod.functions, intrinsic, nothing)
+    if ptls_getter !== nothing
 
         for use in ptls_getter.uses
             val = use.user

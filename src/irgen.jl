@@ -16,12 +16,10 @@ function irgen(@nospecialize(job::CompilerJob))
         for llvmf in mod.functions
             if Base.isdebugbuild()
                 # only occurs in debug builds
-                delete!(llvmf.function_attributes,
-                        EnumAttribute("sspstrong", 0))
+                delete!(llvmf.function_attributes, :sspstrong)
             end
 
-            delete!(llvmf.function_attributes,
-                    StringAttribute("probe-stack", "inline-asm"))
+            delete!(llvmf.function_attributes, "probe-stack")
 
             if Sys.iswindows()
                 llvmf.personality = nothing
@@ -90,9 +88,9 @@ function irgen(@nospecialize(job::CompilerJob))
                 if arg.cc == BITS_REF
                     llvm_typ = convert(LLVMType, arg.typ)
                     if pass_by_ref(job)
-                        attr = TypeAttribute("byref", llvm_typ)
+                        attr = TypeAttribute(:byref, llvm_typ)
                     else
-                        attr = TypeAttribute("byval", llvm_typ)
+                        attr = TypeAttribute(:byval, llvm_typ)
                     end
                     push!(entry.parameter_attributes[arg.idx], attr)
                 end
@@ -111,8 +109,8 @@ function irgen(@nospecialize(job::CompilerJob))
         # runtime library's strong def is then linked in normally.
         for method in values(Runtime.methods)
             method.def isa Symbol || continue
-            haskey(mod.functions, method.llvm_name) || continue
-            f = mod.functions[method.llvm_name]
+            f = get(mod.functions, method.llvm_name, nothing)
+            f === nothing && continue
             isdeclaration(f) && continue
             empty!(f)
             f.linkage = LLVM.Linkage.External
@@ -263,13 +261,8 @@ function emit_exception!(@nospecialize(job::CompilerJob), builder, name, inst)
 end
 
 function emit_trap!(@nospecialize(job::CompilerJob), builder, mod, inst)
-    trap_ft = LLVM.FunctionType(LLVM.VoidType())
-    trap = if haskey(mod.functions, "llvm.trap")
-        mod.functions["llvm.trap"]
-    else
-        LLVM.Function(mod, "llvm.trap", trap_ft)
-    end
-    call!(builder, trap_ft, trap)
+    trap = LLVM.Function(mod, Intrinsic("llvm.trap"))
+    call!(builder, trap.function_type, trap)
 end
 
 
@@ -283,8 +276,8 @@ function has_unreachable_control_flow(f::LLVM.Function)
             return true
         end
         if isa(inst, LLVM.CallInst)
-            callee = inst.called_operand
-            if isa(callee, LLVM.Function) && callee.name == "llvm.trap"
+            callee = inst.called_function
+            if callee !== nothing && LLVM.isintrinsic(callee, Intrinsic("llvm.trap"))
                 return true
             end
         end
@@ -302,8 +295,6 @@ end
 # without us having to reason about call-graph paths.
 function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
-    alwaysinline_attr = EnumAttribute("alwaysinline", 0)
-    noinline_attr = EnumAttribute("noinline", 0)
     kernel_fns = kernels(mod)
 
     @tracepoint "inline unreachable control flow" begin
@@ -315,11 +306,11 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
             # (the inliner can't inline it anyway).
             (f in kernel_fns || isempty(f.uses)) && continue
             attrs = f.function_attributes
-            alwaysinline_attr in collect(attrs) && continue
+            haskey(attrs, :alwaysinline) && continue
             has_unreachable_control_flow(f) || continue
 
-            delete!(attrs, noinline_attr)
-            push!(attrs, alwaysinline_attr)
+            delete!(attrs, :noinline)
+            push!(attrs, EnumAttribute(:alwaysinline))
             marked = true
         end
         marked || break
@@ -412,19 +403,18 @@ function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::L
     # kernel calls, and genuinely-`noreturn` functions (e.g. infinite loops) we left out-of-line.
     # dropping it is always safe — it only relaxes an optimization hint; the back-end may re-infer
     # it on a function that really never returns, but with no trap to reconstruct that is harmless.
-    noreturn_attr = EnumAttribute("noreturn", 0)
     for f in mod.functions
-        delete!(f.function_attributes, noreturn_attr)
+        delete!(f.function_attributes, :noreturn)
         for bb in f.blocks, inst in bb.instructions
-            isa(inst, LLVM.CallInst) && delete!(inst.function_attributes, noreturn_attr)
+            isa(inst, LLVM.CallInst) && delete!(inst.function_attributes, :noreturn)
         end
     end
 
     # erase the now-unused `llvm.trap` declaration. guarded by `isempty(uses(...))` so we only
     # ever drop it when the calls above are gone (other backends create their own `llvm.trap`
     # and never invoke this pass, so theirs is untouched).
-    if haskey(mod.functions, "llvm.trap")
-        trap = mod.functions["llvm.trap"]
+    trap = get(mod.functions, "llvm.trap", nothing)
+    if trap !== nothing
         if isempty(trap.uses)
             erase!(trap)
             changed = true
@@ -441,8 +431,8 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
     # Pass 1: strip every `llvm.trap` call, regardless of shape.
     for bb in f.blocks, inst in collect(bb.instructions)
         if isa(inst, LLVM.CallInst)
-            callee = inst.called_operand
-            if isa(callee, LLVM.Function) && callee.name == "llvm.trap"
+            callee = inst.called_function
+            if callee !== nothing && LLVM.isintrinsic(callee, Intrinsic("llvm.trap"))
                 erase!(inst)
                 changed = true
             end
@@ -497,9 +487,7 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
                 br!(builder, return_block)
 
                 # move the return
-                remove!(ret)
-                position!(builder, LLVM.at_end(return_block))
-                move!(ret, builder.position)
+                move!(ret, LLVM.at_end(return_block))
             end
 
             # when returning a value, add a phi node to the return block, so that we can later
@@ -687,13 +675,9 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     byval = BitVector(undef, length(ft.parameters))
     types = Vector{LLVMType}(undef, length(ft.parameters))
     for i in 1:length(byval)
-        byval[i] = false
-        for attr in collect(f.parameter_attributes[i])
-            if attr.kind == :byval
-                byval[i] = true
-                types[i] = attr.value
-            end
-        end
+        attr = get(f.parameter_attributes[i], :byval, nothing)
+        byval[i] = attr !== nothing
+        byval[i] && (types[i] = attr.value)
     end
 
     # fixup metadata
@@ -749,9 +733,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
                 push!(new_args, ptr)
             else
                 push!(new_args, new_f.parameters[i])
-                for attr in collect(f.parameter_attributes[i])
-                    push!(new_f.parameter_attributes[i], attr)
-                end
+                append!(new_f.parameter_attributes[i], f.parameter_attributes[i])
             end
         end
 
@@ -770,11 +752,10 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 
     # remove the old function
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
-    fn = f.name
     @assert isempty(f.uses)
     replace_metadata_uses!(f, new_f)
+    take_name!(new_f, f)
     erase!(f)
-    new_f.name = fn
 
     return new_f
 
@@ -966,7 +947,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
 
     # ensure the old (stateless) functions don't have uses anymore, and remove them
     for f in keys(workmap)
-        prune_constexpr_uses!(f)
+        remove_dead_constant_users!(f)
         @assert isempty(f.uses)
         replace_metadata_uses!(f, workmap[f])
         erase!(f)
@@ -1062,8 +1043,8 @@ function (self::LowerKernelState)(fun::LLVM.Function)
     end
 
     # fixup all uses of the state getter to use the newly introduced function state argument
-    if haskey(mod.functions, "julia.gpu.state_getter")
-        state_intr = mod.functions["julia.gpu.state_getter"]
+    state_intr = get(mod.functions, "julia.gpu.state_getter", nothing)
+    if state_intr !== nothing
         state_arg = nothing # only look-up when needed
 
         @dispose builder=IRBuilder() begin
@@ -1116,8 +1097,8 @@ function (self::CleanupKernelState)(mod::LLVM.Module)
     changed = false
 
     # remove the getter intrinsic
-    if haskey(mod.functions, "julia.gpu.state_getter")
-        intr = mod.functions["julia.gpu.state_getter"]
+    intr = get(mod.functions, "julia.gpu.state_getter", nothing)
+    if intr !== nothing
         if isempty(intr.uses)
             # if we're not emitting a kernel, we can't resolve the intrinsic to an argument.
             erase!(intr)
@@ -1130,12 +1111,10 @@ end
 CleanupKernelStatePass(job) = ModulePass("CleanupKernelStatePass", CleanupKernelState(job))
 
 function kernel_state_intr(mod::LLVM.Module, T_state)
-    state_intr = if haskey(mod.functions, "julia.gpu.state_getter")
-        mod.functions["julia.gpu.state_getter"]
-    else
+    state_intr = get!(mod.functions, "julia.gpu.state_getter") do
         LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_state))
     end
-    push!(state_intr.function_attributes, EnumAttribute("readnone", 0))
+    push!(state_intr.function_attributes, EnumAttribute(:readnone))
 
     return state_intr
 end
@@ -1157,12 +1136,10 @@ end
 # global at parse time (which would bake the wrong level under pkgimage reuse across `-g`).
 
 function debug_level_intr(mod::LLVM.Module)
-    intr = if haskey(mod.functions, "julia.gpu.debug_level")
-        mod.functions["julia.gpu.debug_level"]
-    else
+    intr = get!(mod.functions, "julia.gpu.debug_level") do
         LLVM.Function(mod, "julia.gpu.debug_level", LLVM.FunctionType(LLVM.Int32Type()))
     end
-    push!(intr.function_attributes, EnumAttribute("readnone", 0))
+    push!(intr.function_attributes, EnumAttribute(:readnone))
 
     return intr
 end
@@ -1183,9 +1160,8 @@ export kernel_debug_level
 
 # replace every `julia.gpu.debug_level` call with the job's configured level
 function lower_debug_level!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    haskey(mod.functions, "julia.gpu.debug_level") || return false
-
-    intr = mod.functions["julia.gpu.debug_level"]
+    intr = get(mod.functions, "julia.gpu.debug_level", nothing)
+    intr === nothing && return false
     level = ConstantInt(LLVM.Int32Type(), job.config.debug_level)
     for use in collect(intr.uses)
         inst = use.user
@@ -1217,9 +1193,7 @@ end
 
 function alloca_intr(mod::LLVM.Module, T_ptr::LLVMType)
     name = "julia.gpu.alloca"
-    intr = if haskey(mod.functions, name)
-        mod.functions[name]
-    else
+    intr = get!(mod.functions, name) do
         # takes the size in bytes and the alignment as constant operands, and returns a
         # pointer in the requested address space; intentionally *not* readnone/speculatable,
         # as each call must yield a distinct slot and must not be hoisted or CSE'd. a module
@@ -1281,19 +1255,19 @@ end
 
 # replace every `julia.gpu.alloca` call with an entry-block alloca in the containing function
 function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    haskey(mod.functions, "julia.gpu.alloca") || return false
-    intr = mod.functions["julia.gpu.alloca"]
+    intr = get(mod.functions, "julia.gpu.alloca", nothing)
+    intr === nothing && return false
 
     @dispose builder=IRBuilder() begin
         for use in collect(intr.uses)
             call = use.user
             @assert call isa LLVM.CallInst
-            bytes, align = convert.(Int, call.operands[1:2])
+            bytes, align = convert.(Int, call.arguments[1:2])
             f = call.parent.parent
 
             # materialize the slot at the top of the entry block so that it is a static
             # alloca (promotable, and allocated once rather than per loop iteration).
-            position!(builder, LLVM.before(first(first(f.blocks).instructions)))
+            position!(builder, LLVM.before(first(f.entry.instructions)))
             slot = alloca!(builder, alloca_slot_type(bytes, align), "alloca")
             slot.alignment = align
 
@@ -1348,12 +1322,12 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
         # the pointer itself cannot be captured since we immediately load from it.
         # `nocapture` was replaced by `captures(none)` (an integer-valued IntAttr,
         # value 0 == CaptureInfo::none()) in LLVM 21.
-        push!(attrs, LLVM.version() >= v"21" ? EnumAttribute("captures", 0)
-                                             : EnumAttribute("nocapture", 0))
+        push!(attrs, LLVM.version() >= v"21" ? EnumAttribute(:captures, 0)
+                                             : EnumAttribute(:nocapture))
         # each kernel state is separate
-        push!(attrs, EnumAttribute("noalias", 0))
+        push!(attrs, EnumAttribute(:noalias))
         # the state is read-only
-        push!(attrs, EnumAttribute("readonly", 0))
+        push!(attrs, EnumAttribute(:readonly))
 
         # remove the old function
         replace_function!(f, new_f)
@@ -1465,7 +1439,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # drop unused constants that may be referring to the old functions
     # XXX: can we do this differently?
     for f in worklist
-        prune_constexpr_uses!(f)
+        remove_dead_constant_users!(f)
     end
 
     # update other uses of the old function, modifying call sites to pass the arguments
@@ -1498,13 +1472,8 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     new_val = LLVM.const_bitcast(new_f, val.value_type)
                     rewrite_uses!(val, new_val)
                     # we can't simply replace this constant expression, as it may be used
-                    # as a call, taking arguments (so we need to rewrite it to pass the input arguments)
-
-                    # drop the old constant if it is unused
-                    # XXX: can we do this differently?
-                    if isempty(val.uses)
-                        LLVM.unsafe_destroy!(val)
-                    end
+                    # as a call, taking arguments (so we need to rewrite it to pass the input
+                    # arguments). the old constant is dropped below, once it's unused.
                 else
                     error("Cannot rewrite unknown use of function: $val")
                 end
@@ -1513,6 +1482,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     end
     for (f, new_f) in workmap
         rewrite_uses!(f, new_f)
+        remove_dead_constant_users!(f)
         @assert isempty(f.uses)
         replace_metadata_uses!(f, new_f)
         erase!(f)

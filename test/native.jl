@@ -554,13 +554,13 @@ end
                 @test box.externally_initialized
                 @test box.linkage == LLVM.Linkage.External
                 header_idx = LLVM.element_at(m.datalayout, box.global_value_type, rec.offset)
-                @test convert(UInt, collect(box.initializer.operands)[header_idx]) == 0
+                @test convert(UInt, box.initializer.elements[header_idx]) == 0
                 GPUCompiler.bake_relocations!(m, relocs)
                 @test isempty(relocs)
                 @test !box.externally_initialized
                 @test box.constant
                 @test box.linkage == LLVM.Linkage.Private
-                @test convert(UInt, collect(box.initializer.operands)[header_idx]) ==
+                @test convert(UInt, box.initializer.elements[header_idx]) ==
                       GPUCompiler.resolve_relocation_target(rec.target)
                 dispose(m)
 
@@ -1656,7 +1656,7 @@ end
         GPUCompiler.bake_relocations!(mod, relocs)
         init = gv.initializer
         @test !(init isa LLVM.ConstantAggregateZero)   # rebuilt into explicit fields
-        header = convert(UInt, LLVM.Constant[init.operands...][1])
+        header = convert(UInt, init.elements[1])
         @test header == GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(Float64))
         @test gv.constant
         @test isempty(relocs)
@@ -1755,7 +1755,7 @@ end
         @test GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
         @test [rec.target for rec in relocs.records] ==
               [GPUCompiler.CGlobalRef(:jl_float32_type), GPUCompiler.CGlobalRef(:jl_float64_type)]
-        addr = first(first(mod.functions["entry"].blocks).instructions)
+        addr = first(mod.functions["entry"].entry.instructions)
         @test !occursin(r"@jl_float(32|64)_type\b", string(addr))
         for rec in relocs.records
             @test occursin("@$(rec.name)", string(addr))
@@ -1805,8 +1805,8 @@ end
                     i64 0, i32 2, i64 1)
                 ret i32 %value
             }""")
-        load = first(first(mod.functions["entry"].blocks).instructions)
-        @test GPUCompiler.constexpr_byte_offset(load.operands[1], mod.datalayout) == 20
+        load = first(mod.functions["entry"].entry.instructions)
+        @test GPUCompiler.constexpr_byte_offset(load.pointer_operand, mod.datalayout) == 20
         @test_throws ArgumentError GPUCompiler.CGlobalRef(:jl_layout; offset=-1)
 
         # Julia codegen references small-tagged DataTypes through `jl_small_typeof` offsets.

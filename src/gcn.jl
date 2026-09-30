@@ -134,8 +134,7 @@ function add_kernarg_address_spaces!(
     # due to element type mismatches in classify_arguments assertions).
     byref_mask = BitVector(undef, length(ft.parameters))
     for i in 1:length(ft.parameters)
-        attrs = collect(f.parameter_attributes[i])
-        byref_mask[i] = any(a -> a isa TypeAttribute && a.kind == :byref, attrs)
+        byref_mask[i] = haskey(f.parameter_attributes[i], :byref)
     end
 
     # check if any flat pointer byref params need rewriting
@@ -168,9 +167,7 @@ function add_kernarg_address_spaces!(
     # attributes via setAttributes. For byref params, the VMap maps old args to addrspacecast
     # instructions (not Arguments), so LLVM's attribute remapping silently drops them.
     for i in 1:length(param_types)
-        for attr in collect(f.parameter_attributes[i])
-            push!(new_f.parameter_attributes[i], attr)
-        end
+        append!(new_f.parameter_attributes[i], f.parameter_attributes[i])
     end
 
     replace_function!(f, new_f)

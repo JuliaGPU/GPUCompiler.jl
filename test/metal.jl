@@ -837,16 +837,16 @@ end
     Context() do ctx
         mod = narrowing_module([2, 2])
         callee = mod.functions["callee"]
-        push!(callee.parameter_attributes[1], EnumAttribute("nonnull", 0))
-        push!(callee.function_attributes, EnumAttribute("nounwind", 0))
+        push!(callee.parameter_attributes[1], EnumAttribute(:nonnull))
+        push!(callee.function_attributes, EnumAttribute(:nounwind))
 
         @test GPUCompiler.propagate_argument_address_spaces!(mod)
         @test callee_param_as(mod) == 2
         @test all(c -> c.arguments[1].value_type.addrspace == 2, calls_to(mod, "callee"))
 
         callee = mod.functions["callee"]
-        @test EnumAttribute("nonnull", 0).kind in [a.kind for a in callee.parameter_attributes[1]]
-        @test EnumAttribute("nounwind", 0).kind in [a.kind for a in callee.function_attributes]
+        @test haskey(callee.parameter_attributes[1], :nonnull)
+        @test haskey(callee.function_attributes, :nounwind)
         @test (verify(mod); true)
     end
 
@@ -965,7 +965,7 @@ end
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
         callee = LLVM.Function(mod, "callee", callee_ft)
         callee.linkage = LLVM.Linkage.Internal
-        push!(callee.parameter_attributes[1], EnumAttribute("zeroext", 0))
+        push!(callee.parameter_attributes[1], EnumAttribute(:zeroext))
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
             p = inttoptr!(builder, callee.parameters[1], asptr(0))
@@ -979,7 +979,7 @@ end
             position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
             cs = call!(builder, callee_ft, callee, [arg])
-            push!(cs.argument_attributes[1], EnumAttribute("zeroext", 0))
+            push!(cs.argument_attributes[1], EnumAttribute(:zeroext))
             ret!(builder, cs)
         end
         @test (verify(mod); true)  # `zeroext` on the i64 boundary is valid pre-narrowing
@@ -988,10 +988,8 @@ end
             @test GPUCompiler.propagate_argument_address_spaces!(mod)
             # the retargeted pointer must not keep the integer's `zeroext`, on either side
             callee = mod.functions["callee"]
-            @test !(EnumAttribute("zeroext", 0).kind in
-                    [a.kind for a in callee.parameter_attributes[1]])
-            @test all(c -> !(EnumAttribute("zeroext", 0).kind in
-                             [a.kind for a in c.argument_attributes[1]]), calls_to(mod, "callee"))
+            @test !haskey(callee.parameter_attributes[1], :zeroext)
+            @test all(c -> !haskey(c.argument_attributes[1], :zeroext), calls_to(mod, "callee"))
         else
             @test !GPUCompiler.propagate_argument_address_spaces!(mod)
         end
@@ -1705,7 +1703,7 @@ end
         @test length(loads) == 2
         @test Set(string(l.value_type) for l in loads) == Set(["i64", "float"])
         # each field load is fed by an inbounds GEP off the original pointer
-        @test all(l -> l.operands[1] isa LLVM.GetElementPtrInst, loads)
+        @test all(l -> l.pointer_operand isa LLVM.GetElementPtrInst, loads)
         @test (verify(mod); true)
     end
 

@@ -354,8 +354,8 @@ function nvvm_reflect!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
     # find and sanity check the nnvm-reflect function
     # TODO: also handle the llvm.nvvm.reflect intrinsic
-    haskey(mod.functions, NVVM_REFLECT_FUNCTION) || return false
-    reflect_function = mod.functions[NVVM_REFLECT_FUNCTION]
+    reflect_function = get(mod.functions, NVVM_REFLECT_FUNCTION, nothing)
+    reflect_function === nothing && return false
     isdeclaration(reflect_function) || error("_reflect function should not have a body")
     reflect_typ = reflect_function.function_type.return_type
     isa(reflect_typ, LLVM.IntegerType) || error("_reflect's return type should be integer")
@@ -496,7 +496,7 @@ function ptx_rsqrt_fast!(mod::LLVM.Module)
     # declare intrinsics by name so LLVM keeps the exact non-overloaded names;
     # LLVM.Intrinsic + type params would mangle to *.f64, unrecognized by NVPTX.
     fns = mod.functions
-    declare(name, ft) = haskey(fns, name) ? fns[name] : LLVM.Function(mod, name, ft)
+    declare(name, ft) = get!(() -> LLVM.Function(mod, name, ft), fns, name)
     f64_ft = LLVM.FunctionType(f64, [f64])
     rsqrt_f64 = declare("llvm.nvvm.rsqrt.approx.d", f64_ft)
 
@@ -541,7 +541,7 @@ function ptx_fdiv_fast!(mod::LLVM.Module)
     isempty(to_replace) && return false
 
     fns = mod.functions
-    declare(name, ft) = haskey(fns, name) ? fns[name] : LLVM.Function(mod, name, ft)
+    declare(name, ft) = get!(() -> LLVM.Function(mod, name, ft), fns, name)
     f64_ft1 = LLVM.FunctionType(f64, [f64])
     rcp_f64 = declare("llvm.nvvm.rcp.approx.ftz.d", f64_ft1)
     fma_ft  = LLVM.FunctionType(f64, [f64, f64, f64])
@@ -592,7 +592,7 @@ function ptx_fsqrt_fast!(mod::LLVM.Module)
     isempty(to_replace) && return false
 
     fns = mod.functions
-    declare(name, ft) = haskey(fns, name) ? fns[name] : LLVM.Function(mod, name, ft)
+    declare(name, ft) = get!(() -> LLVM.Function(mod, name, ft), fns, name)
     f64_ft = LLVM.FunctionType(f64, [f64])
     rcp_f64   = declare("llvm.nvvm.rcp.approx.ftz.d", f64_ft)
     rsqrt_f64 = declare("llvm.nvvm.rsqrt.approx.d",   f64_ft)

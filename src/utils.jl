@@ -316,22 +316,6 @@ macro unlocked(ex)
 end
 
 
-## constant expression pruning
-
-# for some reason, after cloning the LLVM IR can contain unused constant expressions.
-# these result in false positives when checking that values are unused and can be deleted.
-# this helper function removes such unused constant expression uses of a value.
-# the process needs to be recursive, as constant expressions can refer to one another.
-function prune_constexpr_uses!(root::LLVM.Value)
-    for use in root.uses
-        val = use.user
-        if val isa ConstantExpr
-            prune_constexpr_uses!(val)
-            isempty(val.uses) && LLVM.unsafe_destroy!(val)
-        end
-    end
-end
-
 ## replacing a global with a runtime value
 
 # Replace every use of `gv` with the function-local value `replacement(f)`, then erase it.
@@ -348,11 +332,8 @@ function replace_global_with_local!(gv::LLVM.GlobalVariable, replacement)
         inst isa LLVM.Instruction ||
             error("Unexpected use of global '$(gv.name)': $inst")
         f = inst.parent.parent
-        ops = inst.operands
-        for i in 1:length(ops)
-            ops[i] == gv || continue
-            ops[i] = replacement(f)
-        end
+        # an instruction is visited once per use, but all its uses are replaced at once
+        any(==(gv), inst.operands) && replace!(inst.operands, gv => replacement(f))
     end
     @assert isempty(gv.uses) "global '$(gv.name)' still has uses after replacement"
     erase!(gv)
@@ -411,13 +392,12 @@ end
 # `clone_into!` leaves behind when the signature changes -- hands the name and metadata to `new_f`,
 # and erases `f`.
 function replace_function!(f::LLVM.Function, new_f::LLVM.Function)
-    fn = f.name
-    prune_constexpr_uses!(f)
+    remove_dead_constant_users!(f)
     @assert isempty(f.uses)
     replace_metadata_uses!(f, new_f)
+    take_name!(new_f, f)
     erase!(f)
-    new_f.name = fn
-    prune_constexpr_uses!(new_f)
+    remove_dead_constant_users!(new_f)
     return new_f
 end
 

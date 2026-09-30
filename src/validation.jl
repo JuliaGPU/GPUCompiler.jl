@@ -243,10 +243,8 @@ function constant_string(val::LLVM.Value)
     val isa LLVM.GlobalVariable || return nothing
     init = val.initializer
     init === nothing && return nothing
-    LLVM.API.LLVMIsConstantString(init) == 1 || return nothing
-    len = Ref{Csize_t}()
-    ptr = LLVM.API.LLVMGetAsString(init, len)
-    return rstrip(unsafe_string(convert(Ptr{UInt8}, ptr), len[]), '\0')
+    isstring(init) || return nothing
+    return rstrip(String(init), '\0')
 end
 
 # Julia's codegen replaces an `llvmcall` of an intrinsic it doesn't know, e.g. one that was
@@ -341,13 +339,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
         elseif fn == "jl_load_and_lookup" || fn == "ijl_load_and_lookup"
             try
                 f_lib, f_name, hnd = inst.arguments
-                f_name = first(f_name.operands)::GlobalVariable # get rid of the GEP
-                name_init = f_name.initializer::ConstantDataSequential
-                name_value = map(collect(name_init.elements)) do char
-                    convert(UInt8, char)
-                end |> String
-                name_value = name_value[1:end-1] # remove trailing \0
-                push!(errors, (CCALL_FUNCTION, bt, name_value))
+                name_value = constant_string(f_name)
+                name_value === nothing && error("Unknown function name")
+                push!(errors, (CCALL_FUNCTION, bt, String(name_value)))
             catch e
                 @safe_debug "Decoding arguments to jl_load_and_lookup failed" inst bb=inst.parent
                 push!(errors, (CCALL_FUNCTION, bt, nothing))

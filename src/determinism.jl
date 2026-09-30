@@ -80,30 +80,29 @@ function dedup_compile_units!(mod::LLVM.Module)
 
     canonical = Dict{Tuple,LLVM.Metadata}()
     canonical_cus = LLVM.Metadata[]
-    replacement = Dict{LLVM.API.LLVMMetadataRef,LLVM.Metadata}()
+    replacement = Dict{LLVM.Metadata,LLVM.Metadata}()
     for cu in cus
         cu === nothing && continue
-        key = Tuple(op === nothing ? LLVM.API.LLVMMetadataRef(C_NULL) : op.ref
-                    for op in cu.operands)
+        key = Tuple(cu.operands)
         canon = get!(canonical, key, cu)
-        if canon.ref == cu.ref
+        if canon == cu
             push!(canonical_cus, cu)
         else
-            replacement[cu.ref] = canon
+            replacement[cu] = canon
         end
     end
     isempty(replacement) && return false
 
     # Metadata forms a graph, so walk every attachment reachable from module values.
-    visited = Set{LLVM.API.LLVMMetadataRef}()
+    visited = Set{LLVM.Metadata}()
     function repoint!(@nospecialize(md))
         md isa LLVM.MDNode || return
-        md.ref in visited && return
-        push!(visited, md.ref)
+        md in visited && return
+        push!(visited, md)
         # iterate a copy, as replacing an operand re-uniques the node
         for (i, op) in enumerate(collect(md.operands))
             op isa LLVM.MDNode || continue
-            repl = get(replacement, op.ref, nothing)
+            repl = get(replacement, op, nothing)
             if repl !== nothing
                 md.operands[i] = repl
             else
@@ -112,29 +111,13 @@ function dedup_compile_units!(mod::LLVM.Module)
         end
     end
 
-    function repoint_instruction!(inst)
-        # LLVM.jl cannot iterate InstructionMetadataDict, so enumerate non-debug
-        # attachments through LLVM's C API.
-        md = inst.metadata
-        haskey(md, LLVM.MD_dbg) && repoint!(md[LLVM.MD_dbg])
-
-        num_entries = Ref{Csize_t}()
-        entries = LLVM.API.LLVMInstructionGetAllMetadataOtherThanDebugLoc(inst, num_entries)
-        try
-            for i in 1:num_entries[]
-                ref = LLVM.API.LLVMValueMetadataEntriesGetMetadata(entries, i - 1)
-                repoint!(LLVM.Metadata(ref))
-            end
-        finally
-            LLVM.API.LLVMDisposeValueMetadataEntries(entries)
-        end
-    end
-
     for f in mod.functions
         sp = f.subprogram
         sp === nothing || repoint!(sp)
         for bb in f.blocks, inst in bb.instructions
-            repoint_instruction!(inst)
+            for (kind, md) in inst.metadata
+                repoint!(md)
+            end
         end
     end
     for gv in mod.globals

@@ -56,7 +56,7 @@ function GPUCompiler.compile_unhooked(output::Symbol, job::CompilerJob{<:EnzymeT
 
     # Normally, Enzyme would run here and transform the output of the primal job.
     if output === :llvm && job.config.params.always_inline
-        push!(meta.entry.function_attributes, EnumAttribute("alwaysinline", 0))
+        push!(meta.entry.function_attributes, EnumAttribute(:alwaysinline))
     end
 
     return ir, meta

@@ -41,9 +41,7 @@ function GPUCompiler.relocation_table_pointer(@nospecialize(job::NativeCompilerJ
                                               builder::LLVM.IRBuilder, fun::LLVM.Function)
     mod = fun.parent
     T_word = GPUCompiler.relocation_word_type()
-    gv = if haskey(mod.globals, RELOC_TABLE_BASE)
-        mod.globals[RELOC_TABLE_BASE]
-    else
+    gv = get!(mod.globals, RELOC_TABLE_BASE) do
         gv = GlobalVariable(mod, T_word, RELOC_TABLE_BASE)
         gv.initializer = LLVM.ConstantInt(T_word, 0)
         gv.externally_initialized = true

@@ -134,7 +134,7 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
             entry = kernel_state_to_reference!(job, mod, entry)
 
             T_state = convert(LLVMType, state)
-            attr = TypeAttribute("byval", T_state)
+            attr = TypeAttribute(:byval, T_state)
             push!(entry.parameter_attributes[1], attr)
         end
     end
@@ -343,16 +343,14 @@ function flatten_nested_insertvalue!(mod::LLVM.Module)
 
     for f in mod.functions, bb in f.blocks
         worklist = filter(collect(bb.instructions)) do inst
-            inst.opcode == LLVM.Opcode.InsertValue && LLVM.API.LLVMGetNumIndices(inst) > 1
+            inst isa LLVM.InsertValueInst && length(inst.indices) > 1
         end
         isempty(worklist) && continue
 
         @dispose builder=IRBuilder() begin
             for inst in worklist
                 agg, val = inst.operands
-                n = LLVM.API.LLVMGetNumIndices(inst)
-                idxptr = LLVM.API.LLVMGetIndices(inst)
-                indices = [unsafe_load(idxptr, i) for i in 1:n]
+                indices = collect(inst.indices)
 
                 position!(builder, LLVM.before(inst))
                 new = flatten_insertvalue!(builder, agg, val, indices)
@@ -461,7 +459,7 @@ function convert_i128_allocas!(mod::LLVM.Module)
     for f in mod.functions, bb in f.blocks
         for inst in bb.instructions
             if inst isa LLVM.AllocaInst
-                alloca_type = LLVMType(LLVM.API.LLVMGetAllocatedType(inst))
+                alloca_type = inst.allocated_type
 
                 # Check if this is an i128 or an array of i128
                 if alloca_type isa LLVM.ArrayType
@@ -491,7 +489,7 @@ function convert_i128_allocas!(mod::LLVM.Module)
                         # XXX: The issue only seems to manifest itself on LLVM >= 18
                         #      where we use opaque pointers anyways, so not sure this
                         #      is needed
-                        old_ptr_type = LLVMType(LLVM.API.LLVMTypeOf(inst.ref))
+                        old_ptr_type = inst.value_type
                         bitcast_ptr = bitcast!(builder, new_alloca, old_ptr_type)
 
                         replace_uses!(inst, bitcast_ptr)
@@ -515,13 +513,9 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
     byval = BitVector(undef, length(ft.parameters))
     types = Vector{LLVMType}(undef, length(ft.parameters))
     for i in 1:length(byval)
-        byval[i] = false
-        for attr in collect(f.parameter_attributes[i])
-            if attr.kind == :byval
-                byval[i] = true
-                types[i] = attr.value
-            end
-        end
+        attr = get(f.parameter_attributes[i], :byval, nothing)
+        byval[i] = attr !== nothing
+        byval[i] && (types[i] = attr.value)
     end
 
     # generate the wrapper function type & definition: byval params become pointers to a struct
@@ -535,7 +529,7 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
     # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
     for i in 1:length(byval)
-        byval[i] && push!(new_f.parameter_attributes[i], TypeAttribute("byval", wrapper(i)))
+        byval[i] && push!(new_f.parameter_attributes[i], TypeAttribute(:byval, wrapper(i)))
     end
 
     # remove the old function
