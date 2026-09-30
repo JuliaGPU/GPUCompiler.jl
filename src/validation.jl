@@ -142,6 +142,7 @@ const LAZY_FUNCTION    = "call to a lazy-initialized function"
 const DELAYED_BINDING  = "use of an undefined name"
 const DYNAMIC_CALL     = "dynamic function invocation"
 const UNKNOWN_INTRINSIC = "call to an unknown LLVM intrinsic"
+const UNSUPPORTED_ALLOCATION = "allocation of an object with references"
 
 function Base.showerror(io::IO, err::InvalidIRError)
     print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
@@ -154,6 +155,8 @@ function Base.showerror(io::IO, err::InvalidIRError)
             elseif kind == DELAYED_BINDING
                 printstyled(io, " (use of '", meta, "')"; color=:red)
             elseif kind == STATIC_ASSERTION
+                printstyled(io, " (", meta, ")"; color=:red)
+            elseif kind == UNSUPPORTED_ALLOCATION
                 printstyled(io, " (", meta, ")"; color=:red)
             end
         end
@@ -268,6 +271,8 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
             push!(errors, (STATIC_ASSERTION, bt, static_assert_message(inst)))
         elseif is_unknown_intrinsic_error(inst)
             push!(errors, (UNKNOWN_INTRINSIC, bt, nothing))
+        elseif fn == UNSUPPORTED_ALLOCATION_MARKER
+            push!(errors, (UNSUPPORTED_ALLOCATION, bt, static_assert_message(inst)))
         elseif fn == "jl_get_binding_or_error" || fn == "ijl_get_binding_or_error"
             try
                 m, sym = arguments(inst)

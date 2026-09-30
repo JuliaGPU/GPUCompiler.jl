@@ -156,13 +156,10 @@ end
 
 ## exception handling
 
-# this pass lowers `jl_throw` and friends to GPU-compatible exceptions.
-# this isn't strictly necessary, but has a couple of advantages:
-# - we can kill off unused exception arguments that otherwise would allocate or invoke
-# - we can fake debug information (lacking a stack unwinder)
-#
-# once we have thorough inference (ie. discarding `@nospecialize` and thus supporting
-# exception arguments) and proper debug info to unwind the stack, this pass can go.
+# this pass lowers `jl_throw` and friends to GPU-compatible exceptions, reporting the kind of
+# exception and faking debug information (lacking a stack unwinder). the thrown values are not
+# used: throws in Julia code already throw `nothing` (see `drop_throw_arguments!`), and what
+# remains of the arguments of codegen's own throws (e.g. `jl_type_error`) is left to DCE.
 function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "lower throw" begin
@@ -207,23 +204,7 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                 end
 
                 # remove the call
-                call_args = arguments(call)
                 erase!(call)
-
-                # HACK: kill the exceptions' unused arguments
-                #       this is needed for throwing objects with @nospecialize constructors.
-                for arg in call_args
-                    # peek through casts
-                    if isa(arg, LLVM.AddrSpaceCastInst)
-                        cast = arg
-                        arg = first(operands(cast))
-                        isempty(uses(cast)) && erase!(cast)
-                    end
-
-                    if isa(arg, LLVM.Instruction) && isempty(uses(arg))
-                        erase!(arg)
-                    end
-                end
 
                 changed = true
             end
@@ -362,28 +343,24 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
     return changed
 end
 
-# demote LLVM atomic loads and stores to plain ones
+# demote `unordered` LLVM atomic loads and stores to plain ones
 #
-# Julia marks accesses to heap references `unordered` so that a read racing with the GC, or
-# with another thread's write, cannot observe a torn pointer, and stores the type tag of a
-# freshly allocated object with `release` ordering so that no other thread can observe the
-# object before its header. There is no device GC and no such race for GPUCompiler to
-# protect against, so these orderings carry no meaning here, but not every back-end can
-# express them: SPIR-V's OpAtomicLoad/OpAtomicStore only take scalar integer or
-# floating-point operands, so the Khronos translator turns an atomic access of a pointer
-# into an invalid pointer-typed atomic that consumers reject (Intel's compiler fails with an
-# undefined `__spirv_AtomicLoad(long**, int, int)`), and AIR has no atomic load or store
-# instructions at all: Apple's back-end aborts on them (`XPC_ERROR_CONNECTION_INTERRUPTED`
-# from the driver; the macOS 26 AGX compiler reports `unable to legalize instruction:
-# store release (p0)` for a type-tag store through the generic pointer the device allocator
-# returns). Run after optimization, where dropping the ordering cannot enable new
-# transformations. Device-side atomics proper go through target intrinsics, not these
-# instructions, so every remaining one is such Julia bookkeeping and gets demoted.
-function demote_atomics!(mod::LLVM.Module)
+# Julia marks accesses to heap references `unordered`, so that a read racing with the GC or
+# with another thread's write cannot observe a torn pointer. There is no device GC, and
+# aligned accesses don't tear, so the ordering carries no meaning here. Not every back-end can
+# express it, though: SPIR-V's OpAtomicLoad/OpAtomicStore only take scalar integer or
+# floating-point operands, so the Khronos translator turns an atomic access of a pointer into
+# an invalid pointer-typed atomic, and Metal only has atomics on device and threadgroup memory,
+# while these accesses are often of objects passed by reference (e.g. an immutable struct
+# with a `DataType` field, or with a reference to a mutable object). Rejecting allocations of
+# objects with references (see `check_allocation!`) does not remove them, as they don't
+# involve an allocation. Other orderings are left alone, because they are user atomics (e.g.
+# UnsafeAtomics' `load`/`store!`) that the back-end must see.
+function demote_unordered_atomics!(mod::LLVM.Module)
     changed = false
     for f in functions(mod), bb in blocks(f), inst in instructions(bb)
         (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) || continue
-        is_atomic(inst) || continue
+        is_atomic(inst) && ordering(inst) == LLVM.API.LLVMAtomicOrderingUnordered || continue
         ordering!(inst, LLVM.API.LLVMAtomicOrderingNotAtomic)
         changed = true
     end

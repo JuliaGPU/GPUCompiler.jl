@@ -1757,116 +1757,734 @@ end
     end
 end
 
-@testset "Bool conversion exception allocation" begin
+@testset "exception allocations" begin
+    # a thrown exception's construction is dead once `throw` is lowered, but it used to survive
+    # (e.g. as an un-inlined constructor call), allocating through the device allocator, with
+    # Julia's GC orderings on the stores into it (`unordered`, `release`) that AIR cannot
+    # express (#904, Metal.jl#955)
     mod = @eval module $(gensym())
         using ..GPUCompiler
-        module Runtime
-            # Keep allocation visible to LLVM; a constant-null allocator erases
-            # the heap-reference stores which exposed #904.
-            malloc(sz) = ccall("extern test_malloc", llvmcall, Ptr{Nothing}, (Csize_t,), sz)
-            signal_exception() = return
-            report_oom(sz) = return
-            report_exception(ex) = return
-            report_exception_name(ex) = return
-            report_exception_frame(idx, func, file, line) = return
-        end
+        import ..ExternalAllocatorRuntime
         struct Params <: GPUCompiler.AbstractCompilerParams end
-        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = Runtime
-        function kernel(out, x)
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = ExternalAllocatorRuntime
+        GPUCompiler.isintrinsic(job::CompilerJob{MetalCompilerTarget,Params}, fn::String) =
+            fn == "test_malloc" ||
+            @invoke GPUCompiler.isintrinsic(job::CompilerJob{MetalCompilerTarget}, fn::String)
+
+        # `InexactError` boxes its arguments in a tuple (#904)
+        function bool(out, x)
             unsafe_store!(out, Bool(x))
             return
         end
+
+        # `DomainError` with a lazily-built message (Metal.jl#955)
+        function domain(out, x)
+            x < 0 && throw(DomainError(x, LazyString("log1p was called with ", x)))
+            unsafe_store!(out, x)
+            return
+        end
+
+        # throws emitted by codegen
+        function tuple_index(out, t, i)
+            unsafe_store!(out, t[i])
+            return
+        end
     end
-    source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Bool,1},Int},
-                            Base.get_world_counter())
-    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
-    job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
-    ir = sprint(io -> GPUCompiler.code_llvm(io, job; dump_module=true))
-    if VERSION >= v"1.12-"
-        @test occursin(r"store atomic .* unordered", ir)
+
+    for (f, tt) in ((mod.bool, Tuple{Core.LLVMPtr{Bool,1},Int}),
+                    (mod.domain, Tuple{Core.LLVMPtr{Float32,1},Float32}),
+                    (mod.tuple_index, Tuple{Core.LLVMPtr{Int,1},NTuple{3,Int},Int}))
+        source = methodinstance(typeof(f), tt, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+        job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
+
+        @test @filecheck implicit_check_not=["{{(load|store) atomic|atomicrmw|cmpxchg}}", "call {{.*}}@test_malloc"] begin
+            @check "define void @_Z"
+            @check "call void @llvm.trap()"
+            GPUCompiler.code_llvm(stdout, job; dump_module=true)
+        end
     end
-    air = sprint(io -> GPUCompiler.code_native(io, job; dump_module=true))
-    @test !occursin(r"(load|store) atomic", air)
 end
 
-@testset "atomic demotion" begin
-    # Demote every LLVM atomic load/store, whatever its ordering or value type.
+@testset "unsupported allocations" begin
+    # without a garbage collector, device code can only allocate objects that do not
+    # reference other objects
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..ExternalAllocatorRuntime, ..Metal
+        struct Params <: GPUCompiler.AbstractCompilerParams
+            table::Bool     # use the `:table` relocation strategy, as Metal.jl does
+        end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = ExternalAllocatorRuntime
+        GPUCompiler.relocation_lowering(job::CompilerJob{<:Any,Params}) =
+            job.config.params.table ? (:table) : (:bake)
+        GPUCompiler.kernel_state_type(job::CompilerJob{<:Any,Params}) =
+            job.config.params.table ? Metal.TableKernelState : Nothing
+        GPUCompiler.isintrinsic(job::CompilerJob{MetalCompilerTarget,Params}, fn::String) =
+            fn == "test_malloc" ||
+            @invoke GPUCompiler.isintrinsic(job::CompilerJob{MetalCompilerTarget}, fn::String)
+
+        mutable struct Counter
+            x::Int
+        end
+        mutable struct Holder
+            c::Counter
+        end
+        @noinline bump!(c::Counter) = (c.x += 1; return)
+        @noinline bump!(h::Holder) = bump!(h.c)
+
+        # an escaping object with plain data
+        function plain(out, x)
+            c = Counter(x)
+            bump!(c)
+            unsafe_store!(out, c.x)
+            return
+        end
+
+        # one that references another object
+        function nested(out, x)
+            h = Holder(Counter(x))
+            bump!(h)
+            unsafe_store!(out, h.c.x)
+            return
+        end
+
+        # one whose type codegen refers to by its small tag instead of its address
+        @noinline svec_length(s::Core.SimpleVector) = length(s)
+        function svec(out, x)
+            s = Core.svec(x)
+            unsafe_store!(out, svec_length(s))
+            return
+        end
+    end
+    function compile(f, table)
+        source = methodinstance(typeof(f), Tuple{Core.LLVMPtr{Int,1},Int},
+                                Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+        job = CompilerJob(source, CompilerConfig(target, mod.Params(table); kernel=true))
+        JuliaContext() do ctx
+            GPUCompiler.compile(:llvm, job)
+        end
+    end
+
+    # the allocated type is found through relocations of either strategy
+    for table in (false, true)
+        @test compile(mod.plain, table) isa Tuple
+        @test_throws_message(InvalidIRError, compile(mod.nested, table)) do msg
+            occursin("unsupported allocation of an object with references", msg) &&
+            occursin("Holder)", msg) && occursin("[2] nested", msg)
+        end
+        # older versions call `jl_f_svec` instead of allocating inline
+        if VERSION >= v"1.12"
+            @test_throws_message(InvalidIRError, compile(mod.svec, table)) do msg
+                occursin("unsupported allocation of an object with references", msg) &&
+                occursin("(Core.SimpleVector)", msg) && occursin("[1] svec", msg)
+            end
+        end
+    end
+
+    # small tags are resolved on every version, while addresses are still dereferenced
     Context() do ctx
-        ir = """
-        define void @f(i8** %p, i8** %q, i64* %r) {
-        entry:
-          %a = load atomic i8*, i8** %p unordered, align 8
-          store atomic i8* %a, i8** %q unordered, align 8
-          %t = load atomic i8*, i8** %p acquire, align 8
-          store atomic i8* %t, i8** %q release, align 8
-          %b = load atomic i64, i64* %r monotonic, align 8
-          store atomic i64 %b, i64* %r release, align 8
-          store i8* %a, i8** %p, align 8
+        relocs = GPUCompiler.Relocations()
+        ref(addr) = GPUCompiler.referenced_object(
+            const_inttoptr(ConstantInt(UInt64(addr)), LLVM.PointerType(LLVM.Int8Type())),
+            relocs)
+        # the header of an object holds its type's small tag
+        obj = Core.svec(1, 2)
+        ptr = ccall(:jl_value_ptr, Ptr{UInt}, (Any,), obj)
+        tag = GC.@preserve obj unsafe_load(ptr - sizeof(UInt)) & ~UInt(15)
+        @test tag < 64 << 4
+        @test something(ref(tag)) === Core.SimpleVector
+        @test ref(63 << 4) === nothing  # unused tag
+        addr = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), Core.SimpleVector)
+        @test something(ref(UInt(addr))) === Core.SimpleVector
+    end
+end
+
+@testset "LLVM atomics" begin
+    # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`) keep their ordering, while
+    # Julia's `unordered` heap-reference accesses, which AIR cannot express when they are of
+    # pointers or outside device and threadgroup memory, become plain ones
+    function kernel(p::Core.LLVMPtr{Int32,1}, q::Core.LLVMPtr{Int32,1})
+        r = reinterpret(Ptr{Ptr{Int32}}, p)
+        y = Core.Intrinsics.atomic_pointerref(r, :unordered)
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Ptr{Int32}}, q), y, :unordered)
+        x = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Int32}, p), :acquire)
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int32}, q), x, :release)
+        return
+    end
+    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}},
+                            Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"27", metal=v"4.1", air=v"2.9")
+    job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+
+    @test @filecheck begin
+        @check_not "unordered"
+        @check "load atomic i32"
+        @check_same "acquire"
+        @check "store atomic i32"
+        @check_same "release"
+        @check_not "unordered"
+        GPUCompiler.code_llvm(job; dump_module=true)
+    end
+    @test @filecheck begin
+        @check "call i32 @air.atomic.global.load.i32({{.+}}, i32 2, i32 2, i32 3, i1 true)"
+        @check "call void @air.atomic.global.store.i32({{.+}}, i32 3, i32 2, i32 3, i1 false)"
+        GPUCompiler.code_native(job; dump_module=true)
+    end
+end
+
+# lower the atomics (and fences) of textual IR for a Metal target, like `lower_air!`
+function lower_metal_atomics(ir::String; metal, air)
+    source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"27", metal, air)
+    job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+    Context(; opaque_pointers=true) do ctx
+        mod = parse(LLVM.Module, ir)
+        errors = GPUCompiler.validate_ir(job, mod)
+        isempty(errors) || return join(first.(errors), "\n")
+        GPUCompiler.lower_atomics!(job, mod)
+        GPUCompiler.lower_fences!(job, mod)
+        @dispose pb=NewPMPassBuilder() begin
+            add!(pb, AlwaysInlinerPass())
+            add!(pb, StripDeadPrototypesPass())
+            run!(pb, mod)
+        end
+        verify(mod)
+        string(mod)
+    end
+end
+
+@testset "atomic lowering" begin
+    kernel(body; args="ptr addrspace(1) %p, ptr addrspace(3) %t") = """
+        define void @f($args) {
+        $body
           ret void
         }
         """
-        mod = parse(LLVM.Module, ir)
-        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
-        memops() = filter(i -> i isa LLVM.LoadInst || i isa LLVM.StoreInst, insts())
+    targets = ((v"3.2", v"2.7"), (v"4.0", v"2.8"), (v"4.0", v"2.9"), (v"4.1", v"2.9"))
 
-        @test count(is_atomic, memops()) == 6
-        @test GPUCompiler.demote_atomics!(mod)
-        @test count(is_atomic, memops()) == 0
-        @test !occursin("atomic", string(mod))
-        @test (verify(mod); true)
-        # idempotent
-        @test !GPUCompiler.demote_atomics!(mod)
+    @testset "orderings (Metal $metal, AIR $air)" for (metal, air) in targets
+        # MSL 4.1 has ordered atomics that order device and threadgroup memory (flags=3),
+        # but sequentially-consistent stores need a trailing fence; before that, a relaxed
+        # atomic is bracketed by (sequentially-consistent) fences
+        ordered = metal >= v"4.1"
+        args(order, flags, volatile) = air >= v"2.9" ?
+            "i32 $order, i32 2, i32 $flags, i1 $volatile" : "i32 $order, i32 2, i1 $volatile"
+        # loads and read-modify-writes are always volatile (see `select_atomic!`)
+        op(order; volatile=false) =
+            ordered ? args(order, order == 0 ? 0 : 3, volatile) : args(0, 0, true)
+        rmw(order) = op(order; volatile=true)
+        fence = "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+        ir = lower_metal_atomics(kernel("""
+            %a = atomicrmw add ptr addrspace(1) %p, i32 1 seq_cst, align 4
+            %b = load atomic i32, ptr addrspace(1) %p acquire, align 4
+            store atomic i32 %b, ptr addrspace(1) %p release, align 4
+            %c = cmpxchg ptr addrspace(1) %p, i32 1, i32 2 monotonic acquire, align 4
+            %d = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4
+            store atomic i32 %d, ptr addrspace(1) %p seq_cst, align 4
+            """); metal, air)
+        @test @filecheck begin
+            @check_label "define void @f"
+            @check cond=!ordered fence
+            @check_next cond=!ordered "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(rmw(5)))"
+            @check cond=ordered "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(rmw(5)))"
+            @check_next cond=!ordered fence
+            @check cond=!ordered "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(rmw(2)))"
+            @check_next cond=ordered "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(rmw(2)))"
+            @check_next cond=!ordered fence
+            @check_next cond=!ordered fence
+            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 {{%.+}}, $(op(3)))"
+            @check "call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p, ptr {{%.+}}, i32 2, i32 0, $(ordered ? args(2, 3, false) : args(0, 0, true)))"
+            @check_next "icmp eq i32 {{%.+}}, 1"
+            @check cond=!ordered fence
+            @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(rmw(0)))"
+            @check_next cond=!ordered fence
+            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 {{%.+}}, $(op(5)))"
+            @check_next fence
+            @check_not "call void @air.atomic.fence"
+            ir
+        end
+        @test !occursin(r"(atomicrmw|cmpxchg|load atomic|store atomic) |^\s*fence "m, ir)
     end
 
-    # end-to-end: Julia's own `:unordered` accesses (as codegen emits for heap-reference
-    # fields) must reach the AIR as plain loads and stores
-    function kernel(p::Core.LLVMPtr{Int,1}, q::Core.LLVMPtr{Int,1})
-        x = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Int}, p), :unordered)
-        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int}, q), x, :unordered)
-        return
+    @testset "relaxed loads (Metal $metal, AIR $air)" for (metal, air) in targets
+        # relaxed loads of device memory at device scope are acquire loads, so that they
+        # eventually see other threadgroups' stores; others aren't affected (and relaxed loads
+        # of device memory are selected at device scope regardless, like MSL does)
+        ir = lower_metal_atomics(kernel("""
+            %a = load atomic i32, ptr addrspace(1) %p monotonic, align 4
+            %b = load atomic i32, ptr addrspace(1) %p syncscope("workgroup") monotonic, align 4
+            %c = load atomic i32, ptr addrspace(3) %t monotonic, align 4
+            """); metal, air)
+        ordered = metal >= v"4.1"
+        args(order, flags) = air >= v"2.9" ?
+            "i32 $order, i32 2, i32 $flags, i1 true" : "i32 $order, i32 2, i1 true"
+        relaxed(scope) = air >= v"2.9" ? "i32 0, i32 $scope, i32 0, i1 true" : "i32 0, i32 $scope, i1 true"
+        @test @filecheck begin
+            @check "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(ordered ? args(2, 3) : args(0, 0)))"
+            @check_next cond=!ordered "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+            @check_next "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(relaxed(2)))"
+            @check_next "call i32 @air.atomic.local.load.i32(ptr addrspace(3) %t, $(relaxed(1)))"
+            ir
+        end
     end
-    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int,1}, Core.LLVMPtr{Int,1}},
-                            Base.get_world_counter())
-    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
-    config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
-    job = CompilerJob(source, config)
 
-    # precondition: the accesses survive optimization as unordered atomics
-    ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true))
-    @test occursin(r"load atomic .* unordered", ir)
-    @test occursin(r"store atomic .* unordered", ir)
-
-    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
-    @test !occursin(r"(load|store) atomic", air)
-    @test occursin(r"load i64", air)
-    @test occursin(r"store i64", air)
-
-    # likewise for the `release` store of a pointer that codegen emits for an allocated
-    # object's type tag. Only Julia 1.12+ lowers `Ptr` values to LLVM pointers, which is
-    # what makes this the case Apple's back-end cannot legalize.
-    @static if VERSION >= v"1.12"
-    function tagged(p::Core.LLVMPtr{Int,1}, q::Core.LLVMPtr{Int,1})
-        x = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Ptr{Int}}, p), :acquire)
-        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Ptr{Int}}, q), x, :release)
-        return
+    @testset "sequentially-consistent stores" begin
+        # from MSL 4.1, only sequentially-consistent stores get a (trailing) fence, with the
+        # store's scope: other orderings and operations don't need one
+        ir = lower_metal_atomics(kernel("""
+            store atomic i32 1, ptr addrspace(1) %p seq_cst, align 4
+            store atomic i32 1, ptr addrspace(3) %t syncscope("workgroup") seq_cst, align 4
+            store atomic float 1.0, ptr addrspace(1) %p seq_cst, align 4
+            store atomic i32 1, ptr addrspace(1) %p release, align 4
+            %a = load atomic i32, ptr addrspace(1) %p seq_cst, align 4
+            %b = atomicrmw xchg ptr addrspace(1) %p, i32 1 seq_cst, align 4
+            %c = cmpxchg ptr addrspace(1) %p, i32 1, i32 2 seq_cst seq_cst, align 4
+            """); metal=v"4.1", air=v"2.9")
+        @test @filecheck begin
+            @check "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1, i32 5, i32 2, i32 3, i1 false)"
+            @check_next "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+            @check_next "call void @air.atomic.local.store.i32(ptr addrspace(3) %t, i32 1, i32 5, i32 1, i32 3, i1 false)"
+            @check_next "call void @air.atomic.fence(i32 3, i32 5, i32 1)"
+            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1065353216, i32 5, i32 2, i32 3, i1 false)"
+            @check_next "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+            @check_next "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1, i32 3, i32 2, i32 3, i1 false)"
+            @check_not "call void @air.atomic.fence"
+            ir
+        end
     end
-    source = methodinstance(typeof(tagged), Tuple{Core.LLVMPtr{Int,1}, Core.LLVMPtr{Int,1}},
-                            Base.get_world_counter())
-    job = CompilerJob(source, config)
 
-    ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true))
-    @test occursin(r"load atomic ptr.* acquire", ir)
-    @test occursin(r"store atomic ptr.* release", ir)
+    @testset "scopes" begin
+        ir = lower_metal_atomics(kernel("""
+            %a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope("singlethread") monotonic, align 4
+            %b = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope("subgroup") monotonic, align 4
+            %c = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope("workgroup") monotonic, align 4
+            %d = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope("device") monotonic, align 4
+            %e = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %f = atomicrmw add ptr addrspace(3) %t, i32 1 monotonic, align 4
+            %g = atomicrmw add ptr addrspace(3) %t, i32 1 syncscope("device") monotonic, align 4
+            %h = atomicrmw add ptr addrspace(3) %t, i32 1 syncscope("subgroup") monotonic, align 4
+            fence syncscope("workgroup") release
+            fence syncscope("subgroup") acquire
+            fence seq_cst
+            """); metal=v"4.1", air=v"2.9")
+        @test @filecheck begin
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 0, i32 0, i1 true)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 4, i32 0, i1 true)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 1, i32 0, i1 true)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 true)"
+            @check "@air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 true)"
+            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 1, i32 0, i1 true)"
+            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 1, i32 0, i1 true)"
+            @check "@air.atomic.local.add.s.i32(ptr addrspace(3) %t, i32 1, i32 0, i32 4, i32 0, i1 true)"
+            @check "call void @air.atomic.fence(i32 3, i32 3, i32 1)"
+            @check "call void @air.atomic.fence(i32 3, i32 2, i32 4)"
+            @check "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+            ir
+        end
+    end
 
-    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
-    @test !occursin(r"(load|store) atomic", air)
+    @testset "operations" begin
+        ir = lower_metal_atomics(kernel("""
+            %xchg = atomicrmw xchg ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %add = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %sub = atomicrmw sub ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %and = atomicrmw and ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %or = atomicrmw or ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %xor = atomicrmw xor ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %max = atomicrmw max ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %min = atomicrmw min ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %umax = atomicrmw umax ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %umin = atomicrmw umin ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %fadd = atomicrmw fadd ptr addrspace(1) %p, float 1.0 monotonic, align 4
+            %fsub = atomicrmw fsub ptr addrspace(3) %t, float 1.0 monotonic, align 4
+            store atomic i32 1, ptr addrspace(1) %p monotonic, align 4
+            store atomic volatile i32 1, ptr addrspace(1) %p monotonic, align 4
+            """); metal=v"4.1", air=v"2.9")
+        # loads and read-modify-writes are always volatile, stores only when LLVM's are
+        trailer = "i32 0, i32 2, i32 0, i1 true)"
+        @test @filecheck begin
+            @check "call i32 @air.atomic.global.xchg.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.sub.s.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.and.s.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.or.s.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.xor.s.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.max.s.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.min.s.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.max.u.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call i32 @air.atomic.global.min.u.i32(ptr addrspace(1) %p, i32 1, $trailer"
+            @check "call float @air.atomic.global.add.f32(ptr addrspace(1) %p, float 1.000000e+00, $trailer"
+            @check "call float @air.atomic.local.sub.f32(ptr addrspace(3) %t, float 1.000000e+00, i32 0, i32 1, i32 0, i1 true)"
+            @check "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 false)"
+            @check "call void @air.atomic.global.store.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 true)"
+            # declared like Apple does, with element types for the typed-pointer downgrader
+            @check "declare !arg_eltypes [[I32:![0-9]+]] i32 @air.atomic.global.xchg.i32(ptr addrspace(1), i32, i32, i32, i32, i1) [[ATTRS:#[0-9]+]]"
+            @check "declare !arg_eltypes [[F32:![0-9]+]] float @air.atomic.global.add.f32"
+            @check "attributes [[ATTRS]] = { mustprogress nounwind willreturn }"
+            @check "[[I32]] = !{i32 0, i32 0}"
+            @check "[[F32]] = !{i32 0, float 0.000000e+00}"
+            ir
+        end
+    end
+
+    @testset "compare-exchange" begin
+        # AIR's compare-exchange takes the expected value by reference and returns the old
+        # value; like MSL, the success flag compares that with the expected value
+        ir = lower_metal_atomics(kernel("""
+            %pair = cmpxchg ptr addrspace(1) %p, i32 1, i32 2 acq_rel acquire, align 4
+            %weak = cmpxchg weak ptr addrspace(3) %t, i32 1, i32 2 monotonic monotonic, align 4
+            %ok = extractvalue { i32, i1 } %pair, 1
+            %okw = extractvalue { i32, i1 } %weak, 1
+            %both = and i1 %ok, %okw
+            store i1 %both, ptr addrspace(1) %p
+            """); metal=v"4.1", air=v"2.9")
+        @test @filecheck begin
+            @check "store i32 1, ptr [[EXP:%.+]], align 4"
+            @check_next "[[OLD:%.+]] = call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p, ptr [[EXP]], i32 2, i32 4, i32 2, i32 2, i32 3, i1 false)"
+            @check_next "icmp eq i32 [[OLD]], 1"
+            @check "call i32 @air.atomic.local.cmpxchg.weak.i32(ptr addrspace(3) %t, ptr {{%.+}}, i32 2, i32 0, i32 0, i32 1, i32 0, i1 false)"
+            @check "declare !arg_eltypes [[MD:![0-9]+]] i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1), ptr, i32, i32, i32, i32, i32, i1)"
+            @check "[[MD]] = !{i32 0, i32 0, i32 1, i32 0}"
+            ir
+        end
+    end
+
+    @testset "expansions (Metal $metal, AIR $air)" for (metal, air) in targets
+        # operations AIR lacks become compare-exchange loops, 8- and 16-bit ones masked
+        # operations on the containing 32-bit word
+        ir = lower_metal_atomics(kernel("""
+            %nand = atomicrmw nand ptr addrspace(1) %p, i32 1 monotonic, align 4
+            %fmax = atomicrmw fmax ptr addrspace(1) %p, float 1.0 monotonic, align 4
+            %fload = load atomic float, ptr addrspace(1) %p monotonic, align 4
+            store atomic float %fload, ptr addrspace(3) %t monotonic, align 4
+            %fxchg = atomicrmw xchg ptr addrspace(1) %p, float 1.0 monotonic, align 4
+            %tgfadd = atomicrmw fadd ptr addrspace(3) %t, float 1.0 monotonic, align 4
+            """); metal, air)
+        @test @filecheck begin
+            @check_label "define void @f"
+            # nand: a loop around a compare-exchange of the computed value
+            @check "atomic.global.load.i32"
+            @check "atomicrmw.start"
+            @check "and i32"
+            @check_next "xor i32 {{.+}}, -1"
+            @check "atomic.global.cmpxchg.weak.i32"
+            # fmax
+            @check "atomicrmw.start"
+            @check "call float @llvm.maxnum.f32"
+            @check "atomic.global.cmpxchg.weak.i32"
+            # floating-point loads, stores and exchanges on integers
+            @check "atomic.global.load.i32"
+            @check_next "bitcast i32 {{.+}} to float"
+            @check "bitcast float {{.+}} to i32"
+            @check_next "atomic.local.store.i32"
+            @check "atomic.global.xchg.i32(ptr addrspace(1) %p, i32 1065353216"
+            # threadgroup fadd needs MSL 4.1
+            @check cond=(metal >= v"4.1") "call float @air.atomic.local.add.f32"
+            @check cond=(metal < v"4.1") "atomic.local.cmpxchg.weak.i32"
+            @check_not "atomicrmw {{[a-z]+}} ptr"
+            ir
+        end
+
+        ir = lower_metal_atomics(kernel("""
+            %add8 = atomicrmw add ptr addrspace(1) %p, i8 1 monotonic, align 1
+            %or8 = atomicrmw or ptr addrspace(1) %p, i8 1 monotonic, align 1
+            %l8 = load atomic i8, ptr addrspace(3) %t monotonic, align 1
+            store atomic i16 1, ptr addrspace(1) %p monotonic, align 2
+            %c16 = cmpxchg ptr addrspace(1) %p, i16 1, i16 2 monotonic monotonic, align 2
+            %h = atomicrmw fadd ptr addrspace(1) %p, half 1.0 monotonic, align 2
+            store atomic i8 1, ptr addrspace(3) %t unordered, align 1
+            """); metal, air)
+        @test @filecheck begin
+            @check_label "define void @f"
+            # add: masked compare-exchange loop on the containing word
+            @check "ptrtoint ptr addrspace(1) %p to i64"
+            @check "and i64 {{.+}}, 3"
+            @check "atomicrmw.start"
+            @check "atomic.global.cmpxchg.weak.i32"
+            # or: a word-sized or, with the value shifted into place
+            @check "[[V:%.+]] = shl i32 1, {{%.+}}"
+            @check_next "call i32 @air.atomic.global.or.s.i32(ptr addrspace(1) {{%.+}}, i32 [[V]],"
+            # load: a word-sized load, shifted
+            @check "call i32 @air.atomic.local.load.i32"
+            @check_next "lshr i32"
+            @check_next "trunc i32 {{.+}} to i8"
+            # store and compare-exchange
+            @check "atomic.global.cmpxchg.weak.i32"
+            @check "partword.cmpxchg.loop"
+            @check "atomic.global.cmpxchg.weak.i32"
+            # half-precision add
+            @check "fadd half"
+            @check "atomic.global.cmpxchg.weak.i32"
+            # an unordered store, which becomes a (monotonic) compare-exchange loop
+            @check "atomic.local.cmpxchg.weak.i32"
+            @check_not "atomicrmw {{[a-z]+}} ptr"
+            ir
+        end
+    end
+
+    @testset "64-bit min/max (Metal $metal, AIR $air)" for (metal, air) in targets
+        ir = lower_metal_atomics(kernel("""
+            %a = atomicrmw umax ptr addrspace(1) %p, i64 1 monotonic, align 8
+            %b = atomicrmw umin ptr addrspace(1) %p, i64 1 release, align 8
+            """); metal, air)
+        trailer(order, flags, volatile) = air >= v"2.9" ?
+            "i32 $order, i32 2, i32 $flags, i1 $volatile" : "i32 $order, i32 2, i1 $volatile"
+        ordered = metal >= v"4.1"
+        @test @filecheck begin
+            @check "call void @air.atomic.global.max.u.i64(ptr addrspace(1) %p, i64 1, $(trailer(0, 0, true)))"
+            @check cond=!ordered "call void @air.atomic.fence(i32 3, i32 5, i32 2)"
+            @check "call void @air.atomic.global.min.u.i64(ptr addrspace(1) %p, i64 1, $(ordered ? trailer(3, 3, true) : trailer(0, 0, true)))"
+            ir
+        end
+    end
+
+    @testset "intrinsics emitted by front-ends (Metal $metal, AIR $air)" for (metal, air) in targets
+        # in the MSL 4.1 form, rewritten for the target (as Metal.jl's did in `finish_ir!`)
+        ir = lower_metal_atomics("""
+            declare i32 @air.atomic.global.add.s.i32(ptr addrspace(1), i32, i32, i32, i32, i1)
+            declare i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1), ptr, i32, i32, i32, i32, i32, i1)
+            define void @f(ptr addrspace(1) %p, ptr %e) {
+              %a = call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 0, i32 2, i32 0, i1 false)
+              %b = call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p, ptr %e, i32 1, i32 0, i32 0, i32 2, i32 0, i1 false)
+              %c = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4
+              ret void
+            }
+            """; metal, air)
+        trailer = metal >= v"4.1" ? "i32 0, i32 2, i32 0, i1 false" :
+                  air >= v"2.9" ? "i32 0, i32 2, i32 0, i1 true" : "i32 0, i32 2, i1 true"
+        # (the read-modify-write we select is always volatile)
+        selected = air >= v"2.9" ? "i32 0, i32 2, i32 0, i1 true" : "i32 0, i32 2, i1 true"
+        @test @filecheck begin
+            @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $trailer)"
+            @check "call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p, ptr %e, i32 1, i32 0, $trailer)"
+            @check "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $selected)"
+            ir
+        end
+        @test occursin(r"declare !arg_eltypes ![0-9]+ i32 @air.atomic.global.cmpxchg.weak.i32", ir)
+    end
+
+    # orderings and memory flags on intrinsics need MSL 4.1
+    @test_throws "requires MSL 4.1" lower_metal_atomics("""
+        declare i32 @air.atomic.global.add.s.i32(ptr addrspace(1), i32, i32, i32, i32, i1)
+        define void @f(ptr addrspace(1) %p) {
+          %a = call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, i32 5, i32 2, i32 1, i1 false)
+          ret void
+        }
+        """; metal=v"4.0", air=v"2.8")
+
+    @testset "thread-private memory" begin
+        # atomics on the thread's stack (e.g. from `AllocOpt`) become plain accesses, whatever
+        # their ordering, operation or size (GPUCompiler.jl#934)
+        ir = lower_metal_atomics(kernel("""
+            %slot = alloca i64, align 8
+            %hi = getelementptr inbounds i32, ptr %slot, i64 1
+            store i32 0, ptr %slot, align 4
+            %pair = cmpxchg ptr %slot, i32 0, i32 1 seq_cst monotonic, align 4
+            %fadd = atomicrmw fadd ptr %hi, float 1.0 seq_cst, align 4
+            %sel = select i1 %c, ptr %slot, ptr %hi
+            %umax = atomicrmw umax ptr %sel, i32 2 acquire, align 4
+            %wide = load atomic i64, ptr %slot seq_cst, align 8
+            store atomic volatile i64 %wide, ptr %slot release, align 8
+            %old = extractvalue { i32, i1 } %pair, 0
+            store i32 %old, ptr addrspace(1) %p
+            """; args="ptr addrspace(1) %p, i1 %c"); metal=v"3.2", air=v"2.7")
+        @test @filecheck begin
+            @check_label "define void @f"
+            # compare-exchange
+            @check "[[OLD:%.+]] = load i32, ptr %slot, align 4"
+            @check_next "[[OK:%.+]] = icmp eq i32 [[OLD]], 0"
+            @check_next "[[NEW:%.+]] = select i1 [[OK]], i32 1, i32 [[OLD]]"
+            @check_next "store i32 [[NEW]], ptr %slot, align 4"
+            # read-modify-write, also through a select of stack pointers
+            @check "load float, ptr %hi, align 4"
+            @check_next "fadd float"
+            @check_next "store float"
+            @check "load i32, ptr %sel, align 4"
+            @check_next "icmp ugt i32"
+            @check_next "select i1"
+            @check_next "store i32"
+            # 64-bit loads and stores
+            @check "load i64, ptr %slot, align 8"
+            @check_next "store volatile i64 {{%.+}}, ptr %slot, align 8"
+            @check_not "air.atomic"
+            ir
+        end
+
+        # also through phis of stack pointers
+        ir = lower_metal_atomics(kernel("""
+            %a = alloca i32, align 4
+            %b = alloca i32, align 4
+            br i1 %c, label %l, label %r
+          l:
+            br label %m
+          r:
+            br label %m
+          m:
+            %phi = phi ptr [ %a, %l ], [ %b, %r ]
+            %x = atomicrmw add ptr %phi, i32 1 monotonic, align 4
+            """; args="i1 %c"); metal=v"4.1", air=v"2.9")
+        @test occursin("load i32, ptr %phi", ir)
+        @test !occursin("air.atomic", ir)
+    end
+
+    @testset "unsupported atomics" begin
+        for (body, reason) in (
+                ("%a = atomicrmw add ptr %g, i32 1 monotonic, align 4",
+                 "atomic operation in address space 0"),
+                ("%a = atomicrmw add ptr addrspace(2) %c, i32 1 monotonic, align 4",
+                 "atomic operation in address space 2"),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i64 1 monotonic, align 8",
+                 "64-bit atomic operation"),
+                ("%a = atomicrmw umax ptr addrspace(1) %p, i64 1 monotonic, align 8\nstore i64 %a, ptr addrspace(1) %p",
+                 "64-bit atomic operation"),
+                ("%a = load atomic i64, ptr addrspace(1) %p monotonic, align 8",
+                 "64-bit atomic operation"),
+                ("%a = load atomic ptr, ptr addrspace(1) %p acquire, align 8",
+                 "64-bit atomic operation"),
+                ("%a = atomicrmw fadd ptr addrspace(1) %p, double 1.0 monotonic, align 8",
+                 "64-bit atomic operation"),
+                ("%a = atomicrmw add ptr addrspace(3) %t, i64 1 monotonic, align 8",
+                 "64-bit atomic operation"),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 2",
+                 "misaligned atomic operation"),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"agent\") monotonic, align 4",
+                 "synchronization scope \"agent\""),
+                # a pointer that may not be on the stack
+                ("%s = alloca i32, align 4\n%m = select i1 %b, ptr %s, ptr %g\n%a = atomicrmw add ptr %m, i32 1 monotonic, align 4",
+                 "atomic operation in address space 0"),
+            )
+            errors = lower_metal_atomics(kernel(body; args="ptr addrspace(1) %p, ptr addrspace(3) %t, ptr %g, ptr addrspace(2) %c, i1 %b");
+                                         metal=v"4.1", air=v"2.9")
+            @test occursin(reason, errors)
+        end
+        # without fences, ordered atomics need MSL 4.1; with them, MSL 3.2
+        @test occursin("ordered atomic operation",
+                       lower_metal_atomics(kernel("%a = atomicrmw add ptr addrspace(1) %p, i32 1 seq_cst, align 4");
+                                           metal=v"3.1", air=v"2.6"))
+    end
+
+    @testset "unsupported atomics without validation" begin
+        # the lowering reports them too, instead of selecting AIR intrinsics that don't exist
+        source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"27", metal=v"4.1", air=v"2.9")
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        Context(; opaque_pointers=true) do ctx
+            mod = parse(LLVM.Module, kernel("""
+                %a = atomicrmw add ptr addrspace(1) %p, i64 1 monotonic, align 8
+                %b = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4
+                """))
+            err = try
+                GPUCompiler.lower_atomics!(job, mod)
+                nothing
+            catch err
+                err
+            end
+            @test err isa GPUCompiler.InvalidIRError
+            @test startswith(only(err.errors)[1], "64-bit atomic operation")
+        end
+
+        # e.g. when reflecting, which compiles without validation
+        function kernel64(p::Core.LLVMPtr{Int64,1})
+            Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int64}, p), 1, :monotonic)
+            return
+        end
+        source = methodinstance(typeof(kernel64), Tuple{Core.LLVMPtr{Int64,1}},
+                                Base.get_world_counter())
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        @test occursin("store atomic i64", sprint(io -> GPUCompiler.code_llvm(io, job)))
+        @test_throws GPUCompiler.InvalidIRError GPUCompiler.code_native(devnull, job)
+    end
+
+    # end-to-end, from Julia code emitting LLVM atomics (like UnsafeAtomics does), which also
+    # exercises typed pointers on Julia versions that still use them
+    mod = @eval module $(gensym())
+        using LLVM, LLVM.Interop
+        @generated function atomic_rmw(ptr::Core.LLVMPtr{T,A}, val::T, ::Val{op}) where {T,A,op}
+            @dispose ctx=Context() begin
+                T_val = convert(LLVMType, T)
+                T_ptr = convert(LLVMType, ptr)
+                f, _ = create_function(T_val, [T_ptr, T_val])
+                @dispose builder=IRBuilder() begin
+                    position!(builder, BasicBlock(f, "entry"))
+                    typed_ptr = bitcast!(builder, parameters(f)[1], LLVM.PointerType(T_val, A))
+                    rv = atomic_rmw!(builder, op, typed_ptr, parameters(f)[2],
+                                     LLVM.API.LLVMAtomicOrderingSequentiallyConsistent,
+                                     SyncScope("device"))
+                    ret!(builder, rv)
+                end
+                call_function(f, T, Tuple{Core.LLVMPtr{T,A},T}, :ptr, :val)
+            end
+        end
+        function kernel(p::Core.LLVMPtr{Int32,1}, b::Core.LLVMPtr{UInt8,1},
+                        f::Core.LLVMPtr{Float32,1})
+            x = atomic_rmw(p, Int32(1), Val(LLVM.API.LLVMAtomicRMWBinOpAdd))
+            y = atomic_rmw(b, UInt8(1), Val(LLVM.API.LLVMAtomicRMWBinOpAdd))
+            z = atomic_rmw(f, 1f0, Val(LLVM.API.LLVMAtomicRMWBinOpFMax))
+            unsafe_store!(p, x + y + reinterpret(Int32, z))
+            return
+        end
+    end
+    @testset "end-to-end (Metal $metal, AIR $air)" for (metal, air) in targets
+        source = methodinstance(typeof(mod.kernel),
+                                Tuple{Core.LLVMPtr{Int32,1},Core.LLVMPtr{UInt8,1},
+                                      Core.LLVMPtr{Float32,1}},
+                                Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"27", metal, air)
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        llvm = sprint(io -> GPUCompiler.code_llvm(io, job; dump_module=true))
+        @test occursin("atomicrmw add", llvm)
+        @test occursin("atomicrmw fmax", llvm)
+        asm = sprint(io -> GPUCompiler.code_native(io, job; dump_module=true))
+        @test occursin("@air.atomic.global.add.s.i32", asm)
+        @test occursin("@air.atomic.global.cmpxchg.weak.i32", asm)
+        @test occursin("@air.atomic.fence", asm) == (metal < v"4.1")
+        @test !occursin(r"(atomicrmw|cmpxchg|load atomic|store atomic) ", asm)
+    end
+end
+
+@testset "atomics on thread-private objects" begin
+    # GPUCompiler.jl#934: `AllocOpt` moves a non-escaping object with `@atomic` fields to the
+    # stack, keeping its compare-exchange loops, which Metal cannot express. From Julia 1.13,
+    # `@atomic` modifications are calls to `julia.atomicmodify`, which `AllocOpt` treats as
+    # an escape, so the object stays on the heap (the "thread-private memory" testset covers
+    # the lowering on every version).
+    @static if VERSION < v"1.13-"
+        mod = @eval module $(gensym())
+            mutable struct Acc
+                @atomic n::Int32
+                @atomic x::Float32
+            end
+            function kernel(out::Core.LLVMPtr{Float32,1}, x::Float32)
+                acc = Acc(0, 0f0)
+                @atomic acc.n += Int32(1)
+                @atomic acc.x += x
+                unsafe_store!(out, (@atomic acc.n) + (@atomic acc.x))
+                return
+            end
+        end
+        source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Float32,1}, Float32},
+                                Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"15", metal=v"3.2", air=v"2.7")
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        @test @filecheck begin
+            @check "alloca"
+            @check "cmpxchg"
+            GPUCompiler.code_llvm(job; dump_module=true)
+        end
+        @test @filecheck begin
+            @check_not "cmpxchg"
+            @check_not "air.atomic"
+            GPUCompiler.code_native(job; dump_module=true)
+        end
     end
 end
 
 @testset "fence lowering" begin
     orders = [("acquire", 2), ("release", 3), ("acq_rel", 4), ("seq_cst", 5)]
     scopes = [("", 2), ("syncscope(\"singlethread\") ", 0),
-              ("syncscope(\"workgroup\") ", 2),
+              ("syncscope(\"workgroup\") ", 1),
               (raw"syncscope(\"fence acquire\22\5C\0A\") ", 2)]
     metadata = ("", ", !dbg !3, !annotation !4")
     fences_ir = join(["fence $scope$order$md" for (order, _) in orders
@@ -1915,10 +2533,22 @@ end
         end
     end
 
+    # scopes without an MSL equivalent are rejected, not guessed
+    Context() do ctx
+        mod = parse(LLVM.Module, """
+            define void @f() {
+              fence syncscope("block") seq_cst
+              ret void
+            }
+            """)
+        errors = GPUCompiler.validate_ir(fence_job(v"4.1"), mod)
+        @test only(errors)[1] == "fence with synchronization scope \"block\""
+    end
+
     # end-to-end: Julia's `atomic_fence` intrinsic must not reach the AIR as a bare `fence`
     # (Julia 1.14 added a syncscope argument to the intrinsic, JuliaLang/julia#60311)
-    function kernel(p::Core.LLVMPtr{Int,1})
-        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int}, p), 1, :monotonic)
+    function kernel(p::Core.LLVMPtr{Int32,1})
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int32}, p), Int32(1), :monotonic)
         @static if VERSION >= v"1.14.0-DEV.1371"
             Core.Intrinsics.atomic_fence(:release, :system)
         else
@@ -1926,7 +2556,7 @@ end
         end
         return
     end
-    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int,1}}, Base.get_world_counter())
+    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int32,1}}, Base.get_world_counter())
     target = MetalCompilerTarget(; macos=v"27", metal=v"4.1", air=v"2.9")
     config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
     job = CompilerJob(source, config)

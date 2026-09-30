@@ -322,26 +322,124 @@ end
     end
 end
 
-@testset "atomic demotion" begin
-    # Julia's `unordered` heap-reference accesses and `release` type-tag stores cannot be
-    # expressed in SPIR-V when they involve pointers (OpAtomicLoad/OpAtomicStore take scalars
-    # only): the translator would emit an invalid pointer-typed atomic. They carry no meaning
-    # without a device GC, so `demote_atomics!` turns them into plain accesses.
+@testset "exception allocations" begin
+    # a thrown exception's construction is dead once `throw` is lowered, but it used to survive
+    # (e.g. as an un-inlined constructor call), allocating through the device allocator, with
+    # Julia's GC orderings on the stores into it, which SPIR-V cannot express for pointers
+    # (#924)
     mod = @eval module $(gensym())
-        function kernel(p::Ptr{Ptr{Int}}, q::Ptr{Ptr{Int}})
-            x = Core.Intrinsics.atomic_pointerref(p, :unordered)
-            Core.Intrinsics.atomic_pointerset(q, x, :unordered)
-            y = Core.Intrinsics.atomic_pointerref(p, :acquire)
-            Core.Intrinsics.atomic_pointerset(q, y, :release)
+        using ..GPUCompiler
+        import ..ExternalAllocatorRuntime
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = ExternalAllocatorRuntime
+        GPUCompiler.isintrinsic(job::CompilerJob{SPIRVCompilerTarget,Params}, fn::String) =
+            fn == "test_malloc" ||
+            @invoke GPUCompiler.isintrinsic(job::CompilerJob{SPIRVCompilerTarget}, fn::String)
+
+        # `InexactError` boxes its arguments in a tuple
+        function bool(out, x)
+            unsafe_store!(out, Bool(x))
+            return
+        end
+
+        # `DomainError` with a lazily-built message
+        function domain(out, x)
+            x < 0 && throw(DomainError(x, LazyString("log1p was called with ", x)))
+            unsafe_store!(out, x)
             return
         end
     end
-    tt = Tuple{Ptr{Ptr{Int}}, Ptr{Ptr{Int}}}
+
+    for (f, tt) in ((mod.bool, Tuple{Core.LLVMPtr{Bool,1},Int}),
+                    (mod.domain, Tuple{Core.LLVMPtr{Float32,1},Float32}))
+        source = methodinstance(typeof(f), tt, Base.get_world_counter())
+        target = SPIRVCompilerTarget(; backend, validate=true)
+        job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
+
+        @test @filecheck implicit_check_not=["{{(load|store) atomic|atomicrmw|cmpxchg}}", "call {{.*}}@test_malloc"] begin
+            @check "define spir_kernel void @_Z"
+            GPUCompiler.code_llvm(stdout, job; dump_module=true)
+        end
+    end
+end
+
+@testset "unsupported allocations" begin
+    # without a garbage collector, device code can only allocate objects that do not
+    # reference other objects
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..ExternalAllocatorRuntime
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = ExternalAllocatorRuntime
+        GPUCompiler.isintrinsic(job::CompilerJob{SPIRVCompilerTarget,Params}, fn::String) =
+            fn == "test_malloc" ||
+            @invoke GPUCompiler.isintrinsic(job::CompilerJob{SPIRVCompilerTarget}, fn::String)
+
+        mutable struct Counter
+            x::Int
+        end
+        mutable struct Holder
+            c::Counter
+        end
+        @noinline bump!(c::Counter) = (c.x += 1; return)
+        @noinline bump!(h::Holder) = bump!(h.c)
+
+        # an escaping object with plain data
+        function plain(out, x)
+            c = Counter(x)
+            bump!(c)
+            unsafe_store!(out, c.x)
+            return
+        end
+
+        # one that references another object
+        function nested(out, x)
+            h = Holder(Counter(x))
+            bump!(h)
+            unsafe_store!(out, h.c.x)
+            return
+        end
+    end
+    function compile(f)
+        source = methodinstance(typeof(f), Tuple{Core.LLVMPtr{Int,1},Int},
+                                Base.get_world_counter())
+        target = SPIRVCompilerTarget(; backend, validate=true)
+        job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
+        JuliaContext() do ctx
+            GPUCompiler.compile(:llvm, job)
+        end
+    end
+
+    @test compile(mod.plain) isa Tuple
+    @test_throws_message(InvalidIRError, compile(mod.nested)) do msg
+        occursin("unsupported allocation of an object with references", msg) &&
+        occursin("Holder)", msg) && occursin("[2] nested", msg)
+    end
+end
+
+@testset "LLVM atomics" begin
+    # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`, Atomix' `get`/`set!`) must
+    # reach the back-end, while Julia's `unordered` heap-reference accesses, which SPIR-V
+    # cannot express when they are of pointers, become plain ones
+    mod = @eval module $(gensym())
+        function kernel(p::Ptr{Int32}, q::Ptr{Int32})
+            y = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Ptr{Int32}}, p), :unordered)
+            Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Ptr{Int32}}, q), y, :unordered)
+            x = Core.Intrinsics.atomic_pointerref(p, :acquire)
+            Core.Intrinsics.atomic_pointerset(q, x, :release)
+            return
+        end
+    end
+    tt = Tuple{Ptr{Int32}, Ptr{Int32}}
 
     @test @filecheck begin
         @check_label "define spir_kernel void @_Z6kernel"
-        @check_not "load atomic"
-        @check_not "store atomic"
+        @check_not "unordered"
+        @check "load atomic i32"
+        @check_same "acquire"
+        @check "store atomic i32"
+        @check_same "release"
+        @check_not "unordered"
         @check "ret void"
         SPIRV.code_llvm(mod.kernel, tt; backend, kernel=true)
     end
@@ -350,8 +448,8 @@ end
     @test @filecheck begin
         @check "OpEntryPoint Kernel %[[KERNEL:[^ ]+]]"
         @check "%[[KERNEL]] = OpFunction %void None"
-        @check_not "OpAtomicLoad"
-        @check_not "OpAtomicStore"
+        @check "OpAtomicLoad"
+        @check "OpAtomicStore"
         SPIRV.code_native(mod.kernel, tt; backend, kernel=true)
     end
 end

@@ -910,6 +910,118 @@ end
     end
 end
 
+@testset "Julia IR passes" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+
+        # a back-end adding a pass that records the functions it sees
+        const seen = Symbol[]
+        function record!(interp, opt, ir)
+            push!(seen, opt.linfo.def.name)
+            return ir
+        end
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        module Runtime end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = Runtime
+        GPUCompiler.julia_ir_passes(job::CompilerJob{<:Any,Params}) =
+            (@invoke(GPUCompiler.julia_ir_passes(job::CompilerJob))..., record!)
+
+        @noinline callee(x) = x + 1
+        caller(x) = callee(x) * 2
+    end
+
+    source = methodinstance(typeof(mod.caller), Tuple{Int}, Base.get_world_counter())
+    config = CompilerConfig(NativeCompilerTarget(), mod.Params(); kernel=false)
+    GPUCompiler.code_typed(CompilerJob(source, config))
+    @test :caller in mod.seen
+    @test :callee in mod.seen
+end
+
+@testset "throw arguments" begin
+    mod = @eval module $(gensym())
+        # an exception object that Julia can prove removable
+        removable(x) = x > 1 ? throw(InexactError(:removable, Int, x)) : x
+        # a message with side effects, which have to stay
+        eager(x) = x > 1 ? throw(ArgumentError(string("bad value ", x))) : x
+    end
+    # resolve callees like the pass does (on Julia 1.14, they aren't `GlobalRef`s anymore)
+    CC = Core.Compiler
+    is_throw(ci, stmt) = Meta.isexpr(stmt, :call) &&
+        CC.singleton_type(CC.argextype(stmt.args[1], ci, CC.VarState[])) === Core.throw
+    throws(ci) = filter(stmt -> is_throw(ci, stmt), ci.code)
+    invokes(ci, name) = count(stmt -> Meta.isexpr(stmt, :invoke) &&
+                                      occursin(name, string(stmt.args[2])), ci.code)
+
+    # with the Julia runtime, exceptions are thrown as usual
+    ci, _ = only(Native.code_typed(mod.removable, Tuple{Int}; jlruntime=true))
+    @test !isempty(throws(ci))
+    @test all(stmt -> stmt.args[2] isa Core.SSAValue, throws(ci))
+    @test invokes(ci, "InexactError") == 1
+
+    # without it, the thrown value is unused, and so is its construction
+    ci, _ = only(Native.code_typed(mod.removable, Tuple{Int}; jlruntime=false))
+    @test !isempty(throws(ci))
+    @test all(stmt -> stmt.args[2] === nothing, throws(ci))
+    @test invokes(ci, "InexactError") == 0
+
+    # unless the construction isn't known to be free of side effects
+    ci, _ = only(Native.code_typed(mod.eager, Tuple{Int}; jlruntime=false))
+    @test !isempty(throws(ci))
+    @test all(stmt -> stmt.args[2] === nothing, throws(ci))
+    @test invokes(ci, "string") + invokes(ci, "print_to_string") >= 1
+end
+
+@testset "throw arguments: dead code" begin
+    mod = @eval module $(gensym())
+        # a constructor with a side effect
+        struct Logged <: Exception
+            code::Int
+            @noinline function Logged(p::Ptr{Int}, code::Int)
+                unsafe_store!(p, code)
+                new(code)
+            end
+        end
+        function side_effect(p::Ptr{Int}, x::Int)
+            x > 1 && throw(Logged(p, x))
+            return x
+        end
+
+        # exception values swapped around a loop (a dead phi cycle, only removed by ADCE)
+        function loop_carried(x::Int)
+            a = InexactError(:loop_carried, Int, x)
+            b = InexactError(:loop_carried, Int, -x)
+            i = 0
+            while i < x
+                i += 1
+                a, b = b, a
+            end
+            x > 100 && throw(a)
+            return i
+        end
+
+        # a `@nospecialize` helper, whose inferred source Julia < 1.12 used to discard
+        @noinline throw_nospecialize(@nospecialize(x)) = throw(ArgumentError("nospecialize"))
+        nospecialize(x::Int) = x > 1 ? throw_nospecialize(x) : x
+    end
+    invokes(ci, name) = count(stmt -> Meta.isexpr(stmt, :invoke) &&
+                                      occursin(name, string(stmt.args[2])), ci.code)
+
+    ci, _ = only(Native.code_typed(mod.side_effect, Tuple{Ptr{Int}, Int}; jlruntime=false))
+    @test invokes(ci, "Logged") == 1
+
+    ci, _ = only(Native.code_typed(mod.loop_carried, Tuple{Int}; jlruntime=false))
+    @test invokes(ci, "InexactError") == 0
+    @test !any(stmt -> stmt isa Core.PhiNode &&
+                       any(v -> v isa Core.SSAValue && ci.ssavaluetypes[v.id] <: InexactError,
+                           stmt.values), ci.code)
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_nospecialize_[0-9]+}}"
+        @check_not "ArgumentError"
+        Native.code_llvm(mod.nospecialize, Tuple{Int}; jlruntime=false, dump_module=true)
+    end
+end
+
 @testset "function attributes" begin
     mod = @eval module $(gensym())
         @inline function convergent_barrier()
