@@ -2196,9 +2196,11 @@ end
             """); metal, air)
         @test @filecheck begin
             @check_label "define void @f"
-            # add: masked compare-exchange loop on the containing word
+            # add: masked compare-exchange loop on the containing word, whose address is
+            # computed with pointer arithmetic (AIR has no `llvm.ptrmask`)
             @check "ptrtoint ptr addrspace(1) %p to i64"
             @check "and i64 {{.+}}, 3"
+            @check "getelementptr i8, ptr addrspace(1) %p, i64 {{%.+}}"
             @check "atomicrmw.start"
             @check "atomic.global.cmpxchg.weak.i32"
             # or: a word-sized or, with the value shifted into place
@@ -2220,6 +2222,7 @@ end
             @check_not "atomicrmw {{[a-z]+}} ptr"
             ir
         end
+        @test !occursin(r"ptrmask|inttoptr", ir)
     end
 
     @testset "64-bit min/max (Metal $metal, AIR $air)" for (metal, air) in targets

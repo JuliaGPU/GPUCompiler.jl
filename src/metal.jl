@@ -265,9 +265,8 @@ function demote_boxed_constants!(mod::LLVM.Module)
         function slot(f::LLVM.Function)
             get!(slots, f) do
                 @dispose builder=IRBuilder() begin
-                    position!(builder, LLVM.before(first(f.entry.instructions)))
-                    ptr = alloca!(builder, boxty)
-                    ptr.alignment = align
+                    position!(builder, LLVM.at_begin(f.entry))
+                    ptr = alloca!(builder, boxty; align)
                     store!(builder, init, ptr)
                     ptr
                 end
@@ -731,7 +730,8 @@ end
 # - operations that AIR cannot express are rewritten in terms of ones it can
 #   (see `metal_atomic_action`): floating-point loads, stores and exchanges are cast to integers,
 #   8- and 16-bit operations become masked operations on the containing 32-bit word, and
-#   read-modify-write operations without an AIR equivalent become compare-exchange loops;
+#   read-modify-write operations without an AIR equivalent become compare-exchange loops
+#   (using LLVM.jl's copies of `AtomicExpand`'s expansions);
 # - the remaining operations are selected to `air.atomic.*` calls (`select_atomic!`), in the
 #   form the target's AIR and MSL versions use.
 #
@@ -782,11 +782,11 @@ const AIR_ATOMICRMW_OPS = let Op = LLVM.AtomicRMWBinOp
          Op.UMax => "max.u", Op.UMin => "min.u", Op.FAdd => "add", Op.FSub => "sub")
 end
 
-# read-modify-write operations we can expand to compare-exchange loops
-const EXPANDABLE_ATOMICRMW_OPS = let Op = LLVM.AtomicRMWBinOp
-    (Op.Nand, Op.FMax, Op.FMin, Op.FMaximum, Op.FMinimum, Op.UIncWrap, Op.UDecWrap,
-     Op.USubCond, Op.USubSat)
-end
+# read-modify-write operations we expand to compare-exchange loops: all others, which
+# `expand_to_cmpxchg!` computes like LLVM does (operations the LLVM in use doesn't support
+# can't occur in the IR)
+const EXPANDABLE_ATOMICRMW_OPS =
+    filter(op -> !haskey(AIR_ATOMICRMW_OPS, op), instances(LLVM.AtomicRMWBinOp.T))
 
 function atomic_bits(T::LLVMType)
     T isa LLVM.IntegerType && return Int(T.width)
@@ -895,286 +895,88 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
     return :select
 end
 
-# Build an expansion that needs control flow as an internal, always-inlined function, and
-# replace `inst` with a call to it: LLVM.jl cannot split basic blocks. `body(builder, f,
-# params...)` emits the function's code and returns its result, and the inliner that runs at
-# the end of `lower_air!` puts the code in place.
-function outline_atomic!(body, mod::LLVM.Module, inst::LLVM.Instruction,
-                         args::Vector{<:LLVM.Value})
-    T_ret = inst.value_type
-    ft = LLVM.FunctionType(T_ret, map(arg -> arg.value_type, args))
-    f = LLVM.Function(mod, "julia.air.atomic_expansion", ft)
-    f.linkage = LLVM.Linkage.Internal
-    push!(f.function_attributes, EnumAttribute(:alwaysinline))
-    @dispose builder=IRBuilder() begin
-        position!(builder, LLVM.at_end(BasicBlock(f, "entry")))
-        result = body(builder, f, f.parameters...)
-        T_ret == LLVM.VoidType() ? ret!(builder) : ret!(builder, result)
-
-        position!(builder, LLVM.before(inst))
-        builder.debug_location = inst.debug_location
-        call = call!(builder, ft, f, args)
-        T_ret == LLVM.VoidType() || replace_uses!(inst, call)
-    end
-    erase!(inst)
-    return
-end
-
-function set_atomic!(inst::LLVM.Instruction, order::LLVM.AtomicOrdering.T, scope::SyncScope,
-                     volatile::Bool=false)
-    inst.ordering = order
-    inst.syncscope = scope
-    inst.volatile = volatile
-    return inst
-end
-
 # Replace an atomic operation on the thread's own memory (see `is_thread_private`) by plain
 # accesses. Its ordering and scope don't matter either: no other thread can observe the memory
 # it accesses, so it cannot synchronize with any.
 function demote_private_atomic!(inst::LLVM.Instruction)
-    ptr = inst.pointer_operand
-    T = atomic_value_type(inst)
-    volatile = inst.volatile
-    @dispose builder=IRBuilder() begin
-        position!(builder, LLVM.before(inst))
-        builder.debug_location = inst.debug_location
-        function plain_load()
-            ld = load!(builder, T, ptr)
-            ld.alignment = inst.alignment
-            ld.volatile = volatile
-            ld
-        end
-        function plain_store(val)
-            st = store!(builder, val, ptr)
-            st.alignment = inst.alignment
-            st.volatile = volatile
-            st
-        end
-        if inst isa LLVM.LoadInst
-            replace_uses!(inst, plain_load())
-        elseif inst isa LLVM.StoreInst
-            plain_store(inst.value_operand)
-        elseif inst isa LLVM.AtomicRMWInst
-            old = plain_load()
-            plain_store(atomicrmw_value!(builder, inst.binop, old, inst.value_operand))
-            replace_uses!(inst, old)
-        else
-            # compare-exchange: store the new value if the old one matches, else the old one
-            cmp, new = inst.operands[2:3]
-            old = plain_load()
-            success = icmp!(builder, LLVM.IntPredicate.EQ, old, cmp)
-            plain_store(select!(builder, success, new, old))
-            result = insert_value!(builder, UndefValue(inst.value_type), old, 0)
-            replace_uses!(inst, insert_value!(builder, result, success, 1))
-        end
+    if inst isa LLVM.LoadInst || inst isa LLVM.StoreInst
+        # (a plain access has the default, system scope)
+        inst.syncscope = SyncScope("system")
+        inst.ordering = LLVM.AtomicOrdering.NotAtomic
+    else
+        lower_atomic!(inst)
     end
-    erase!(inst)
     return
 end
 
-# Emit a loop that atomically replaces the 32-bit word at `ptr` by `update(builder, word)`
-# using compare-exchange, returning the word the successful exchange replaced
-# (`AtomicExpand`'s `insertRMWCmpXchgLoop`).
-function emit_cmpxchg_loop!(update, builder::IRBuilder, f::LLVM.Function, ptr::LLVM.Value,
-                            order::LLVM.AtomicOrdering.T, scope::SyncScope, volatile::Bool)
-    T_word = LLVM.Int32Type()
-    entry = builder.insert_block
-    init = load!(builder, T_word, ptr)
-    init.alignment = 4
-    set_atomic!(init, LLVM.AtomicOrdering.Monotonic, scope, volatile)
-    loop = BasicBlock(f, "atomicrmw.start")
-    done = BasicBlock(f, "atomicrmw.end")
-    br!(builder, loop)
+# The ordering to lower an atomic operation with: without ordered atomics (MSL < 4.1), the
+# fences `insert_atomic_fences!` added provide the ordering, and the operation is relaxed.
+lowered_ordering(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                 order::LLVM.AtomicOrdering.T) =
+    job.config.target.metal < v"4.1" ? LLVM.AtomicOrdering.Monotonic : order
 
-    position!(builder, LLVM.at_end(loop))
-    loaded = phi!(builder, T_word, "loaded")
-    pair = atomic_cmpxchg!(builder, ptr, loaded, update(builder, loaded), order,
-                           strongest_failure_ordering(order), scope)
-    pair.volatile = volatile
-    word = extract_value!(builder, pair, 0)
-    br!(builder, extract_value!(builder, pair, 1), done, loop)
-    push!(loaded.incoming, (init, entry))
-    push!(loaded.incoming, (word, loop))
-
-    position!(builder, LLVM.at_end(done))
-    return word
-end
-
-# The 32-bit word containing an 8- or 16-bit value at `ptr`, and the position of the value
-# in it (`AtomicExpand`'s `createMaskInstrs`; Metal is little-endian). Like `AtomicExpand`,
-# this assumes that whole word can be accessed: true for device buffers, which Metal allocates
-# in pages, and for threadgroup arrays, which Metal.jl aligns and pads to 4 bytes.
-function partword_layout!(builder::IRBuilder, ptr::LLVM.Value, bits::Int)
-    as = ptr.value_type.addrspace
-    T_i8, T_i32, T_i64 = LLVM.Int8Type(), LLVM.Int32Type(), LLVM.Int64Type()
-    bytes = bitcast!(builder, ptr, LLVM.PointerType(T_i8, as))
-    offset = and!(builder, ptrtoint!(builder, bytes, T_i64), ConstantInt(T_i64, 3))
-    word = gep!(builder, T_i8, bytes, [neg!(builder, offset)])
-    word = bitcast!(builder, word, LLVM.PointerType(T_i32, as))
-    shift = shl!(builder, trunc!(builder, offset, T_i32), ConstantInt(T_i32, 3))
-    mask = shl!(builder, ConstantInt(T_i32, (1 << bits) - 1), shift)
-    return (; word, shift, mask, inv_mask=not!(builder, mask))
-end
-partword_extract!(builder, layout, word, T) =
-    trunc!(builder, lshr!(builder, word, layout.shift), T)
-partword_insert!(builder, layout, word, val) =
-    or!(builder, and!(builder, word, layout.inv_mask),
-        shl!(builder, zext!(builder, val, LLVM.Int32Type()), layout.shift))
-
-# The operands of an atomic operation that its expansions need, with the ordering it is lowered
-# with (see `lowered_ordering`).
-function atomic_operands(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+# Give the operation the ordering it is lowered with, before expanding it into other atomics.
+function lower_ordering!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
                          inst::LLVM.Instruction)
-    T = atomic_value_type(inst)
-    return (; ptr=inst.pointer_operand, T, bits=atomic_bits(T),
-              op=inst isa LLVM.AtomicRMWInst ? inst.binop : nothing,
-              order=lowered_ordering(job, atomic_ordering(inst)), scope=inst.syncscope,
-              volatile=inst.volatile)
+    if inst isa LLVM.AtomicCmpXchgInst
+        inst.success_ordering = lowered_ordering(job, inst.success_ordering)
+        inst.failure_ordering = lowered_ordering(job, inst.failure_ordering)
+    else
+        inst.ordering = lowered_ordering(job, inst.ordering)
+    end
+    return inst
 end
 
 # Cast a floating-point load, store or exchange to an integer one, returning the new operation.
-function cast_atomic_to_int!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                             inst::LLVM.Instruction)
-    (; ptr, T, bits, order, scope, volatile) = atomic_operands(job, inst)
-    T_int = LLVM.IntType(bits)
-    @dispose builder=IRBuilder() begin
-        position!(builder, LLVM.before(inst))
-        builder.debug_location = inst.debug_location
-        int_ptr = bitcast!(builder, ptr, LLVM.PointerType(T_int, ptr.value_type.addrspace))
-        new = if inst isa LLVM.LoadInst
-            ld = load!(builder, T_int, int_ptr)
-            ld.alignment = inst.alignment
-            set_atomic!(ld, order, scope, volatile)
-            replace_uses!(inst, bitcast!(builder, ld, T))
-            ld
-        elseif inst isa LLVM.StoreInst
-            st = store!(builder, bitcast!(builder, inst.value_operand, T_int), int_ptr)
-            st.alignment = inst.alignment
-            set_atomic!(st, order, scope, volatile)
-        else
-            rmw = atomic_rmw!(builder, LLVM.AtomicRMWBinOp.Xchg, int_ptr,
-                              bitcast!(builder, inst.value_operand, T_int), order, scope)
-            rmw.alignment = inst.alignment
-            rmw.volatile = volatile
-            replace_uses!(inst, bitcast!(builder, rmw, T))
-            rmw
-        end
-        erase!(inst)
-        return new
-    end
-end
+cast_atomic_to_int!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                    inst::LLVM.Instruction) =
+    cast_atomic_to_integer!(lower_ordering!(job, inst))
 
-# Expand a 32-bit read-modify-write operation to a compare-exchange loop on the word.
-function expand_to_cmpxchg_loop!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                                 mod::LLVM.Module, inst::LLVM.Instruction)
-    (; ptr, T, op, order, scope, volatile) = atomic_operands(job, inst)
-    T_i32 = LLVM.Int32Type()
-    outline_atomic!(mod, inst, [ptr, inst.value_operand]) do builder, f, ptr, val
-        word_ptr = bitcast!(builder, ptr, LLVM.PointerType(T_i32, ptr.value_type.addrspace))
-        word = emit_cmpxchg_loop!(builder, f, word_ptr, order, scope, volatile) do builder, loaded
-            old = bitcast!(builder, loaded, T)
-            bitcast!(builder, atomicrmw_value!(builder, op, old, val), T_i32)
-        end
-        bitcast!(builder, word, T)
-    end
-    return
-end
+# Expand a 32-bit read-modify-write operation to a compare-exchange loop.
+expand_to_cmpxchg_loop!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                        inst::LLVM.AtomicRMWInst) =
+    expand_to_cmpxchg!(lower_ordering!(job, inst))
 
-# 8- and 16-bit atomics as masked operations on the containing 32-bit word
-# (`AtomicExpand`'s `expandPartwordAtomicRMW` and `expandPartwordCmpXchg`)
+# 8- and 16-bit atomics as masked operations on the containing 32-bit word, like
+# `AtomicExpand` does. Like `AtomicExpand`, this assumes that the whole word can be accessed:
+# true for device buffers, which Metal allocates in pages, and for threadgroup arrays, which
+# Metal.jl aligns and pads to 4 bytes.
 function expand_partword_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                                 mod::LLVM.Module, inst::LLVM.Instruction)
-    (; ptr, T, bits, op, order, scope, volatile) = atomic_operands(job, inst)
-    T_i32 = LLVM.Int32Type()
-
-    # operations that don't need a loop: loads, and bitwise operations that leave the rest
-    # of the word unchanged
-    if inst isa LLVM.LoadInst ||
-       op in (LLVM.AtomicRMWBinOp.And, LLVM.AtomicRMWBinOp.Or, LLVM.AtomicRMWBinOp.Xor)
+                                 inst::LLVM.Instruction)
+    lower_ordering!(job, inst)
+    if inst isa LLVM.LoadInst
+        # a word-sized load, shifted
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.before(inst))
-            builder.debug_location = inst.debug_location
-            layout = partword_layout!(builder, ptr, bits)
-            word = if inst isa LLVM.LoadInst
-                ld = load!(builder, T_i32, layout.word)
-                ld.alignment = 4
-                set_atomic!(ld, order, scope, volatile)
-            else
-                val = shl!(builder, zext!(builder, inst.value_operand, T_i32), layout.shift)
-                op == LLVM.AtomicRMWBinOp.And && (val = or!(builder, val, layout.inv_mask))
-                rmw = atomic_rmw!(builder, op, layout.word, val, order, scope)
-                rmw.alignment = 4
-                rmw.volatile = volatile
-                rmw
-            end
-            replace_uses!(inst, partword_extract!(builder, layout, word, T))
+            mask = partword_mask!(builder, inst.value_type, inst.pointer_operand;
+                                  align=inst.alignment, word_size=4)
+            word = load!(builder, mask.word_type, mask.aligned_addr)
+            word.alignment = mask.aligned_addr_alignment
+            word.ordering = inst.ordering
+            word.syncscope = inst.syncscope
+            word.volatile = inst.volatile
+            copy_atomic_metadata!(word, inst)
+            replace_uses!(inst, extract_masked_value!(builder, word, mask))
         end
         erase!(inst)
         return
-    end
-
-    if inst isa LLVM.AtomicCmpXchgInst
-        cmp, new = inst.operands[2:3]
-        success = lowered_ordering(job, inst.success_ordering)
-        failure = lowered_ordering(job, inst.failure_ordering)
-        T_result = inst.value_type
-        outline_atomic!(mod, inst, [ptr, cmp, new]) do builder, f, ptr, cmp, new
-            layout = partword_layout!(builder, ptr, bits)
-            new_shifted = shl!(builder, zext!(builder, new, T_i32), layout.shift)
-            cmp_shifted = shl!(builder, zext!(builder, cmp, T_i32), layout.shift)
-            init = load!(builder, T_i32, layout.word)
-            init.alignment = 4
-            set_atomic!(init, LLVM.AtomicOrdering.Monotonic, scope, volatile)
-            init_rest = and!(builder, init, layout.inv_mask)
-            entry = builder.insert_block
-            loop = BasicBlock(f, "partword.cmpxchg.loop")
-            failed = BasicBlock(f, "partword.cmpxchg.failure")
-            done = BasicBlock(f, "partword.cmpxchg.end")
-            br!(builder, loop)
-
-            # retry as long as the exchange only failed because of the rest of the word
-            position!(builder, LLVM.at_end(loop))
-            rest = phi!(builder, T_i32, "rest")
-            pair = atomic_cmpxchg!(builder, layout.word, or!(builder, rest, cmp_shifted),
-                                   or!(builder, rest, new_shifted), success, failure, scope)
-            pair.volatile = volatile
-            word = extract_value!(builder, pair, 0)
-            ok = extract_value!(builder, pair, 1)
-            br!(builder, ok, done, failed)
-
-            position!(builder, LLVM.at_end(failed))
-            new_rest = and!(builder, word, layout.inv_mask)
-            br!(builder, icmp!(builder, LLVM.IntPredicate.NE, rest, new_rest), loop, done)
-            push!(rest.incoming, (init_rest, entry))
-            push!(rest.incoming, (new_rest, failed))
-
-            position!(builder, LLVM.at_end(done))
-            result = insert_value!(builder, UndefValue(T_result),
-                                   partword_extract!(builder, layout, word, T), 0)
-            insert_value!(builder, result, ok, 1)
+    elseif inst isa LLVM.StoreInst
+        # an exchange whose result is unused (`AtomicExpand`'s `expandAtomicStoreToXChg`),
+        # which needs at least a monotonic ordering
+        order = inst.ordering == LLVM.AtomicOrdering.Unordered ?
+                LLVM.AtomicOrdering.Monotonic : inst.ordering
+        rmw = @dispose builder=IRBuilder() begin
+            position!(builder, LLVM.before(inst))
+            atomic_rmw!(builder, LLVM.AtomicRMWBinOp.Xchg, inst.pointer_operand,
+                        inst.value_operand, order, inst.syncscope)
         end
-        return
+        rmw.alignment = inst.alignment
+        rmw.volatile = inst.volatile
+        copy_atomic_metadata!(rmw, inst)
+        erase!(inst)
+        inst = rmw
     end
-
-    # everything else becomes a compare-exchange loop on the word; the value may be a
-    # floating-point one, for the arithmetic read-modify-write operations
-    val = inst.value_operand
-    op = something(op, LLVM.AtomicRMWBinOp.Xchg)   # a store is an exchange with an ignored result
-    # compare-exchange needs at least monotonic (like `AtomicExpand`'s `expandAtomicStoreToXChg`)
-    order == LLVM.AtomicOrdering.Unordered && (order = LLVM.AtomicOrdering.Monotonic)
-    is_store = inst isa LLVM.StoreInst
-    T_int = LLVM.IntType(bits)
-    outline_atomic!(mod, inst, [ptr, val]) do builder, f, ptr, val
-        layout = partword_layout!(builder, ptr, bits)
-        word = emit_cmpxchg_loop!(builder, f, layout.word, order, scope,
-                                  volatile) do builder, loaded
-            old = bitcast!(builder, partword_extract!(builder, layout, loaded, T_int), T)
-            new = bitcast!(builder, atomicrmw_value!(builder, op, old, val), T_int)
-            partword_insert!(builder, layout, loaded, new)
-        end
-        is_store ? nothing :
-            bitcast!(builder, partword_extract!(builder, layout, word, T_int), T)
-    end
+    expand_partword!(inst, 4)
     return
 end
 
@@ -1238,12 +1040,6 @@ function insert_trailing_seq_cst_fence!(inst::LLVM.Instruction)
     end
     return true
 end
-
-# The ordering to lower an atomic operation with: without ordered atomics (MSL < 4.1), the
-# fences `insert_atomic_fences!` added provide the ordering, and the operation is relaxed.
-lowered_ordering(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                 order::LLVM.AtomicOrdering.T) =
-    job.config.target.metal < v"4.1" ? LLVM.AtomicOrdering.Monotonic : order
 
 air_atomic_function(mod::LLVM.Module, name::String, ft::LLVM.FunctionType) =
     declare!(mod, name, ft) do
@@ -1314,7 +1110,7 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
             cmp, desired = inst.operands[2:3]
             fn = inst.parent.parent
             expected = @dispose entry_builder=IRBuilder() begin
-                position!(entry_builder, LLVM.before(first(fn.entry.instructions)))
+                position!(entry_builder, LLVM.at_begin(fn.entry))
                 alloca!(entry_builder, T)
             end
             store!(builder, cmp, expected)
@@ -1442,9 +1238,9 @@ function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
             action = metal_atomic_action(job, inst)   # e.g. a half-precision load is partword
         end
         if action === :partword
-            expand_partword_atomic!(job, mod, inst)
+            expand_partword_atomic!(job, inst)
         elseif action === :cmpxchg_loop
-            expand_to_cmpxchg_loop!(job, mod, inst)
+            expand_to_cmpxchg_loop!(job, inst)
         end
     end
 

@@ -18,15 +18,3 @@ atomic_value_type(inst::LLVM.AtomicCmpXchgInst) = inst.operands[2].value_type   
 # the ordering of an atomic memory operation, merging a compare-exchange's orderings
 atomic_ordering(inst::LLVM.AtomicCmpXchgInst) = merged_ordering(inst)
 atomic_ordering(inst::LLVM.Instruction) = inst.ordering
-
-# the value of a read-modify-write operation, like LLVM.jl's `atomic_rmw_value!` (LLVM's
-# `buildAtomicRMWValue`), except for `usub_sat`, which that computes with an `llvm.usub.sat`
-# call that the Metal back-end has no lowering for
-function atomicrmw_value!(builder::IRBuilder, op::LLVM.AtomicRMWBinOp.T, old::LLVM.Value,
-                          val::LLVM.Value)
-    if op == LLVM.AtomicRMWBinOp.USubSat
-        return select!(builder, icmp!(builder, LLVM.IntPredicate.UGE, old, val),
-                       sub!(builder, old, val), ConstantInt(old.value_type, 0))
-    end
-    return atomic_rmw_value!(builder, op, old, val)
-end
