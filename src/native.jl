@@ -15,17 +15,17 @@ llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
 function llvm_machine(target::NativeCompilerTarget)
     triple = llvm_triple(target)
 
-    t = Target(triple=triple)
+    t = LLVM.Target(triple=triple)
 
-    tm = TargetMachine(t, triple, target.cpu, target.features)
-    asm_verbosity!(tm, true)
+    tm = LLVM.TargetMachine(t, triple; target.cpu, target.features)
+    LLVM.asm_verbosity!(tm, true)
 
     return tm
 end
 
 function finish_module!(job::CompilerJob{NativeCompilerTarget}, mod::LLVM.Module, entry::LLVM.Function)
     if job.config.target.llvm_always_inline
-        push!(function_attributes(entry), EnumAttribute("alwaysinline", 0))
+        push!(entry.function_attributes, EnumAttribute("alwaysinline", 0))
     end
 
     return entry

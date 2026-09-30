@@ -187,7 +187,7 @@ function check_ir(job, mod::LLVM.Module, relocs::Relocations=Relocations())
 end
 
 function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Relocations)
-    for f in functions(mod)
+    for f in mod.functions
         check_ir!(job, errors, f, relocs)
     end
 
@@ -198,7 +198,7 @@ function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Reloc
 end
 
 function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Relocations)
-    for bb in blocks(f), inst in instructions(bb)
+    for bb in f.blocks, inst in bb.instructions
         if isa(inst, LLVM.CallInst)
             check_ir!(job, errors, inst, relocs)
         elseif isa(inst, LLVM.LoadInst)
@@ -213,21 +213,21 @@ const libjulia = Ref{Ptr{Cvoid}}(C_NULL)
 
 function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
     bt = backtrace(inst)
-    src = operands(inst)[1]
+    src = inst.operands[1]
     if src isa ConstantExpr
-        if opcode(src) == LLVM.API.LLVMBitCast
-            src = operands(src)[1]
+        if src.opcode == LLVM.API.LLVMBitCast
+            src = src.operands[1]
         end
     end
     if src isa GlobalVariable
-        name = LLVM.name(src)
+        name = src.name
         if startswith(name, "jlplt_")
             try
                 rx = r"jlplt_(.*)_\d+_got"
                 name = match(rx, name).captures[1]
                 push!(errors, (LAZY_FUNCTION, bt, name))
             catch e
-                @safe_debug "Decoding name of PLT entry failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding name of PLT entry failed" inst bb=inst.parent
                 push!(errors, (LAZY_FUNCTION, bt, nothing))
             end
         end
@@ -238,10 +238,10 @@ end
 # the contents of a constant string global, or `nothing`
 function constant_string(val::LLVM.Value)
     while val isa LLVM.ConstantExpr
-        val = first(operands(val))
+        val = first(val.operands)
     end
     val isa LLVM.GlobalVariable || return nothing
-    init = initializer(val)
+    init = val.initializer
     init === nothing && return nothing
     LLVM.API.LLVMIsConstantString(init) == 1 || return nothing
     len = Ref{Csize_t}()
@@ -252,19 +252,19 @@ end
 # Julia's codegen replaces an `llvmcall` of an intrinsic it doesn't know, e.g. one that was
 # removed from LLVM, with a call to `jl_error`, deferring the error to run time.
 function is_unknown_intrinsic_error(call::LLVM.CallInst)
-    dest = called_operand(call)
+    dest = call.called_operand
     dest isa LLVM.Function || return false
-    LLVM.name(dest) in ("jl_error", "ijl_error") || return false
-    args = arguments(call)
+    dest.name in ("jl_error", "ijl_error") || return false
+    args = call.arguments
     length(args) == 1 || return false
     return constant_string(args[1]) == "llvmcall only supports intrinsic calls"
 end
 
 function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Relocations)
     bt = backtrace(inst)
-    dest = called_operand(inst)
+    dest = inst.called_operand
     if isa(dest, LLVM.Function)
-        fn = LLVM.name(dest)
+        fn = dest.name
 
         # some special handling for runtime functions that we don't implement
         if fn == STATIC_ASSERT_MARKER
@@ -275,29 +275,29 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
             push!(errors, (UNSUPPORTED_ALLOCATION, bt, static_assert_message(inst)))
         elseif fn == "jl_get_binding_or_error" || fn == "ijl_get_binding_or_error"
             try
-                m, sym = arguments(inst)
+                m, sym = inst.arguments
                 ref = referenced_object(sym, relocs)
                 ref === nothing && error("Unknown binding")
                 push!(errors, (DELAYED_BINDING, bt, something(ref)))
             catch e
-                @safe_debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_get_binding_or_error failed" inst bb=inst.parent
                 push!(errors, (DELAYED_BINDING, bt, nothing))
             end
         elseif fn == "jl_reresolve_binding_value_seqcst" || fn == "ijl_reresolve_binding_value_seqcst" ||
                fn == "jl_get_binding_value_seqcst" || fn == "ijl_get_binding_value_seqcst"
             try
                 # pry the binding from the IR
-                ref = referenced_object(arguments(inst)[1], relocs)
+                ref = referenced_object(inst.arguments[1], relocs)
                 ref === nothing && error("Unknown binding")
                 obj = something(ref)
                 push!(errors, (DELAYED_BINDING, bt, obj.globalref))
             catch e
-                @safe_debug "Decoding arguments to jl_reresolve_binding_value_seqcst failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_reresolve_binding_value_seqcst failed" inst bb=inst.parent
                 push!(errors, (DELAYED_BINDING, bt, nothing))
             end
         elseif startswith(fn, "tojlinvoke")
             try
-                fun, args, nargs = arguments(inst)
+                fun, args, nargs = inst.arguments
                 ref = referenced_object(fun, relocs)
                 ref === nothing && error("Unknown function")
                 fun = something(ref)::Base.Function
@@ -305,51 +305,51 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
                 # XXX: an invoke trampoline happens when codegen doesn't have access to code
                 #      which suggests a GPUCompiler.jl bug. throw an error instead?
             catch e
-                @safe_debug "Decoding arguments to jl_invoke failed" inst bb = LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_invoke failed" inst bb = inst.parent
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
         elseif fn == "jl_invoke" || fn == "ijl_invoke"
             # most invokes are contained in a trampoline handled above,
             # but some direct ones remain (e.g., with `@nospecialize`)
             # XXX: this shouldn't be true on 1.12+ anymore; jl_invoke is always trampolined
-            caller = LLVM.parent(LLVM.parent(inst))
-            if startswith(LLVM.name(caller), "tojlinvoke")
+            caller = inst.parent.parent
+            if startswith(caller.name, "tojlinvoke")
                 return
             end
             try
-                fun, args, nargs, meth = arguments(inst)
+                fun, args, nargs, meth = inst.arguments
                 ref = referenced_object(meth, relocs)
                 ref === nothing && error("Unknown method instance")
                 meth = something(ref)::Core.MethodInstance
                 push!(errors, (DYNAMIC_CALL, bt, meth.def))
             catch e
-                @safe_debug "Decoding arguments to jl_invoke failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_invoke failed" inst bb=inst.parent
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
         elseif fn == "jl_apply_generic" || fn == "ijl_apply_generic"
             try
-                f, args, nargs = arguments(inst)
+                f, args, nargs = inst.arguments
                 ref = referenced_object(f, relocs)
                 ref === nothing && error("Unknown function")
                 f = something(ref)
                 push!(errors, (DYNAMIC_CALL, bt, f))
             catch e
-                @safe_debug "Decoding arguments to jl_apply_generic failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_apply_generic failed" inst bb=inst.parent
                 push!(errors, (DYNAMIC_CALL, bt, nothing))
             end
 
         elseif fn == "jl_load_and_lookup" || fn == "ijl_load_and_lookup"
             try
-                f_lib, f_name, hnd = arguments(inst)
-                f_name = first(operands(f_name))::GlobalVariable # get rid of the GEP
-                name_init = LLVM.initializer(f_name)::ConstantDataSequential
-                name_value = map(collect(name_init)) do char
+                f_lib, f_name, hnd = inst.arguments
+                f_name = first(f_name.operands)::GlobalVariable # get rid of the GEP
+                name_init = f_name.initializer::ConstantDataSequential
+                name_value = map(collect(name_init.elements)) do char
                     convert(UInt8, char)
                 end |> String
                 name_value = name_value[1:end-1] # remove trailing \0
                 push!(errors, (CCALL_FUNCTION, bt, name_value))
             catch e
-                @safe_debug "Decoding arguments to jl_load_and_lookup failed" inst bb=LLVM.parent(inst)
+                @safe_debug "Decoding arguments to jl_load_and_lookup failed" inst bb=inst.parent
                 push!(errors, (CCALL_FUNCTION, bt, nothing))
             end
 
@@ -365,9 +365,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
             end
 
             if Libdl.dlsym_e(libjulia[], fn) != C_NULL
-                push!(errors, (RUNTIME_FUNCTION, bt, LLVM.name(dest)))
+                push!(errors, (RUNTIME_FUNCTION, bt, dest.name))
             else
-                push!(errors, (UNKNOWN_FUNCTION, bt, LLVM.name(dest)))
+                push!(errors, (UNKNOWN_FUNCTION, bt, dest.name))
             end
         end
 
@@ -376,9 +376,9 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
 
     elseif isa(dest, ConstantExpr)
         # detect calls to literal pointers
-        if opcode(dest) == LLVM.API.LLVMIntToPtr
+        if dest.opcode == LLVM.API.LLVMIntToPtr
             # extract the literal pointer
-            ptr_arg = first(operands(dest))
+            ptr_arg = first(dest.operands)
             @compiler_assert isa(ptr_arg, ConstantInt) job
             ptr_val = convert(Int, ptr_arg)
             ptr = Ptr{Cvoid}(ptr_val)
@@ -403,8 +403,8 @@ end
 # helper function to check for illegal values in an LLVM module
 function check_ir_values(mod::LLVM.Module, predicate, msg="value")
     errors = IRError[]
-    for fun in functions(mod), bb in blocks(fun), inst in instructions(bb)
-        if predicate(inst) || any(predicate, operands(inst))
+    for fun in mod.functions, bb in fun.blocks, inst in bb.instructions
+        if predicate(inst) || any(predicate, inst.operands)
             bt = backtrace(inst)
             # snapshot to a string: the error may outlive the module, and showing a
             # disposed LLVM value segfaults
@@ -415,5 +415,5 @@ function check_ir_values(mod::LLVM.Module, predicate, msg="value")
 end
 ## shorthand to check for illegal value types
 function check_ir_values(mod::LLVM.Module, T_bad::LLVMType)
-    check_ir_values(mod, val -> value_type(val) == T_bad, "use of $(string(T_bad)) value")
+    check_ir_values(mod, val -> val.value_type == T_bad, "use of $(string(T_bad)) value")
 end

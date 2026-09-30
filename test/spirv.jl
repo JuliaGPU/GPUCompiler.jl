@@ -117,7 +117,7 @@ end
     # to the now-unused box without defining it.
     _, meta = SPIRV.code_execution(
         mod.kernel, (Core.LLVMPtr{UInt,1}, Bool, Int32); backend)
-    @test all(!endswith(LLVM.name(gv), "_box") for gv in globals(meta.ir))
+    @test all(!endswith(gv.name, "_box") for gv in meta.ir.globals)
 end
 
 @testset "small type tags" begin

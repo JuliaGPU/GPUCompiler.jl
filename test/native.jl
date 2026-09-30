@@ -406,13 +406,13 @@ end
             # NOTE: parse eagerly; a lazily-parsed module doesn't expose uses
             rt = parse(LLVM.Module, MemoryBuffer(lib.bytes))
             used = 0
-            for gv in globals(rt)
-                haskey(metadata(gv), "julia.constgv") || continue
-                isempty(uses(gv)) && continue
+            for gv in rt.globals
+                haskey(gv.metadata, "julia.constgv") || continue
+                isempty(gv.uses) && continue
                 used += 1
-                init = LLVM.initializer(gv)
+                init = gv.initializer
                 @test init === nothing
-                rec = GPUCompiler.find_relocation(lib.relocations, LLVM.name(gv))
+                rec = GPUCompiler.find_relocation(lib.relocations, gv.name)
                 @test rec !== nothing && rec.kind === GPUCompiler.SlotSite
             end
             if GPUCompiler.supports_relocatable_ir()
@@ -516,7 +516,7 @@ end
             m = LLVM.Module("bool singletons")
             for name in ("jl_true", "jl_false")
                 gv = LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()), name)
-                constant!(gv, true)
+                gv.constant = true
             end
             relocs = collect!(m, Dict{String, Ptr{Cvoid}}())
             @test isempty(relocs)
@@ -524,7 +524,7 @@ end
             bool_ir = string(m)
             for name in ("jl_true", "jl_false")
                 # a fully-materialized box is private, so it needs no per-job namespace
-                @test haskey(globals(m), "$(name)_box")
+                @test haskey(m.globals, "$(name)_box")
                 @test occursin("@$name = private constant", bool_ir)
             end
             @test !occursin("external", bool_ir)
@@ -537,7 +537,7 @@ end
                 relocs = collect!(m, map)
                 @test isempty(relocs)
                 GPUCompiler.bake_relocations!(m, relocs)
-                @test haskey(globals(m), "jl_global_0_box")
+                @test haskey(m.globals, "jl_global_0_box")
                 dispose(m)
 
                 # Float64: the non-smalltag header is an interior relocation.
@@ -550,18 +550,17 @@ end
                 @test rec.target.value === Float64
                 # a relocatable box is addressed by name, so its name carries the namespace
                 @test startswith(rec.name, namespace)
-                box = globals(m)[rec.name]
-                @test isextinit(box)
-                @test linkage(box) == LLVM.API.LLVMExternalLinkage
-                header_idx = Int(element_at(datalayout(m), global_value_type(box),
-                                            rec.offset)) + 1
-                @test convert(UInt, collect(operands(initializer(box)))[header_idx]) == 0
+                box = m.globals[rec.name]
+                @test box.externally_initialized
+                @test box.linkage == LLVM.API.LLVMExternalLinkage
+                header_idx = LLVM.element_at(m.datalayout, box.global_value_type, rec.offset)
+                @test convert(UInt, collect(box.initializer.operands)[header_idx]) == 0
                 GPUCompiler.bake_relocations!(m, relocs)
                 @test isempty(relocs)
-                @test !isextinit(box)
-                @test isconstant(box)
-                @test linkage(box) == LLVM.API.LLVMPrivateLinkage
-                @test convert(UInt, collect(operands(initializer(box)))[header_idx]) ==
+                @test !box.externally_initialized
+                @test box.constant
+                @test box.linkage == LLVM.API.LLVMPrivateLinkage
+                @test convert(UInt, collect(box.initializer.operands)[header_idx]) ==
                       GPUCompiler.resolve_relocation_target(rec.target)
                 dispose(m)
 
@@ -574,7 +573,7 @@ end
                 @test startswith(rec.name, namespace)
                 GPUCompiler.bake_relocations!(m, relocs)
                 @test isempty(relocs)
-                @test !haskey(globals(m), "jl_global_0_box")
+                @test !haskey(m.globals, "jl_global_0_box")
                 @test occursin("inttoptr", string(m))
                 dispose(m)
 
@@ -592,8 +591,8 @@ end
                 rec = only(relocs.records)
                 @test rec.offset == 8
                 GPUCompiler.bake_relocations!(m, relocs)
-                box = globals(m)[rec.name]
-                @test length(elements(LLVM.global_value_type(box))) == 3
+                box = m.globals[rec.name]
+                @test length(box.global_value_type.elements) == 3
                 dispose(m)
 
                 # Codegen can emit several slots for one value in a module (observed on
@@ -606,8 +605,8 @@ end
                                           "jl_global#2" => ptrs[3]))
                 rec = only(relocs.records)
                 @test rec.target.value === objs[3]
-                @test count(gv -> startswith(LLVM.name(gv), namespace), globals(m)) == 1
-                @test !any(gv -> startswith(LLVM.name(gv), "jl_global#"), globals(m))
+                @test count(gv -> startswith(gv.name, namespace), m.globals) == 1
+                @test !any(gv -> startswith(gv.name, "jl_global#"), m.globals)
                 dispose(m)
             end
         end
@@ -1107,7 +1106,7 @@ end
                 end
 
                 fptr, lljit, _table = Native.load(Vector{UInt8}(codeunits(obj)),
-                                                  LLVM.name(meta.entry), relocs)
+                                                  meta.entry.name, relocs)
                 try
                     boxed_args = Any[args...]
                     r = GC.@preserve boxed_args ccall(fptr, Any, (Any, Ptr{Any}, Int32),
@@ -1162,7 +1161,7 @@ end
                 write(io, ir)
                 take!(io)
             end
-            entry = LLVM.name(meta.entry)
+            entry = meta.entry.name
 
             # a fresh session resolves the records into its own copy of the module, and only
             # then emits an object
@@ -1200,7 +1199,7 @@ end
         ir, meta = GPUCompiler.compile(:llvm, job)
         @test isempty(meta.relocations)
         # nothing is left for a loader to patch or import
-        @test !any(GPUCompiler.isextinit, globals(ir))
+        @test !any(gv -> gv.externally_initialized, ir.globals)
 
         # This back-end can emit objects without threading relocation metadata.
         code, _ = GPUCompiler.emit_asm(job, ir, LLVM.API.LLVMObjectFile)
@@ -1226,18 +1225,18 @@ end
             # every slot became a null-init, externally-initialized definition kept alive by
             # `llvm.used`; the loader patches each record after loading. Definitions are weak
             # so that two objects defining one record coalesce (see "shared patchable record").
-            @test haskey(globals(meta.ir), "llvm.used")
+            @test haskey(meta.ir.globals, "llvm.used")
             for rec in relocs.records
-                gv = globals(meta.ir)[rec.name]
+                gv = meta.ir.globals[rec.name]
                 @test !isdeclaration(gv)
-                @test isextinit(gv)
-                @test !isconstant(gv)
-                @test linkage(gv) == LLVM.API.LLVMWeakODRLinkage
-                rec.kind === GPUCompiler.SlotSite && @test LLVM.isnull(initializer(gv))
+                @test gv.externally_initialized
+                @test !gv.constant
+                @test gv.linkage == LLVM.API.LLVMWeakODRLinkage
+                rec.kind === GPUCompiler.SlotSite && @test LLVM.isnull(gv.initializer)
             end
 
             bytes = Vector{UInt8}(codeunits(obj))
-            entry = LLVM.name(meta.entry)
+            entry = meta.entry.name
             probe = only(filter(rec -> rec.target isa GPUCompiler.JuliaValueRef &&
                                        rec.target.value === :patch_probe, relocs.records))
             expected = GPUCompiler.resolve_relocation_target(probe.target)
@@ -1289,7 +1288,7 @@ end
                 relocs = GPUCompiler.Relocations(
                     [GPUCompiler.Relocation(GPUCompiler.SlotSite, "shared_reloc", 0, ref)])
                 asm, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.API.LLVMObjectFile)
-                @test linkage(globals(m)["shared_reloc"]) == LLVM.API.LLVMWeakODRLinkage
+                @test m.globals["shared_reloc"].linkage == LLVM.API.LLVMWeakODRLinkage
                 return Vector{UInt8}(codeunits(asm)), relocs
             end
 
@@ -1297,9 +1296,9 @@ end
             obj_b, _ = shared_object("shared_entry_b")
             expected = GPUCompiler.resolve_relocation_target(ref)
 
-            lljit = LLJIT(; tm=JITTargetMachine())
+            lljit = LLJIT(; tm=LLVM.JITTargetMachine())
             try
-                jd = JITDylib(lljit)
+                jd = lljit.main_dylib
                 add!(lljit, jd, MemoryBuffer(obj_a))
                 add!(lljit, jd, MemoryBuffer(obj_b))   # the duplicate definition
 
@@ -1343,16 +1342,16 @@ end
 
             # every record's global is gone: slots are erased, boxes demoted to allocas
             for rec in relocs.records
-                @test !haskey(globals(meta.ir), rec.name)
+                @test !haskey(meta.ir.globals, rec.name)
             end
             # the words are read out of the table, not baked into the module
-            @test haskey(globals(meta.ir), Native.RELOC_TABLE_BASE)
+            @test haskey(meta.ir.globals, Native.RELOC_TABLE_BASE)
 
             expected = reinterpret(UInt64, 2.0) +
                        GPUCompiler.resolve_relocation_target(
                            GPUCompiler.JuliaValueRef(:table_probe))
             fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)),
-                                             LLVM.name(meta.entry), relocs; table=true)
+                                             meta.entry.name, relocs; table=true)
             try
                 GC.@preserve table begin
                     @test ccall(fptr, UInt, (Bool,), false) == expected
@@ -1468,11 +1467,11 @@ end
             @test any(rec -> rec.target == GPUCompiler.CGlobalRef(:jl_nothing),
                       relocs.records)
             for rec in relocs.records
-                @test !haskey(globals(m), rec.name)
+                @test !haskey(m.globals, rec.name)
             end
             LLVM.verify(m)
-            @test all(alignment(inst) <= sizeof(UInt)
-                      for bb in blocks(functions(m)["pick"]) for inst in instructions(bb)
+            @test all(inst.alignment <= sizeof(UInt)
+                      for bb in m.functions["pick"].blocks for inst in bb.instructions
                       if inst isa LLVM.LoadInst)
 
             fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)), "pick", relocs;
@@ -1570,7 +1569,7 @@ end
         JuliaContext() do ctx
             _, meta = GPUCompiler.compile(:obj, job)
             @test isempty(meta.relocations)
-            @test !haskey(globals(meta.ir), Native.RELOC_TABLE_BASE)
+            @test !haskey(meta.ir.globals, Native.RELOC_TABLE_BASE)
         end
     end
 end
@@ -1604,14 +1603,14 @@ end
         # ...whose initializer is a struct...
         mod = LLVM.Module("errors")
         gv = GlobalVariable(mod, word(), "flat")
-        initializer!(gv, ConstantInt(word(), 0))
+        gv.initializer = ConstantInt(word(), 0)
         @test_throws "non-struct initializer" GPUCompiler.foreach_relocation(
             nop, mod, interior("flat", 0))
 
         # ...and it must land within that global
         mod = LLVM.Module("errors")
         gv = GlobalVariable(mod, LLVM.StructType([LLVM.Int64Type(), LLVM.Int64Type()]), "box")
-        initializer!(gv, ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(0)]))
+        gv.initializer = ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(0)])
         @test_throws "outside its" GPUCompiler.foreach_relocation(
             nop, mod, interior("box", 16))
     end
@@ -1636,8 +1635,8 @@ end
         end
         GPUCompiler.prune_dead_relocations!(mod, relocs)
         @test [rec.name for rec in relocs.records] == ["live"]
-        @test haskey(globals(mod), "live")     # a used declaration survives
-        @test !haskey(globals(mod), "dead")    # the dead definition is erased
+        @test haskey(mod.globals, "live")     # a used declaration survives
+        @test !haskey(mod.globals, "dead")    # the dead definition is erased
     end
 end
 
@@ -1649,17 +1648,17 @@ end
     JuliaContext() do ctx
         mod = parse(LLVM.Module,
                     "@zero_box = private global { i64, [8 x i8] } zeroinitializer")
-        gv = globals(mod)["zero_box"]
-        @test initializer(gv) isa LLVM.ConstantAggregateZero   # the folded shape
+        gv = mod.globals["zero_box"]
+        @test gv.initializer isa LLVM.ConstantAggregateZero   # the folded shape
         relocs = GPUCompiler.Relocations(
             [GPUCompiler.Relocation(GPUCompiler.InteriorSite, "zero_box", 0,
                                     GPUCompiler.JuliaValueRef(Float64))])
         GPUCompiler.bake_relocations!(mod, relocs)
-        init = initializer(gv)
+        init = gv.initializer
         @test !(init isa LLVM.ConstantAggregateZero)   # rebuilt into explicit fields
-        header = convert(UInt, LLVM.Constant[operands(init)...][1])
+        header = convert(UInt, LLVM.Constant[init.operands...][1])
         @test header == GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(Float64))
-        @test isconstant(gv)
+        @test gv.constant
         @test isempty(relocs)
     end
 end
@@ -1684,7 +1683,7 @@ end
                 ret void
             }""")
         GPUCompiler.prepare_execution!(job, mod)
-        @test haskey(functions(mod), "jl_get_pgcstack_resolved")
+        @test haskey(mod.functions, "jl_get_pgcstack_resolved")
 
         mod = parse(LLVM.Module, """
             @jl_float32_type = external global $word_ptr
@@ -1756,7 +1755,7 @@ end
         @test GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
         @test [rec.target for rec in relocs.records] ==
               [GPUCompiler.CGlobalRef(:jl_float32_type), GPUCompiler.CGlobalRef(:jl_float64_type)]
-        addr = first(instructions(first(blocks(functions(mod)["entry"]))))
+        addr = first(first(mod.functions["entry"].blocks).instructions)
         @test !occursin(r"@jl_float(32|64)_type\b", string(addr))
         for rec in relocs.records
             @test occursin("@$(rec.name)", string(addr))
@@ -1764,10 +1763,10 @@ end
         # Direct and merged references retain the same load type. Mixing pointer loads
         # with rebuilt integer loads/inttoptr miscompiles the `nothing` case on Metal.
         for f in ("direct", "entry")
-            load = only(inst for bb in blocks(functions(mod)[f]) for inst in instructions(bb)
+            load = only(inst for bb in mod.functions[f].blocks for inst in bb.instructions
                         if inst isa LLVM.LoadInst)
-            @test value_type(load) isa LLVM.PointerType
-            @test alignment(load) == sizeof(UInt)
+            @test load.value_type isa LLVM.PointerType
+            @test load.alignment == sizeof(UInt)
         end
         LLVM.verify(mod)
         mod = parse(LLVM.Module, merged_ir)
@@ -1806,8 +1805,8 @@ end
                     i64 0, i32 2, i64 1)
                 ret i32 %value
             }""")
-        load = first(instructions(first(blocks(functions(mod)["entry"]))))
-        @test GPUCompiler.constexpr_byte_offset(operands(load)[1], datalayout(mod)) == 20
+        load = first(first(mod.functions["entry"].blocks).instructions)
+        @test GPUCompiler.constexpr_byte_offset(load.operands[1], mod.datalayout) == 20
         @test_throws ArgumentError GPUCompiler.CGlobalRef(:jl_layout; offset=-1)
 
         # Julia codegen references small-tagged DataTypes through `jl_small_typeof` offsets.
@@ -1957,7 +1956,7 @@ end
             }""")
         unused = GlobalVariable(src, LLVM.StructType([LLVM.Int64Type(), LLVM.Int64Type()]),
                                 "unused_patch")
-        initializer!(unused, ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(1)]))
+        unused.initializer = ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(1)])
         src_relocs = GPUCompiler.Relocations()
         for (name, T) in ("used_patch" => Float64, "unused_patch" => Int64)
             GPUCompiler.add_relocation!(src_relocs, GPUCompiler.InteriorSite, name, 0,

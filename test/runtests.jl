@@ -6,7 +6,7 @@ using NVPTX_LLVM_Backend_jll
 using AMDGPU_LLVM_Backend_jll
 
 const init_code = quote
-    using GPUCompiler, LLVM
+    using GPUCompiler, LLVM, LLVM.IR, LLVM.Build, LLVM.Passes, LLVM.ORC
     using SPIRV_LLVM_Backend_jll, SPIRV_LLVM_Translator_jll, SPIRV_Tools_jll
     using LLVMDowngrader_jll
     using NVPTX_LLVM_Backend_jll

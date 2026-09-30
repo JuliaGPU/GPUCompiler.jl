@@ -40,17 +40,17 @@
         @test (verify(mod); true)
 
         # emission order, then uncountered declarations by name
-        @test [LLVM.name(f) for f in functions(mod)] ==
+        @test [f.name for f in mod.functions] ==
               ["julia_a_10", "jfptr_a_11", "julia_b_12", "julia_c_13", "ijl_throw", "llvm.trap"]
-        @test [LLVM.name(g) for g in globals(mod)] ==
+        @test [g.name for g in mod.globals] ==
               ["_j_const#1", "_j_const#2", "_j_const#2.1", "_j_str_x#3", "_j_str_x#3.1",
                "+Core.Tuple#15", "jl_global#20", "jl_nothing"]
 
         # the identical clone was folded into the copy that kept the bare name...
-        @test !haskey(globals(mod), "_j_const#1.1")
-        @test occursin("@\"_j_const#1\"", string(functions(mod)["julia_b_12"]))
+        @test !haskey(mod.globals, "_j_const#1.1")
+        @test occursin("@\"_j_const#1\"", string(mod.functions["julia_b_12"]))
         # ...while a same-named constant with different content is left alone
-        @test occursin("@\"_j_str_x#3.1\"", string(functions(mod)["julia_c_13"]))
+        @test occursin("@\"_j_str_x#3.1\"", string(mod.functions["julia_c_13"]))
 
         # idempotent
         before = string(mod)

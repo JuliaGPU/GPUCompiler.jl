@@ -17,12 +17,12 @@ portable path), and flagging both leaves no path that silently keeps the
 slow lowering.
 """
 function apply_fastmath!(mod::LLVM.Module)
-    for f in functions(mod)
+    for f in mod.functions
         isdeclaration(f) && continue
-        push!(function_attributes(f), StringAttribute("unsafe-fp-math", "true"))
-        for bb in blocks(f), inst in instructions(bb)
+        push!(f.function_attributes, StringAttribute("unsafe-fp-math", "true"))
+        for bb in f.blocks, inst in bb.instructions
             if Bool(LLVM.API.LLVMCanValueUseFastMathFlags(inst))
-                fast_math!(inst; all=true)
+                inst.fast_math = (; fast=true)
             end
         end
     end
@@ -54,7 +54,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     tm = llvm_machine(job.config.target)
     tti = llvm_targetinfo(job.config.target)
 
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb=PassBuilder() begin
         tti === nothing || LLVM.target_transform_info!(pb, tti)
 
         register!(pb, GPULowerCPUFeaturesPass(job))
@@ -67,7 +67,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         register!(pb, LowerKernelStatePass(job))
         register!(pb, CleanupKernelStatePass(job))
 
-        add!(pb, NewPMModulePassManager()) do mpm
+        add!(pb, ModulePassManager()) do mpm
             buildNewPMPipeline!(mpm, job, opt_level)
         end
         run!(pb, mod, tm)
@@ -81,7 +81,7 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     buildEarlySimplificationPipeline(mpm, job, opt_level)
     add!(mpm, AlwaysInlinerPass())
     buildEarlyOptimizerPipeline(mpm, job, opt_level)
-    add!(mpm, NewPMFunctionPassManager()) do fpm
+    add!(mpm, FunctionPassManager()) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
         if (can_vectorize(job)) && opt_level >= 2
@@ -112,7 +112,7 @@ const AggressiveSimplifyCFGOptions =
 
 function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if should_verify()
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             add!(fpm, GCInvariantVerifierPass())
         end
         add!(mpm, VerifierPass())
@@ -124,7 +124,7 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
     add!(mpm, Annotation2MetadataPass())
     add!(mpm, InferFunctionAttrsPass())
     add!(mpm, ConstantMergePass())
-    add!(mpm, NewPMFunctionPassManager()) do fpm
+    add!(mpm, FunctionPassManager()) do fpm
         add!(fpm, LowerExpectIntrinsicPass())
         if opt_level >= 2
             add!(fpm, PropagateJuliaAddrspacesPass())
@@ -140,7 +140,7 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
     end
     if opt_level >= 1
         add!(mpm, GlobalOptPass())
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             add!(fpm, PromotePass())
             add!(fpm, instcombine_pass(job))
         end
@@ -154,12 +154,12 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
     if LLVM.version() >= v"17"
         add!(mpm, OptimizerEarlyCallbacks(; opt_level))
     end
-    add!(mpm, NewPMCGSCCPassManager()) do cgpm
+    add!(mpm, CGSCCPassManager()) do cgpm
         if LLVM.version() >= v"17"
             add!(cgpm, CGSCCOptimizerLateCallbacks(; opt_level))
         end
         if opt_level >= 2
-            add!(cgpm, NewPMFunctionPassManager()) do fpm
+            add!(cgpm, FunctionPassManager()) do fpm
                 add!(fpm, AllocOptPass())
                 add!(fpm, Float2IntPass())
                 add!(fpm, LowerConstantIntrinsicsPass())
@@ -168,7 +168,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
     end
     add!(mpm, GPULowerCPUFeaturesPass(job))
     if opt_level >= 1
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             if opt_level >= 2
                 add!(fpm, SROAPass())
                 add!(fpm, EarlyCSEPass(; memssa=true))
@@ -194,7 +194,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
 end
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
-    add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
+    add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
         add!(lpm, LowerSIMDLoopPass())
         if opt_level >= 2
             add!(lpm, LoopInstSimplifyPass())
@@ -217,7 +217,7 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
     end
     add!(fpm, SimplifyCFGPass(; BasicSimplifyCFGOptions...))
     add!(fpm, instcombine_pass(job))
-    add!(fpm, NewPMLoopPassManager()) do lpm
+    add!(fpm, LoopPassManager()) do lpm
         if opt_level >= 2
             add!(lpm, LoopIdiomRecognizePass())
             add!(lpm, IndVarSimplifyPass())
@@ -269,7 +269,7 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
         end
         add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
         add!(fpm, AllocOptPass())
-        add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
+        add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
         end
@@ -285,7 +285,7 @@ end
 
 function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     # re-rotate loops that might have been unrotated in the simplification above
-    add!(fpm, NewPMLoopPassManager()) do lpm
+    add!(fpm, LoopPassManager()) do lpm
         add!(lpm, LoopRotatePass())
         add!(lpm, LoopDeletionPass())
     end
@@ -294,7 +294,7 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, LoopVectorizePass())
     add!(fpm, LoopLoadEliminationPass())
     add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
-    add!(fpm, NewPMLoopPassManager(; use_memory_ssa=true)) do lpm
+    add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
         add!(lpm, LICMPass())
     end
     add!(fpm, EarlyCSEPass())
@@ -322,7 +322,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     # lower GC intrinsics
     if !uses_julia_runtime(job)
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             # Use the registered pass because it owns `relocs`.
             add!(fpm, "GPULowerGCFrame")
         end
@@ -340,7 +340,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     if job.config.kernel
         # TODO: now that all kernel state-related passes are being run here, merge some?
         add!(mpm, AddKernelStatePass(job))
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             add!(fpm, LowerKernelStatePass(job))
         end
         add!(mpm, CleanupKernelStatePass(job))
@@ -348,13 +348,13 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     if !uses_julia_runtime(job)
         # remove dead uses of ptls
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             add!(fpm, ADCEPass())
         end
         add!(mpm, GPULowerPTLSPass(job))
     end
 
-    add!(mpm, NewPMFunctionPassManager()) do fpm
+    add!(mpm, FunctionPassManager()) do fpm
         # lower exception handling
         if uses_julia_runtime(job) && VERSION < v"1.13.0-DEV.36"
             add!(fpm, LowerExcHandlersPass())
@@ -378,7 +378,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     end
 
     if opt_level >= 2
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             add!(fpm, GVNPass())
             add!(fpm, SCCPPass())
             add!(fpm, DCEPass())
@@ -391,7 +391,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     end
 
     if opt_level >= 1
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             add!(fpm, instcombine_pass(job))
             add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
         end
@@ -407,7 +407,7 @@ end
 
 function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if opt_level >= 2
-        add!(mpm, NewPMFunctionPassManager()) do fpm
+        add!(mpm, FunctionPassManager()) do fpm
             if VERSION < v"1.12.0-DEV.1390"
                 add!(fpm, CombineMulAddPass())
             end
@@ -417,10 +417,10 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if LLVM.version() >= v"17"
         add!(mpm, OptimizerLastCallbacks(; opt_level))
     end
-    add!(mpm, NewPMFunctionPassManager()) do fpm
+    add!(mpm, FunctionPassManager()) do fpm
         add!(fpm, AnnotationRemarksPass())
     end
-    add!(mpm, NewPMFunctionPassManager()) do fpm
+    add!(mpm, FunctionPassManager()) do fpm
         add!(fpm, DemoteFloat16Pass())
         if opt_level >= 2
             add!(fpm, GVNPass())
@@ -445,9 +445,9 @@ function (self::CPUFeatures)(mod::LLVM.Module)
     )
 
     # have_fma
-    for f in functions(mod)
-        ft = function_type(f)
-        fn = LLVM.name(f)
+    for f in mod.functions
+        ft = f.function_type
+        fn = f.name
         startswith(fn, "julia.cpu.have_fma.") || continue
         typnam = fn[20:end]
 
@@ -459,28 +459,28 @@ function (self::CPUFeatures)(mod::LLVM.Module)
             # warn?
             false
         end
-        has_fma = ConstantInt(return_type(ft), has_fma)
+        has_fma = ConstantInt(ft.return_type, has_fma)
 
         # substitute all uses of the intrinsic with a constant
         materialized = LLVM.Value[]
-        for use in uses(f)
-            val = user(use)
+        for use in f.uses
+            val = use.user
             replace_uses!(val, has_fma)
             push!(materialized, val)
         end
 
         # remove the intrinsic and its uses
         for val in materialized
-            @assert isempty(uses(val))
+            @assert isempty(val.uses)
             erase!(val)
         end
-        @assert isempty(uses(f))
+        @assert isempty(f.uses)
         erase!(f)
     end
 
     return changed
 end
-GPULowerCPUFeaturesPass(job) = NewPMModulePass("GPULowerCPUFeatures", CPUFeatures(job))
+GPULowerCPUFeaturesPass(job) = ModulePass("GPULowerCPUFeatures", CPUFeatures(job))
 
 struct LinkRuntime
     job::CompilerJob
@@ -496,13 +496,13 @@ function (self::LinkRuntime)(mod::LLVM.Module)
     runtime, runtime_relocs = load_runtime(self.job)
     # `RemoveNIPass` stripped non-integral address spaces from `mod`'s datalayout, but the
     # cached runtime kept them; align it (as with target libraries) to avoid a warning.
-    triple!(runtime, triple(mod))
-    datalayout!(runtime, datalayout(mod))
+    runtime.triple = mod.triple
+    runtime.datalayout = mod.datalayout
     link_relocatable!(mod, self.relocs, runtime, runtime_relocs; only_needed=true)
     return true
 end
 GPULinkRuntimePass(job, relocs::Relocations) =
-    NewPMModulePass("GPULinkRuntime", LinkRuntime(job, relocs))
+    ModulePass("GPULinkRuntime", LinkRuntime(job, relocs))
 
 struct LinkLibraries
     job::CompilerJob
@@ -517,7 +517,7 @@ function (self::LinkLibraries)(mod::LLVM.Module)
     link_libraries!(self.job, mod)
     return true
 end
-GPULinkLibrariesPass(job) = NewPMModulePass("GPULinkLibraries", LinkLibraries(job))
+GPULinkLibrariesPass(job) = ModulePass("GPULinkLibraries", LinkLibraries(job))
 
 struct FinishRuntimeIntrinsics
     job::CompilerJob
@@ -526,7 +526,7 @@ function (self::FinishRuntimeIntrinsics)(mod::LLVM.Module)
     return finish_runtime_intrinsics!(self.job, mod)
 end
 GPUFinishRuntimeIntrinsicsPass(job) =
-    NewPMModulePass("GPUFinishRuntimeIntrinsics", FinishRuntimeIntrinsics(job))
+    ModulePass("GPUFinishRuntimeIntrinsics", FinishRuntimeIntrinsics(job))
 
 # lower object allocations to to PTX malloc
 #
@@ -541,28 +541,28 @@ struct LowerGCFrame
     relocs::Relocations
 end
 function (self::LowerGCFrame)(fun::LLVM.Function)
-    mod = LLVM.parent(fun)
+    mod = fun.parent
     changed = false
 
     # plain alloc
-    if haskey(functions(mod), "julia.gc_alloc_obj")
-        alloc_obj = functions(mod)["julia.gc_alloc_obj"]
-        alloc_obj_ft = function_type(alloc_obj)
-        T_prjlvalue = return_type(alloc_obj_ft)
+    if haskey(mod.functions, "julia.gc_alloc_obj")
+        alloc_obj = mod.functions["julia.gc_alloc_obj"]
+        alloc_obj_ft = alloc_obj.function_type
+        T_prjlvalue = alloc_obj_ft.return_type
         T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
 
-        for use in uses(alloc_obj)
-            call = user(use)::LLVM.CallInst
+        for use in alloc_obj.uses
+            call = use.user::LLVM.CallInst
 
             # decode the call
-            ops = arguments(call)
+            ops = call.arguments
             sz = ops[2]
             typ = ops[3]
 
             # replace with PTX alloc_obj
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
                 check_allocation!(builder, typ, self.relocs)
                 ptr = call!(builder, Runtime.get(:gc_pool_alloc), [sz])
                 replace_uses!(call, ptr)
@@ -573,29 +573,29 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
             changed = true
         end
 
-        @compiler_assert isempty(uses(alloc_obj)) self.job
+        @compiler_assert isempty(alloc_obj.uses) self.job
     end
 
     # we don't care about write barriers. Julia 1.14 replaced `julia.write_barrier` with
     # object and field-aware variants, the latter specialized on the slot address space.
     for name in ("julia.write_barrier", "julia.object_write_barrier",
                  "julia.field_write_barrier.p11", "julia.field_write_barrier.p13")
-        haskey(functions(mod), name) || continue
-        barrier = functions(mod)[name]
+        haskey(mod.functions, name) || continue
+        barrier = mod.functions[name]
 
-        for use in uses(barrier)
-            call = user(use)::LLVM.CallInst
+        for use in barrier.uses
+            call = use.user::LLVM.CallInst
             erase!(call)
             changed = true
         end
 
-        @compiler_assert isempty(uses(barrier)) self.job
+        @compiler_assert isempty(barrier.uses) self.job
     end
 
     return changed
 end
 GPULowerGCFramePass(job, relocs::Relocations) =
-    NewPMFunctionPass("GPULowerGCFrame", LowerGCFrame(job, relocs))
+    FunctionPass("GPULowerGCFrame", LowerGCFrame(job, relocs))
 
 # only allocations of objects without references to other heap objects are supported.
 #
@@ -616,12 +616,12 @@ function check_allocation!(builder::IRBuilder, typ::LLVM.Value, relocs::Relocati
     Base.datatype_pointerfree(T) && return
 
     # emit a call to a marker, passing the name of the type
-    bb = position(builder)
-    mod = LLVM.parent(LLVM.parent(bb))
+    bb = builder.insert_block
+    mod = bb.parent.parent
     name = globalstring_ptr!(builder, string(T), "allocated_type")
-    marker_type = LLVM.FunctionType(LLVM.VoidType(), [value_type(name)])
-    marker = if haskey(functions(mod), UNSUPPORTED_ALLOCATION_MARKER)
-        functions(mod)[UNSUPPORTED_ALLOCATION_MARKER]
+    marker_type = LLVM.FunctionType(LLVM.VoidType(), [name.value_type])
+    marker = if haskey(mod.functions, UNSUPPORTED_ALLOCATION_MARKER)
+        mod.functions[UNSUPPORTED_ALLOCATION_MARKER]
     else
         LLVM.Function(mod, UNSUPPORTED_ALLOCATION_MARKER, marker_type)
     end
@@ -644,12 +644,12 @@ function (self::LowerPTLS)(mod::LLVM.Module)
 
     intrinsic = "julia.get_pgcstack"
 
-    if haskey(functions(mod), intrinsic)
-        ptls_getter = functions(mod)[intrinsic]
+    if haskey(mod.functions, intrinsic)
+        ptls_getter = mod.functions[intrinsic]
 
-        for use in uses(ptls_getter)
-            val = user(use)
-            if isempty(uses(val))
+        for use in ptls_getter.uses
+            val = use.user
+            if isempty(val.uses)
                 erase!(val)
                 changed = true
             else
@@ -660,4 +660,4 @@ function (self::LowerPTLS)(mod::LLVM.Module)
 
     return changed
 end
-GPULowerPTLSPass(job) = NewPMModulePass("GPULowerPTLS", LowerPTLS(job))
+GPULowerPTLSPass(job) = ModulePass("GPULowerPTLS", LowerPTLS(job))

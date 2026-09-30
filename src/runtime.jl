@@ -10,7 +10,7 @@
 module Runtime
 
 using ..GPUCompiler
-using LLVM
+using LLVM, LLVM.IR, LLVM.Build
 using LLVM.Interop
 
 
@@ -115,19 +115,19 @@ function build_runtime_stub(llvm_name::String, @nospecialize(return_type::Type),
                             @nospecialize(types::Tuple), args::Vector)
     generate_llvmcall(return_type, Tuple{types...}, args...) do builder, params...
         entry = current_function(builder)
-        ft = function_type(entry)
+        ft = entry.function_type
 
         # weak definition of `gpu_<name>` that returns a harmless placeholder on CPU
         extern = LLVM.Function(current_module(builder), llvm_name, ft)
-        linkage!(extern, LLVM.API.LLVMWeakAnyLinkage)
+        extern.linkage = LLVM.API.LLVMWeakAnyLinkage
         @dispose extern_builder=IRBuilder() begin
-            position!(extern_builder, BasicBlock(extern, "entry"))
-            emit_fake_return!(extern_builder, LLVM.return_type(ft))
+            position!(extern_builder, LLVM.at_end(BasicBlock(extern, "entry")))
+            emit_fake_return!(extern_builder, ft.return_type)
         end
 
         # entry: call the weak symbol, return its result
         result = call!(builder, ft, extern, collect(Value, params))
-        LLVM.return_type(ft) isa LLVM.VoidType ? nothing : result
+        ft.return_type isa LLVM.VoidType ? nothing : result
     end
 end
 
@@ -143,7 +143,7 @@ function emit_fake_return!(builder::IRBuilder, rt::LLVMType)
         ret!(builder, const_inttoptr(ConstantInt(i64, 1), rt))
     elseif rt isa LLVM.IntegerType
         ret!(builder, ConstantInt(rt, 0))
-    elseif rt isa LLVM.LLVMFloat || rt isa LLVM.LLVMDouble
+    elseif rt == LLVM.FloatType() || rt == LLVM.DoubleType()
         ret!(builder, ConstantFP(rt, 0.0))
     else
         error("Unsupported runtime stub return type: $rt")

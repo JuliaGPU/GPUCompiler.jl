@@ -17,15 +17,15 @@ is_release(order::AtomicOrdering) =
               LLVM.API.LLVMAtomicOrderingSequentiallyConsistent)
 
 is_atomic_memop(inst::LLVM.Instruction) =
-    ((inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) && is_atomic(inst)) ||
+    ((inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) && isatomic(inst)) ||
     inst isa LLVM.AtomicRMWInst || inst isa LLVM.AtomicCmpXchgInst
 
-atomic_pointer(inst::LLVM.StoreInst) = operands(inst)[2]
-atomic_pointer(inst::LLVM.Instruction) = operands(inst)[1]
+atomic_pointer(inst::LLVM.StoreInst) = inst.operands[2]
+atomic_pointer(inst::LLVM.Instruction) = inst.operands[1]
 
-atomic_value_type(inst::LLVM.LoadInst) = value_type(inst)
-atomic_value_type(inst::LLVM.StoreInst) = value_type(operands(inst)[1])
-atomic_value_type(inst::LLVM.Instruction) = value_type(operands(inst)[2])
+atomic_value_type(inst::LLVM.LoadInst) = inst.value_type
+atomic_value_type(inst::LLVM.StoreInst) = inst.operands[1].value_type
+atomic_value_type(inst::LLVM.Instruction) = inst.operands[2].value_type
 
 is_volatile(inst::LLVM.Instruction) = LLVM.API.LLVMGetVolatile(inst) != 0
 
@@ -38,7 +38,7 @@ end
 # the ordering that covers both of a compare-exchange's orderings
 # (`AtomicCmpXchgInst::getMergedOrdering`)
 function merged_ordering(inst::LLVM.AtomicCmpXchgInst)
-    success, failure = success_ordering(inst), failure_ordering(inst)
+    success, failure = inst.success_ordering, inst.failure_ordering
     failure == LLVM.API.LLVMAtomicOrderingSequentiallyConsistent && return failure
     if failure == LLVM.API.LLVMAtomicOrderingAcquire
         success == LLVM.API.LLVMAtomicOrderingMonotonic && return failure
@@ -48,7 +48,7 @@ function merged_ordering(inst::LLVM.AtomicCmpXchgInst)
     return success
 end
 atomic_ordering(inst::LLVM.AtomicCmpXchgInst) = merged_ordering(inst)
-atomic_ordering(inst::LLVM.Instruction) = ordering(inst)
+atomic_ordering(inst::LLVM.Instruction) = inst.ordering
 
 # the failure ordering of a compare-exchange implementing an operation with the given
 # ordering (`AtomicCmpXchgInst::getStrongestFailureOrdering`)
@@ -67,10 +67,10 @@ end
 
 # the value of a read-modify-write operation (`llvm::buildAtomicRMWValue`)
 function atomicrmw_value!(builder::IRBuilder, op::Symbol, old::LLVM.Value, val::LLVM.Value)
-    T = value_type(old)
+    T = old.value_type
     minmax(pred) = select!(builder, icmp!(builder, pred, old, val), old, val)
     function intrinsic(name)
-        mod = LLVM.parent(LLVM.parent(position(builder)))
+        mod = builder.insert_block.parent.parent
         intr = LLVM.Intrinsic(name)
         call!(builder, LLVM.FunctionType(intr, [T]), LLVM.Function(mod, intr, [T]), [old, val])
     end

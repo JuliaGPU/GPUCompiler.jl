@@ -25,14 +25,14 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         error("A compiler job is required to call runtime method '$(rt.name)'")
     end
 
-    bb = position(builder)
-    f = LLVM.parent(bb)
-    mod = LLVM.parent(f)
+    bb = builder.insert_block
+    f = bb.parent
+    mod = f.parent
 
     # get or create a function prototype
-    if haskey(functions(mod), rt.llvm_name)
-        f = functions(mod)[rt.llvm_name]
-        ft = function_type(f)
+    if haskey(mod.functions, rt.llvm_name)
+        f = mod.functions[rt.llvm_name]
+        ft = f.function_type
     else
         ft = if job === nothing
             convert(LLVM.FunctionType, rt)
@@ -53,24 +53,24 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     # runtime functions are written in Julia, while we're calling from LLVM,
     # this often results in argument type mismatches. try to fix some here.
     args = LLVM.Value[args...]
-    if length(args) != length(parameters(ft))
+    if length(args) != length(ft.parameters)
         error("Incorrect number of arguments for runtime function: ",
               "passing ", length(args), " argument(s) to '", string(ft), " ", rt.name, "'")
     end
     for (i,arg) in enumerate(args)
-        if value_type(arg) != parameters(ft)[i]
-            args[i] = if (value_type(arg) isa LLVM.PointerType) &&
-               (parameters(ft)[i] isa LLVM.IntegerType)
+        if arg.value_type != ft.parameters[i]
+            args[i] = if (arg.value_type isa LLVM.PointerType) &&
+               (ft.parameters[i] isa LLVM.IntegerType)
                 # pointers are passed as integers on Julia 1.11 and earlier
-                ptrtoint!(builder, args[i], parameters(ft)[i])
-            elseif value_type(arg) isa LLVM.PointerType &&
-                   parameters(ft)[i] isa LLVM.PointerType &&
-                   addrspace(value_type(arg)) != addrspace(parameters(ft)[i])
+                ptrtoint!(builder, args[i], ft.parameters[i])
+            elseif arg.value_type isa LLVM.PointerType &&
+                   ft.parameters[i] isa LLVM.PointerType &&
+                   arg.value_type.addrspace != ft.parameters[i].addrspace
                 # arguments may come from globals in other address spaces than the
                 # one the runtime function expects (see `runtime_cstring_type`).
-                addrspacecast!(builder, args[i], parameters(ft)[i])
+                addrspacecast!(builder, args[i], ft.parameters[i])
             else
-                error("Don't know how to convert ", arg, " argument to ", parameters(ft)[i])
+                error("Don't know how to convert ", arg, " argument to ", ft.parameters[i])
             end
         end
     end
@@ -112,10 +112,10 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # Keep this intermediate module relocatable even when the final back-end resolves
     # relocations eagerly. The caller links a fresh copy and lowers the merged sites.
     new_mod, meta = compile_unhooked(:llvm, rt_job; resolve_relocations=false)
-    ft = function_type(meta.entry)
+    ft = meta.entry.function_type
     expected_ft = runtime_function_type(rt_job, method)
-    if return_type(ft) != return_type(expected_ft)
-        error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
+    if ft.return_type != expected_ft.return_type
+        error("Invalid return type for runtime function '$(method.name)': expected $(expected_ft.return_type), got $(ft.return_type)")
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
@@ -124,13 +124,13 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
-    if haskey(functions(new_mod), name) && functions(new_mod)[name] !== meta.entry
-        decl = functions(new_mod)[name]
-        @assert value_type(decl) == value_type(meta.entry)
+    if haskey(new_mod.functions, name) && new_mod.functions[name] !== meta.entry
+        decl = new_mod.functions[name]
+        @assert decl.value_type == meta.entry.value_type
         replace_uses!(decl, meta.entry)
         erase!(decl)
     end
-    LLVM.name!(meta.entry, name)
+    meta.entry.name = name
 
     io = IOBuffer()
     write(io, new_mod)

@@ -14,39 +14,39 @@ function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
         push!(done, inst)
 
         # look up the debug information from the current instruction
-        loc = LLVM.debuglocation(inst)
+        loc = inst.debug_location
         while loc !== nothing
-            scope = LLVM.scope(loc)
+            scope = loc.scope
             if scope !== nothing
-                name = replace(LLVM.name(scope), r";$"=>"")
-                file = LLVM.file(scope)
-                path = joinpath(LLVM.directory(file), LLVM.filename(file))
-                line = LLVM.line(loc)
+                name = replace(scope.name, r";$"=>"")
+                file = scope.file
+                path = joinpath(file.directory, file.filename)
+                line = loc.line
                 push!(bt, StackTraces.StackFrame(name, path, line))
             end
-            loc = LLVM.inlined_at(loc)
+            loc = loc.inlined_at
         end
 
         # move up the call chain
-        f = LLVM.parent(LLVM.parent(inst))
+        f = inst.parent.parent
         ## functions can be used as a *value* in eg. constant expressions, so filter those out
-        callers = filter(val -> isa(user(val), LLVM.CallInst), collect(uses(f)))
+        callers = filter(val -> isa(val.user, LLVM.CallInst), collect(f.uses))
         ## get rid of calls without debug info
         filter!(callers) do call
-            LLVM.debuglocation(user(call)) !== nothing
+            call.user.debug_location !== nothing
         end
         if !isempty(callers)
             # figure out the call sites of this instruction
             call_sites = unique(callers) do call
                 # there could be multiple calls, originating from the same source location
-                LLVM.debuglocation(user(call))
+                call.user.debug_location
             end
 
             if length(call_sites) > 1
                 frame = StackTraces.StackFrame("multiple call sites", "unknown", 0)
                 push!(bt, frame)
             elseif length(call_sites) == 1
-                inst = user(first(call_sites))
+                inst = first(call_sites).user
                 continue
             end
         end

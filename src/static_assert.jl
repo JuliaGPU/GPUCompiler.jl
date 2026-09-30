@@ -30,7 +30,7 @@ function static_assert_marker(message::String)
         # LLVM.jl owns the pointer representation and creates an anonymous private
         # string global, just like LLVM's annotation helpers.
         string = globalstring_ptr!(builder, message)
-        marker_type = LLVM.FunctionType(LLVM.VoidType(), [value_type(string)])
+        marker_type = LLVM.FunctionType(LLVM.VoidType(), [string.value_type])
         marker = LLVM.Function(current_module(builder), STATIC_ASSERT_MARKER, marker_type)
         call!(builder, marker_type, marker, [string])
         nothing
@@ -39,14 +39,14 @@ end
 
 function static_assert_message(inst::LLVM.CallInst)
     try
-        value = only(arguments(inst))
+        value = only(inst.arguments)
         while value isa ConstantExpr
-            value = first(operands(value))
+            value = first(value.operands)
         end
         value isa GlobalVariable || return nothing
-        initializer = LLVM.initializer(value)
+        initializer = value.initializer
         initializer isa ConstantDataSequential || initializer isa ConstantArray || return nothing
-        values = initializer isa ConstantDataSequential ? collect(initializer) : operands(initializer)
+        values = initializer.elements
         bytes = UInt8[convert(UInt8, byte) for byte in values]
         !isempty(bytes) && bytes[end] == 0x00 && pop!(bytes)
         return String(bytes)

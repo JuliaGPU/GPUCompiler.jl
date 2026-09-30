@@ -38,7 +38,7 @@ end
 
 # typed/opaque pointer detection for conditional FileCheck checks
 
-using LLVM
+using LLVM, LLVM.IR
 const typed_ptrs = JuliaContext() do ctx
     supports_typed_pointers(ctx)
 end

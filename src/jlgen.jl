@@ -675,13 +675,13 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # create and configure the module
         ts_mod = ThreadSafeModule("start")
         ts_mod() do mod
-            triple!(mod, llvm_triple(job.config.target))
+            mod.triple = llvm_triple(job.config.target)
             if julia_datalayout(job.config.target) !== nothing
-                datalayout!(mod, julia_datalayout(job.config.target))
+                mod.datalayout = julia_datalayout(job.config.target)
             end
-            flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+            mod.flags["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
                 Metadata(ConstantInt(dwarf_version(job.config.target)))
-            flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+            mod.flags["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
                 Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
         end
 
@@ -716,7 +716,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
         # XXX: this is wrong; we can't expose the underlying LLVM module, but should
         #      instead always go through the callback in order to unlock it properly.
-        llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref)
+        # the module is owned by `native_code`: wrap it as borrowed, so that LLVM.jl doesn't
+        # consider it ours to dispose of (which would also be reported as a leak by memcheck)
+        llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref; borrowed=true)
         llvm_mod = nothing
         llvm_ts_mod() do mod
             llvm_mod = mod
@@ -776,38 +778,38 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     gv_to_value = Dict{String, Ptr{Cvoid}}()
     if gvs === nothing
         # Without a reliable GV table, recover addresses from existing initializers.
-        for gv in globals(llvm_mod)
-            if !haskey(metadata(gv), "julia.constgv")
+        for gv in llvm_mod.globals
+            if !haskey(gv.metadata, "julia.constgv")
                 continue
             end
-            gv_to_value[LLVM.name(gv)] = C_NULL
-            val = initializer(gv)
+            gv_to_value[gv.name] = C_NULL
+            val = gv.initializer
             if val === nothing
                 continue
             end
             while isa(val, LLVM.ConstantExpr)
-                if in(opcode(val), (LLVM.API.LLVMBitCast, LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMIntToPtr))
-                    val = operands(val)[1]
+                if in(val.opcode, (LLVM.API.LLVMBitCast, LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMIntToPtr))
+                    val = val.operands[1]
                     continue
                 end
                 break
             end
             if isa(val, LLVM.ConstantInt)
-                gv_to_value[LLVM.name(gv)] = reinterpret(Ptr{Cvoid}, convert(UInt, val))
+                gv_to_value[gv.name] = reinterpret(Ptr{Cvoid}, convert(UInt, val))
             end
         end
     else
         @assert inits !== nothing
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
-            gv_to_value[LLVM.name(gv)] = init
+            gv_to_value[gv.name] = init
         end
         # Discard session addresses. Declarations survive optimization until relocation
         # lowering; null definitions could be folded away first.
-        for gv in globals(llvm_mod)
-            haskey(gv_to_value, LLVM.name(gv)) || continue
-            initializer!(gv, nothing)
-            linkage!(gv, LLVM.API.LLVMExternalLinkage)
+        for gv in llvm_mod.globals
+            haskey(gv_to_value, gv.name) || continue
+            gv.initializer = nothing
+            gv.linkage = LLVM.API.LLVMExternalLinkage
         end
     end
 
@@ -914,7 +916,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
                                   (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
             @assert llvm_func_ref != C_NULL
-            LLVM.name(LLVM.Function(llvm_func_ref))
+            LLVM.Function(llvm_func_ref).name
         else
             nothing
         end
@@ -923,7 +925,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
                                       (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
             @assert llvm_specfunc_ref != C_NULL
-            LLVM.name(LLVM.Function(llvm_specfunc_ref))
+            LLVM.Function(llvm_specfunc_ref).name
         else
             nothing
         end

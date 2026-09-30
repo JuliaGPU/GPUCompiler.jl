@@ -9,71 +9,71 @@ function irgen(@nospecialize(job::CompilerJob))
         entry_fn = compiled[job.source].func
     end
     @assert entry_fn !== nothing
-    entry = functions(mod)[entry_fn]
+    entry = mod.functions[entry_fn]
 
     # clean up incompatibilities
     @tracepoint "clean-up" begin
-        for llvmf in functions(mod)
+        for llvmf in mod.functions
             if Base.isdebugbuild()
                 # only occurs in debug builds
-                delete!(function_attributes(llvmf),
+                delete!(llvmf.function_attributes,
                         EnumAttribute("sspstrong", 0))
             end
 
-            delete!(function_attributes(llvmf),
+            delete!(llvmf.function_attributes,
                     StringAttribute("probe-stack", "inline-asm"))
 
             if Sys.iswindows()
-                personality!(llvmf, nothing)
+                llvmf.personality = nothing
             end
 
             # remove the non-specialized jfptr functions
             # TODO: Do we need to remove these?
             if job.config.entry_abi === :specfunc
-                if startswith(LLVM.name(llvmf), "jfptr_")
+                if startswith(llvmf.name, "jfptr_")
                     erase!(llvmf)
                 end
             end
         end
 
         # remove the exception-handling personality function
-        if Sys.iswindows() && "__julia_personality" in functions(mod)
-            llvmf = functions(mod)["__julia_personality"]
-            @compiler_assert isempty(uses(llvmf)) job
+        if Sys.iswindows() && "__julia_personality" in mod.functions
+            llvmf = mod.functions["__julia_personality"]
+            @compiler_assert isempty(llvmf.uses) job
             erase!(llvmf)
         end
     end
 
     # sanitize defined globals (external declaration names are part of their ABI)
-    for val in collect(globals(mod))
+    for val in collect(mod.globals)
         isdeclaration(val) && continue
-        new_name = safe_name(LLVM.name(val))
-        if LLVM.name(val) != new_name
-            LLVM.name!(val, new_name)
+        new_name = safe_name(val.name)
+        if val.name != new_name
+            val.name = new_name
         end
     end
 
     # sanitize defined functions (Julia doesn't when using the external codegen policy)
-    for val in collect(functions(mod))
+    for val in collect(mod.functions)
         isdeclaration(val) && continue
-        old_name = LLVM.name(val)
+        old_name = val.name
         new_name = safe_name(old_name)
         if old_name != new_name
-            LLVM.name!(val, new_name)
+            val.name = new_name
         end
     end
 
     # rename and process the entry point
     if job.config.name !== nothing
-        LLVM.name!(entry, safe_name(job.config.name))
+        entry.name = safe_name(job.config.name)
     elseif job.config.kernel
-        LLVM.name!(entry, mangle_sig(job.source.specTypes))
+        entry.name = mangle_sig(job.source.specTypes)
     end
     if job.config.entry_abi === :specfunc
         func = compiled[job.source].func
-        specfunc = LLVM.name(entry)
+        specfunc = entry.name
     else
-        func = LLVM.name(entry)
+        func = entry.name
         specfunc = compiled[job.source].specfunc
     end
 
@@ -85,7 +85,7 @@ function irgen(@nospecialize(job::CompilerJob))
         if job.config.kernel && pass_by_value(job)
             # pass all bitstypes by value; by default Julia passes aggregates by reference
             # (this improves performance, and is mandated by certain back-ends like SPIR-V).
-            args = classify_arguments(job, function_type(entry))
+            args = classify_arguments(job, entry.function_type)
             for arg in args
                 if arg.cc == BITS_REF
                     llvm_typ = convert(LLVMType, arg.typ)
@@ -94,7 +94,7 @@ function irgen(@nospecialize(job::CompilerJob))
                     else
                         attr = TypeAttribute("byval", llvm_typ)
                     end
-                    push!(parameter_attributes(entry, arg.idx), attr)
+                    push!(entry.parameter_attributes[arg.idx], attr)
                 end
             end
         end
@@ -111,31 +111,23 @@ function irgen(@nospecialize(job::CompilerJob))
         # runtime library's strong def is then linked in normally.
         for method in values(Runtime.methods)
             method.def isa Symbol || continue
-            haskey(functions(mod), method.llvm_name) || continue
-            f = functions(mod)[method.llvm_name]
+            haskey(mod.functions, method.llvm_name) || continue
+            f = mod.functions[method.llvm_name]
             isdeclaration(f) && continue
             empty!(f)
-            linkage!(f, LLVM.API.LLVMExternalLinkage)
+            f.linkage = LLVM.API.LLVMExternalLinkage
         end
 
         # internalize all functions and, but keep exported global variables.
-        linkage!(entry, LLVM.API.LLVMExternalLinkage)
-        preserved_gvs = String[LLVM.name(entry)]
-        for gvar in globals(mod)
-            push!(preserved_gvs, LLVM.name(gvar))
+        entry.linkage = LLVM.API.LLVMExternalLinkage
+        preserved_gvs = String[entry.name]
+        for gvar in mod.globals
+            push!(preserved_gvs, gvar.name)
         end
-        if LLVM.version() >= v"17"
-            @dispose pb=NewPMPassBuilder() begin
-                add!(pb, InternalizePass(; preserved_gvs))
-                add!(pb, AlwaysInlinerPass())
-                run!(pb, mod, llvm_machine(job.config.target))
-            end
-        else
-            @dispose pm=ModulePassManager() begin
-                internalize!(pm, preserved_gvs)
-                always_inliner!(pm)
-                run!(pm, mod)
-            end
+        @dispose pb=PassBuilder() begin
+            add!(pb, InternalizePass(; preserved_gvs))
+            add!(pb, AlwaysInlinerPass())
+            run!(pb, mod, llvm_machine(job.config.target))
         end
 
         can_throw(job) || lower_throw!(job, mod)
@@ -186,20 +178,20 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     # removed from LLVM) by a run-time `jl_error`. report those at compile time instead.
     errors = IRError[]
 
-    for f in functions(mod)
-        fn = LLVM.name(f)
+    for f in mod.functions
+        fn = f.name
         for (throw_fn, name) in throw_functions
             occursin(throw_fn, fn) || continue
 
-            for use in uses(f)
-                call = user(use)::LLVM.CallInst
+            for use in f.uses
+                call = use.user::LLVM.CallInst
                 if is_unknown_intrinsic_error(call)
                     push!(errors, (UNKNOWN_INTRINSIC, backtrace(call), nothing))
                 end
 
                 # replace the throw with a PTX-compatible exception
                 @dispose builder=IRBuilder() begin
-                    position!(builder, call)
+                    position!(builder, LLVM.before(call))
                     emit_exception!(job, builder, name, call)
                 end
 
@@ -209,7 +201,7 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                 changed = true
             end
 
-            @compiler_assert isempty(uses(f)) job
+            @compiler_assert isempty(f.uses) job
             break
          end
      end
@@ -235,9 +227,9 @@ end
 # folding away the guarding bounds-check branch. so the trap is the optimizer-correctness guard;
 # do not move its removal earlier than post-`optimize!`.
 function emit_exception!(@nospecialize(job::CompilerJob), builder, name, inst)
-    bb = position(builder)
-    fun = LLVM.parent(bb)
-    mod = LLVM.parent(fun)
+    bb = builder.insert_block
+    fun = bb.parent
+    mod = fun.parent
 
     # report the exception
     if job.config.debug_level >= 1
@@ -255,10 +247,10 @@ function emit_exception!(@nospecialize(job::CompilerJob), builder, name, inst)
         ft = runtime_function_type(job, rt)
         bt = backtrace(inst)
         for (i,frame) in enumerate(bt)
-            idx = ConstantInt(parameters(ft)[1], i)
+            idx = ConstantInt(ft.parameters[1], i)
             func = globalstring_ptr!(builder, String(frame.func), "di_func")
             file = globalstring_ptr!(builder, String(frame.file), "di_file")
-            line = ConstantInt(parameters(ft)[4], frame.line)
+            line = ConstantInt(ft.parameters[4], frame.line)
             call!(builder, rt, [idx, func, file, line]; job)
         end
     end
@@ -272,8 +264,8 @@ end
 
 function emit_trap!(@nospecialize(job::CompilerJob), builder, mod, inst)
     trap_ft = LLVM.FunctionType(LLVM.VoidType())
-    trap = if haskey(functions(mod), "llvm.trap")
-        functions(mod)["llvm.trap"]
+    trap = if haskey(mod.functions, "llvm.trap")
+        mod.functions["llvm.trap"]
     else
         LLVM.Function(mod, "llvm.trap", trap_ft)
     end
@@ -286,13 +278,13 @@ end
 # check if a function contains unreachable control flow
 # (`unreachable` terminator or `trap` call)
 function has_unreachable_control_flow(f::LLVM.Function)
-    for bb in blocks(f), inst in instructions(bb)
+    for bb in f.blocks, inst in bb.instructions
         if isa(inst, LLVM.UnreachableInst)
             return true
         end
         if isa(inst, LLVM.CallInst)
-            callee = called_operand(inst)
-            if isa(callee, LLVM.Function) && name(callee) == "llvm.trap"
+            callee = inst.called_operand
+            if isa(callee, LLVM.Function) && callee.name == "llvm.trap"
                 return true
             end
         end
@@ -317,12 +309,12 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
     @tracepoint "inline unreachable control flow" begin
     while true
         marked = false
-        for f in functions(mod)
+        for f in mod.functions
             isdeclaration(f) && continue
             # never inline a kernel, and don't bother marking a function with no call sites
             # (the inliner can't inline it anyway).
-            (f in kernel_fns || isempty(uses(f))) && continue
-            attrs = function_attributes(f)
+            (f in kernel_fns || isempty(f.uses)) && continue
+            attrs = f.function_attributes
             alwaysinline_attr in collect(attrs) && continue
             has_unreachable_control_flow(f) || continue
 
@@ -332,7 +324,7 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
         end
         marked || break
 
-        @dispose pb=NewPMPassBuilder() begin
+        @dispose pb=PassBuilder() begin
             add!(pb, AlwaysInlinerPass())
             run!(pb, mod, llvm_machine(job.config.target))
         end
@@ -358,10 +350,10 @@ end
 # UnsafeAtomics' `load`/`store!`) that the back-end must see.
 function demote_unordered_atomics!(mod::LLVM.Module)
     changed = false
-    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
         (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) || continue
-        is_atomic(inst) && ordering(inst) == LLVM.API.LLVMAtomicOrderingUnordered || continue
-        ordering!(inst, LLVM.API.LLVMAtomicOrderingNotAtomic)
+        isatomic(inst) && inst.ordering == LLVM.API.LLVMAtomicOrderingUnordered || continue
+        inst.ordering = LLVM.API.LLVMAtomicOrderingNotAtomic
         changed = true
     end
     return changed
@@ -389,7 +381,7 @@ function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::L
     # erases the throwing helpers it fully inlines (they are `internal`, hence discardable), so in
     # practice this is a no-op; it is here only to catch dead remnants of partial inlining, since the
     # regular `cleanup` DCE ran before `finish_ir!` and won't see anything produced above.
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb=PassBuilder() begin
         add!(pb, GlobalDCEPass())
         run!(pb, mod, llvm_machine(job.config.target))
     end
@@ -402,12 +394,12 @@ function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::L
     # `trap`/`unreachable`, which the back-end may reject, but that honestly surfaces an unsupported
     # construct instead of quietly miscompiling it — and warn.
     kernel_fns = kernels(mod)
-    for f in functions(mod)
+    for f in mod.functions
         isdeclaration(f) && continue
         if f in kernel_fns
             changed |= lower_unreachable_control_flow!(f)
-        elseif has_unreachable_control_flow(f) && !isempty(uses(f))
-            @safe_warn "Cannot lower unreachable control flow in '$(name(f))': it has callers but could not be inlined into a kernel (it is likely recursive or address-taken). Leaving its trap/unreachable in place; this may not be supported by the back-end."
+        elseif has_unreachable_control_flow(f) && !isempty(f.uses)
+            @safe_warn "Cannot lower unreachable control flow in '$(f.name)': it has callers but could not be inlined into a kernel (it is likely recursive or address-taken). Leaving its trap/unreachable in place; this may not be supported by the back-end."
         end
     end
 
@@ -421,19 +413,19 @@ function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::L
     # dropping it is always safe — it only relaxes an optimization hint; the back-end may re-infer
     # it on a function that really never returns, but with no trap to reconstruct that is harmless.
     noreturn_attr = EnumAttribute("noreturn", 0)
-    for f in functions(mod)
-        delete!(function_attributes(f), noreturn_attr)
-        for bb in blocks(f), inst in instructions(bb)
-            isa(inst, LLVM.CallInst) && delete!(function_attributes(inst), noreturn_attr)
+    for f in mod.functions
+        delete!(f.function_attributes, noreturn_attr)
+        for bb in f.blocks, inst in bb.instructions
+            isa(inst, LLVM.CallInst) && delete!(inst.function_attributes, noreturn_attr)
         end
     end
 
     # erase the now-unused `llvm.trap` declaration. guarded by `isempty(uses(...))` so we only
     # ever drop it when the calls above are gone (other backends create their own `llvm.trap`
     # and never invoke this pass, so theirs is untouched).
-    if haskey(functions(mod), "llvm.trap")
-        trap = functions(mod)["llvm.trap"]
-        if isempty(uses(trap))
+    if haskey(mod.functions, "llvm.trap")
+        trap = mod.functions["llvm.trap"]
+        if isempty(trap.uses)
             erase!(trap)
             changed = true
         end
@@ -447,10 +439,10 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
     changed = false
 
     # Pass 1: strip every `llvm.trap` call, regardless of shape.
-    for bb in blocks(f), inst in collect(instructions(bb))
+    for bb in f.blocks, inst in collect(bb.instructions)
         if isa(inst, LLVM.CallInst)
-            callee = called_operand(inst)
-            if isa(callee, LLVM.Function) && name(callee) == "llvm.trap"
+            callee = inst.called_operand
+            if isa(callee, LLVM.Function) && callee.name == "llvm.trap"
                 erase!(inst)
                 changed = true
             end
@@ -461,7 +453,7 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
     # block. this also covers `unreachable` not preceded by a trap.
     unreachables = Instruction[]
     exit_blocks = BasicBlock[]
-    for bb in blocks(f), inst in instructions(bb)
+    for bb in f.blocks, inst in bb.instructions
         if isa(inst, LLVM.UnreachableInst)
             push!(unreachables, inst)
         end
@@ -477,8 +469,8 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
             # the function has no normal return (e.g. a kernel whose only path is a `throw`).
             # synthesize a return block so we can turn the `unreachable` into a clean return.
             return_block = BasicBlock(f, "ret")
-            position!(builder, return_block)
-            rt = return_type(function_type(f))
+            position!(builder, LLVM.at_end(return_block))
+            rt = f.function_type.return_type
             if rt == LLVM.VoidType()
                 ret!(builder)
             else
@@ -488,55 +480,55 @@ function lower_unreachable_control_flow!(f::LLVM.Function)
             # if we have multiple exit blocks, take the last one, which is hopefully the least
             # divergent (assuming divergent control flow is the root of the problem here).
             exit_block = last(exit_blocks)
-            ret = terminator(exit_block)
+            ret = exit_block.terminator
 
             # create a return block with only the return instruction, so that we only have to
             # care about any values returned, and not about any other SSA value in the block.
-            if first(instructions(exit_block)) == ret
+            if first(exit_block.instructions) == ret
                 # we can reuse the exit block if it only contains the return
                 return_block = exit_block
             else
                 # split the exit block right before the ret
                 return_block = BasicBlock(f, "ret")
-                move_after(return_block, exit_block)
+                move!(return_block, LLVM.after(exit_block))
 
                 # emit a branch
-                position!(builder, ret)
+                position!(builder, LLVM.before(ret))
                 br!(builder, return_block)
 
                 # move the return
                 remove!(ret)
-                position!(builder, return_block)
-                insert!(builder, ret)
+                position!(builder, LLVM.at_end(return_block))
+                move!(ret, builder.position)
             end
 
             # when returning a value, add a phi node to the return block, so that we can later
             # add incoming undef values when branching from `unreachable` blocks
-            if !isempty(operands(ret))
-                position!(builder, ret)
+            if !isempty(ret.operands)
+                position!(builder, LLVM.before(ret))
                 # XXX: support aggregate returns?
-                val = only(operands(ret))
-                phi = phi!(builder, value_type(val))
-                for pred in predecessors(return_block)
-                    push!(incoming(phi), (val, pred))
+                val = only(ret.operands)
+                phi = phi!(builder, val.value_type)
+                for pred in return_block.predecessors
+                    push!(phi.incoming, (val, pred))
                 end
-                operands(ret)[1] = phi
+                ret.operands[1] = phi
             end
         end
 
         # replace the unreachable with a branch to the return block
         for unreachable in unreachables
-            bb = LLVM.parent(unreachable)
+            bb = unreachable.parent
 
-            position!(builder, unreachable)
+            position!(builder, LLVM.before(unreachable))
             br!(builder, return_block)
             erase!(unreachable)
 
             # patch up any phi nodes in the return block
-            for inst in instructions(return_block)
+            for inst in return_block.instructions
                 if isa(inst, LLVM.PHIInst)
-                    undef = UndefValue(value_type(inst))
-                    vals = incoming(inst)
+                    undef = UndefValue(inst.value_type)
+                    vals = inst.incoming
                     push!(vals, (undef, bb))
                 end
             end
@@ -567,7 +559,7 @@ function same_type_modulo_addrspaces(@nospecialize(a::LLVMType), @nospecialize(b
     a == b && return true
     (a isa LLVM.PointerType && b isa LLVM.PointerType) || return false
     supports_typed_pointers(context()) || return true
-    return same_type_modulo_addrspaces(eltype(a), eltype(b))
+    return same_type_modulo_addrspaces(a.element_type, b.element_type)
 end
 
 # Determine the calling convention of a the arguments of a Julia function, given the
@@ -589,7 +581,7 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
         push!(source_argnames, source_argnames[end])
     end
 
-    codegen_types = parameters(codegen_ft)
+    codegen_types = codegen_ft.parameters
 
     if post_optimization && kernel_state_type(job) !== Nothing
         args = []
@@ -688,18 +680,18 @@ end
 # some back-ends don't support byval, or support it badly, so lower it eagerly ourselves
 # https://reviews.llvm.org/D79744
 function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
-    ft = function_type(f)
+    ft = f.function_type
     @tracepoint "lower byval" begin
 
     # find the byval parameters
-    byval = BitVector(undef, length(parameters(ft)))
-    types = Vector{LLVMType}(undef, length(parameters(ft)))
+    byval = BitVector(undef, length(ft.parameters))
+    types = Vector{LLVMType}(undef, length(ft.parameters))
     for i in 1:length(byval)
         byval[i] = false
-        for attr in collect(parameter_attributes(f, i))
-            if kind(attr) == kind(TypeAttribute("byval", LLVM.VoidType()))
+        for attr in collect(f.parameter_attributes[i])
+            if attr.kind == :byval
                 byval[i] = true
-                types[i] = value(attr)
+                types[i] = attr.value
             end
         end
     end
@@ -717,13 +709,13 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
     # repairs it. `CleanupIR` also never touches `!alias.scope`/`!noalias`. The inliner copes with
     # that because it clones alias scopes per instance, but `clone_into!` below copies the metadata
     # verbatim, so we strip the whole package ourselves.
-    for (i, param) in enumerate(parameters(f))
+    for (i, param) in enumerate(f.parameters)
         byval[i] && strip_julia_const_region_metadata_from_derived_uses!(param)
     end
 
     # generate the new function type & definition
     new_types = LLVM.LLVMType[]
-    for (i, param) in enumerate(parameters(ft))
+    for (i, param) in enumerate(ft.parameters)
         if byval[i]
             llvm_typ = convert(LLVMType, types[i])
             push!(new_types, llvm_typ)
@@ -731,41 +723,41 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
             push!(new_types, param)
         end
     end
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_ft = LLVM.FunctionType(ft.return_type, new_types)
     new_f = LLVM.Function(mod, "", new_ft)
-    linkage!(new_f, linkage(f))
-    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
-        LLVM.name!(new_arg, LLVM.name(arg))
+    new_f.linkage = f.linkage
+    for (arg, new_arg) in zip(f.parameters, new_f.parameters)
+        new_arg.name = arg.name
     end
 
     # emit IR performing the "conversions"
     new_args = LLVM.Value[]
     @dispose builder=IRBuilder() begin
         entry = BasicBlock(new_f, "conversion")
-        position!(builder, entry)
+        position!(builder, LLVM.at_end(entry))
 
         # perform argument conversions
-        for (i, param) in enumerate(parameters(ft))
+        for (i, param) in enumerate(ft.parameters)
             if byval[i]
                 # copy the argument value to a stack slot, and reference it.
                 llvm_typ = convert(LLVMType, types[i])
                 ptr = alloca!(builder, llvm_typ)
-                if LLVM.addrspace(param) != 0
+                if param.addrspace != 0
                     ptr = addrspacecast!(builder, ptr, param)
                 end
-                store!(builder, parameters(new_f)[i], ptr)
+                store!(builder, new_f.parameters[i], ptr)
                 push!(new_args, ptr)
             else
-                push!(new_args, parameters(new_f)[i])
-                for attr in collect(parameter_attributes(f, i))
-                    push!(parameter_attributes(new_f, i), attr)
+                push!(new_args, new_f.parameters[i])
+                for attr in collect(f.parameter_attributes[i])
+                    push!(new_f.parameter_attributes[i], attr)
                 end
             end
         end
 
         # map the arguments
         value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => new_args[i] for (i,param) in enumerate(parameters(f))
+            param => new_args[i] for (i,param) in enumerate(f.parameters)
         )
 
         value_map[f] = new_f
@@ -773,16 +765,16 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
         # fall through
-        br!(builder, blocks(new_f)[2])
+        br!(builder, new_f.blocks[2])
     end
 
     # remove the old function
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
-    fn = LLVM.name(f)
-    @assert isempty(uses(f))
+    fn = f.name
+    @assert isempty(f.uses)
     replace_metadata_uses!(f, new_f)
     erase!(f)
-    LLVM.name!(new_f, fn)
+    new_f.name = fn
 
     return new_f
 
@@ -795,7 +787,7 @@ const JuliaConstRegionMetadataKinds =
 
 function strip_julia_const_region_metadata!(inst::LLVM.Instruction)
     changed = false
-    md = metadata(inst)
+    md = inst.metadata
     for kind in JuliaConstRegionMetadataKinds
         if haskey(md, kind)
             delete!(md, kind)
@@ -814,7 +806,7 @@ end
 function strip_julia_const_region_metadata_from_derived_uses!(root)
     changed = false
     seen = Base.IdSet{LLVM.Value}()  # `IdSet` is not visible unqualified on Julia 1.10
-    worklist = Vector{LLVM.Instruction}(user.(collect(uses(root))))
+    worklist = Vector{LLVM.Instruction}(collect(root.users))
     while !isempty(worklist)
         inst = popfirst!(worklist)
         inst in seen && continue
@@ -823,7 +815,7 @@ function strip_julia_const_region_metadata_from_derived_uses!(root)
         changed |= strip_julia_const_region_metadata!(inst)
 
         is_pointer_derivation_inst(inst) || continue
-        append!(worklist, user.(collect(uses(inst))))
+        append!(worklist, collect(inst.users))
     end
     return changed
 end
@@ -877,20 +869,20 @@ function (self::AddKernelState)(mod::LLVM.Module)
         additions = LLVM.Function[]
         function check_user(val)
             if val isa Instruction
-                bb = LLVM.parent(val)
-                new_f = LLVM.parent(bb)
+                bb = val.parent
+                new_f = bb.parent
                 in(new_f, worklist) || push!(additions, new_f)
             elseif val isa ConstantExpr
                 # constant expressions don't have a parent; we need to look up their uses
-                for use in uses(val)
-                    check_user(user(use))
+                for use in val.uses
+                    check_user(use.user)
                 end
             else
                 error("Don't know how to check uses of $val. Please file an issue.")
             end
         end
-        for f in worklist, use in uses(f)
-            check_user(user(use))
+        for f in worklist, use in f.uses
+            check_user(use.user)
         end
         for f in additions
             push!(worklist, f)
@@ -900,21 +892,21 @@ function (self::AddKernelState)(mod::LLVM.Module)
 
     # add a state argument
     # Clones are appended in processing order, so don't iterate the pointer-hashed worklist.
-    ordered_worklist = [f for f in functions(mod) if f in worklist]
+    ordered_worklist = [f for f in mod.functions if f in worklist]
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in ordered_worklist
-        fn = LLVM.name(f)
-        ft = function_type(f)
-        LLVM.name!(f, fn * ".stateless")
+        fn = f.name
+        ft = f.function_type
+        f.name = fn * ".stateless"
 
         # create a new function
-        new_param_types = [T_state, parameters(ft)...]
-        new_ft = LLVM.FunctionType(return_type(ft), new_param_types)
+        new_param_types = [T_state, ft.parameters...]
+        new_ft = LLVM.FunctionType(ft.return_type, new_param_types)
         new_f = LLVM.Function(mod, fn, new_ft)
-        LLVM.name!(parameters(new_f)[1], "state")
-        linkage!(new_f, linkage(f))
-        for (arg, new_arg) in zip(parameters(f), parameters(new_f)[2:end])
-            LLVM.name!(new_arg, LLVM.name(arg))
+        new_f.parameters[1].name = "state"
+        new_f.linkage = f.linkage
+        for (arg, new_arg) in zip(f.parameters, new_f.parameters[2:end])
+            new_arg.name = arg.name
         end
 
         workmap[f] = new_f
@@ -930,8 +922,8 @@ function (self::AddKernelState)(mod::LLVM.Module)
     # _correct_ the uses (i.e. actually add the state argument) afterwards.
     function materializer(val)
         if val isa ConstantExpr
-            if opcode(val) == LLVM.API.LLVMBitCast
-                target = operands(val)[1]
+            if val.opcode == LLVM.API.LLVMBitCast
+                target = val.operands[1]
                 if target isa LLVM.Function && haskey(workmap, target)
                     # the function is being bitcasted to a different function type.
                     # we need to mutate that function type to include the state argument,
@@ -939,15 +931,15 @@ function (self::AddKernelState)(mod::LLVM.Module)
                     #
                     # XXX: ptrtoint/inttoptr pairs can also lose the state argument...
                     #      is all this even sound?
-                    typ = value_type(val)::LLVM.PointerType
-                    ft = eltype(typ)::LLVM.FunctionType
-                    new_ft = LLVM.FunctionType(return_type(ft), [T_state, parameters(ft)...])
-                    return const_bitcast(workmap[target], LLVM.PointerType(new_ft, addrspace(typ)))
+                    typ = val.value_type::LLVM.PointerType
+                    ft = typ.element_type::LLVM.FunctionType
+                    new_ft = LLVM.FunctionType(ft.return_type, [T_state, ft.parameters...])
+                    return const_bitcast(workmap[target], LLVM.PointerType(new_ft, typ.addrspace))
                 end
-            elseif opcode(val) == LLVM.API.LLVMPtrToInt
-                target = operands(val)[1]
+            elseif val.opcode == LLVM.API.LLVMPtrToInt
+                target = val.operands[1]
                 if target isa LLVM.Function && haskey(workmap, target)
-                    return const_ptrtoint(workmap[target], value_type(val))
+                    return const_ptrtoint(workmap[target], val.value_type)
                 end
             end
         end
@@ -957,8 +949,8 @@ function (self::AddKernelState)(mod::LLVM.Module)
         new_f = workmap[f]
         # use a value mapper for rewriting function arguments
         value_map = Dict{LLVM.Value, LLVM.Value}()
-        for (param, new_param) in zip(parameters(f), parameters(new_f)[2:end])
-            LLVM.name!(new_param, LLVM.name(param))
+        for (param, new_param) in zip(f.parameters, new_f.parameters[2:end])
+            new_param.name = param.name
             value_map[param] = new_param
         end
 
@@ -975,7 +967,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
     # ensure the old (stateless) functions don't have uses anymore, and remove them
     for f in keys(workmap)
         prune_constexpr_uses!(f)
-        @assert isempty(uses(f))
+        @assert isempty(f.uses)
         replace_metadata_uses!(f, workmap[f])
         erase!(f)
     end
@@ -984,55 +976,55 @@ function (self::AddKernelState)(mod::LLVM.Module)
     function rewrite_uses!(f, ft)
         # update uses
         @dispose builder=IRBuilder() begin
-            for use in uses(f)
-                val = user(use)
-                if val isa LLVM.CallBase && called_operand(val) == f
+            for use in f.uses
+                val = use.user
+                if val isa LLVM.CallBase && val.called_operand == f
                     # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
                     #       as those have a fixed argument list, passing actual arguments
                     #       in an array of objects. that doesn't matter, for now, since
                     #       GPU back-ends don't support such calls anyhow. but if we ever
                     #       want to support kernel state passing on more capable back-ends,
                     #       we'll need to update the argument array instead.
-                    if callconv(val) == 37 || callconv(val) == 38
+                    if val.callconv == 37 || val.callconv == 38
                         # TODO: update for LLVM 15 when JuliaLang/julia#45088 is merged.
                         continue
                     end
 
                     # forward the state argument
-                    position!(builder, val)
+                    position!(builder, LLVM.before(val))
                     state = call!(builder, state_intr_ft, state_intr, Value[], "state")
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, ft, f, [state, arguments(val)...], operand_bundles(val))
+                        call!(builder, ft, f, [state, val.arguments...], val.operand_bundles)
                     else
                         # TODO: invoke and callbr
                         error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
                     end
-                    callconv!(new_val, callconv(val))
+                    new_val.callconv = val.callconv
 
                     replace_uses!(val, new_val)
-                    @assert isempty(uses(val))
+                    @assert isempty(val.uses)
                     erase!(val)
                 elseif val isa LLVM.CallBase
                     # the function is being passed as an argument. to avoid having to
                     # rewrite the target function, instead case the rewritten function to
                     # the old stateless type.
                     # XXX: we won't have to do this with opaque pointers.
-                    position!(builder, val)
-                    target_ft = called_type(val)
-                    new_args = map(zip(parameters(target_ft),
-                                       arguments(val))) do (param_typ, arg)
-                        if value_type(arg) != param_typ
+                    position!(builder, LLVM.before(val))
+                    target_ft = val.called_type
+                    new_args = map(zip(target_ft.parameters,
+                                       val.arguments)) do (param_typ, arg)
+                        if arg.value_type != param_typ
                             const_bitcast(arg, param_typ)
                         else
                             arg
                         end
                     end
-                    new_val = call!(builder, called_type(val), called_operand(val), new_args,
-                                    operand_bundles(val))
-                    callconv!(new_val, callconv(val))
+                    new_val = call!(builder, val.called_type, val.called_operand, new_args,
+                                    val.operand_bundles)
+                    new_val.callconv = val.callconv
 
                     replace_uses!(val, new_val)
-                    @assert isempty(uses(val))
+                    @assert isempty(val.uses)
                     erase!(val)
                 elseif val isa LLVM.StoreInst
                     # the function is being stored, which again we'll permit like before.
@@ -1045,13 +1037,13 @@ function (self::AddKernelState)(mod::LLVM.Module)
         end
     end
     for f in values(workmap)
-        ft = function_type(f)
+        ft = f.function_type
         rewrite_uses!(f, ft)
     end
 
     return true
 end
-AddKernelStatePass(job) = NewPMModulePass("AddKernelStatePass", AddKernelState(job))
+AddKernelStatePass(job) = ModulePass("AddKernelStatePass", AddKernelState(job))
 
 # lower calls to the state getter intrinsic. this is a two-step process, so that the state
 # argument can be added before optimization, and that optimization can introduce new uses
@@ -1060,7 +1052,7 @@ struct LowerKernelState
     job::CompilerJob
 end
 function (self::LowerKernelState)(fun::LLVM.Function)
-    mod = LLVM.parent(fun)
+    mod = fun.parent
     changed = false
 
     # check if we even need a kernel state argument
@@ -1070,42 +1062,42 @@ function (self::LowerKernelState)(fun::LLVM.Function)
     end
 
     # fixup all uses of the state getter to use the newly introduced function state argument
-    if haskey(functions(mod), "julia.gpu.state_getter")
-        state_intr = functions(mod)["julia.gpu.state_getter"]
+    if haskey(mod.functions, "julia.gpu.state_getter")
+        state_intr = mod.functions["julia.gpu.state_getter"]
         state_arg = nothing # only look-up when needed
 
         @dispose builder=IRBuilder() begin
-            for use in uses(state_intr)
-                inst = user(use)
+            for use in state_intr.uses
+                inst = use.user
                 @assert inst isa LLVM.CallInst
-                bb = LLVM.parent(inst)
-                LLVM.parent(bb) == fun || continue
+                bb = inst.parent
+                bb.parent == fun || continue
 
-                position!(builder, inst)
-                bb = LLVM.parent(inst)
-                f = LLVM.parent(bb)
+                position!(builder, LLVM.before(inst))
+                bb = inst.parent
+                f = bb.parent
 
                 if state_arg === nothing
                     # find the kernel state argument. this should be the first argument of
                     # the function, but only when this function needs the state!
-                    params = parameters(fun)
+                    params = fun.parameters
                     if isempty(params)
                         # `add_kernel_state!` should have given every function that uses the
                         # state intrinsic a state argument. if it didn't, fail with a clear
                         # message (naming the offending function) instead of an opaque
                         # `BoundsError`, so the bug is diagnosable from the error alone.
-                        error("""kernel state lowering: function `$(LLVM.name(fun))` uses the \
+                        error("""kernel state lowering: function `$(fun.name)` uses the \
                                  kernel state intrinsic but was not given a state argument. \
                                  This is a GPUCompiler bug; please file an issue.""")
                     end
                     state_arg = params[1]
                     T_state = convert(LLVMType, state)
-                    @assert value_type(state_arg) == T_state
+                    @assert state_arg.value_type == T_state
                 end
 
                 replace_uses!(inst, state_arg)
 
-                @assert isempty(uses(inst))
+                @assert isempty(inst.uses)
                 erase!(inst)
 
                 changed = true
@@ -1115,7 +1107,7 @@ function (self::LowerKernelState)(fun::LLVM.Function)
 
     return changed
 end
-LowerKernelStatePass(job) = NewPMFunctionPass("LowerKernelStatePass", LowerKernelState(job))
+LowerKernelStatePass(job) = FunctionPass("LowerKernelStatePass", LowerKernelState(job))
 
 struct CleanupKernelState
     job::CompilerJob
@@ -1124,9 +1116,9 @@ function (self::CleanupKernelState)(mod::LLVM.Module)
     changed = false
 
     # remove the getter intrinsic
-    if haskey(functions(mod), "julia.gpu.state_getter")
-        intr = functions(mod)["julia.gpu.state_getter"]
-        if isempty(uses(intr))
+    if haskey(mod.functions, "julia.gpu.state_getter")
+        intr = mod.functions["julia.gpu.state_getter"]
+        if isempty(intr.uses)
             # if we're not emitting a kernel, we can't resolve the intrinsic to an argument.
             erase!(intr)
             changed = true
@@ -1135,15 +1127,15 @@ function (self::CleanupKernelState)(mod::LLVM.Module)
 
     return changed
 end
-CleanupKernelStatePass(job) = NewPMModulePass("CleanupKernelStatePass", CleanupKernelState(job))
+CleanupKernelStatePass(job) = ModulePass("CleanupKernelStatePass", CleanupKernelState(job))
 
 function kernel_state_intr(mod::LLVM.Module, T_state)
-    state_intr = if haskey(functions(mod), "julia.gpu.state_getter")
-        functions(mod)["julia.gpu.state_getter"]
+    state_intr = if haskey(mod.functions, "julia.gpu.state_getter")
+        mod.functions["julia.gpu.state_getter"]
     else
         LLVM.Function(mod, "julia.gpu.state_getter", LLVM.FunctionType(T_state))
     end
-    push!(function_attributes(state_intr), EnumAttribute("readnone", 0))
+    push!(state_intr.function_attributes, EnumAttribute("readnone", 0))
 
     return state_intr
 end
@@ -1152,7 +1144,7 @@ end
 kernel_state_value(state) = generate_llvmcall(state, Tuple{}) do builder
     T_state = convert(LLVMType, state)
     state_intr = kernel_state_intr(current_module(builder), T_state)
-    call!(builder, function_type(state_intr), state_intr, Value[], "state")
+    call!(builder, state_intr.function_type, state_intr, Value[], "state")
 end
 
 
@@ -1165,12 +1157,12 @@ end
 # global at parse time (which would bake the wrong level under pkgimage reuse across `-g`).
 
 function debug_level_intr(mod::LLVM.Module)
-    intr = if haskey(functions(mod), "julia.gpu.debug_level")
-        functions(mod)["julia.gpu.debug_level"]
+    intr = if haskey(mod.functions, "julia.gpu.debug_level")
+        mod.functions["julia.gpu.debug_level"]
     else
         LLVM.Function(mod, "julia.gpu.debug_level", LLVM.FunctionType(LLVM.Int32Type()))
     end
-    push!(function_attributes(intr), EnumAttribute("readnone", 0))
+    push!(intr.function_attributes, EnumAttribute("readnone", 0))
 
     return intr
 end
@@ -1179,7 +1171,7 @@ end
 # configured `debug_level` as an `Int32` (lowered to a constant by `lower_debug_level!`).
 kernel_debug_level_value() = generate_llvmcall(Int32, Tuple{}) do builder
     intr = debug_level_intr(current_module(builder))
-    call!(builder, function_type(intr), intr, Value[], "debug_level")
+    call!(builder, intr.function_type, intr, Value[], "debug_level")
 end
 
 # device-facing accessor: the compiling job's debug level as an `Int32` compile-time constant.
@@ -1191,17 +1183,17 @@ export kernel_debug_level
 
 # replace every `julia.gpu.debug_level` call with the job's configured level
 function lower_debug_level!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    haskey(functions(mod), "julia.gpu.debug_level") || return false
+    haskey(mod.functions, "julia.gpu.debug_level") || return false
 
-    intr = functions(mod)["julia.gpu.debug_level"]
+    intr = mod.functions["julia.gpu.debug_level"]
     level = ConstantInt(LLVM.Int32Type(), job.config.debug_level)
-    for use in collect(uses(intr))
-        inst = user(use)
+    for use in collect(intr.uses)
+        inst = use.user
         @assert inst isa LLVM.CallInst
         replace_uses!(inst, level)
         erase!(inst)
     end
-    @assert isempty(uses(intr))
+    @assert isempty(intr.uses)
     erase!(intr)
 
     return true
@@ -1225,8 +1217,8 @@ end
 
 function alloca_intr(mod::LLVM.Module, T_ptr::LLVMType)
     name = "julia.gpu.alloca"
-    intr = if haskey(functions(mod), name)
-        functions(mod)[name]
+    intr = if haskey(mod.functions, name)
+        mod.functions[name]
     else
         # takes the size in bytes and the alignment as constant operands, and returns a
         # pointer in the requested address space; intentionally *not* readnone/speculatable,
@@ -1262,7 +1254,7 @@ function alloca_value(@nospecialize(T), N::Int, AS::Int)
         intr = alloca_intr(current_module(builder), T_ptr)
         args = Value[ConstantInt(LLVM.Int64Type(), bytes),
                      ConstantInt(LLVM.Int64Type(), align)]
-        call!(builder, function_type(intr), intr, args, "alloca")
+        call!(builder, intr.function_type, intr, args, "alloca")
     end
 end
 
@@ -1289,33 +1281,33 @@ end
 
 # replace every `julia.gpu.alloca` call with an entry-block alloca in the containing function
 function lower_alloca!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    haskey(functions(mod), "julia.gpu.alloca") || return false
-    intr = functions(mod)["julia.gpu.alloca"]
+    haskey(mod.functions, "julia.gpu.alloca") || return false
+    intr = mod.functions["julia.gpu.alloca"]
 
     @dispose builder=IRBuilder() begin
-        for use in collect(uses(intr))
-            call = user(use)
+        for use in collect(intr.uses)
+            call = use.user
             @assert call isa LLVM.CallInst
-            bytes, align = convert.(Int, operands(call)[1:2])
-            f = LLVM.parent(LLVM.parent(call))
+            bytes, align = convert.(Int, call.operands[1:2])
+            f = call.parent.parent
 
             # materialize the slot at the top of the entry block so that it is a static
             # alloca (promotable, and allocated once rather than per loop iteration).
-            position!(builder, first(instructions(first(blocks(f)))))
+            position!(builder, LLVM.before(first(first(f.blocks).instructions)))
             slot = alloca!(builder, alloca_slot_type(bytes, align), "alloca")
-            alignment!(slot, align)
+            slot.alignment = align
 
             # `alloca!` placed the slot in the datalayout's alloca address space; cast it to
             # the intrinsic's return type, i.e. the address space requested by the caller
             # (emitting an addrspacecast when it differs from the alloca address space).
-            ptr = pointercast!(builder, slot, value_type(call))
+            ptr = pointercast!(builder, slot, call.value_type)
 
             replace_uses!(call, ptr)
             erase!(call)
         end
     end
 
-    @assert isempty(uses(intr))
+    @assert isempty(intr.uses)
     erase!(intr)
 
     return true
@@ -1328,7 +1320,7 @@ end
 # serves to convert that argument (and is conceptually the inverse of `lower_byval`).
 function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                     f::LLVM.Function)
-    ft = function_type(f)
+    ft = f.function_type
 
     # check if we even need a kernel state argument
     state = kernel_state_type(job)
@@ -1339,20 +1331,20 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
     T_state = convert(LLVMType, state)
 
     # find the kernel state parameter (should be the first argument)
-    if isempty(parameters(ft)) || value_type(parameters(f)[1]) != T_state
+    if isempty(ft.parameters) || f.parameters[1].value_type != T_state
         return f
     end
 
     @tracepoint "kernel state to reference" begin
         # turn the leading kernel-state value parameter into a pointer the body loads from
         new_types = Union{Nothing,LLVM.LLVMType}[
-            i == 1 ? LLVM.PointerType(T_state) : nothing for i in 1:length(parameters(ft))]
+            i == 1 ? LLVM.PointerType(T_state) : nothing for i in 1:length(ft.parameters)]
         new_f = clone_with_converted_args!(mod, f, new_types,
             (builder, param, i) -> load!(builder, T_state, param, "state"))
-        LLVM.name!(parameters(new_f)[1], "state_ptr")
+        new_f.parameters[1].name = "state_ptr"
 
         # set the attributes for the state pointer parameter
-        attrs = parameter_attributes(new_f, 1)
+        attrs = new_f.parameter_attributes[1]
         # the pointer itself cannot be captured since we immediately load from it.
         # `nocapture` was replaced by `captures(none)` (an integer-valued IntAttr,
         # value 0 == CaptureInfo::none()) in LLVM 21.
@@ -1367,7 +1359,7 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
         replace_function!(f, new_f)
 
         # minimal optimization
-        @dispose pb=NewPMPassBuilder() begin
+        @dispose pb=PassBuilder() begin
             add!(pb, SimplifyCFGPass())
             run!(pb, new_f, llvm_machine(job.config.target))
         end
@@ -1378,18 +1370,18 @@ end
 
 function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                               entry::LLVM.Function, kernel_intrinsics::Dict)
-    entry_fn = LLVM.name(entry)
+    entry_fn = entry.name
 
     # figure out which intrinsics are used and need to be added as arguments
     used_intrinsics = filter(keys(kernel_intrinsics)) do intr_fn
-        haskey(functions(mod), intr_fn)
+        haskey(mod.functions, intr_fn)
     end |> collect
     nargs = length(used_intrinsics)
 
     # determine which functions need these arguments
     worklist = Set{LLVM.Function}([entry])
     for intr_fn in used_intrinsics
-        push!(worklist, functions(mod)[intr_fn])
+        push!(worklist, mod.functions[intr_fn])
     end
     worklist_length = 0
     while worklist_length != length(worklist)
@@ -1397,11 +1389,11 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         worklist_length = length(worklist)
         additions = Set{LLVM.Function}()
         function scan_uses(val)
-            for use in uses(val)
-                candidate = user(use)
+            for use in val.uses
+                candidate = use.user
                 if isa(candidate, Instruction)
-                    bb = LLVM.parent(candidate)
-                    new_f = LLVM.parent(bb)
+                    bb = candidate.parent
+                    new_f = bb.parent
                     in(new_f, worklist) || push!(additions, new_f)
                 elseif isa(candidate, ConstantExpr)
                     scan_uses(candidate)
@@ -1418,33 +1410,33 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         end
     end
     for intr_fn in used_intrinsics
-        delete!(worklist, functions(mod)[intr_fn])
+        delete!(worklist, mod.functions[intr_fn])
     end
 
     # add the arguments
     # NOTE: we don't need to be fine-grained here, as unused args will be removed during opt
     # Clones are appended in processing order, so don't iterate the pointer-hashed worklist.
-    ordered_worklist = [f for f in functions(mod) if f in worklist]
+    ordered_worklist = [f for f in mod.functions if f in worklist]
     workmap = Dict{LLVM.Function, LLVM.Function}()
     for f in ordered_worklist
-        fn = LLVM.name(f)
-        ft = function_type(f)
-        LLVM.name!(f, fn * ".orig")
+        fn = f.name
+        ft = f.function_type
+        f.name = fn * ".orig"
         # create a new function
-        new_param_types = LLVMType[parameters(ft)...]
+        new_param_types = LLVMType[ft.parameters...]
 
         for intr_fn in used_intrinsics
             llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].typ)
             push!(new_param_types, llvm_typ)
         end
-        new_ft = LLVM.FunctionType(return_type(ft), new_param_types)
+        new_ft = LLVM.FunctionType(ft.return_type, new_param_types)
         new_f = LLVM.Function(mod, fn, new_ft)
-        linkage!(new_f, linkage(f))
-        for (arg, new_arg) in zip(parameters(f), parameters(new_f))
-            LLVM.name!(new_arg, LLVM.name(arg))
+        new_f.linkage = f.linkage
+        for (arg, new_arg) in zip(f.parameters, new_f.parameters)
+            new_arg.name = arg.name
         end
-        for (intr_fn, new_arg) in zip(used_intrinsics, parameters(new_f)[end-nargs+1:end])
-            LLVM.name!(new_arg, kernel_intrinsics[intr_fn].name)
+        for (intr_fn, new_arg) in zip(used_intrinsics, new_f.parameters[end-nargs+1:end])
+            new_arg.name = kernel_intrinsics[intr_fn].name
         end
 
         workmap[f] = new_f
@@ -1456,8 +1448,8 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         new_f = workmap[f]
         # map the arguments
         value_map = Dict{LLVM.Value, LLVM.Value}()
-        for (param, new_param) in zip(parameters(f), parameters(new_f))
-            LLVM.name!(new_param, LLVM.name(param))
+        for (param, new_param) in zip(f.parameters, new_f.parameters)
+            new_param.name = param.name
             value_map[param] = new_param
         end
 
@@ -1480,37 +1472,37 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     function rewrite_uses!(f, new_f)
         # update uses
         @dispose builder=IRBuilder() begin
-            for use in uses(f)
-                val = user(use)
+            for use in f.uses
+                val = use.user
                 if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
-                    callee_f = LLVM.parent(LLVM.parent(val))
+                    callee_f = val.parent.parent
                     # forward the arguments
-                    position!(builder, val)
+                    position!(builder, LLVM.before(val))
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, function_type(new_f), new_f,
-                              [arguments(val)..., parameters(callee_f)[end-nargs+1:end]...],
-                              operand_bundles(val))
+                        call!(builder, new_f.function_type, new_f,
+                              [val.arguments..., callee_f.parameters[end-nargs+1:end]...],
+                              val.operand_bundles)
                     else
                         # TODO: invoke and callbr
                         error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
                     end
-                    callconv!(new_val, callconv(val))
+                    new_val.callconv = val.callconv
 
                     replace_uses!(val, new_val)
-                    @assert isempty(uses(val))
+                    @assert isempty(val.uses)
                     erase!(val)
-                elseif val isa LLVM.ConstantExpr && opcode(val) == LLVM.API.LLVMBitCast
+                elseif val isa LLVM.ConstantExpr && val.opcode == LLVM.API.LLVMBitCast
                     # XXX: why isn't this caught by the value materializer above?
-                    target = operands(val)[1]
+                    target = val.operands[1]
                     @assert target == f
-                    new_val = LLVM.const_bitcast(new_f, value_type(val))
+                    new_val = LLVM.const_bitcast(new_f, val.value_type)
                     rewrite_uses!(val, new_val)
                     # we can't simply replace this constant expression, as it may be used
                     # as a call, taking arguments (so we need to rewrite it to pass the input arguments)
 
                     # drop the old constant if it is unused
                     # XXX: can we do this differently?
-                    if isempty(uses(val))
+                    if isempty(val.uses)
                         LLVM.unsafe_destroy!(val)
                     end
                 else
@@ -1521,29 +1513,29 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     end
     for (f, new_f) in workmap
         rewrite_uses!(f, new_f)
-        @assert isempty(uses(f))
+        @assert isempty(f.uses)
         replace_metadata_uses!(f, new_f)
         erase!(f)
     end
 
     # replace uses of the intrinsics with references to the input arguments
     for (i, intr_fn) in enumerate(used_intrinsics)
-        intr = functions(mod)[intr_fn]
-        for use in uses(intr)
-            val = user(use)
-            callee_f = LLVM.parent(LLVM.parent(val))
+        intr = mod.functions[intr_fn]
+        for use in intr.uses
+            val = use.user
+            callee_f = val.parent.parent
             if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
-                replace_uses!(val, parameters(callee_f)[end-nargs+i])
+                replace_uses!(val, callee_f.parameters[end-nargs+i])
             else
                 error("Cannot rewrite unknown use of function: $val")
             end
 
-            @assert isempty(uses(val))
+            @assert isempty(val.uses)
             erase!(val)
         end
-        @assert isempty(uses(intr))
+        @assert isempty(intr.uses)
         erase!(intr)
     end
 
-    return functions(mod)[entry_fn]
+    return mod.functions[entry_fn]
 end

@@ -24,25 +24,16 @@ GPUCompiler.runtime_module(::CompilerJob{<:Any,TestCompilerParams}) = TestRuntim
 
 ## JIT integration
 
-using LLVM, LLVM.Interop
+using LLVM, LLVM.IR, LLVM.ORC, LLVM.Interop
 
 function absolute_symbol_materialization(name, ptr)
-    address = LLVM.API.LLVMOrcJITTargetAddress(reinterpret(UInt, ptr))
-    flags = LLVM.API.LLVMJITSymbolFlags(LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
-    symbol = LLVM.API.LLVMJITEvaluatedSymbol(address, flags)
-    gv = if LLVM.version() >= v"15"
-        LLVM.API.LLVMOrcCSymbolMapPair(name, symbol)
-    else
-        LLVM.API.LLVMJITCSymbolMapPair(name, symbol)
-    end
-
-    return LLVM.absolute_symbols(Ref(gv))
+    return absolute_symbols(name => (ptr, SymbolFlags(; exported=true)))
 end
 
 function define_absolute_symbol(jd, name)
     ptr = LLVM.find_symbol(name)
     if ptr !== C_NULL
-        LLVM.define(jd, absolute_symbol_materialization(name, ptr))
+        define!(jd, absolute_symbol_materialization(name, ptr))
         return true
     end
     return false
@@ -62,33 +53,28 @@ function get_trampoline(job)
     ism   = compiler.ism
 
     # We could also use one dylib per job
-    jd = JITDylib(lljit)
+    jd = lljit.main_dylib
 
     entry_sym = String(gensym(:entry))
     target_sym = String(gensym(:target))
-    flags = LLVM.API.LLVMJITSymbolFlags(
-        LLVM.API.LLVMJITSymbolGenericFlagsCallable |
-        LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
-    entry = LLVM.API.LLVMOrcCSymbolAliasMapPair(
-        mangle(lljit, entry_sym),
-        LLVM.API.LLVMOrcCSymbolAliasMapEntry(
-            mangle(lljit, target_sym), flags))
+    flags = SymbolFlags(; callable=true, exported=true)
+    entry = mangle(lljit, entry_sym) => (mangle(lljit, target_sym), flags)
 
-    mu = LLVM.reexports(lctm, ism, jd, Ref(entry))
-    LLVM.define(jd, mu)
+    mu = lazy_reexports(lctm, ism, jd, [entry])
+    define!(jd, mu)
 
     # 2. Lookup address of entry symbol
     addr = lookup(lljit, entry_sym)
 
     # 3. add MU that will call back into the compiler
-    sym = LLVM.API.LLVMOrcCSymbolFlagsMapPair(mangle(lljit, target_sym), flags)
+    sym = mangle(lljit, target_sym) => flags
 
     function materialize(mr)
         buf = JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job; validate=false)
 
             # Rename entry to match target_sym
-            LLVM.name!(meta.entry, target_sym)
+            meta.entry.name = target_sym
 
             # So 1. serialize the module
             buf = convert(MemoryBuffer, ir)
@@ -100,8 +86,8 @@ function get_trampoline(job)
                     ThreadSafeModule(mod)
                 end
 
-                il = LLVM.IRTransformLayer(lljit)
-                LLVM.emit(il, mr, tsm)
+                il = lljit.ir_transform_layer
+                emit!(il, mr, tsm)
             end
         end
 
@@ -111,8 +97,8 @@ function get_trampoline(job)
     function discard(jd, sym)
     end
 
-    mu = LLVM.CustomMaterializationUnit(entry_sym, Ref(sym), materialize, discard)
-    LLVM.define(jd, mu)
+    mu = CustomMaterializationUnit(entry_sym, [sym], materialize, discard)
+    define!(jd, mu)
     return addr
 end
 
@@ -162,7 +148,7 @@ end
                 push!(ccall_types, Any)
             else
                 et = convert(LLVMType, func)
-                if isa(et, LLVM.SequentialType) # et->isAggregateType
+                if isa(et, Union{LLVM.StructType, LLVM.ArrayType}) # et->isAggregateType
                     push!(ccall_types, Ptr{F})
                     argexpr = Expr(:call, GlobalRef(Base, :Ref), argexpr)
                 else
@@ -187,7 +173,7 @@ end
 
             if isboxed
                 push!(ccall_types, Any)
-            elseif isa(et, LLVM.SequentialType) # et->isAggregateType
+            elseif isa(et, Union{LLVM.StructType, LLVM.ArrayType}) # et->isAggregateType
                 push!(ccall_types, Ptr{source_typ})
                 argexpr = Expr(:call, GlobalRef(Base, :Ref), argexpr)
             else
@@ -230,25 +216,24 @@ end
 end
 
 optlevel = LLVM.API.LLVMCodeGenLevelDefault
-tm = GPUCompiler.JITTargetMachine(optlevel=optlevel)
+tm = LLVM.JITTargetMachine(; opt_level=optlevel)
 LLVM.asm_verbosity!(tm, true)
 
 lljit = LLJIT(;tm)
 
-jd_main = JITDylib(lljit)
+jd_main = lljit.main_dylib
 
-prefix = LLVM.get_prefix(lljit)
-dg = LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix)
+dg = DynamicLibrarySearchGenerator(lljit)
 add!(jd_main, dg)
 if Sys.iswindows() && Int === Int64
     # TODO can we check isGNU?
     define_absolute_symbol(jd_main, mangle(lljit, "___chkstk_ms"))
 end
 
-es = ExecutionSession(lljit)
+es = lljit.execution_session
 
-lctm = LLVM.LocalLazyCallThroughManager(triple(lljit), es)
-ism = LLVM.LocalIndirectStubsManager(triple(lljit))
+lctm = LocalLazyCallThroughManager(lljit.triple, es)
+ism = LocalIndirectStubsManager(lljit.triple)
 
 jit[] = CompilerInstance(lljit, lctm, ism)
 atexit() do
