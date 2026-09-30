@@ -46,6 +46,43 @@ end
     end
 end
 
+@testset "kernel state" begin
+    # the kernel state is passed by reference, as a byval pointer
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..TestRuntime
+        struct State
+            x::Int64
+        end
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = TestRuntime
+        GPUCompiler.kernel_state_type(::CompilerJob{SPIRVCompilerTarget,Params}) = State
+
+        kernel() = return
+        kernel(x::Int) = return
+    end
+    function job(tt)
+        source = methodinstance(typeof(mod.kernel), tt, Base.get_world_counter())
+        target = SPIRVCompilerTarget(; backend, validate=true)
+        CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
+    end
+
+    for tt in (Tuple{}, Tuple{Int})
+        @test @filecheck begin
+            @check_label "define spir_kernel void @_Z6kernel"
+            @check_same "byval"
+            GPUCompiler.code_llvm(stdout, job(tt); dump_module=true)
+        end
+
+        # without optimization, there is no kernel state parameter to pass by reference
+        @test @filecheck begin
+            @check_label "define spir_kernel void @_Z6kernel"
+            @check_not "byval"
+            GPUCompiler.code_llvm(stdout, job(tt); dump_module=true, optimize=false)
+        end
+    end
+end
+
 @testset "exception strings" begin
     # the exception name and backtrace strings are globals in the cross-workgroup address
     # space, so the reporting runtime should accept them there without a cast.
