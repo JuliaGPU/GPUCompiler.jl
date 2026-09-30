@@ -95,8 +95,7 @@ function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations
     lljit = LLJIT(; tm=JITTargetMachine())
     try
         jd = JITDylib(lljit)
-        prefix = LLVM.get_prefix(lljit)
-        add!(jd, LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix))
+        add!(jd, LLVM.DynamicLibrarySearchGenerator(lljit))
 
         # Code using the Julia runtime fetches the TLS through `jl_get_pgcstack_resolved`
         # (JuliaLang/julia#61527), which is not a symbol in the process but one Julia's own
