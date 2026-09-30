@@ -80,10 +80,10 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # update calling convention
     for f in mod.functions
         # JuliaGPU/GPUCompiler.jl#97
-        #f.callconv = LLVM.API.LLVMSPIRFUNCCallConv
+        #f.callconv = LLVM.CallConv.SPIRFUNC
     end
     if job.config.kernel
-        entry.callconv = LLVM.API.LLVMSPIRKERNELCallConv
+        entry.callconv = LLVM.CallConv.SPIRKERNEL
     end
 
     return entry
@@ -196,7 +196,7 @@ function translate(input::Vector{UInt8}, options::Ref{LLVMSPIRVTranslateOptions}
 end
 
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
-                         format=LLVM.API.LLVMAssemblyFile)
+                         format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
 
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
@@ -268,7 +268,7 @@ end
         rm(optimized)
     end
 
-    output = if format == LLVM.API.LLVMObjectFile
+    output = if format == LLVM.CodeGenFileType.Object
         spirv
     else
         # disassemble
@@ -343,7 +343,7 @@ function flatten_nested_insertvalue!(mod::LLVM.Module)
 
     for f in mod.functions, bb in f.blocks
         worklist = filter(collect(bb.instructions)) do inst
-            inst.opcode == LLVM.API.LLVMInsertValue && LLVM.API.LLVMGetNumIndices(inst) > 1
+            inst.opcode == LLVM.Opcode.InsertValue && LLVM.API.LLVMGetNumIndices(inst) > 1
         end
         isempty(worklist) && continue
 
@@ -426,8 +426,8 @@ function lower_minimum_maximum!(mod::LLVM.Module)
                 # if both operands are zero, combine their sign bits
                 if !flags.nsz
                     zero = LLVM.null(typ)
-                    both_zero = and!(builder, fcmp!(builder, LLVM.API.LLVMRealOEQ, x, zero),
-                                              fcmp!(builder, LLVM.API.LLVMRealOEQ, y, zero))
+                    both_zero = and!(builder, fcmp!(builder, LLVM.RealPredicate.OEQ, x, zero),
+                                              fcmp!(builder, LLVM.RealPredicate.OEQ, y, zero))
                     xi = bitcast!(builder, x, ityp)
                     yi = bitcast!(builder, y, ityp)
                     zi = is_minimum ? or!(builder, xi, yi) : and!(builder, xi, yi)
@@ -436,7 +436,7 @@ function lower_minimum_maximum!(mod::LLVM.Module)
 
                 # if either operand is NaN, return a NaN
                 if !flags.nnan
-                    either_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, x, y)
+                    either_nan = fcmp!(builder, LLVM.RealPredicate.UNO, x, y)
                     res = select!(builder, either_nan, fadd!(builder, x, y), res)
                 end
 

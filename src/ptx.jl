@@ -138,17 +138,17 @@ function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     # runtime, deferred jobs) don't need it and should not get module-level
     # flags that can collide when linked into the toplevel module.
     if job.config.toplevel
-        mod.flags["nvvm-reflect-ftz", LLVM.API.LLVMModuleFlagBehaviorOverride] =
+        mod.flags["nvvm-reflect-ftz", LLVM.ModuleFlagBehavior.Override] =
             Metadata(ConstantInt(Int32(job.config.target.fastmath ? 1 : 0)))
     end
 
     # update calling convention
     for f in mod.functions
         # JuliaGPU/GPUCompiler.jl#97
-        #f.callconv = LLVM.API.LLVMPTXDeviceCallConv
+        #f.callconv = LLVM.CallConv.PTXDevice
     end
     if job.config.kernel
-        entry.callconv = LLVM.API.LLVMPTXKernelCallConv
+        entry.callconv = LLVM.CallConv.PTXKernel
     end
 
     if job.config.kernel
@@ -303,11 +303,11 @@ struct NVPTXCompileOptions
 end
 
 @unlocked function mcgen(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                         mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
+                         mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
     if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
         error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
     end
-    if format != LLVM.API.LLVMAssemblyFile
+    if format != LLVM.CodeGenFileType.Assembly
         error("Unsupported PTX output format $format; the NVPTX back-end only emits PTX assembly.")
     end
     backend = ExternalBackend(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX")
@@ -334,7 +334,7 @@ function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     if job.config.target.debuginfo
         invoke(llvm_debug_info, Tuple{CompilerJob}, job)
     else
-        LLVM.API.LLVMDebugEmissionKindNoDebug
+        LLVM.DebugEmissionKind.NoDebug
     end
 end
 
@@ -388,14 +388,14 @@ function nvvm_reflect!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             sym = call.operands[1]
         else
             str = call.operands[1]
-            if !isa(str, LLVM.ConstantExpr) || str.opcode != LLVM.API.LLVMGetElementPtr
+            if !isa(str, LLVM.ConstantExpr) || str.opcode != LLVM.Opcode.GetElementPtr
                 @safe_error """Unrecognized format of __nvvm_reflect call:
                                $(string(call))
                                Operand should be a GEP instruction, got a $(typeof(str)). Please file an issue."""
                 continue
             end
             sym = str.operands[1]
-            if isa(sym, LLVM.ConstantExpr) && sym.opcode == LLVM.API.LLVMGetElementPtr
+            if isa(sym, LLVM.ConstantExpr) && sym.opcode == LLVM.Opcode.GetElementPtr
                 # CUDA 11.0 or below
                 sym = sym.operands[1]
             end

@@ -215,7 +215,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
     bt = backtrace(inst)
     src = inst.operands[1]
     if src isa ConstantExpr
-        if src.opcode == LLVM.API.LLVMBitCast
+        if src.opcode == LLVM.Opcode.BitCast
             src = src.operands[1]
         end
     end
@@ -376,7 +376,7 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
 
     elseif isa(dest, ConstantExpr)
         # detect calls to literal pointers
-        if dest.opcode == LLVM.API.LLVMIntToPtr
+        if dest.opcode == LLVM.Opcode.IntToPtr
             # extract the literal pointer
             ptr_arg = first(dest.operands)
             @compiler_assert isa(ptr_arg, ConstantInt) job

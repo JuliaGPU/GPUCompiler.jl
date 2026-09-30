@@ -115,11 +115,11 @@ function irgen(@nospecialize(job::CompilerJob))
             f = mod.functions[method.llvm_name]
             isdeclaration(f) && continue
             empty!(f)
-            f.linkage = LLVM.API.LLVMExternalLinkage
+            f.linkage = LLVM.Linkage.External
         end
 
         # internalize all functions and, but keep exported global variables.
-        entry.linkage = LLVM.API.LLVMExternalLinkage
+        entry.linkage = LLVM.Linkage.External
         preserved_gvs = String[entry.name]
         for gvar in mod.globals
             push!(preserved_gvs, gvar.name)
@@ -352,8 +352,8 @@ function demote_unordered_atomics!(mod::LLVM.Module)
     changed = false
     for f in mod.functions, bb in f.blocks, inst in bb.instructions
         (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) || continue
-        isatomic(inst) && inst.ordering == LLVM.API.LLVMAtomicOrderingUnordered || continue
-        inst.ordering = LLVM.API.LLVMAtomicOrderingNotAtomic
+        isatomic(inst) && inst.ordering == LLVM.AtomicOrdering.Unordered || continue
+        inst.ordering = LLVM.AtomicOrdering.NotAtomic
         changed = true
     end
     return changed
@@ -762,7 +762,7 @@ function lower_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.
 
         value_map[f] = new_f
         clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+                    changes=LLVM.CloneFunctionChangeType.GlobalChanges)
 
         # fall through
         br!(builder, new_f.blocks[2])
@@ -922,7 +922,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
     # _correct_ the uses (i.e. actually add the state argument) afterwards.
     function materializer(val)
         if val isa ConstantExpr
-            if val.opcode == LLVM.API.LLVMBitCast
+            if val.opcode == LLVM.Opcode.BitCast
                 target = val.operands[1]
                 if target isa LLVM.Function && haskey(workmap, target)
                     # the function is being bitcasted to a different function type.
@@ -936,7 +936,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
                     new_ft = LLVM.FunctionType(ft.return_type, [T_state, ft.parameters...])
                     return const_bitcast(workmap[target], LLVM.PointerType(new_ft, typ.addrspace))
                 end
-            elseif val.opcode == LLVM.API.LLVMPtrToInt
+            elseif val.opcode == LLVM.Opcode.PtrToInt
                 target = val.operands[1]
                 if target isa LLVM.Function && haskey(workmap, target)
                     return const_ptrtoint(workmap[target], val.value_type)
@@ -958,7 +958,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
         merge!(value_map, workmap)
 
         clone_into!(new_f, f; value_map, materializer,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+                    changes=LLVM.CloneFunctionChangeType.GlobalChanges)
 
         # remove the function IR so that we won't have any uses left after this pass.
         empty!(f)
@@ -1455,7 +1455,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 
         value_map[f] = new_f
         clone_into!(new_f, f; value_map,
-                    changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
+                    changes=LLVM.CloneFunctionChangeType.LocalChangesOnly)
 
         # we can't remove this function yet, as we might still need to rewrite any called,
         # but remove the IR already
@@ -1491,7 +1491,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     replace_uses!(val, new_val)
                     @assert isempty(val.uses)
                     erase!(val)
-                elseif val isa LLVM.ConstantExpr && val.opcode == LLVM.API.LLVMBitCast
+                elseif val isa LLVM.ConstantExpr && val.opcode == LLVM.Opcode.BitCast
                     # XXX: why isn't this caught by the value materializer above?
                     target = val.operands[1]
                     @assert target == f

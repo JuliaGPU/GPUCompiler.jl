@@ -215,7 +215,7 @@ end
     abi_call(ptr, rt, tt, f, args...)
 end
 
-optlevel = LLVM.API.LLVMCodeGenLevelDefault
+optlevel = LLVM.CodeGenOptLevel.Default
 tm = LLVM.JITTargetMachine(; opt_level=optlevel)
 LLVM.asm_verbosity!(tm, true)
 

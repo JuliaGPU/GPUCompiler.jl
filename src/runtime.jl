@@ -119,7 +119,7 @@ function build_runtime_stub(llvm_name::String, @nospecialize(return_type::Type),
 
         # weak definition of `gpu_<name>` that returns a harmless placeholder on CPU
         extern = LLVM.Function(current_module(builder), llvm_name, ft)
-        extern.linkage = LLVM.API.LLVMWeakAnyLinkage
+        extern.linkage = LLVM.Linkage.WeakAny
         @dispose extern_builder=IRBuilder() begin
             position!(extern_builder, LLVM.at_end(BasicBlock(extern, "entry")))
             emit_fake_return!(extern_builder, ft.return_type)

@@ -91,9 +91,9 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);
     ## machine code
 
     format = if output == :asm
-        LLVM.API.LLVMAssemblyFile
+        LLVM.CodeGenFileType.Assembly
     elseif output == :obj
-        LLVM.API.LLVMObjectFile
+        LLVM.CodeGenFileType.Object
     else
         error("Unknown assembly format $output")
     end
@@ -319,7 +319,7 @@ const __llvm_initialized = Ref(false)
             # rewrite function signatures.
             preserved_gvs = collect(values(entrypoints))
             for gvar in ir.globals
-                if gvar.linkage == LLVM.API.LLVMExternalLinkage
+                if gvar.linkage == LLVM.Linkage.External
                     push!(preserved_gvs, gvar.name)
                 end
             end
@@ -436,11 +436,11 @@ end
 
 # Compatibility for back-ends that resolve relocations during `emit_llvm`.
 emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
-         format::LLVM.API.LLVMCodeGenFileType) =
+         format::LLVM.CodeGenFileType.T) =
     emit_asm(job, ir, Relocations(), format)
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
-                          relocs::Relocations, format::LLVM.API.LLVMCodeGenFileType)
+                          relocs::Relocations, format::LLVM.CodeGenFileType.T)
     # NOTE: strip after validation to get better errors
     if job.config.strip
         @tracepoint "Debug info removal" strip_debuginfo!(ir)

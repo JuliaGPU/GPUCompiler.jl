@@ -35,7 +35,7 @@ function merge_constant_clones!(mod::LLVM.Module)
         base_name = name[1:prevind(name, m.offset)]
         haskey(mod_gvs, base_name) || continue
         base = mod_gvs[base_name]
-        mergeable(g) = g.linkage == LLVM.API.LLVMPrivateLinkage && g.constant &&
+        mergeable(g) = g.linkage == LLVM.Linkage.Private && g.constant &&
                        g.unnamed_addr == LLVM.UnnamedAddr.Global && !isdeclaration(g)
         (mergeable(gv) && mergeable(base)) || continue
         gv.value_type == base.value_type || continue

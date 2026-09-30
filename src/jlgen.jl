@@ -679,9 +679,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             if julia_datalayout(job.config.target) !== nothing
                 mod.datalayout = julia_datalayout(job.config.target)
             end
-            mod.flags["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+            mod.flags["Dwarf Version", LLVM.ModuleFlagBehavior.Warning] =
                 Metadata(ConstantInt(dwarf_version(job.config.target)))
-            mod.flags["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+            mod.flags["Debug Info Version", LLVM.ModuleFlagBehavior.Warning] =
                 Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
         end
 
@@ -788,7 +788,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
                 continue
             end
             while isa(val, LLVM.ConstantExpr)
-                if in(val.opcode, (LLVM.API.LLVMBitCast, LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMIntToPtr))
+                if in(val.opcode, (LLVM.Opcode.BitCast, LLVM.Opcode.PtrToInt, LLVM.Opcode.AddrSpaceCast, LLVM.Opcode.IntToPtr))
                     val = val.operands[1]
                     continue
                 end
@@ -809,7 +809,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         for gv in llvm_mod.globals
             haskey(gv_to_value, gv.name) || continue
             gv.initializer = nothing
-            gv.linkage = LLVM.API.LLVMExternalLinkage
+            gv.linkage = LLVM.Linkage.External
         end
     end
 

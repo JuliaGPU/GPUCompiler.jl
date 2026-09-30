@@ -375,7 +375,7 @@ end
 # The old function is left in place; the caller fixes up attributes and call sites and then drops it
 # with `replace_function!`. `changes` is forwarded to `clone_into!`.
 function clone_with_converted_args!(mod::LLVM.Module, f::LLVM.Function, new_types::Vector, reconstruct;
-                                    changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
+                                    changes = LLVM.CloneFunctionChangeType.GlobalChanges)
     ft = f.function_type
     param_types = ft.parameters
     @assert length(new_types) == length(param_types)

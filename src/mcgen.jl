@@ -48,7 +48,7 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     return
 end
 
-function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
+function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
     tm = llvm_machine(job.config.target)
 
     return String(LLVM.emit(tm, mod, format))

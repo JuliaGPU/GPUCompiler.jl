@@ -4,17 +4,17 @@
 # need to inspect and rewrite LLVM's atomic instructions themselves; these helpers mirror the
 # parts of LLVM's `AtomicExpand` and the atomic instruction classes that LLVM.jl lacks.
 
-const AtomicOrdering = LLVM.API.LLVMAtomicOrdering
+const AtomicOrdering = LLVM.AtomicOrdering.T
 
 is_ordered(order::AtomicOrdering) =
-    order ∉ (LLVM.API.LLVMAtomicOrderingNotAtomic, LLVM.API.LLVMAtomicOrderingUnordered,
-             LLVM.API.LLVMAtomicOrderingMonotonic)
+    order ∉ (LLVM.AtomicOrdering.NotAtomic, LLVM.AtomicOrdering.Unordered,
+             LLVM.AtomicOrdering.Monotonic)
 is_acquire(order::AtomicOrdering) =
-    order in (LLVM.API.LLVMAtomicOrderingAcquire, LLVM.API.LLVMAtomicOrderingAcquireRelease,
-              LLVM.API.LLVMAtomicOrderingSequentiallyConsistent)
+    order in (LLVM.AtomicOrdering.Acquire, LLVM.AtomicOrdering.AcquireRelease,
+              LLVM.AtomicOrdering.SequentiallyConsistent)
 is_release(order::AtomicOrdering) =
-    order in (LLVM.API.LLVMAtomicOrderingRelease, LLVM.API.LLVMAtomicOrderingAcquireRelease,
-              LLVM.API.LLVMAtomicOrderingSequentiallyConsistent)
+    order in (LLVM.AtomicOrdering.Release, LLVM.AtomicOrdering.AcquireRelease,
+              LLVM.AtomicOrdering.SequentiallyConsistent)
 
 is_atomic_memop(inst::LLVM.Instruction) =
     ((inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) && isatomic(inst)) ||
@@ -39,11 +39,11 @@ end
 # (`AtomicCmpXchgInst::getMergedOrdering`)
 function merged_ordering(inst::LLVM.AtomicCmpXchgInst)
     success, failure = inst.success_ordering, inst.failure_ordering
-    failure == LLVM.API.LLVMAtomicOrderingSequentiallyConsistent && return failure
-    if failure == LLVM.API.LLVMAtomicOrderingAcquire
-        success == LLVM.API.LLVMAtomicOrderingMonotonic && return failure
-        success == LLVM.API.LLVMAtomicOrderingRelease &&
-            return LLVM.API.LLVMAtomicOrderingAcquireRelease
+    failure == LLVM.AtomicOrdering.SequentiallyConsistent && return failure
+    if failure == LLVM.AtomicOrdering.Acquire
+        success == LLVM.AtomicOrdering.Monotonic && return failure
+        success == LLVM.AtomicOrdering.Release &&
+            return LLVM.AtomicOrdering.AcquireRelease
     end
     return success
 end
@@ -53,8 +53,8 @@ atomic_ordering(inst::LLVM.Instruction) = inst.ordering
 # the failure ordering of a compare-exchange implementing an operation with the given
 # ordering (`AtomicCmpXchgInst::getStrongestFailureOrdering`)
 failure_ordering_for(order::AtomicOrdering) =
-    order == LLVM.API.LLVMAtomicOrderingAcquireRelease ? LLVM.API.LLVMAtomicOrderingAcquire :
-    order == LLVM.API.LLVMAtomicOrderingRelease ? LLVM.API.LLVMAtomicOrderingMonotonic :
+    order == LLVM.AtomicOrdering.AcquireRelease ? LLVM.AtomicOrdering.Acquire :
+    order == LLVM.AtomicOrdering.Release ? LLVM.AtomicOrdering.Monotonic :
     order
 
 # The operation of an `atomicrmw`. Parse it from the textual form, as the C API only knows the
@@ -81,10 +81,10 @@ function atomicrmw_value!(builder::IRBuilder, op::Symbol, old::LLVM.Value, val::
     op == :nand && return not!(builder, and!(builder, old, val))
     op == :or && return or!(builder, old, val)
     op == :xor && return xor!(builder, old, val)
-    op == :max && return minmax(LLVM.API.LLVMIntSGT)
-    op == :min && return minmax(LLVM.API.LLVMIntSLE)
-    op == :umax && return minmax(LLVM.API.LLVMIntUGT)
-    op == :umin && return minmax(LLVM.API.LLVMIntULE)
+    op == :max && return minmax(LLVM.IntPredicate.SGT)
+    op == :min && return minmax(LLVM.IntPredicate.SLE)
+    op == :umax && return minmax(LLVM.IntPredicate.UGT)
+    op == :umin && return minmax(LLVM.IntPredicate.ULE)
     op == :fadd && return fadd!(builder, old, val)
     op == :fsub && return fsub!(builder, old, val)
     op == :fmax && return intrinsic("llvm.maxnum")
@@ -93,17 +93,17 @@ function atomicrmw_value!(builder::IRBuilder, op::Symbol, old::LLVM.Value, val::
     op == :fminimum && return intrinsic("llvm.minimum")
     zero, one = ConstantInt(T, 0), ConstantInt(T, 1)
     if op == :uinc_wrap
-        return select!(builder, icmp!(builder, LLVM.API.LLVMIntUGE, old, val), zero,
+        return select!(builder, icmp!(builder, LLVM.IntPredicate.UGE, old, val), zero,
                        add!(builder, old, one))
     elseif op == :udec_wrap
-        wrap = or!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, old, zero),
-                   icmp!(builder, LLVM.API.LLVMIntUGT, old, val))
+        wrap = or!(builder, icmp!(builder, LLVM.IntPredicate.EQ, old, zero),
+                   icmp!(builder, LLVM.IntPredicate.UGT, old, val))
         return select!(builder, wrap, val, sub!(builder, old, one))
     elseif op == :usub_cond
-        return select!(builder, icmp!(builder, LLVM.API.LLVMIntUGE, old, val),
+        return select!(builder, icmp!(builder, LLVM.IntPredicate.UGE, old, val),
                        sub!(builder, old, val), old)
     elseif op == :usub_sat
-        return select!(builder, icmp!(builder, LLVM.API.LLVMIntUGE, old, val),
+        return select!(builder, icmp!(builder, LLVM.IntPredicate.UGE, old, val),
                        sub!(builder, old, val), zero)
     end
     error("Unsupported atomicrmw operation: $op")

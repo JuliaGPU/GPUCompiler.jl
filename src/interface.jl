@@ -661,11 +661,11 @@ end
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))
     if job.config.debug_level == 0
-        LLVM.API.LLVMDebugEmissionKindNoDebug
+        LLVM.DebugEmissionKind.NoDebug
     elseif job.config.debug_level == 1
-        LLVM.API.LLVMDebugEmissionKindLineTablesOnly
+        LLVM.DebugEmissionKind.LineTablesOnly
     elseif job.config.debug_level >= 2
-        LLVM.API.LLVMDebugEmissionKindFullDebug
+        LLVM.DebugEmissionKind.FullDebug
     end
 end
 

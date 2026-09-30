@@ -670,7 +670,7 @@ end
         function private_constant(name)
             gv = GlobalVariable(mod, T, name)
             gv.initializer = ConstantStruct(LLVM.Constant[ConstantInt(0), ConstantInt(0)])
-            gv.linkage = LLVM.API.LLVMPrivateLinkage
+            gv.linkage = LLVM.Linkage.Private
             gv.constant = true
             gv.unnamed_addr = LLVM.UnnamedAddr.Global
             return gv
@@ -759,7 +759,7 @@ end
             position!(builder, LLVM.at_end(entry))
             p0 = addrspacecast!(builder, f.parameters[1], T_p0)
             sel = select!(builder, ConstantInt(T_i1, 1), p0, null(T_p0))
-            cmp = icmp!(builder, LLVM.API.LLVMIntEQ, sel, null(T_p0))
+            cmp = icmp!(builder, LLVM.IntPredicate.EQ, sel, null(T_p0))
             ok = BasicBlock(f, "ok")
             fail = BasicBlock(f, "fail")
             br!(builder, cmp, fail, ok)
@@ -789,7 +789,7 @@ end
     # parameter, reached from one `caller` per entry in `caller_src_as`, each passing a
     # constant global in that address space cast to generic.
     function narrowing_module(caller_src_as::Vector{Int};
-                              callee_linkage=LLVM.API.LLVMInternalLinkage,
+                              callee_linkage=LLVM.Linkage.Internal,
                               recursive=false, address_taken=false)
         mod = LLVM.Module("test")
         i8 = LLVM.Int8Type()
@@ -812,7 +812,7 @@ end
             g = GlobalVariable(mod, i8, "g$n", as)
             g.initializer = ConstantInt(i8, n); g.constant = true
             caller = LLVM.Function(mod, "caller$n", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-            caller.linkage = LLVM.API.LLVMInternalLinkage
+            caller.linkage = LLVM.Linkage.Internal
             @dispose builder=IRBuilder() begin
                 position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
                 ret!(builder, call!(builder, callee_ft, callee,
@@ -866,7 +866,7 @@ end
 
     # externally-visible callee -> left alone (its signature may be observed elsewhere)
     Context() do ctx
-        mod = narrowing_module([2]; callee_linkage=LLVM.API.LLVMExternalLinkage)
+        mod = narrowing_module([2]; callee_linkage=LLVM.Linkage.External)
         @test !GPUCompiler.propagate_argument_address_spaces!(mod)
         @test callee_param_as(mod) == 0
     end
@@ -889,13 +889,13 @@ end
         i8 = LLVM.Int8Type()
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[asptr(0)])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        callee.linkage = LLVM.API.LLVMInternalLinkage
+        callee.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
             ret!(builder, load!(builder, i8, callee.parameters[1]))
         end
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[asptr(1)]))
-        caller.linkage = LLVM.API.LLVMInternalLinkage
+        caller.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             gen = addrspacecast!(builder, caller.parameters[1], asptr(0))
@@ -921,7 +921,7 @@ end
         mod = LLVM.Module("test")
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        callee.linkage = LLVM.API.LLVMInternalLinkage
+        callee.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
             p = inttoptr!(builder, callee.parameters[1], asptr(0))
@@ -931,7 +931,7 @@ end
             g = GlobalVariable(mod, i8, "g$n", 2)
             g.initializer = ConstantInt(i8, n); g.constant = true
             caller = LLVM.Function(mod, "caller$n", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-            caller.linkage = LLVM.API.LLVMInternalLinkage
+            caller.linkage = LLVM.Linkage.Internal
             @dispose builder=IRBuilder() begin
                 position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
                 arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
@@ -964,7 +964,7 @@ end
         mod = LLVM.Module("test")
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        callee.linkage = LLVM.API.LLVMInternalLinkage
+        callee.linkage = LLVM.Linkage.Internal
         push!(callee.parameter_attributes[1], EnumAttribute("zeroext", 0))
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
@@ -974,7 +974,7 @@ end
         g = GlobalVariable(mod, i8, "g", 2)
         g.initializer = ConstantInt(i8, 1); g.constant = true
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-        caller.linkage = LLVM.API.LLVMInternalLinkage
+        caller.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
@@ -1007,7 +1007,7 @@ end
         mod = LLVM.Module("test")
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        callee.linkage = LLVM.API.LLVMInternalLinkage
+        callee.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
             p = inttoptr!(builder, callee.parameters[1], asptr(0))
@@ -1019,7 +1019,7 @@ end
         g = GlobalVariable(mod, i8, "g", 2)
         g.initializer = ConstantInt(i8, 1); g.constant = true
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-        caller.linkage = LLVM.API.LLVMInternalLinkage
+        caller.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
@@ -1041,7 +1041,7 @@ end
 
         # leaf: loads through its generic pointer parameter
         leaf = LLVM.Function(mod, "leaf", ft)
-        leaf.linkage = LLVM.API.LLVMInternalLinkage
+        leaf.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(leaf, "entry")))
             ret!(builder, load!(builder, i8, leaf.parameters[1]))
@@ -1049,7 +1049,7 @@ end
 
         # mid: forwards its generic pointer parameter to leaf
         mid = LLVM.Function(mod, "mid", ft)
-        mid.linkage = LLVM.API.LLVMInternalLinkage
+        mid.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(mid, "entry")))
             ret!(builder, call!(builder, ft, leaf, [mid.parameters[1]]))
@@ -1059,7 +1059,7 @@ end
         g = GlobalVariable(mod, i8, "g", 2)
         g.initializer = ConstantInt(i8, 1); g.constant = true
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-        caller.linkage = LLVM.API.LLVMInternalLinkage
+        caller.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             ret!(builder, call!(builder, ft, mid, [const_addrspacecast(g, asptr(0))]))
@@ -1094,7 +1094,7 @@ end
 
         # leaf: inttoptrs its integer parameter and loads through it
         leaf = LLVM.Function(mod, "leaf", int_ft)
-        leaf.linkage = LLVM.API.LLVMInternalLinkage
+        leaf.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(leaf, "entry")))
             p = inttoptr!(builder, leaf.parameters[1], asptr(0))
@@ -1103,7 +1103,7 @@ end
 
         # mid: forwards its integer parameter on to leaf (no inttoptr of its own)
         mid = LLVM.Function(mod, "mid", int_ft)
-        mid.linkage = LLVM.API.LLVMInternalLinkage
+        mid.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(mid, "entry")))
             ret!(builder, call!(builder, int_ft, leaf, [mid.parameters[1]]))
@@ -1113,7 +1113,7 @@ end
         g = GlobalVariable(mod, i8, "g", 2)
         g.initializer = ConstantInt(i8, 1); g.constant = true
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-        caller.linkage = LLVM.API.LLVMInternalLinkage
+        caller.linkage = LLVM.Linkage.Internal
         @dispose builder=IRBuilder() begin
             position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
@@ -2406,14 +2406,14 @@ end
             T_val = convert(LLVMType, T)
             typed_ptr = bitcast!(builder, ptr, LLVM.PointerType(T_val, A))
             atomic_rmw!(builder, op, typed_ptr, val,
-                        LLVM.API.LLVMAtomicOrderingSequentiallyConsistent,
+                        LLVM.AtomicOrdering.SequentiallyConsistent,
                         SyncScope("device"))
         end
         function kernel(p::Core.LLVMPtr{Int32,1}, b::Core.LLVMPtr{UInt8,1},
                         f::Core.LLVMPtr{Float32,1})
-            x = atomic_rmw(p, Int32(1), Val(LLVM.API.LLVMAtomicRMWBinOpAdd))
-            y = atomic_rmw(b, UInt8(1), Val(LLVM.API.LLVMAtomicRMWBinOpAdd))
-            z = atomic_rmw(f, 1f0, Val(LLVM.API.LLVMAtomicRMWBinOpFMax))
+            x = atomic_rmw(p, Int32(1), Val(LLVM.AtomicRMWBinOp.Add))
+            y = atomic_rmw(b, UInt8(1), Val(LLVM.AtomicRMWBinOp.Add))
+            z = atomic_rmw(f, 1f0, Val(LLVM.AtomicRMWBinOp.FMax))
             unsafe_store!(p, x + y + reinterpret(Int32, z))
             return
         end

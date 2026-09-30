@@ -42,7 +42,7 @@ function llvm_machine(target::GCNCompilerTarget)
 
     cpu = target.dev_isa
     feat = target.features
-    reloc = LLVM.API.LLVMRelocPIC
+    reloc = LLVM.RelocMode.PIC
     tm = LLVM.TargetMachine(t, triple; cpu, features=feat, reloc)
     LLVM.asm_verbosity!(tm, true)
 
@@ -72,7 +72,7 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
 
     if job.config.kernel
         # calling convention
-        entry.callconv = LLVM.API.LLVMAMDGPUKERNELCallConv
+        entry.callconv = LLVM.CallConv.AMDGPUKERNEL
 
         # workgroup size bounds; the backend sizes its register budget for the
         # worst case (1,1024) when unset
@@ -197,7 +197,7 @@ const AMDGPUAssemblyFile = Cint(0)
 const AMDGPUObjectFile = Cint(1)
 
 @unlocked function mcgen(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
-                         mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
+                         mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
 
     if target.backend === :inprocess
@@ -218,9 +218,9 @@ const AMDGPUObjectFile = Cint(1)
     end
     backend = ExternalBackend(AMDGPU_LLVM_Backend_jll.libamdgpu, "AMDGPU")
 
-    filetype = if format == LLVM.API.LLVMAssemblyFile
+    filetype = if format == LLVM.CodeGenFileType.Assembly
         AMDGPUAssemblyFile
-    elseif format == LLVM.API.LLVMObjectFile
+    elseif format == LLVM.CodeGenFileType.Object
         AMDGPUObjectFile
     else
         error("Unsupported GCN output format $format")

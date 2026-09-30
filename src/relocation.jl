@@ -358,7 +358,7 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
            !(obj isa Bool)
             val = materialize_box!(mod, relocs, namespace, gv, obj, init)
             gv.initializer = val
-            gv.linkage = LLVM.API.LLVMPrivateLinkage
+            gv.linkage = LLVM.Linkage.Private
         else
             check_slot_size(mod, gv, name)
             slot_name = namespaced_name(namespace,
@@ -400,7 +400,7 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
             val = materialize_box!(mod, relocs, namespace, gv, obj, init)
             gv.initializer = val
             gv.constant = true
-            gv.linkage = LLVM.API.LLVMPrivateLinkage
+            gv.linkage = LLVM.Linkage.Private
         end
     end
     return relocs
@@ -455,14 +455,14 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
     box.alignment = 16
     if patch_header
         box.constant = false
-        box.linkage = LLVM.API.LLVMExternalLinkage
+        box.linkage = LLVM.Linkage.External
         box.externally_initialized = true
         # `header_idx` is a zero-based field index, `LLVM.offsetof` numbers fields from 1
         offset = LLVM.offsetof(mod.datalayout, boxty, header_idx + 1)
         add_relocation!(relocs, InteriorSite, box_name, offset, JuliaValueRef(typeof(obj)))
     else
         box.constant = true
-        box.linkage = LLVM.API.LLVMPrivateLinkage
+        box.linkage = LLVM.Linkage.Private
         box.unnamed_addr = LLVM.UnnamedAddr.Global
     end
 
@@ -476,9 +476,9 @@ end
 # Return the byte offset added by a constant cast or GEP, or `nothing` if it is not static.
 function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::LLVM.DataLayout)
     op = ce.opcode
-    if op == LLVM.API.LLVMBitCast || op == LLVM.API.LLVMAddrSpaceCast
+    if op == LLVM.Opcode.BitCast || op == LLVM.Opcode.AddrSpaceCast
         return 0
-    elseif op == LLVM.API.LLVMGetElementPtr
+    elseif op == LLVM.Opcode.GetElementPtr
         ops = ce.operands
         indices = ops[2:end]
         all(idx -> idx isa LLVM.ConstantInt, indices) || return nothing
@@ -724,11 +724,11 @@ function bake_relocations!(mod::LLVM.Module, relocs::Relocations)
         word = resolve_relocation_target(rec.target)
         if rec.kind === SlotSite
             gv.initializer = slot_initializer(gv, word)
-            gv.linkage = LLVM.API.LLVMPrivateLinkage
+            gv.linkage = LLVM.Linkage.Private
             gv.constant = true
         else
             patch_initializer_word!(mod, gv, rec.offset, word)
-            gv.linkage = LLVM.API.LLVMPrivateLinkage
+            gv.linkage = LLVM.Linkage.Private
             gv.externally_initialized = false
             gv.constant = true
             gv.unnamed_addr = LLVM.UnnamedAddr.Global
@@ -763,13 +763,13 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
         # patched with the word every object referencing it expects. `llvm.used` below still
         # anchors them against DCE, and `externally_initialized` still stops the optimizer
         # from believing the null initializer.
-        gv.linkage = LLVM.API.LLVMWeakODRLinkage
+        gv.linkage = LLVM.Linkage.WeakODR
         # Julia emits these globals `dso_local`, so backends address them PC-relatively
         # (e.g. `@rel32` on AMDGPU). A weak definition with default visibility is however
         # preemptible in an ELF shared link, which `ld.lld` rejects ("recompile with -fPIC").
         # Protected visibility keeps the symbol in the dynamic symbol table, so loaders can
         # still find it by name, while honouring the non-preemptible promise.
-        gv.visibility = LLVM.API.LLVMProtectedVisibility
+        gv.visibility = LLVM.Visibility.Protected
         push!(used, gv)
     end
     isempty(used) || union!(mod.used, used)
@@ -1022,14 +1022,14 @@ end
 function referenced_object(value, relocs::Relocations)
     # This is best-effort: optimized shapes fall back to the unknown-binding error path.
     while (value isa ConstantExpr &&
-           value.opcode in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)) ||
+           value.opcode in (LLVM.Opcode.BitCast, LLVM.Opcode.AddrSpaceCast)) ||
           value isa LLVM.BitCastInst || value isa LLVM.AddrSpaceCastInst
         value = first(value.operands)
     end
     if value isa LLVM.LoadInst
         source = first(value.operands)
         while source isa ConstantExpr &&
-              source.opcode in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)
+              source.opcode in (LLVM.Opcode.BitCast, LLVM.Opcode.AddrSpaceCast)
             source = first(source.operands)
         end
         if source isa GlobalVariable
@@ -1038,7 +1038,7 @@ function referenced_object(value, relocs::Relocations)
                 return Some(rec.target.value)
             end
         end
-    elseif value isa ConstantExpr && value.opcode == LLVM.API.LLVMIntToPtr
+    elseif value isa ConstantExpr && value.opcode == LLVM.Opcode.IntToPtr
         addr = first(value.operands)
         addr isa ConstantInt || return nothing
         addr = convert(UInt, addr)

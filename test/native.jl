@@ -552,14 +552,14 @@ end
                 @test startswith(rec.name, namespace)
                 box = m.globals[rec.name]
                 @test box.externally_initialized
-                @test box.linkage == LLVM.API.LLVMExternalLinkage
+                @test box.linkage == LLVM.Linkage.External
                 header_idx = LLVM.element_at(m.datalayout, box.global_value_type, rec.offset)
                 @test convert(UInt, collect(box.initializer.operands)[header_idx]) == 0
                 GPUCompiler.bake_relocations!(m, relocs)
                 @test isempty(relocs)
                 @test !box.externally_initialized
                 @test box.constant
-                @test box.linkage == LLVM.API.LLVMPrivateLinkage
+                @test box.linkage == LLVM.Linkage.Private
                 @test convert(UInt, collect(box.initializer.operands)[header_idx]) ==
                       GPUCompiler.resolve_relocation_target(rec.target)
                 dispose(m)
@@ -1168,7 +1168,7 @@ end
             session_mod = parse(LLVM.Module, MemoryBuffer(bitcode))
             GPUCompiler.apply_relocations!(session_mod, relocs)
             @test !isempty(relocs)   # the metadata is not consumed
-            obj, _ = GPUCompiler.emit_asm(job, session_mod, LLVM.API.LLVMObjectFile)
+            obj, _ = GPUCompiler.emit_asm(job, session_mod, LLVM.CodeGenFileType.Object)
 
             expected = reinterpret(UInt64, 1.0) +
                        GPUCompiler.resolve_relocation_target(
@@ -1202,7 +1202,7 @@ end
         @test !any(gv -> gv.externally_initialized, ir.globals)
 
         # This back-end can emit objects without threading relocation metadata.
-        code, _ = GPUCompiler.emit_asm(job, ir, LLVM.API.LLVMObjectFile)
+        code, _ = GPUCompiler.emit_asm(job, ir, LLVM.CodeGenFileType.Object)
         @test !isempty(code)
     end
 end
@@ -1231,7 +1231,7 @@ end
                 @test !isdeclaration(gv)
                 @test gv.externally_initialized
                 @test !gv.constant
-                @test gv.linkage == LLVM.API.LLVMWeakODRLinkage
+                @test gv.linkage == LLVM.Linkage.WeakODR
                 rec.kind === GPUCompiler.SlotSite && @test LLVM.isnull(gv.initializer)
             end
 
@@ -1287,8 +1287,8 @@ end
                     }""")
                 relocs = GPUCompiler.Relocations(
                     [GPUCompiler.Relocation(GPUCompiler.SlotSite, "shared_reloc", 0, ref)])
-                asm, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.API.LLVMObjectFile)
-                @test m.globals["shared_reloc"].linkage == LLVM.API.LLVMWeakODRLinkage
+                asm, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.CodeGenFileType.Object)
+                @test m.globals["shared_reloc"].linkage == LLVM.Linkage.WeakODR
                 return Vector{UInt8}(codeunits(asm)), relocs
             end
 
@@ -1461,7 +1461,7 @@ end
                     ret i64 %word
                 }""")
             relocs = relocations()
-            obj, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.API.LLVMObjectFile)
+            obj, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.CodeGenFileType.Object)
             # `jl_nothing` became a slot too, and all of them were replaced by the table
             @test length(relocs) == length(slots) + 1
             @test any(rec -> rec.target == GPUCompiler.CGlobalRef(:jl_nothing),
@@ -1506,7 +1506,7 @@ end
                     ret i64 %word
                 }""")
             @test_throws "merged with unsupported address" GPUCompiler.emit_asm(
-                job, m, relocations(), LLVM.API.LLVMObjectFile)
+                job, m, relocations(), LLVM.CodeGenFileType.Object)
 
             # The table contains whole, read-only words.
             for (body, message) in (
@@ -1520,7 +1520,7 @@ end
                         $(replace(body, "; " => "\n"))
                     }""")
                 @test_throws message GPUCompiler.emit_asm(
-                    job, m, relocations(), LLVM.API.LLVMObjectFile)
+                    job, m, relocations(), LLVM.CodeGenFileType.Object)
             end
 
             # Slot addresses are not exposed as general storage.
@@ -1534,7 +1534,7 @@ end
                     ret i1 %same
                 }""")
             @test_throws "Unsupported use of relocation slot address" GPUCompiler.emit_asm(
-                job, m, relocations(), LLVM.API.LLVMObjectFile)
+                job, m, relocations(), LLVM.CodeGenFileType.Object)
         end
     end
 end
@@ -1551,7 +1551,7 @@ end
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job)
             @test !isempty(meta.relocations)
-            GPUCompiler.emit_asm(job, ir, LLVM.API.LLVMObjectFile)   # the 3-arg form
+            GPUCompiler.emit_asm(job, ir, LLVM.CodeGenFileType.Object)   # the 3-arg form
             @test_throws "never rewritten" GPUCompiler.resolved_relocation_table(
                 meta.relocations)
         end
