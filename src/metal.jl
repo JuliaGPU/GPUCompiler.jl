@@ -784,13 +784,10 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
         gv.name = gv_name * ".old"
         new_gv = GlobalVariable(mod, gv_ty, gv_name, new_addrspace)
 
-        new_gv.alignment = gv.alignment
-        gv.unnamed_addr == LLVM.UnnamedAddr.Global &&
-            (new_gv.unnamed_addr = LLVM.UnnamedAddr.Global)
+        copy_attributes!(new_gv, gv)
         new_gv.initializer = gv.initializer
         new_gv.constant = true
         new_gv.linkage = gv.linkage
-        new_gv.visibility = gv.visibility
 
         # we can't map the global variable directly, as the type change won't be applied
         # recursively. so instead map a constant expression converting the value of the
