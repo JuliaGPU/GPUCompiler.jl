@@ -152,9 +152,13 @@ end
     # Baking an interior relocation can expose a dead pointer component of an isbits-union
     # result. It must be folded before SPIR-V translation, which otherwise emits a reference
     # to the now-unused box without defining it.
-    _, meta = SPIRV.code_execution(
-        mod.kernel, (Core.LLVMPtr{UInt,1}, Bool, Int32); backend)
-    @test all(!endswith(gv.name, "_box") for gv in meta.ir.globals)
+    job, kwargs = SPIRV.create_job(mod.kernel, (Core.LLVMPtr{UInt,1}, Bool, Int32);
+                                   kernel=true, backend)
+    JuliaContext() do ctx
+        _, meta = GPUCompiler.compile(:asm, job; kwargs...)
+        @test all(!endswith(gv.name, "_box") for gv in meta.ir.globals)
+        dispose(meta.ir)
+    end
 end
 
 @testset "small type tags" begin

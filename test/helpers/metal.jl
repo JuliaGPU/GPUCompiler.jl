@@ -1,6 +1,7 @@
 module Metal
 
 using ..GPUCompiler
+import LLVM
 import ..TestRuntime
 
 struct CompilerParams <: AbstractCompilerParams end
@@ -113,11 +114,15 @@ end
 code_llvm_threaded_runtime(@nospecialize(func), @nospecialize(types); kwargs...) =
     code_llvm_threaded_runtime(stdout, func, types; kwargs...)
 
-# simulates codegen for a kernel function: validates by default
+# simulates codegen for a kernel function: validates by default. Returns the assembly and
+# the metadata without the IR (and its entry function), which only lives as long as the
+# context, and is disposed of here.
 function code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = create_job(func, types; kernel=true, kwargs...)
     JuliaContext() do ctx
-        GPUCompiler.compile(:asm, job; kwargs...)
+        asm, meta = GPUCompiler.compile(:asm, job; kwargs...)
+        LLVM.dispose(meta.ir)
+        asm, Base.structdiff(meta, NamedTuple{(:ir, :entry)})
     end
 end
 

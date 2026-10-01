@@ -289,8 +289,10 @@ source_code(target::SPIRVCompilerTarget) = "spirv"
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
-    obj, _ = JuliaContext() do ctx
-        compile(:obj, CompilerJob(job; config))
+    obj = JuliaContext() do ctx
+        obj, meta = compile(:obj, CompilerJob(job; config))
+        dispose(meta.ir)
+        obj
     end
     mktemp() do input_path, input_io
         write(input_io, obj)

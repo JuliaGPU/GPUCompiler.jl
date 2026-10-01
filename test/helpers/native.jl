@@ -156,11 +156,15 @@ for method in (:code_warntype, :code_llvm, :code_native)
     end
 end
 
-# simulates codegen for a kernel function: validates by default
+# simulates codegen for a kernel function: validates by default. Returns the assembly and
+# the metadata without the IR (and its entry function), which only lives as long as the
+# context, and is disposed of here.
 function code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = create_job(func, types; kernel=true, kwargs...)
     JuliaContext() do ctx
-        GPUCompiler.compile(:asm, job; kwargs...)
+        asm, meta = GPUCompiler.compile(:asm, job; kwargs...)
+        LLVM.dispose(meta.ir)
+        asm, Base.structdiff(meta, NamedTuple{(:ir, :entry)})
     end
 end
 
