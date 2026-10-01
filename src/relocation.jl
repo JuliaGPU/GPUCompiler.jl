@@ -889,7 +889,7 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
             end
             replace_global_with_local!(gv, slot_address)
         else
-            demote_relocatable_box!(mod, gv, rec, table_word, index)
+            demote_relocatable_box!(mod, gv, rec, table_base, table_word, index)
         end
     end
 
@@ -950,7 +950,7 @@ end
 # relocation table. Sound because a box address carries no identity of its own: `isbits` egal
 # compares by content, so a per-invocation copy is indistinguishable from a shared one.
 function demote_relocatable_box!(mod::LLVM.Module, gv::GlobalVariable, rec::Relocation,
-                                 table_word, index::Int)
+                                 table_base, table_word, index::Int)
     boxty = gv.global_value_type::LLVM.StructType
     init = gv.initializer
     # zero-based, for `struct_gep!` (`LLVM.element_at` numbers fields from 1)
@@ -959,10 +959,16 @@ function demote_relocatable_box!(mod::LLVM.Module, gv::GlobalVariable, rec::Relo
     allocas = Dict{LLVM.Function, LLVM.Value}()
     function box_alloca(f::LLVM.Function)
         get!(allocas, f) do
+            _, entry = table_base(f)
             @dispose builder=IRBuilder() begin
-                position!(builder, LLVM.before(first(f.entry.instructions)))
+                # a static alloca, which dominates the users of the box
+                position!(builder, LLVM.at_begin(f.entry))
                 # keep Julia's heap alignment, which the payload's `isbits` layout assumes
                 ptr = alloca!(builder, boxty; align=max(gv.alignment, 16))
+
+                # initialize it after the table base (the header load below uses it), but
+                # before any original instruction, like the slot addresses
+                position!(builder, LLVM.before(entry))
                 store!(builder, init, ptr)
                 # overwrite the (zeroed) header field with the resolved relocation word
                 word = table_word(builder, index)

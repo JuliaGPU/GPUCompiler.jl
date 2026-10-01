@@ -1381,6 +1381,40 @@ end
     end
 end
 
+@testset "tabulated relocation of several boxes" begin
+    # Each demoted box reads its header from the table, whose base is computed once per
+    # function: it must be available to every box, however many there are.
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
+        mod = @eval module $(gensym())
+            @noinline produce64(cond::Bool, a::Int32) = cond ? a : 2.0
+            @noinline produce32(cond::Bool, a::Int32) = cond ? a : 3.0f0
+            function f(cond::Bool)
+                x = produce64(cond, Int32(7))
+                y = produce32(cond, Int32(8))
+                wx = x isa Float64 ? reinterpret(UInt64, x) : UInt64(0)
+                wy = y isa Float32 ? UInt64(reinterpret(UInt32, y)) : UInt64(0)
+                return wx + wy
+            end
+        end
+        job, _ = Native.create_job(mod.f, (Bool,); relocations=:table, jlruntime=false)
+        JuliaContext() do ctx
+            obj, meta = GPUCompiler.compile(:obj, job)
+            @test count(rec -> rec.kind === GPUCompiler.InteriorSite,
+                        meta.relocations.records) == 2
+            @test verification_error(meta.ir) === nothing
+
+            fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)),
+                                             meta.entry.name, meta.relocations; table=true)
+            @dispose lljit=lljit begin
+                GC.@preserve table begin
+                    @test ccall(fptr, UInt, (Bool,), false) == mod.f(false)
+                    @test ccall(fptr, UInt, (Bool,), true) == mod.f(true)
+                end
+            end
+        end
+    end
+end
+
 @testset "tabulated relocation of merged slots" begin
     # LLVM merges loads from different slots into one load from a `phi` or `select` of their
     # addresses (#959). The lowering substitutes table entry addresses while preserving
