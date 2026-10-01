@@ -35,7 +35,7 @@ function irgen(@nospecialize(job::CompilerJob))
         end
 
         # remove the exception-handling personality function
-        if Sys.iswindows() && "__julia_personality" in mod.functions
+        if Sys.iswindows() && haskey(mod.functions, "__julia_personality")
             llvmf = mod.functions["__julia_personality"]
             @compiler_assert isempty(llvmf.uses) job
             erase!(llvmf)
