@@ -999,7 +999,7 @@ function insert_atomic_fences!(inst::LLVM.Instruction)
         end
         if is_acquire_or_stronger(order)
             position!(builder, LLVM.after(inst))
-            inst.debug_location = builder.debug_location
+            builder.debug_location = inst.debug_location
             fence!(builder, order, scope)
         end
     end
@@ -1037,7 +1037,7 @@ function insert_trailing_seq_cst_fence!(inst::LLVM.Instruction)
         return false
     @dispose builder=IRBuilder() begin
         position!(builder, LLVM.after(inst))
-        inst.debug_location = builder.debug_location
+        builder.debug_location = inst.debug_location
         fence!(builder, LLVM.AtomicOrdering.SequentiallyConsistent, inst.syncscope)
     end
     return true
