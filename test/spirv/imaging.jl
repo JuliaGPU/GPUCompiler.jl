@@ -19,5 +19,6 @@ script = """
         verify(ir)
     end
     """
-cmd = `$(Base.julia_cmd()) --image-codegen --project=$(Base.active_project()) -e $script`
+# Base.julia_cmd() inherits coverage from the test runner, which conflicts with imaging mode.
+cmd = `$(Base.julia_cmd()) --code-coverage=none --image-codegen --project=$(Base.active_project()) -e $script`
 @test success(pipeline(cmd; stdout, stderr))
