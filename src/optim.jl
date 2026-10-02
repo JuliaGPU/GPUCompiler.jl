@@ -586,7 +586,7 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
 
     return changed
 end
-GPULowerGCFramePass(job) = FunctionPass("GPULowerGCFrame", LowerGCFrame(job))
+GPULowerGCFramePass(job) = FunctionPass("GPULowerGCFrame", LowerGCFrame(job); required=true)
 
 # lower the `julia.ptls_states` intrinsic by removing it, since it is GPU incompatible.
 #
