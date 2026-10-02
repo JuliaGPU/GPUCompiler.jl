@@ -254,6 +254,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
         register!(pb, PTXRSqrtFastPass())
         register!(pb, PTXFDivFastPass())
         register!(pb, PTXFSqrtFastPass())
+        register!(pb, PTXLocalAtomicsPass())
         if get(optimization_options(job), :fastmath, true)
             add!(pb, PTXRSqrtFastPass())
             add!(pb, PTXFDivFastPass())
@@ -285,6 +286,11 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
 
             add!(fpm, SimplifyCFGPass())
         end
+
+        # PTX has no atomics on local memory; after the optimizations above, so that
+        # inlining has exposed as many stack slots as possible
+        add!(pb, PTXLocalAtomicsPass())
+        add!(pb, AlwaysInlinerPass())
 
         # get rid of the internalized functions; now possible unused
         add!(pb, GlobalDCEPass())
@@ -617,3 +623,210 @@ function ptx_fsqrt_fast!(mod::LLVM.Module)
     return changed
 end
 PTXFSqrtFastPass() = NewPMModulePass("ptx-fsqrt-fast", ptx_fsqrt_fast!)
+
+# Atomics on thread-private memory.
+#
+# PTX has no atomic instructions for the local state space: an `atom` on a generic address that
+# points to local memory (a stack slot) faults at run time with CUDA_ERROR_INVALID_ADDRESS_SPACE,
+# a sticky error that makes the context unusable. LLVM IR allows atomics on any memory, and the
+# NVPTX back-end does not legalize them. Such atomics are generated, e.g., by Enzyme: the
+# adjoint of a non-inlined device function accumulates into the shadow of a by-reference
+# argument with `atomicrmw fadd`, and that shadow can be an `alloca` in the caller.
+#
+# Memory that only one thread can access needs no atomicity, so an atomic whose pointer is
+# known to be local becomes a plain load, operation and store. One whose address space is not
+# known (a generic pointer, e.g. a function argument) is replaced by a call to an
+# `alwaysinline` helper that checks `isspacep.local` at run time and takes the plain path
+# for local memory, the atomic one otherwise. Global and shared memory are left alone.
+
+# the address space a generic pointer is known to point to (0 if unknown)
+function ptx_pointee_addrspace(ptr::LLVM.Value)
+    seen = Set{LLVM.Value}()
+    while !(ptr in seen)
+        push!(seen, ptr)
+        as = addrspace(value_type(ptr))
+        as != 0 && return as
+        if ptr isa LLVM.AllocaInst
+            return #=local=# 5
+        elseif ptr isa LLVM.GetElementPtrInst || ptr isa LLVM.BitCastInst ||
+               ptr isa LLVM.AddrSpaceCastInst
+            ptr = operands(ptr)[1]
+        elseif ptr isa LLVM.ConstantExpr &&
+               opcode(ptr) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast,
+                               LLVM.API.LLVMAddrSpaceCast)
+            ptr = operands(ptr)[1]
+        else
+            return 0
+        end
+    end
+    return 0
+end
+
+# the value an atomic read-modify-write stores, given the value it read (`nothing` if unsupported)
+function ptx_rmw_result!(builder::IRBuilder, op::LLVM.API.LLVMAtomicRMWBinOp, old::LLVM.Value,
+                         val::LLVM.Value, mod::LLVM.Module)
+    T = value_type(old)
+    minmax(pred) = select!(builder, icmp!(builder, pred, old, val), old, val)
+    if op == LLVM.API.LLVMAtomicRMWBinOpXchg
+        val
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpAdd
+        add!(builder, old, val)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpSub
+        sub!(builder, old, val)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpAnd
+        and!(builder, old, val)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpNand
+        not!(builder, and!(builder, old, val))
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpOr
+        or!(builder, old, val)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpXor
+        xor!(builder, old, val)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpMax
+        minmax(LLVM.API.LLVMIntSGT)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpMin
+        minmax(LLVM.API.LLVMIntSLT)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpUMax
+        minmax(LLVM.API.LLVMIntUGT)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpUMin
+        minmax(LLVM.API.LLVMIntULT)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpFAdd
+        fadd!(builder, old, val)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpFSub
+        fsub!(builder, old, val)
+    elseif op == LLVM.API.LLVMAtomicRMWBinOpFMax || op == LLVM.API.LLVMAtomicRMWBinOpFMin
+        name = op == LLVM.API.LLVMAtomicRMWBinOpFMax ? "llvm.maxnum" : "llvm.minnum"
+        intr = LLVM.Function(mod, LLVM.Intrinsic(name), [T])
+        call!(builder, LLVM.function_type(intr), intr, [old, val])
+    else
+        # e.g. uinc_wrap/udec_wrap, which LLVM's C API does not name: left atomic
+        nothing
+    end
+end
+
+# emit, at the builder's position, the non-atomic form of `inst` on `ptr` (and its operands);
+# returns the value that replaces the atomic's result, or `nothing` if unsupported
+function ptx_emit_nonatomic!(builder::IRBuilder, inst::LLVM.Instruction, ptr::LLVM.Value,
+                             args::Vector{<:LLVM.Value}, mod::LLVM.Module)
+    # the plain accesses keep the atomic's alignment and volatility
+    align = LLVM.API.LLVMGetAlignment(inst)
+    isvolatile = LLVM.API.LLVMGetVolatile(inst) != 0
+    function access!(i)
+        align != 0 && LLVM.API.LLVMSetAlignment(i, align)
+        isvolatile && LLVM.API.LLVMSetVolatile(i, true)
+        return i
+    end
+    if inst isa LLVM.AtomicRMWInst
+        T = value_type(inst)
+        old = access!(load!(builder, T, ptr))
+        new = ptx_rmw_result!(builder, binop(inst), old, args[1], mod)
+        new === nothing && return nothing
+        access!(store!(builder, new, ptr))
+        return old
+    else # cmpxchg: returns {old, success}
+        cmp, new = args
+        T = value_type(cmp)
+        old = access!(load!(builder, T, ptr))
+        eq = icmp!(builder, LLVM.API.LLVMIntEQ, old, cmp)
+        access!(store!(builder, select!(builder, eq, new, old), ptr))
+        agg = UndefValue(value_type(inst))
+        agg = insert_value!(builder, agg, old, 0)
+        return insert_value!(builder, agg, eq, 1)
+    end
+end
+
+# an `alwaysinline` function `(ptr, operands...) -> result` that performs `inst` atomically,
+# unless `ptr` points to local memory
+function ptx_local_safe_atomic!(mod::LLVM.Module, inst::LLVM.Instruction)
+    ptr = operands(inst)[1]
+    args = LLVM.Value[operands(inst)[2:end]...]
+    ft = LLVM.FunctionType(value_type(inst), LLVM.LLVMType[value_type(ptr), value_type.(args)...])
+    f = LLVM.Function(mod, "gpucompiler.local_safe_atomic", ft)
+    linkage!(f, LLVM.API.LLVMInternalLinkage)
+    push!(function_attributes(f), EnumAttribute("alwaysinline"))
+    fptr, fargs = parameters(f)[1], collect(parameters(f))[2:end]
+    # declared by LLVM: it takes an `i8*` with typed pointers
+    isspacep = LLVM.Function(mod, LLVM.Intrinsic("llvm.nvvm.isspacep.local"))
+    isspacep_ft = LLVM.function_type(isspacep)
+    T_arg = only(parameters(isspacep_ft))
+    @dispose builder=IRBuilder() begin
+        entry = BasicBlock(f, "entry")
+        local_bb = BasicBlock(f, "local")
+        atomic_bb = BasicBlock(f, "atomic")
+        exit_bb = BasicBlock(f, "exit")
+        position!(builder, entry)
+        arg = value_type(fptr) == T_arg ? fptr : bitcast!(builder, fptr, T_arg)
+        br!(builder, call!(builder, isspacep_ft, isspacep, [arg]), local_bb, atomic_bb)
+
+        position!(builder, local_bb)
+        plain = ptx_emit_nonatomic!(builder, inst, fptr, fargs, mod)
+        if plain === nothing
+            erase!(f)
+            return nothing
+        end
+        br!(builder, exit_bb)
+
+        position!(builder, atomic_bb)
+        atomic = if inst isa LLVM.AtomicRMWInst
+            atomic_rmw!(builder, binop(inst), fptr, fargs[1], ordering(inst), syncscope(inst))
+        else
+            atomic_cmpxchg!(builder, fptr, fargs[1], fargs[2], success_ordering(inst),
+                            failure_ordering(inst), syncscope(inst))
+        end
+        # the pass must not wrap this atomic again, e.g. when a module that went through it
+        # is linked into one that is optimized again
+        metadata(atomic)["gpucompiler.local_checked"] = MDNode(LLVM.Metadata[])
+        LLVM.API.LLVMGetVolatile(inst) != 0 && LLVM.API.LLVMSetVolatile(atomic, true)
+        LLVM.API.LLVMSetAlignment(atomic, LLVM.API.LLVMGetAlignment(inst))
+        inst isa LLVM.AtomicCmpXchgInst && isweak(inst) && weak!(atomic, true)
+        br!(builder, exit_bb)
+
+        position!(builder, exit_bb)
+        result = phi!(builder, value_type(inst))
+        append!(LLVM.incoming(result), [(plain, local_bb), (atomic, atomic_bb)])
+        ret!(builder, result)
+    end
+    return f
+end
+
+function ptx_local_atomics!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "ptx-local-atomics" begin
+
+    todo = LLVM.Instruction[]
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        if (inst isa LLVM.AtomicRMWInst || inst isa LLVM.AtomicCmpXchgInst) &&
+           !haskey(metadata(inst), "gpucompiler.local_checked")
+            push!(todo, inst)
+        end
+    end
+
+    @dispose builder=IRBuilder() begin
+        for inst in todo
+            ptr = operands(inst)[1]
+            as = ptx_pointee_addrspace(ptr)
+            as == 1 && continue     # global
+            as == 3 && continue     # shared
+            as == 4 && continue     # constant (atomics are invalid there anyway)
+            args = LLVM.Value[operands(inst)[2:end]...]
+            position!(builder, inst)
+            replacement = if as == 5
+                # known to be local: only this thread can access it
+                ptx_emit_nonatomic!(builder, inst, ptr, args, mod)
+            elseif as == 0 && addrspace(value_type(ptr)) == 0
+                helper = ptx_local_safe_atomic!(mod, inst)
+                helper === nothing ? nothing :
+                    call!(builder, LLVM.function_type(helper), helper, LLVM.Value[ptr, args...])
+            else
+                nothing
+            end
+            replacement === nothing && continue
+            replace_uses!(inst, replacement)
+            erase!(inst)
+            changed = true
+        end
+    end
+
+    end # @tracepoint
+    return changed
+end
+PTXLocalAtomicsPass() = NewPMModulePass("ptx-local-atomics", ptx_local_atomics!)
