@@ -242,7 +242,7 @@ function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         f_name = LLVM.name(f)
         for fn in throw_functions
             if occursin(fn, f_name)
-                for use in uses(f)
+                for use in collect(uses(f))
                     call = user(use)::LLVM.CallInst
 
                     # replace the throw with a trap

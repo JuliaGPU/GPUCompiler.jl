@@ -549,7 +549,7 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
         T_prjlvalue = return_type(alloc_obj_ft)
         T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
 
-        for use in uses(alloc_obj)
+        for use in collect(uses(alloc_obj))
             call = user(use)::LLVM.CallInst
 
             # decode the call
@@ -575,7 +575,7 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
     if haskey(functions(mod), "julia.write_barrier")
         barrier = functions(mod)["julia.write_barrier"]
 
-        for use in uses(barrier)
+        for use in collect(uses(barrier))
             call = user(use)::LLVM.CallInst
             erase!(call)
             changed = true
@@ -606,7 +606,7 @@ function (self::LowerPTLS)(mod::LLVM.Module)
     if haskey(functions(mod), intrinsic)
         ptls_getter = functions(mod)[intrinsic]
 
-        for use in uses(ptls_getter)
+        for use in collect(uses(ptls_getter))
             val = user(use)
             if isempty(uses(val))
                 erase!(val)

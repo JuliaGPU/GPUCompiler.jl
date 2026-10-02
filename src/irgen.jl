@@ -199,7 +199,7 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         for (throw_fn, name) in throw_functions
             occursin(throw_fn, fn) || continue
 
-            for use in uses(f)
+            for use in collect(uses(f))
                 call = user(use)::LLVM.CallInst
                 if is_unknown_intrinsic_error(call)
                     push!(errors, (UNKNOWN_INTRINSIC, backtrace(call), nothing))
@@ -987,7 +987,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
     function rewrite_uses!(f, ft)
         # update uses
         @dispose builder=IRBuilder() begin
-            for use in uses(f)
+            for use in collect(uses(f))
                 val = user(use)
                 if val isa LLVM.CallBase && called_operand(val) == f
                     # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
@@ -1078,7 +1078,7 @@ function (self::LowerKernelState)(fun::LLVM.Function)
         state_arg = nothing # only look-up when needed
 
         @dispose builder=IRBuilder() begin
-            for use in uses(state_intr)
+            for use in collect(uses(state_intr))
                 inst = user(use)
                 @assert inst isa LLVM.CallInst
                 bb = LLVM.parent(inst)
@@ -1539,7 +1539,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     function rewrite_uses!(f, new_f)
         # update uses
         @dispose builder=IRBuilder() begin
-            for use in uses(f)
+            for use in collect(uses(f))
                 val = user(use)
                 if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
                     callee_f = LLVM.parent(LLVM.parent(val))
@@ -1588,7 +1588,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     # replace uses of the intrinsics with references to the input arguments
     for (i, intr_fn) in enumerate(used_intrinsics)
         intr = functions(mod)[intr_fn]
-        for use in uses(intr)
+        for use in collect(uses(intr))
             val = user(use)
             callee_f = LLVM.parent(LLVM.parent(val))
             if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
