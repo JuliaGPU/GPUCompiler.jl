@@ -119,6 +119,26 @@ end
         mod.kernel, (Core.LLVMPtr{UInt,1}, Bool, Int32); backend)
     @test all(!endswith(LLVM.name(gv), "_box") for gv in globals(meta.ir))
 end
+
+@testset "small type tags" begin
+    mod = @eval module $(gensym())
+        function kernel(out::Core.LLVMPtr{UInt,1}, p::Ptr{Cvoid})
+            x = unsafe_pointer_to_objref(p)
+            T = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), typeof(x))
+            Base.unsafe_store!(out, UInt(T))
+            return
+        end
+    end
+
+    # Julia looks up the type of a boxed value in `jl_small_typeof`, a global in the
+    # cross-workgroup address space, which older versions cast with a `bitcast`.
+    job, _ = SPIRV.create_job(mod.kernel, (Core.LLVMPtr{UInt,1}, Ptr{Cvoid});
+                              backend, kernel=true)
+    JuliaContext() do ctx
+        ir, _ = GPUCompiler.compile(:llvm, job)
+        @test (verify(ir); true)
+    end
+end
 end
 
 @testset "unsupported type detection" begin
