@@ -1093,7 +1093,7 @@ function (self::LowerKernelState)(fun::LLVM.Function)
 
     return changed
 end
-LowerKernelStatePass(job) = FunctionPass("LowerKernelStatePass", LowerKernelState(job))
+LowerKernelStatePass(job) = FunctionPass("LowerKernelStatePass", LowerKernelState(job); required=true)
 
 struct CleanupKernelState
     job::CompilerJob

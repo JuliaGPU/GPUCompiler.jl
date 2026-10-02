@@ -596,7 +596,7 @@ function (self::LowerGCFrame)(fun::LLVM.Function)
     return changed
 end
 GPULowerGCFramePass(job, relocs::Relocations) =
-    FunctionPass("GPULowerGCFrame", LowerGCFrame(job, relocs))
+    FunctionPass("GPULowerGCFrame", LowerGCFrame(job, relocs); required=true)
 
 # only allocations of objects without references to other heap objects are supported.
 #
