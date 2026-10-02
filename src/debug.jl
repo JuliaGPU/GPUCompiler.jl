@@ -18,7 +18,8 @@ function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
         while loc !== nothing
             scope = loc.scope
             if scope !== nothing
-                name = replace(scope.name, r";$"=>"")
+                name = replace(something(scope.name, ""), r";$"=>"")
+                isempty(name) && (name = "unknown")
                 file = scope.file
                 path = file === nothing ? "unknown" : joinpath(file.directory, file.filename)
                 line = loc.line
