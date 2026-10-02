@@ -24,4 +24,4 @@ steps:
       - exit_status: 3
 
 env:
-  JULIA_PKG_SERVER: "" # it often struggles with our large artifacts
+  JULIA_PKG_SERVER_REGISTRY_PREFERENCE: "eager" # see freshly-registered versions without cloning the registry
