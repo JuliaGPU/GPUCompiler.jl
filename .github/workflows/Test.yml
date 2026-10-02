@@ -15,7 +15,7 @@ jobs:
   release_test:
     name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }} - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -66,8 +66,11 @@ jobs:
           JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
 
       - name: Process coverage
+        # CoverageTools 1.4.1 uses a PkgLoadSpec field renamed in Julia 1.14.
+        if: matrix.version != 'nightly'
         uses: julia-actions/julia-processcoverage@v1
       - name: Submit coverage
+        if: matrix.version != 'nightly'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
