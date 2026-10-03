@@ -1,6 +1,6 @@
 name = "GPUCompiler"
 uuid = "61eb1bfa-7361-4325-ad38-22787b887f55"
-version = "2.10.0"
+version = "2.11.0"
 authors = ["Tim Besard <tim.besard@gmail.com>"]
 
 [workspace]
@@ -42,7 +42,7 @@ CompilerCaching = "0.4, 0.5"
 ExprTools = "0.1"
 Highlights = "0.6"
 InteractiveUtils = "1"
-LLVM = "9.13"
+LLVM = "10"
 LLVMDowngrader_jll = "0.11, 0.12"
 Libdl = "1"
 Logging = "1"

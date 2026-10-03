@@ -1,7 +1,7 @@
 module Enzyme
 
 using ..GPUCompiler
-using LLVM
+using LLVM, LLVM.IR
 
 struct EnzymeTarget{Target<:AbstractCompilerTarget} <: AbstractCompilerTarget
     target::Target
@@ -56,7 +56,7 @@ function GPUCompiler.compile_unhooked(output::Symbol, job::CompilerJob{<:EnzymeT
 
     # Normally, Enzyme would run here and transform the output of the primal job.
     if output === :llvm && job.config.params.always_inline
-        push!(function_attributes(meta.entry), EnumAttribute("alwaysinline", 0))
+        push!(meta.entry.function_attributes, EnumAttribute(:alwaysinline))
     end
 
     return ir, meta

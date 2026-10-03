@@ -46,6 +46,43 @@ end
     end
 end
 
+@testset "kernel state" begin
+    # the kernel state is passed by reference, as a byval pointer
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..TestRuntime
+        struct State
+            x::Int64
+        end
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = TestRuntime
+        GPUCompiler.kernel_state_type(::CompilerJob{SPIRVCompilerTarget,Params}) = State
+
+        kernel() = return
+        kernel(x::Int) = return
+    end
+    function job(tt)
+        source = methodinstance(typeof(mod.kernel), tt, Base.get_world_counter())
+        target = SPIRVCompilerTarget(; backend, validate=true)
+        CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true))
+    end
+
+    for tt in (Tuple{}, Tuple{Int})
+        @test @filecheck begin
+            @check_label "define spir_kernel void @_Z6kernel"
+            @check_same "byval"
+            GPUCompiler.code_llvm(stdout, job(tt); dump_module=true)
+        end
+
+        # without optimization, there is no kernel state parameter to pass by reference
+        @test @filecheck begin
+            @check_label "define spir_kernel void @_Z6kernel"
+            @check_not "byval"
+            GPUCompiler.code_llvm(stdout, job(tt); dump_module=true, optimize=false)
+        end
+    end
+end
+
 @testset "exception strings" begin
     # the exception name and backtrace strings are globals in the cross-workgroup address
     # space, so the reporting runtime should accept them there without a cast.
@@ -115,9 +152,13 @@ end
     # Baking an interior relocation can expose a dead pointer component of an isbits-union
     # result. It must be folded before SPIR-V translation, which otherwise emits a reference
     # to the now-unused box without defining it.
-    _, meta = SPIRV.code_execution(
-        mod.kernel, (Core.LLVMPtr{UInt,1}, Bool, Int32); backend)
-    @test all(!endswith(LLVM.name(gv), "_box") for gv in globals(meta.ir))
+    job, kwargs = SPIRV.create_job(mod.kernel, (Core.LLVMPtr{UInt,1}, Bool, Int32);
+                                   kernel=true, backend)
+    JuliaContext() do ctx
+        _, meta = GPUCompiler.compile(:asm, job; kwargs...)
+        @test all(!endswith(gv.name, "_box") for gv in meta.ir.globals)
+        dispose(meta.ir)
+    end
 end
 
 @testset "small type tags" begin
@@ -538,18 +579,17 @@ end
 
 @testset "replace i128 allocas" begin
     mod = @eval module $(gensym())
+        using LLVM, LLVM.Build, LLVM.Interop
+
         # reimplement some of SIMD.jl
         struct Vec{N, T}
             data::NTuple{N, Core.VecElement{T}}
         end
-        @generated function fadd(x::Vec{N, Float32}, y::Vec{N, Float32}) where {N}
-            quote
-                Vec(Base.llvmcall($"""
-                    %ret = fadd <$N x float> %0, %1
-                    ret <$N x float> %ret
-                """, NTuple{N, Core.VecElement{Float32}}, NTuple{2, NTuple{N, Core.VecElement{Float32}}}, x.data, y.data))
-            end
+        const VF32{N} = NTuple{N, Core.VecElement{Float32}}
+        @llvmgenerated builder function vfadd(x::VF32{N}, y::VF32{N})::VF32{N} where {N}
+            fadd!(builder, x, y)
         end
+        fadd(x::Vec{N, Float32}, y::Vec{N, Float32}) where {N} = Vec(vfadd(x.data, y.data))
         kernel(x, y) = @noinline fadd(x, y)
     end
 

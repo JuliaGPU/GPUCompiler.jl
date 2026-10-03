@@ -211,25 +211,24 @@ end
                              kernel=true)
     JuliaContext() do ctx
         ir, meta = GPUCompiler.compile(:llvm, job)
+        @dispose ir=ir begin
+            entry = meta.entry
+            ft = entry.function_type
+            params = ft.parameters
 
-        entry = meta.entry
-        ft = function_type(entry)
-        params = parameters(ft)
+            # the struct byref param should be ptr addrspace(4)
+            has_as4 = any(p -> p isa LLVM.PointerType && p.addrspace == 4, params)
+            @test has_as4
 
-        # the struct byref param should be ptr addrspace(4)
-        has_as4 = any(p -> p isa LLVM.PointerType && addrspace(p) == 4, params)
-        @test has_as4
+            # non-struct params (double, and i64/ptr for Ptr{Float64}) should NOT
+            # be in addrspace(4). Ptr{Float64} is i64 on Julia ≤1.11, ptr on 1.12+.
+            non_byref = filter(p -> !(p isa LLVM.PointerType && p.addrspace == 4), params)
+            @test !isempty(non_byref)  # double (and i64 or ptr) params
 
-        # non-struct params (double, and i64/ptr for Ptr{Float64}) should NOT
-        # be in addrspace(4). Ptr{Float64} is i64 on Julia ≤1.11, ptr on 1.12+.
-        non_byref = filter(p -> !(p isa LLVM.PointerType && addrspace(p) == 4), params)
-        @test !isempty(non_byref)  # double (and i64 or ptr) params
-
-        # byref attribute must be present
-        ir_str = string(ir)
-        @test occursin("byref", ir_str)
-
-        dispose(ir)
+            # byref attribute must be present
+            ir_str = string(ir)
+            @test occursin("byref", ir_str)
+        end
     end
 end
 

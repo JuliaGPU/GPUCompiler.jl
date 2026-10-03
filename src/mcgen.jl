@@ -5,9 +5,9 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                             relocs::Relocations=Relocations())
     # Clean up first so only live relocations get lowered.
     function cleanup(; fold_instructions=false)
-        @dispose pb=NewPMPassBuilder() begin
+        @dispose pb=PassBuilder() begin
             if fold_instructions
-                add!(pb, NewPMFunctionPassManager()) do fpm
+                add!(pb, FunctionPassManager()) do fpm
                     add!(fpm, instcombine_pass(job))
                 end
             end
@@ -15,7 +15,9 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             add!(pb, GlobalOptPass())
             add!(pb, GlobalDCEPass())
             add!(pb, StripDeadPrototypesPass())
-            run!(pb, mod, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, mod, tm)
+            end
         end
     end
     cleanup()
@@ -48,8 +50,8 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     return
 end
 
-function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
-    tm = llvm_machine(job.config.target)
-
-    return String(emit(tm, mod, format))
+function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
+    with_llvm_machine(job.config.target) do tm
+        String(LLVM.emit(tm, mod, format))
+    end
 end

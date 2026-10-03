@@ -24,28 +24,50 @@ source_code(@nospecialize(target::AbstractCompilerTarget)) = "text"
 llvm_triple(@nospecialize(target::AbstractCompilerTarget)) = error("Not implemented")
 
 # may return nothing if the target is not support by the current version of LLVM.
+# the caller owns the returned target machine; see `with_llvm_machine`.
 function llvm_machine(@nospecialize(target::AbstractCompilerTarget))
     triple = llvm_triple(target)
 
-    t = Target(triple=triple)
+    t = LLVM.Target(triple=triple)
 
-    tm = TargetMachine(t, triple)
-    asm_verbosity!(tm, true)
+    tm = LLVM.TargetMachine(t, triple)
+    LLVM.asm_verbosity!(tm, true)
 
     return tm
 end
 
-llvm_datalayout(target::AbstractCompilerTarget) = DataLayout(llvm_machine(target))
+# call `f` with a target machine for `target`, or with `nothing` if there is none, and dispose
+# of the target machine afterwards
+function with_llvm_machine(f, @nospecialize(target::AbstractCompilerTarget))
+    tm = llvm_machine(target)
+    tm === nothing && return f(nothing)
+    @dispose tm=tm begin
+        f(tm)
+    end
+end
+
+# the target's datalayout: a `DataLayout` the caller owns, a string, or `nothing`
+llvm_datalayout(target::AbstractCompilerTarget) = with_llvm_machine(target) do tm
+    tm === nothing ? nothing : LLVM.DataLayout(tm)
+end
 
 # a custom `TargetTransformInfo` for targets that don't have (or can't rely on) a
 # `TargetMachine`-supplied TTI. Return `nothing` to fall back to LLVM's native TTI.
 llvm_targetinfo(@nospecialize(target::AbstractCompilerTarget)) = nothing
 
-# the target's datalayout, with Julia's non-integral address spaces added to it
+# the target's datalayout, with Julia's non-integral address spaces added to it, as a
+# `DataLayout` the caller owns (or `nothing`)
 function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     dl = llvm_datalayout(target)
     dl === nothing && return nothing
-    DataLayout(string(dl) * "-ni:10:11:12:13")
+    str = if dl isa LLVM.DataLayout
+        @dispose dl=dl begin
+            string(dl)
+        end
+    else
+        string(dl)
+    end
+    LLVM.DataLayout(str * "-ni:10:11:12:13")
 end
 
 have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
@@ -661,11 +683,11 @@ end
 # how much debuginfo to emit
 function llvm_debug_info(@nospecialize(job::CompilerJob))
     if job.config.debug_level == 0
-        LLVM.API.LLVMDebugEmissionKindNoDebug
+        LLVM.DebugEmissionKind.NoDebug
     elseif job.config.debug_level == 1
-        LLVM.API.LLVMDebugEmissionKindLineTablesOnly
+        LLVM.DebugEmissionKind.LineTablesOnly
     elseif job.config.debug_level >= 2
-        LLVM.API.LLVMDebugEmissionKindFullDebug
+        LLVM.DebugEmissionKind.FullDebug
     end
 end
 

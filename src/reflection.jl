@@ -269,7 +269,8 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=job.c
         ts_mod = ThreadSafeModule(ir)
         entry_fn = meta.entry
         GC.@preserve ts_mod entry_fn begin
-            value = Ref(jl_llvmf_dump(ts_mod.ref, entry_fn.ref))
+            # `jl_dump_function_ir` takes ownership of the thread-safe module
+            value = Ref(jl_llvmf_dump(LLVM.consume!(ts_mod), entry_fn.ref))
             ccall(:jl_dump_function_ir, Ref{String},
                     (Ptr{jl_llvmf_dump}, Bool, Bool, Ptr{UInt8}),
                     value, !raw, dump_module, debuginfo)
@@ -296,8 +297,10 @@ See also: [`@device_code_native`](@ref), `InteractiveUtils.code_llvm`
 function code_native(io::IO, @nospecialize(job::CompilerJob);
                      raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
-    asm, meta = JuliaContext() do ctx
-        compile(:asm, CompilerJob(job; config))
+    asm = JuliaContext() do ctx
+        asm, meta = compile(:asm, CompilerJob(job; config))
+        dispose(meta.ir)
+        asm
     end
     highlight(io, asm, source_code(job.config.target))
 end

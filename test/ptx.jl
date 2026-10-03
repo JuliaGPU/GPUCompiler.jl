@@ -135,7 +135,7 @@ end
     end
 end
 
-LLVM.version() >= v"8" && @testset "calling convention" begin
+@testset "calling convention" begin
     @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true) do
         @check_not "ptx_kernel"
         return
@@ -319,11 +319,9 @@ end
         PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, blocks_per_sm=42)
     end
 
-    if LLVM.version() >= v"4.0"
-        @test @filecheck begin
-            @check ".maxnreg 42"
-            PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, maxregs=42)
-        end
+    @test @filecheck begin
+        @check ".maxnreg 42"
+        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, maxregs=42)
     end
 end
 end

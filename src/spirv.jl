@@ -59,8 +59,8 @@ end
 llvm_machine(::SPIRVCompilerTarget) = nothing
 
 function runtime_cstring_type(job::CompilerJob{SPIRVCompilerTarget})
-    DataLayout(llvm_datalayout(job.config.target)) do dl
-        Core.LLVMPtr{Cchar, globals_addrspace(dl)}
+    LLVM.DataLayout(llvm_datalayout(job.config.target)) do dl
+        Core.LLVMPtr{Cchar, dl.globals_addrspace}
     end
 end
 
@@ -78,12 +78,12 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                         entry::LLVM.Function)
     # update calling convention
-    for f in functions(mod)
+    for f in mod.functions
         # JuliaGPU/GPUCompiler.jl#97
-        #callconv!(f, LLVM.API.LLVMSPIRFUNCCallConv)
+        #f.callconv = LLVM.CallConv.SPIRFUNC
     end
     if job.config.kernel
-        callconv!(entry, LLVM.API.LLVMSPIRKERNELCallConv)
+        entry.callconv = LLVM.CallConv.SPIRKERNEL
     end
 
     return entry
@@ -131,11 +131,15 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     if job.config.kernel
         state = kernel_state_type(job)
         if state !== Nothing
-            entry = kernel_state_to_reference!(job, mod, entry)
+            new_entry = kernel_state_to_reference!(job, mod, entry)
 
-            T_state = convert(LLVMType, state)
-            attr = TypeAttribute("byval", T_state)
-            push!(parameter_attributes(entry, 1), attr)
+            # only if there was a kernel state parameter to convert, which optimization adds
+            # (so not when emitting unoptimized IR)
+            if new_entry != entry
+                entry = new_entry
+                T_state = convert(LLVMType, state)
+                push!(entry.parameter_attributes[1], TypeAttribute(:byval, T_state))
+            end
         end
     end
 
@@ -150,11 +154,11 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
 
     # add module metadata
     ## OpenCL 2.0
-    push!(metadata(mod)["opencl.ocl.version"],
+    push!(get!(mod.metadata, "opencl.ocl.version").operands,
           MDNode([ConstantInt(Int32(2)),
                   ConstantInt(Int32(0))]))
     ## SPIR-V 1.5
-    push!(metadata(mod)["opencl.spirv.version"],
+    push!(get!(mod.metadata, "opencl.spirv.version").operands,
           MDNode([ConstantInt(Int32(1)),
                   ConstantInt(Int32(5))]))
 
@@ -196,7 +200,7 @@ function translate(input::Vector{UInt8}, options::Ref{LLVMSPIRVTranslateOptions}
 end
 
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
-                         format=LLVM.API.LLVMAssemblyFile)
+                         format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
 
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
@@ -268,7 +272,7 @@ end
         rm(optimized)
     end
 
-    output = if format == LLVM.API.LLVMObjectFile
+    output = if format == LLVM.CodeGenFileType.Object
         spirv
     else
         # disassemble
@@ -285,8 +289,10 @@ source_code(target::SPIRVCompilerTarget) = "spirv"
 # reimplementation that uses `spirv-dis`, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
-    obj, _ = JuliaContext() do ctx
-        compile(:obj, CompilerJob(job; config))
+    obj = JuliaContext() do ctx
+        obj, meta = compile(:obj, CompilerJob(job; config))
+        dispose(meta.ir)
+        obj
     end
     mktemp() do input_path, input_io
         write(input_io, obj)
@@ -310,11 +316,11 @@ function rm_freeze!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "remove freeze" begin
 
-    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
         if inst isa LLVM.FreezeInst
-            orig = first(operands(inst))
+            orig = first(inst.operands)
             replace_uses!(inst, orig)
-            @compiler_assert isempty(uses(inst)) job
+            @compiler_assert isempty(inst.uses) job
             erase!(inst)
             changed = true
         end
@@ -341,20 +347,18 @@ function flatten_nested_insertvalue!(mod::LLVM.Module)
     changed = false
     @tracepoint "flatten nested insertvalue" begin
 
-    for f in functions(mod), bb in blocks(f)
-        worklist = filter(collect(instructions(bb))) do inst
-            opcode(inst) == LLVM.API.LLVMInsertValue && LLVM.API.LLVMGetNumIndices(inst) > 1
+    for f in mod.functions, bb in f.blocks
+        worklist = filter(collect(bb.instructions)) do inst
+            inst isa LLVM.InsertValueInst && length(inst.indices) > 1
         end
         isempty(worklist) && continue
 
         @dispose builder=IRBuilder() begin
             for inst in worklist
-                agg, val = operands(inst)
-                n = LLVM.API.LLVMGetNumIndices(inst)
-                idxptr = LLVM.API.LLVMGetIndices(inst)
-                indices = [unsafe_load(idxptr, i) for i in 1:n]
+                agg, val = inst.operands
+                indices = collect(inst.indices)
 
-                position!(builder, inst)
+                position!(builder, LLVM.before(inst))
                 new = flatten_insertvalue!(builder, agg, val, indices)
                 replace_uses!(inst, new)
                 erase!(inst)
@@ -387,47 +391,47 @@ function lower_minimum_maximum!(mod::LLVM.Module)
     changed = false
     @tracepoint "lower minimum/maximum" begin
 
-    for f in collect(functions(mod))
+    for f in collect(mod.functions)
         isdeclaration(f) || continue
-        fn = LLVM.name(f)
+        fn = f.name
         is_minimum = startswith(fn, "llvm.minimum.")
         is_minimum || startswith(fn, "llvm.maximum.") || continue
 
-        typ = return_type(function_type(f))
-        eltyp = typ isa LLVM.VectorType ? eltype(typ) : typ
-        bits = if eltyp == LLVM.HalfType()
+        typ = f.function_type.return_type
+        eltyp = typ isa LLVM.VectorType ? typ.element_type : typ
+        bits = if eltyp isa LLVM.HalfType
             16
-        elseif eltyp == LLVM.FloatType()
+        elseif eltyp isa LLVM.FloatType
             32
-        elseif eltyp == LLVM.DoubleType()
+        elseif eltyp isa LLVM.DoubleType
             64
         else
             continue
         end
         ityp = LLVM.IntType(bits)
         if typ isa LLVM.VectorType
-            ityp = LLVM.VectorType(ityp, length(typ))
+            ityp = LLVM.VectorType(ityp, typ.length)
         end
         num = LLVM.Function(mod, LLVM.Intrinsic(is_minimum ? "llvm.minnum" : "llvm.maxnum"),
                             LLVMType[typ])
 
-        for use in collect(uses(f))
-            call = user(use)
+        for use in collect(f.uses)
+            call = use.user
             call isa LLVM.CallInst || continue
-            x, y = arguments(call)
-            flags = LLVM.fast_math(call)
+            x, y = call.arguments
+            flags = NamedTuple(call.fast_math)
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
 
-                res = call!(builder, function_type(num), num, LLVM.Value[x, y])
-                fast_math!(res; flags...)
+                res = call!(builder, num.function_type, num, LLVM.Value[x, y])
+                res.fast_math = flags
 
                 # if both operands are zero, combine their sign bits
                 if !flags.nsz
                     zero = LLVM.null(typ)
-                    both_zero = and!(builder, fcmp!(builder, LLVM.API.LLVMRealOEQ, x, zero),
-                                              fcmp!(builder, LLVM.API.LLVMRealOEQ, y, zero))
+                    both_zero = and!(builder, fcmp!(builder, LLVM.RealPredicate.OEQ, x, zero),
+                                              fcmp!(builder, LLVM.RealPredicate.OEQ, y, zero))
                     xi = bitcast!(builder, x, ityp)
                     yi = bitcast!(builder, y, ityp)
                     zi = is_minimum ? or!(builder, xi, yi) : and!(builder, xi, yi)
@@ -436,7 +440,7 @@ function lower_minimum_maximum!(mod::LLVM.Module)
 
                 # if either operand is NaN, return a NaN
                 if !flags.nnan
-                    either_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, x, y)
+                    either_nan = fcmp!(builder, LLVM.RealPredicate.UNO, x, y)
                     res = select!(builder, either_nan, fadd!(builder, x, y), res)
                 end
 
@@ -445,7 +449,7 @@ function lower_minimum_maximum!(mod::LLVM.Module)
             end
             changed = true
         end
-        isempty(uses(f)) && erase!(f)
+        isempty(f.uses) && erase!(f)
     end
 
     end
@@ -458,40 +462,39 @@ function convert_i128_allocas!(mod::LLVM.Module)
     changed = false
     @tracepoint "convert i128 allocas" begin
 
-    for f in functions(mod), bb in blocks(f)
-        for inst in instructions(bb)
+    for f in mod.functions, bb in f.blocks
+        for inst in bb.instructions
             if inst isa LLVM.AllocaInst
-                alloca_type = LLVMType(LLVM.API.LLVMGetAllocatedType(inst))
+                alloca_type = inst.allocated_type
 
                 # Check if this is an i128 or an array of i128
                 if alloca_type isa LLVM.ArrayType
-                    T = eltype(alloca_type)
+                    T = alloca_type.element_type
                 else
                     T = alloca_type
                 end
-                if T isa LLVM.IntegerType && width(T) == 128
+                if T isa LLVM.IntegerType && T.width == 128
                     # replace i128 with <2 x i64>
                     vec_type = LLVM.VectorType(LLVM.Int64Type(), 2)
 
                     if alloca_type isa LLVM.ArrayType
-                        array_size = length(alloca_type)
+                        array_size = alloca_type.length
                         new_alloca_type = LLVM.ArrayType(vec_type, array_size)
                     else
                         new_alloca_type = vec_type
                     end
-                    align_val = alignment(inst)
+                    align_val = inst.alignment
 
                     # Create new alloca with vector type
                     @dispose builder=IRBuilder() begin
-                        position!(builder, inst)
-                        new_alloca = alloca!(builder, new_alloca_type)
-                        alignment!(new_alloca, align_val)
+                        position!(builder, LLVM.before(inst))
+                        new_alloca = alloca!(builder, new_alloca_type; align=align_val)
 
                         # Bitcast the new alloca back to the original pointer type
                         # XXX: The issue only seems to manifest itself on LLVM >= 18
                         #      where we use opaque pointers anyways, so not sure this
                         #      is needed
-                        old_ptr_type = LLVMType(LLVM.API.LLVMTypeOf(inst.ref))
+                        old_ptr_type = inst.value_type
                         bitcast_ptr = bitcast!(builder, new_alloca, old_ptr_type)
 
                         replace_uses!(inst, bitcast_ptr)
@@ -509,33 +512,29 @@ end
 
 # wrap byval pointers in a single-value struct
 function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
-    ft = function_type(f)::LLVM.FunctionType
+    ft = f.function_type::LLVM.FunctionType
 
     # find the byval parameters
-    byval = BitVector(undef, length(parameters(ft)))
-    types = Vector{LLVMType}(undef, length(parameters(ft)))
+    byval = BitVector(undef, length(ft.parameters))
+    types = Vector{LLVMType}(undef, length(ft.parameters))
     for i in 1:length(byval)
-        byval[i] = false
-        for attr in collect(parameter_attributes(f, i))
-            if kind(attr) == kind(TypeAttribute("byval", LLVM.VoidType()))
-                byval[i] = true
-                types[i] = value(attr)
-            end
-        end
+        attr = get(f.parameter_attributes[i], :byval, nothing)
+        byval[i] = attr !== nothing
+        byval[i] && (types[i] = attr.value)
     end
 
     # generate the wrapper function type & definition: byval params become pointers to a struct
     # wrapping the value, and the body GEPs into that struct to recover the original pointer.
     wrapper(i) = LLVM.StructType([convert(LLVMType, types[i])])
     new_types = Union{Nothing,LLVM.LLVMType}[
-        byval[i] ? LLVM.PointerType(wrapper(i), addrspace(parameters(ft)[i])) : nothing
-        for i in 1:length(parameters(ft))]
+        byval[i] ? LLVM.PointerType(wrapper(i), ft.parameters[i].addrspace) : nothing
+        for i in 1:length(ft.parameters)]
     new_f = clone_with_converted_args!(mod, f, new_types,
         (builder, param, i) -> struct_gep!(builder, wrapper(i), param, 0))
 
     # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
     for i in 1:length(byval)
-        byval[i] && push!(parameter_attributes(new_f, i), TypeAttribute("byval", wrapper(i)))
+        byval[i] && push!(new_f.parameter_attributes[i], TypeAttribute(:byval, wrapper(i)))
     end
 
     # remove the old function
@@ -544,9 +543,11 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
     # XXX: work around KhronosGroup/SPIRV-LLVM-Translator#3389
     if job.config.target.backend === :khronos
-        @dispose pb=NewPMPassBuilder() begin
+        @dispose pb=PassBuilder() begin
             add!(pb, SimplifyCFGPass())
-            run!(pb, new_f, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, new_f, tm)
+            end
         end
     end
     return new_f

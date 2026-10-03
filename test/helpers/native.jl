@@ -1,7 +1,7 @@
 module Native
 
 using ..GPUCompiler
-using LLVM
+using LLVM, LLVM.IR, LLVM.Build, LLVM.ORC
 import ..TestRuntime
 
 # local method table for device functions
@@ -39,32 +39,30 @@ const RELOC_TABLE_BASE = "__reloc_table_base"
 
 function GPUCompiler.relocation_table_pointer(@nospecialize(job::NativeCompilerJob),
                                               builder::LLVM.IRBuilder, fun::LLVM.Function)
-    mod = LLVM.parent(fun)
+    mod = fun.parent
     T_word = GPUCompiler.relocation_word_type()
-    gv = if haskey(globals(mod), RELOC_TABLE_BASE)
-        globals(mod)[RELOC_TABLE_BASE]
-    else
+    gv = get!(mod.globals, RELOC_TABLE_BASE) do
         gv = GlobalVariable(mod, T_word, RELOC_TABLE_BASE)
-        initializer!(gv, LLVM.ConstantInt(T_word, 0))
-        extinit!(gv, true)
-        linkage!(gv, LLVM.API.LLVMExternalLinkage)
-        set_used!(mod, gv)
+        gv.initializer = LLVM.ConstantInt(T_word, 0)
+        gv.externally_initialized = true
+        gv.linkage = LLVM.Linkage.External
+        push!(mod.used, gv)
         gv
     end
     return inttoptr!(builder, load!(builder, T_word, gv), LLVM.PointerType(T_word))
 end
 
 function GPUCompiler.mcgen(@nospecialize(job::NativeCompilerJob), mod::LLVM.Module,
-                           format=LLVM.API.LLVMAssemblyFile)
+                           format=LLVM.CodeGenFileType.Assembly)
     # objects only exist to be loaded into `load`'s ORC JIT, so always emit them with the
     # JIT's target machine: the default one uses the small code model with static
     # relocations, whose 32-bit absolute references to e.g. constant pools cannot reach
     # the addresses the JIT loads code at (and, on Windows, it emits COFF where ORC wants ELF)
-    if job.config.params.relocations !== :bake || format == LLVM.API.LLVMObjectFile
+    if job.config.params.relocations !== :bake || format == LLVM.CodeGenFileType.Object
         target = job.config.target
-        @dispose tm=JITTargetMachine(GPUCompiler.llvm_triple(target), target.cpu,
-                                     target.features) begin
-            return String(emit(tm, mod, format))
+        @dispose tm=LLVM.JITTargetMachine(; triple=GPUCompiler.llvm_triple(target),
+                                          cpu=target.cpu, features=target.features) begin
+            return String(LLVM.emit(tm, mod, format))
         end
     else
         return invoke(GPUCompiler.mcgen, Tuple{CompilerJob,LLVM.Module,Any},
@@ -92,11 +90,10 @@ end
 # The returned table must stay rooted for as long as the code is callable.
 function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations;
               table::Bool=false)
-    lljit = LLJIT(; tm=JITTargetMachine())
+    lljit = LLJIT(; tm=LLVM.JITTargetMachine())
     try
-        jd = JITDylib(lljit)
-        prefix = LLVM.get_prefix(lljit)
-        add!(jd, LLVM.CreateDynamicLibrarySearchGeneratorForProcess(prefix))
+        jd = lljit.main_dylib
+        add!(jd, DynamicLibrarySearchGenerator(lljit))
 
         # Code using the Julia runtime fetches the TLS through `jl_get_pgcstack_resolved`
         # (JuliaLang/julia#61527), which is not a symbol in the process but one Julia's own
@@ -104,13 +101,9 @@ function load(obj::Vector{UInt8}, entry::String, relocs::GPUCompiler.Relocations
         getter = Ref{Ptr{Cvoid}}(C_NULL)
         key = Ref{UInt64}(0)    # `jl_pgcstack_key_t` is at most a word wide
         ccall(:jl_pgcstack_getkey, Cvoid, (Ptr{Ptr{Cvoid}}, Ptr{UInt64}), getter, key)
-        flags = LLVM.API.LLVMJITSymbolFlags(
-            LLVM.API.LLVMJITSymbolGenericFlagsExported |
-            LLVM.API.LLVMJITSymbolGenericFlagsCallable, 0)
-        symbol = LLVM.API.LLVMJITEvaluatedSymbol(reinterpret(UInt, getter[]), flags)
-        pair = LLVM.API.LLVMOrcCSymbolMapPair(mangle(lljit, "jl_get_pgcstack_resolved"),
-                                              symbol)
-        LLVM.define(jd, LLVM.absolute_symbols(Ref(pair)))
+        flags = SymbolFlags(; exported=true, callable=true)
+        define!(jd, absolute_symbols(mangle(lljit, "jl_get_pgcstack_resolved") =>
+                                     (getter[], flags)))
 
         add!(lljit, jd, MemoryBuffer(obj))
         words = UInt[]
@@ -163,11 +156,15 @@ for method in (:code_warntype, :code_llvm, :code_native)
     end
 end
 
-# simulates codegen for a kernel function: validates by default
+# simulates codegen for a kernel function: validates by default. Returns the assembly and
+# the metadata without the IR (and its entry function), which only lives as long as the
+# context, and is disposed of here.
 function code_execution(@nospecialize(func), @nospecialize(types); kwargs...)
     job, kwargs = create_job(func, types; kernel=true, kwargs...)
     JuliaContext() do ctx
-        GPUCompiler.compile(:asm, job; kwargs...)
+        asm, meta = GPUCompiler.compile(:asm, job; kwargs...)
+        LLVM.dispose(meta.ir)
+        asm, Base.structdiff(meta, NamedTuple{(:ir, :entry)})
     end
 end
 

@@ -38,13 +38,13 @@ function llvm_machine(target::GCNCompilerTarget)
         return nothing
     end
     triple = llvm_triple(target)
-    t = Target(triple=triple)
+    t = LLVM.Target(triple=triple)
 
     cpu = target.dev_isa
     feat = target.features
-    reloc = LLVM.API.LLVMRelocPIC
-    tm = TargetMachine(t, triple, cpu, feat; reloc)
-    asm_verbosity!(tm, true)
+    reloc = LLVM.RelocMode.PIC
+    tm = LLVM.TargetMachine(t, triple; cpu, features=feat, reloc)
+    LLVM.asm_verbosity!(tm, true)
 
     return tm
 end
@@ -72,7 +72,7 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
 
     if job.config.kernel
         # calling convention
-        callconv!(entry, LLVM.API.LLVMAMDGPUKERNELCallConv)
+        entry.callconv = LLVM.CallConv.AMDGPUKERNEL
 
         # workgroup size bounds; the backend sizes its register budget for the
         # worst case (1,1024) when unset
@@ -80,7 +80,7 @@ function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
            job.config.target.maxthreads !== nothing
             lo = prod(something(job.config.target.minthreads, 1))
             hi = prod(something(job.config.target.maxthreads, 1024))
-            push!(function_attributes(entry),
+            push!(entry.function_attributes,
                   StringAttribute("amdgpu-flat-work-group-size", "$lo,$hi"))
         end
     end
@@ -97,16 +97,17 @@ function finish_ir!(
 
         # optimize after address space rewriting: propagate addrspace(4) through
         # the addrspacecast chains, then clean up newly-exposed opportunities
-        tm = llvm_machine(job.config.target)
-        @dispose pb=NewPMPassBuilder() begin
-            add!(pb, NewPMFunctionPassManager()) do fpm
-                add!(fpm, InferAddressSpacesPass())
-                add!(fpm, SROAPass())
-                add!(fpm, instcombine_pass(job))
-                add!(fpm, EarlyCSEPass())
-                add!(fpm, SimplifyCFGPass())
+        with_llvm_machine(job.config.target) do tm
+            @dispose pb=PassBuilder() begin
+                add!(pb, FunctionPassManager()) do fpm
+                    add!(fpm, InferAddressSpacesPass())
+                    add!(fpm, SROAPass())
+                    add!(fpm, instcombine_pass(job))
+                    add!(fpm, EarlyCSEPass())
+                    add!(fpm, SimplifyCFGPass())
+                end
+                run!(pb, mod, tm)
             end
-            run!(pb, mod, tm)
         end
     end
     return entry
@@ -127,22 +128,20 @@ function add_kernarg_address_spaces!(
         @nospecialize(job::CompilerJob), mod::LLVM.Module,
         f::LLVM.Function
     )
-    ft = function_type(f)
+    ft = f.function_type
 
     # find the byref parameters by checking for the byref attribute directly,
     # rather than re-classifying arguments (which can fail on typed-pointer LLVM
     # due to element type mismatches in classify_arguments assertions).
-    byref_kind = LLVM.API.LLVMGetEnumAttributeKindForName("byref", 5)
-    byref_mask = BitVector(undef, length(parameters(ft)))
-    for i in 1:length(parameters(ft))
-        attrs = collect(parameter_attributes(f, i))
-        byref_mask[i] = any(a -> a isa TypeAttribute && kind(a) == byref_kind, attrs)
+    byref_mask = BitVector(undef, length(ft.parameters))
+    for i in 1:length(ft.parameters)
+        byref_mask[i] = haskey(f.parameter_attributes[i], :byref)
     end
 
     # check if any flat pointer byref params need rewriting
     needs_rewrite = false
-    for (i, param) in enumerate(parameters(ft))
-        if byref_mask[i] && param isa LLVM.PointerType && addrspace(param) == 0
+    for (i, param) in enumerate(ft.parameters)
+        if byref_mask[i] && param isa LLVM.PointerType && param.addrspace == 0
             needs_rewrite = true
             break
         end
@@ -150,11 +149,11 @@ function add_kernarg_address_spaces!(
     needs_rewrite || return f
 
     # generate the new function type with constant address space on byref flat-pointer params
-    param_types = parameters(ft)
-    flat_byref(i) = byref_mask[i] && param_types[i] isa LLVM.PointerType && addrspace(param_types[i]) == 0
+    param_types = ft.parameters
+    flat_byref(i) = byref_mask[i] && param_types[i] isa LLVM.PointerType && param_types[i].addrspace == 0
     new_types = Union{Nothing,LLVMType}[
         flat_byref(i) ? (supports_typed_pointers(context()) ?
-                            LLVM.PointerType(eltype(param_types[i]), #=constant=# 4) :
+                            LLVM.PointerType(param_types[i].element_type, #=constant=# 4) :
                             LLVM.PointerType(#=constant=# 4)) :
                         nothing
         for i in 1:length(param_types)]
@@ -169,16 +168,14 @@ function add_kernarg_address_spaces!(
     # attributes via setAttributes. For byref params, the VMap maps old args to addrspacecast
     # instructions (not Arguments), so LLVM's attribute remapping silently drops them.
     for i in 1:length(param_types)
-        for attr in collect(parameter_attributes(f, i))
-            push!(parameter_attributes(new_f, i), attr)
-        end
+        append!(new_f.parameter_attributes[i], f.parameter_attributes[i])
     end
 
     replace_function!(f, new_f)
 
     # clean up the extra conversion block
-    @dispose pb=NewPMPassBuilder() begin
-        add!(pb, NewPMFunctionPassManager()) do fpm
+    @dispose pb=PassBuilder() begin
+        add!(pb, FunctionPassManager()) do fpm
             add!(fpm, SimplifyCFGPass())
         end
         run!(pb, mod)
@@ -198,7 +195,7 @@ const AMDGPUAssemblyFile = Cint(0)
 const AMDGPUObjectFile = Cint(1)
 
 @unlocked function mcgen(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
-                         mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
+                         mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
 
     if target.backend === :inprocess
@@ -219,9 +216,9 @@ const AMDGPUObjectFile = Cint(1)
     end
     backend = ExternalBackend(AMDGPU_LLVM_Backend_jll.libamdgpu, "AMDGPU")
 
-    filetype = if format == LLVM.API.LLVMAssemblyFile
+    filetype = if format == LLVM.CodeGenFileType.Assembly
         AMDGPUAssemblyFile
-    elseif format == LLVM.API.LLVMObjectFile
+    elseif format == LLVM.CodeGenFileType.Object
         AMDGPUObjectFile
     else
         error("Unsupported GCN output format $format")
@@ -257,22 +254,22 @@ function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         r"julia___subarray_throw_boundserror.*",
     ]
 
-    for f in functions(mod)
-        f_name = LLVM.name(f)
+    for f in mod.functions
+        f_name = f.name
         for fn in throw_functions
             if occursin(fn, f_name)
-                for use in uses(f)
-                    call = user(use)::LLVM.CallInst
+                for use in collect(f.uses)
+                    call = use.user::LLVM.CallInst
 
                     # replace the throw with a trap
                     @dispose builder=IRBuilder() begin
-                        position!(builder, call)
+                        position!(builder, LLVM.before(call))
                         emit_exception!(job, builder, f_name, call)
                     end
 
-                    # remove the call
-                    nargs = length(parameters(f))
-                    call_args = arguments(call)
+                    # remove the call (collecting its arguments first, as the view is live)
+                    nargs = length(f.parameters)
+                    call_args = collect(call.arguments)
                     erase!(call)
 
                     # HACK: kill the exceptions' unused arguments
@@ -280,11 +277,11 @@ function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                         # peek through casts
                         if isa(arg, LLVM.AddrSpaceCastInst)
                             cast = arg
-                            arg = first(operands(cast))
-                            isempty(uses(cast)) && erase!(cast)
+                            arg = first(cast.operands)
+                            isempty(cast.uses) && erase!(cast)
                         end
 
-                        if isa(arg, LLVM.Instruction) && isempty(uses(arg))
+                        if isa(arg, LLVM.Instruction) && isempty(arg.uses)
                             erase!(arg)
                         end
                     end
@@ -292,7 +289,7 @@ function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                     changed = true
                 end
 
-                @compiler_assert isempty(uses(f)) job
+                @compiler_assert isempty(f.uses) job
             end
         end
     end

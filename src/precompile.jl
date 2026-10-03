@@ -36,7 +36,8 @@ import REPL
         job = CompilerJob(source, config)
 
         JuliaContext() do ctx
-            GPUCompiler.compile(:asm, job)
+            _, meta = GPUCompiler.compile(:asm, job)
+            dispose(meta.ir)
         end
     end
 

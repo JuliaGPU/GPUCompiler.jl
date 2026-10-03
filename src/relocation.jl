@@ -255,20 +255,20 @@ end
 relocation_word_type() = LLVM.IntType(8sizeof(UInt))
 
 function check_slot_size(mod::LLVM.Module, gv::GlobalVariable, name::String)
-    size = abi_size(datalayout(mod), global_value_type(gv))
+    size = LLVM.abi_size(mod.datalayout, gv.global_value_type)
     size == sizeof(UInt) ||
         error("Relocation slot '$name' has size $size, expected $(sizeof(UInt))")
     return
 end
 
 function slot_initializer(gv::GlobalVariable, value::UInt)
-    T = global_value_type(gv)
+    T = gv.global_value_type
     if T isa LLVM.PointerType
         return const_inttoptr(ConstantInt(UInt64(value)), T)
-    elseif T isa LLVM.IntegerType && width(T) == 8sizeof(UInt)
+    elseif T isa LLVM.IntegerType && T.width == 8sizeof(UInt)
         return ConstantInt(T, value)
     end
-    error("Relocation slot '$(LLVM.name(gv))' has unsupported LLVM type $T")
+    error("Relocation slot '$(gv.name)' has unsupported LLVM type $T")
 end
 
 # Validate `gv` against what `rec` says it is. The record is authoritative: a mismatch means
@@ -280,12 +280,12 @@ function check_relocation(mod::LLVM.Module, rec::Relocation, gv::GlobalVariable)
     else
         isdeclaration(gv) &&
             error("Interior relocation '$(rec.name)' is a declaration")
-        init = initializer(gv)
+        init = gv.initializer
         init === nothing && error("Relocation global '$(rec.name)' has no initializer")
-        T = value_type(init)
+        T = init.value_type
         T isa LLVM.StructType ||
             error("Relocation global '$(rec.name)' has non-struct initializer $T")
-        size = abi_size(datalayout(mod), T)
+        size = LLVM.abi_size(mod.datalayout, T)
         rec.offset + sizeof(UInt) <= size ||
             error("Relocation '$(rec.name)+$(rec.offset)' is outside its $size-byte global")
     end
@@ -293,10 +293,10 @@ function check_relocation(mod::LLVM.Module, rec::Relocation, gv::GlobalVariable)
 end
 
 function foreach_relocation(f, mod::LLVM.Module, relocs::Relocations)
-    mod_gvs = globals(mod)
+    mod_gvs = mod.globals
     for rec in relocs.records
-        haskey(mod_gvs, rec.name) || error("Missing relocation global '$(rec.name)'")
-        gv = mod_gvs[rec.name]
+        gv = get(mod_gvs, rec.name, nothing)
+        gv === nothing && error("Missing relocation global '$(rec.name)'")
         check_relocation(mod, rec, gv)
         f(rec, gv)
     end
@@ -336,15 +336,15 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
                                          gv_to_value::Dict{String, Ptr{Cvoid}})
     relocs = Relocations()
     namespace = relocation_namespace(job)
-    mod_gvs = globals(mod)
+    mod_gvs = mod.globals
 
     # Device jobs cannot refer to host boxes, so embed copies of boxed isbits constants.
     # Runtime jobs must keep the GC-managed boxes because returned values may re-enter Julia.
     materialize_boxes = !uses_julia_runtime(job)
     for (name, init) in gv_to_value
-        haskey(mod_gvs, name) || continue
-        gv = mod_gvs[name]
-        cur = initializer(gv)
+        gv = get(mod_gvs, name, nothing)
+        gv === nothing && continue
+        cur = gv.initializer
         if !(cur === nothing || LLVM.isnull(cur))
             @assert !supports_relocatable_ir()
             continue
@@ -357,8 +357,8 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
         if materialize_boxes && isbitstype(typeof(obj)) && sizeof(typeof(obj)) > 0 &&
            !(obj isa Bool)
             val = materialize_box!(mod, relocs, namespace, gv, obj, init)
-            initializer!(gv, val)
-            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+            gv.initializer = val
+            gv.linkage = LLVM.Linkage.Private
         else
             check_slot_size(mod, gv, name)
             slot_name = namespaced_name(namespace,
@@ -370,14 +370,14 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
             # means an equal referenced value, and `add_relocation!` below degenerates into
             # its agreeing-duplicate no-op (or errors on the astronomically unlikely
             # `objectid` collision between distinct values).
-            existing = haskey(mod_gvs, slot_name) ? mod_gvs[slot_name] : nothing
+            existing = get(mod_gvs, slot_name, nothing)
             if existing !== nothing && existing !== gv
-                @assert value_type(existing) == value_type(gv)
+                @assert existing.value_type == gv.value_type
                 replace_uses!(gv, existing)
                 erase!(gv)
             else
-                LLVM.name!(gv, slot_name)
-                LLVM.name(gv) == slot_name ||
+                gv.name = slot_name
+                gv.name == slot_name ||
                     error("Relocation slot name '$slot_name' is already in use")
             end
             add_relocation!(relocs, SlotSite, slot_name, 0, JuliaValueRef(obj))
@@ -388,9 +388,9 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
     # leave them as external cglobals for `collect_cglobal_relocations!`.
     if materialize_boxes
         for (name, obj) in ("jl_true" => true, "jl_false" => false)
-            haskey(mod_gvs, name) || continue
-            gv = mod_gvs[name]
-            cur = initializer(gv)
+            gv = get(mod_gvs, name, nothing)
+            gv === nothing && continue
+            cur = gv.initializer
             if !(cur === nothing || LLVM.isnull(cur))
                 @assert !supports_relocatable_ir()
                 continue
@@ -398,9 +398,9 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
 
             init = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
             val = materialize_box!(mod, relocs, namespace, gv, obj, init)
-            initializer!(gv, val)
-            constant!(gv, true)
-            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+            gv.initializer = val
+            gv.constant = true
+            gv.linkage = LLVM.Linkage.Private
         end
     end
     return relocs
@@ -438,80 +438,65 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
         payload_idx = 2
     end
     boxinit = ConstantStruct(fields)
-    boxty = value_type(boxinit)
+    boxty = boxinit.value_type
 
     # Only a relocatable box needs a namespaced name: its header is a site loaders address by
     # name. A fully-materialized box is a private constant, so LLVM uniques it on its own.
     box_name = if patch_header
         namespaced_name(namespace,
-            strip_codegen_counter(safe_name(LLVM.name(gv))) * "_" *
+            strip_codegen_counter(safe_name(gv.name)) * "_" *
             string(objectid(obj); base=16) * "_box")
     else
-        safe_name(LLVM.name(gv)) * "_box"
+        safe_name(gv.name) * "_box"
     end
     box = GlobalVariable(mod, boxty, box_name)
-    LLVM.name(box) == box_name || error("Interior relocation global '$box_name' is already in use")
-    initializer!(box, boxinit)
-    alignment!(box, 16)
+    box.name == box_name || error("Interior relocation global '$box_name' is already in use")
+    box.initializer = boxinit
+    box.alignment = 16
     if patch_header
-        constant!(box, false)
-        linkage!(box, LLVM.API.LLVMExternalLinkage)
-        extinit!(box, true)
-        offset = Int(offsetof(datalayout(mod), boxty, header_idx))
+        box.constant = false
+        box.linkage = LLVM.Linkage.External
+        box.externally_initialized = true
+        # `header_idx` is a zero-based field index, `LLVM.offsetof` numbers fields from 1
+        offset = LLVM.offsetof(mod.datalayout, boxty, header_idx + 1)
         add_relocation!(relocs, InteriorSite, box_name, offset, JuliaValueRef(typeof(obj)))
     else
-        constant!(box, true)
-        linkage!(box, LLVM.API.LLVMPrivateLinkage)
-        unnamed_addr!(box, true)
+        box.constant = true
+        box.linkage = LLVM.Linkage.Private
+        box.unnamed_addr = LLVM.UnnamedAddr.Global
     end
 
     idx(i) = ConstantInt(LLVM.Int32Type(), i)
     payload = const_gep(boxty, box, LLVM.Constant[idx(0), idx(payload_idx)])
-    slotty = global_value_type(gv)
-    val = value_type(payload) == slotty ? payload : const_addrspacecast(payload, slotty)
+    slotty = gv.global_value_type
+    val = payload.value_type == slotty ? payload : const_addrspacecast(payload, slotty)
     return val
 end
 
 # Return the byte offset added by a constant cast or GEP, or `nothing` if it is not static.
-function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::DataLayout)
-    op = opcode(ce)
-    if op == LLVM.API.LLVMBitCast || op == LLVM.API.LLVMAddrSpaceCast
+function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::LLVM.DataLayout)
+    op = ce.opcode
+    if op == LLVM.Opcode.BitCast || op == LLVM.Opcode.AddrSpaceCast
         return 0
-    elseif op == LLVM.API.LLVMGetElementPtr
-        ops = operands(ce)
-        indices = ops[2:end]
-        all(idx -> idx isa LLVM.ConstantInt, indices) || return nothing
-        T = LLVMType(LLVM.API.LLVMGetGEPSourceElementType(ce))
-        offset = convert(Int, indices[1]) * Int(abi_size(dl, T))
-        for idx in indices[2:end]
-            i = convert(Int, idx)
-            if T isa LLVM.StructType
-                offset += Int(offsetof(dl, T, i))
-                T = elements(T)[i+1]
-            elseif T isa LLVM.ArrayType || T isa LLVM.VectorType
-                T = eltype(T)
-                offset += i * Int(abi_size(dl, T))
-            else
-                return nothing
-            end
-        end
-        return offset
+    elseif op == LLVM.Opcode.GetElementPtr
+        offset = LLVM.constant_offset(ce, dl)
+        return offset === nothing ? nothing : Int(offset)
     end
     return nothing
 end
 
 is_word_type(T::LLVMType) =
-    T isa LLVM.PointerType || (T isa LLVM.IntegerType && width(T) == 8sizeof(UInt))
+    T isa LLVM.PointerType || (T isa LLVM.IntegerType && T.width == 8sizeof(UInt))
 
 # The addresses an instruction merely forwards: those a `phi` or `select` picks from, or the
 # operand of a pointer cast. `nothing` for any other instruction.
 function forwarded_addresses(inst::LLVM.Instruction)
     if inst isa LLVM.PHIInst
-        return LLVM.Value[value for (value, _) in incoming(inst)]
+        return LLVM.Value[value for (value, _) in inst.incoming]
     elseif inst isa LLVM.SelectInst
-        return LLVM.Value[operands(inst)[2], operands(inst)[3]]
+        return LLVM.Value[inst.operands[2], inst.operands[3]]
     elseif inst isa LLVM.BitCastInst || inst isa LLVM.AddrSpaceCastInst
-        return LLVM.Value[operands(inst)[1]]
+        return LLVM.Value[inst.operands[1]]
     end
     return nothing
 end
@@ -521,11 +506,11 @@ end
 function check_word_loads!(value, seen=Set{LLVM.Value}())
     value in seen && return true
     push!(seen, value)
-    for use in uses(value)
-        val = user(use)
+    for use in value.uses
+        val = use.user
         if val isa LLVM.LoadInst
-            is_word_type(value_type(val)) || return false
-            alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+            is_word_type(val.value_type) || return false
+            val.alignment > sizeof(UInt) && (val.alignment = sizeof(UInt))
         elseif val isa LLVM.Instruction && forwarded_addresses(val) !== nothing
             check_word_loads!(val, seen) || return false
         else
@@ -539,10 +524,10 @@ end
 # address preserves the loads and any PHIs/selects LLVM has introduced between them.
 function redirect_word_addresses!(slot_address, @nospecialize(value), what::String;
                                   offset::Union{Int,Nothing}=0,
-                                  dl::DataLayout=datalayout(LLVM.parent(value)::LLVM.Module))
+                                  dl::LLVM.DataLayout=(value.parent::LLVM.Module).datalayout)
     changed = false
-    for use in collect(uses(value))
-        val = user(use)
+    for use in collect(value.uses)
+        val = use.user
         if val isa LLVM.ConstantExpr
             delta = constexpr_byte_offset(val, dl)
             inner = (offset === nothing || delta === nothing) ? nothing : offset + delta
@@ -550,23 +535,20 @@ function redirect_word_addresses!(slot_address, @nospecialize(value), what::Stri
             continue
         elseif val isa LLVM.LoadInst
             offset === nothing &&
-                error("Unsupported $what load through constant expression $(operands(val)[1])")
-            is_word_type(value_type(val)) ||
-                error("Unsupported $what load of LLVM type $(value_type(val))")
-            alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+                error("Unsupported $what load through constant expression $(val.pointer_operand)")
+            is_word_type(val.value_type) ||
+                error("Unsupported $what load of LLVM type $(val.value_type)")
+            val.alignment > sizeof(UInt) && (val.alignment = sizeof(UInt))
         elseif val isa LLVM.Instruction && forwarded_addresses(val) !== nothing
             offset === nothing && continue
             # Slots live in the default address space.
-            addrspace(value_type(value)) == 0 || continue
+            value.value_type.addrspace == 0 || continue
             check_word_loads!(val) || continue
         else
             continue
         end
-        slot = const_pointercast(slot_address(offset), value_type(value))
-        ops = operands(val)
-        for i in 1:length(ops)
-            ops[i] == value && (ops[i] = slot)
-        end
+        slot = const_pointercast(slot_address(offset), value.value_type)
+        replace!(val.operands, value => slot)
         changed = true
     end
     return changed
@@ -574,7 +556,7 @@ end
 
 # Record loaded words from libjulia globals as one relocation slot per symbol and offset.
 function is_cglobal_candidate(value, relocs::Relocations)
-    name = LLVM.name(value)
+    name = value.name
     value isa LLVM.GlobalVariable &&
         find_relocation(relocs, name) !== nothing && return false
     isdeclaration(value) || return false
@@ -587,16 +569,16 @@ function collect_cglobal_relocations!(@nospecialize(job::CompilerJob), mod::LLVM
     changed = false
     namespace = relocation_namespace(job)
 
-    for f in [collect(functions(mod)); collect(globals(mod))]
+    for f in [collect(mod.functions); collect(mod.globals)]
         is_cglobal_candidate(f, relocs) || continue
-        fn = LLVM.name(f)
+        fn = f.name
         slots = Dict{Int,GlobalVariable}()
         function cglobal_slot(offset::Int)
             get!(slots, offset) do
                 # Including zero distinguishes `symbol` at N from `symbol_N` at zero.
                 name = namespaced_name(namespace, "gpu_$(fn)_$(offset)")
                 slot = GlobalVariable(mod, relocation_word_type(), name)
-                LLVM.name(slot) == name ||
+                slot.name == name ||
                     error("cglobal slot name '$name' is already in use")
                 add_relocation!(relocs, SlotSite, name, 0, CGlobalRef(Symbol(fn); offset))
                 slot
@@ -612,8 +594,8 @@ end
 function has_unresolved_cglobal_loads(mod::LLVM.Module, relocs::Relocations)
     # also through merged addresses that `redirect_word_addresses!` had to leave alone
     function has_load(value, seen=Set{LLVM.Value}())
-        for use in uses(value)
-            val = user(use)
+        for use in value.uses
+            val = use.user
             val isa LLVM.LoadInst && return true
             if val isa LLVM.ConstantExpr ||
                (val isa LLVM.Instruction && forwarded_addresses(val) !== nothing)
@@ -625,7 +607,7 @@ function has_unresolved_cglobal_loads(mod::LLVM.Module, relocs::Relocations)
         return false
     end
 
-    for value in [collect(functions(mod)); collect(globals(mod))]
+    for value in [collect(mod.functions); collect(mod.globals)]
         is_cglobal_candidate(value, relocs) || continue
         has_load(value) && return true
     end
@@ -645,7 +627,7 @@ function link_relocatable!(dest_mod::LLVM.Module, dest_relocs::Relocations,
     for rec in src_relocs.records
         # A site absent from the linked module was dead (DCE'd or not imported under
         # `only_needed`); its relocation dies with it.
-        haskey(globals(dest_mod), rec.name) || continue
+        haskey(dest_mod.globals, rec.name) || continue
         add_relocation!(dest_relocs, rec)
     end
     return
@@ -653,17 +635,17 @@ end
 
 function prune_dead_relocations!(mod::LLVM.Module, relocs::Relocations)
     check_mutable(relocs, "prune")
-    mod_gvs = globals(mod)
+    mod_gvs = mod.globals
     dead_names = Set{String}()
     for rec in relocs.records
-        gv = haskey(mod_gvs, rec.name) ? mod_gvs[rec.name] : nothing
-        if gv === nothing || (!isdeclaration(gv) && isempty(uses(gv)))
+        gv = get(mod_gvs, rec.name, nothing)
+        if gv === nothing || (!isdeclaration(gv) && isempty(gv.uses))
             push!(dead_names, rec.name)
         end
     end
     filter!(rec -> !(rec.name in dead_names), relocs.records)
     for name in dead_names
-        gv = haskey(mod_gvs, name) ? mod_gvs[name] : nothing
+        gv = get(mod_gvs, name, nothing)
         gv === nothing || isdeclaration(gv) || erase!(gv)
     end
     return
@@ -693,19 +675,14 @@ end
 # Overwrite the word at `offset` in `gv`'s struct initializer with `word`.
 function patch_initializer_word!(mod::LLVM.Module, gv::GlobalVariable, offset::Int,
                                  word::UInt)
-    init = initializer(gv)
-    T = value_type(init)::LLVM.StructType
-    idx = Int(element_at(datalayout(mod), T, offset)) + 1
-    # An all-zero box (e.g. a patchable header over a zero payload) is folded to a
-    # `zeroinitializer`, a `ConstantAggregateZero` that reports no operands; rebuild
-    # the explicit per-field constants from the struct's element types.
-    fields = if init isa LLVM.ConstantAggregateZero
-        LLVM.Constant[null(elty) for elty in elements(T)]
-    else
-        LLVM.Constant[operands(init)...]
-    end
-    fields[idx] = ConstantInt(value_type(fields[idx]), word)
-    initializer!(gv, ConstantStruct(T, fields))
+    init = gv.initializer
+    T = init.value_type::LLVM.StructType
+    idx = LLVM.element_at(mod.datalayout, T, offset)
+    # (`elements` also covers an all-zero box, e.g. a patchable header over a zero payload,
+    # which LLVM folds to a `zeroinitializer`)
+    fields = LLVM.Constant[init.elements...]
+    fields[idx] = ConstantInt(fields[idx].value_type, word)
+    gv.initializer = ConstantStruct(T, fields)
     return
 end
 
@@ -721,15 +698,15 @@ function bake_relocations!(mod::LLVM.Module, relocs::Relocations)
     foreach_relocation(mod, relocs) do rec, gv
         word = resolve_relocation_target(rec.target)
         if rec.kind === SlotSite
-            initializer!(gv, slot_initializer(gv, word))
-            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-            constant!(gv, true)
+            gv.initializer = slot_initializer(gv, word)
+            gv.linkage = LLVM.Linkage.Private
+            gv.constant = true
         else
             patch_initializer_word!(mod, gv, rec.offset, word)
-            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
-            extinit!(gv, false)
-            constant!(gv, true)
-            unnamed_addr!(gv, true)
+            gv.linkage = LLVM.Linkage.Private
+            gv.externally_initialized = false
+            gv.constant = true
+            gv.unnamed_addr = LLVM.UnnamedAddr.Global
         end
     end
     empty!(relocs.records)
@@ -748,9 +725,9 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
     used = GlobalVariable[]
     foreach_relocation(mod, relocs) do rec, gv
         if rec.kind === SlotSite
-            initializer!(gv, null(global_value_type(gv)))
-            constant!(gv, false)
-            extinit!(gv, true)
+            gv.initializer = null(gv.global_value_type)
+            gv.constant = false
+            gv.externally_initialized = true
         end
         # Two objects can define the same record: a relocation-carrying runtime-library
         # function keeps its own job's namespace in every kernel it is linked into. A loader
@@ -761,16 +738,16 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
         # patched with the word every object referencing it expects. `llvm.used` below still
         # anchors them against DCE, and `externally_initialized` still stops the optimizer
         # from believing the null initializer.
-        linkage!(gv, LLVM.API.LLVMWeakODRLinkage)
+        gv.linkage = LLVM.Linkage.WeakODR
         # Julia emits these globals `dso_local`, so backends address them PC-relatively
         # (e.g. `@rel32` on AMDGPU). A weak definition with default visibility is however
         # preemptible in an ELF shared link, which `ld.lld` rejects ("recompile with -fPIC").
         # Protected visibility keeps the symbol in the dynamic symbol table, so loaders can
         # still find it by name, while honouring the non-preemptible promise.
-        visibility!(gv, LLVM.API.LLVMProtectedVisibility)
+        gv.visibility = LLVM.Visibility.Protected
         push!(used, gv)
     end
-    isempty(used) || set_used!(mod, used...)
+    isempty(used) || union!(mod.used, used)
     return
 end
 
@@ -778,10 +755,10 @@ end
 # onto a global, an isbits union's `{ptr, i8}` aggregate) through to the instructions they end
 # up in.
 function using_functions!(fns::Set{LLVM.Function}, @nospecialize(value))
-    for use in uses(value)
-        val = user(use)
+    for use in value.uses
+        val = use.user
         if val isa LLVM.Instruction
-            push!(fns, LLVM.parent(LLVM.parent(val)))
+            push!(fns, val.parent.parent)
         elseif val isa LLVM.Constant
             using_functions!(fns, val)
         end
@@ -797,37 +774,37 @@ end
 # `A` gets marked on the next round, once `B` has been inlined into it.
 function inline_relocation_users!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                  relocs::Relocations)
-    alwaysinline_attr = EnumAttribute("alwaysinline", 0)
-    noinline_attr = EnumAttribute("noinline", 0)
     # by name: a function we mark may well be gone by the next round
     hoisted = Set{String}()
     while true
         users = Set{LLVM.Function}()
         for rec in relocs.records
-            haskey(globals(mod), rec.name) || continue
-            using_functions!(users, globals(mod)[rec.name])
+            gv = get(mod.globals, rec.name, nothing)
+            gv === nothing || using_functions!(users, gv)
         end
 
         marked = false
         for f in users
             # an entry point has no call sites, and is where the state arrives
-            isempty(uses(f)) && continue
-            fn = LLVM.name(f)
+            isempty(f.uses) && continue
+            fn = f.name
             fn in hoisted &&
                 error("""Function `$fn` uses a relocation but could not be inlined into an
                          entry point (it is likely recursive or address-taken), so it cannot
                          reach the relocation table.""")
             push!(hoisted, fn)
-            attrs = function_attributes(f)
-            delete!(attrs, noinline_attr)
-            push!(attrs, alwaysinline_attr)
+            attrs = f.function_attributes
+            delete!(attrs, :noinline)
+            push!(attrs, EnumAttribute(:alwaysinline))
             marked = true
         end
         marked || break
 
-        @dispose pb=NewPMPassBuilder() begin
+        @dispose pb=PassBuilder() begin
             add!(pb, AlwaysInlinerPass())
-            run!(pb, mod, llvm_machine(job.config.target))
+            with_llvm_machine(job.config.target) do tm
+                run!(pb, mod, tm)
+            end
         end
     end
     return
@@ -868,9 +845,9 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
     bases = Dict{LLVM.Function, Tuple{LLVM.Value, LLVM.Instruction}}()
     function table_base(f::LLVM.Function)
         get!(bases, f) do
-            entry = first(instructions(first(blocks(f))))
+            entry = first(f.entry.instructions)
             @dispose builder=IRBuilder() begin
-                position!(builder, entry)
+                position!(builder, LLVM.before(entry))
                 relocation_table_pointer(job, builder, f), entry
             end
         end
@@ -879,12 +856,12 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
         inbounds_gep!(builder, T_word, base, [ConstantInt(LLVM.Int32Type(), index - 1)])
     end
     function table_word(builder::IRBuilder, index::Int)
-        f = LLVM.parent(position(builder))
+        f = builder.insert_block.parent
         base, _ = table_base(f)
         load!(builder, T_word, table_address(builder, base, index))
     end
 
-    mod_gvs = globals(mod)
+    mod_gvs = mod.globals
     slots = LLVM.GlobalVariable[mod_gvs[rec.name] for rec in relocs.records
                        if rec.kind === SlotSite && haskey(mod_gvs, rec.name)]
     check_relocation_slot_uses!(mod, slots)
@@ -893,8 +870,8 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
     convert_users_to_instructions!(slots)
 
     for (index, rec) in enumerate(relocs.records)
-        haskey(mod_gvs, rec.name) || error("Missing relocation global '$(rec.name)'")
-        gv = mod_gvs[rec.name]
+        gv = get(mod_gvs, rec.name, nothing)
+        gv === nothing && error("Missing relocation global '$(rec.name)'")
         check_relocation(mod, rec, gv)
 
         if rec.kind === SlotSite
@@ -904,27 +881,29 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
                     base, entry = table_base(f)
                     @dispose builder=IRBuilder() begin
                         # After the base, but before any original instruction or PHI edge use.
-                        position!(builder, entry)
+                        position!(builder, LLVM.before(entry))
                         ptr = table_address(builder, base, index)
-                        pointercast!(builder, ptr, value_type(gv))
+                        pointercast!(builder, ptr, gv.value_type)
                     end
                 end
             end
             replace_global_with_local!(gv, slot_address)
         else
-            demote_relocatable_box!(mod, gv, rec, table_word, index)
+            demote_relocatable_box!(mod, gv, rec, table_base, table_word, index)
         end
     end
 
     # Table addresses may be in a different address space from the original slots.
     # Let LLVM propagate that space through the existing PHIs, selects and casts.
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb=PassBuilder() begin
         tti = llvm_targetinfo(job.config.target)
         tti === nothing || LLVM.target_transform_info!(pb, tti)
-        add!(pb, NewPMFunctionPassManager()) do fpm
+        add!(pb, FunctionPassManager()) do fpm
             add!(fpm, InferAddressSpacesPass())
         end
-        run!(pb, mod, llvm_machine(job.config.target))
+        with_llvm_machine(job.config.target) do tm
+            run!(pb, mod, tm)
+        end
     end
     return
 end
@@ -932,19 +911,19 @@ end
 # Slots denote read-only words, not general storage. In particular, don't merge a table
 # address with an unrelated pointer: a back-end may not have a common address space for them.
 function check_relocation_slot_uses!(mod::LLVM.Module, slots::Vector{LLVM.GlobalVariable})
-    dl = datalayout(mod)
+    dl = mod.datalayout
     seen = Set{LLVM.Value}(slots)
     worklist = LLVM.Value[slots...]
     while !isempty(worklist)
-        for use in uses(pop!(worklist))
-            val = user(use)
+        for use in pop!(worklist).uses
+            val = use.user
             if val isa LLVM.LoadInst
-                is_word_type(value_type(val)) ||
-                    error("Unsupported relocation slot load of LLVM type $(value_type(val))")
+                is_word_type(val.value_type) ||
+                    error("Unsupported relocation slot load of LLVM type $(val.value_type)")
                 # Julia names these loads after globals with session-specific counters.
-                LLVM.name!(val, "")
+                val.name = ""
                 # The packed table guarantees word alignment, even if the old global had more.
-                alignment(val) > sizeof(UInt) && alignment!(val, sizeof(UInt))
+                val.alignment > sizeof(UInt) && (val.alignment = sizeof(UInt))
                 continue
             elseif val isa LLVM.ConstantExpr
                 constexpr_byte_offset(val, dl) == 0 ||
@@ -971,19 +950,25 @@ end
 # relocation table. Sound because a box address carries no identity of its own: `isbits` egal
 # compares by content, so a per-invocation copy is indistinguishable from a shared one.
 function demote_relocatable_box!(mod::LLVM.Module, gv::GlobalVariable, rec::Relocation,
-                                 table_word, index::Int)
-    boxty = global_value_type(gv)::LLVM.StructType
-    init = initializer(gv)
-    header_idx = Int(element_at(datalayout(mod), boxty, rec.offset))
+                                 table_base, table_word, index::Int)
+    boxty = gv.global_value_type::LLVM.StructType
+    init = gv.initializer
+    # zero-based, for `struct_gep!` (`LLVM.element_at` numbers fields from 1)
+    header_idx = LLVM.element_at(mod.datalayout, boxty, rec.offset) - 1
 
     allocas = Dict{LLVM.Function, LLVM.Value}()
     function box_alloca(f::LLVM.Function)
         get!(allocas, f) do
+            _, entry = table_base(f)
             @dispose builder=IRBuilder() begin
-                position!(builder, first(instructions(first(blocks(f)))))
-                ptr = alloca!(builder, boxty)
+                # a static alloca, which dominates the users of the box
+                position!(builder, LLVM.at_begin(f.entry))
                 # keep Julia's heap alignment, which the payload's `isbits` layout assumes
-                alignment!(ptr, max(alignment(gv), 16))
+                ptr = alloca!(builder, boxty; align=max(gv.alignment, 16))
+
+                # initialize it after the table base (the header load below uses it), but
+                # before any original instruction, like the slot addresses
+                position!(builder, LLVM.before(entry))
                 store!(builder, init, ptr)
                 # overwrite the (zeroed) header field with the resolved relocation word
                 word = table_word(builder, index)
@@ -1018,25 +1003,17 @@ end
 
 function referenced_object(value, relocs::Relocations)
     # This is best-effort: optimized shapes fall back to the unknown-binding error path.
-    while (value isa ConstantExpr &&
-           opcode(value) in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)) ||
-          value isa LLVM.BitCastInst || value isa LLVM.AddrSpaceCastInst
-        value = first(operands(value))
-    end
+    value = strip_pointer_casts(value)
     if value isa LLVM.LoadInst
-        source = first(operands(value))
-        while source isa ConstantExpr &&
-              opcode(source) in (LLVM.API.LLVMBitCast, LLVM.API.LLVMAddrSpaceCast)
-            source = first(operands(source))
-        end
+        source = strip_pointer_casts(value.pointer_operand)
         if source isa GlobalVariable
-            rec = find_relocation(relocs, LLVM.name(source))
+            rec = find_relocation(relocs, source.name)
             if rec !== nothing && rec.target isa JuliaValueRef
                 return Some(rec.target.value)
             end
         end
-    elseif value isa ConstantExpr && opcode(value) == LLVM.API.LLVMIntToPtr
-        addr = first(operands(value))
+    elseif value isa ConstantExpr && value.opcode == LLVM.Opcode.IntToPtr
+        addr = first(value.operands)
         addr isa ConstantInt || return nothing
         addr = convert(UInt, addr)
         addr < UInt(64 << 4) && return small_typeof(addr)   # jl_max_tags << 4

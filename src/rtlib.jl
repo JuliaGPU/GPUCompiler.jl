@@ -25,22 +25,20 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         error("A compiler job is required to call runtime method '$(rt.name)'")
     end
 
-    bb = position(builder)
-    f = LLVM.parent(bb)
-    mod = LLVM.parent(f)
+    bb = builder.insert_block
+    f = bb.parent
+    mod = f.parent
 
     # get or create a function prototype
-    if haskey(functions(mod), rt.llvm_name)
-        f = functions(mod)[rt.llvm_name]
-        ft = function_type(f)
-    else
+    f = get!(mod.functions, rt.llvm_name) do
         ft = if job === nothing
             convert(LLVM.FunctionType, rt)
         else
             runtime_function_type(job, rt)
         end
-        f = LLVM.Function(mod, rt.llvm_name, ft)
+        LLVM.Function(mod, rt.llvm_name, ft)
     end
+    ft = f.function_type
     if !isdeclaration(f) && (rt.name !== :gc_pool_alloc && rt.name !== :report_exception)
         # XXX: uses of the gc_pool_alloc intrinsic can be introduced _after_ the runtime
         #      is linked, as part of the lower_gc_frame! optimization pass.
@@ -53,24 +51,24 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
     # runtime functions are written in Julia, while we're calling from LLVM,
     # this often results in argument type mismatches. try to fix some here.
     args = LLVM.Value[args...]
-    if length(args) != length(parameters(ft))
+    if length(args) != length(ft.parameters)
         error("Incorrect number of arguments for runtime function: ",
               "passing ", length(args), " argument(s) to '", string(ft), " ", rt.name, "'")
     end
     for (i,arg) in enumerate(args)
-        if value_type(arg) != parameters(ft)[i]
-            args[i] = if (value_type(arg) isa LLVM.PointerType) &&
-               (parameters(ft)[i] isa LLVM.IntegerType)
+        if arg.value_type != ft.parameters[i]
+            args[i] = if (arg.value_type isa LLVM.PointerType) &&
+               (ft.parameters[i] isa LLVM.IntegerType)
                 # pointers are passed as integers on Julia 1.11 and earlier
-                ptrtoint!(builder, args[i], parameters(ft)[i])
-            elseif value_type(arg) isa LLVM.PointerType &&
-                   parameters(ft)[i] isa LLVM.PointerType &&
-                   addrspace(value_type(arg)) != addrspace(parameters(ft)[i])
+                ptrtoint!(builder, args[i], ft.parameters[i])
+            elseif arg.value_type isa LLVM.PointerType &&
+                   ft.parameters[i] isa LLVM.PointerType &&
+                   arg.value_type.addrspace != ft.parameters[i].addrspace
                 # arguments may come from globals in other address spaces than the
                 # one the runtime function expects (see `runtime_cstring_type`).
-                addrspacecast!(builder, args[i], parameters(ft)[i])
+                addrspacecast!(builder, args[i], ft.parameters[i])
             else
-                error("Don't know how to convert ", arg, " argument to ", parameters(ft)[i])
+                error("Don't know how to convert ", arg, " argument to ", ft.parameters[i])
             end
         end
     end
@@ -103,7 +101,7 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     ci, res = runtime_function_results(rt_job)
     if res !== nothing && res.bitcode !== nothing
         link_relocatable!(mod, relocs,
-                          parse(LLVM.Module, MemoryBuffer(res.bitcode)),
+                          parse(LLVM.Module, res.bitcode),
                           res.relocations)
         ci === nothing && (ci = runtime_code_instance(rt_job))
         return ci::CodeInstance
@@ -112,25 +110,27 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # Keep this intermediate module relocatable even when the final back-end resolves
     # relocations eagerly. The caller links a fresh copy and lowers the merged sites.
     new_mod, meta = compile_unhooked(:llvm, rt_job; resolve_relocations=false)
-    ft = function_type(meta.entry)
+    ft = meta.entry.function_type
     expected_ft = runtime_function_type(rt_job, method)
-    if return_type(ft) != return_type(expected_ft)
-        error("Invalid return type for runtime function '$(method.name)': expected $(return_type(expected_ft)), got $(return_type(ft))")
+    if ft.return_type != expected_ft.return_type
+        error("Invalid return type for runtime function '$(method.name)': expected $(expected_ft.return_type), got $(ft.return_type)")
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
-    run!(StripDeadPrototypesPass(), new_mod, llvm_machine(config.target))
+    with_llvm_machine(config.target) do tm
+        run!(StripDeadPrototypesPass(), new_mod, tm)
+    end
     prune_dead_relocations!(new_mod, meta.relocations)
 
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
-    if haskey(functions(new_mod), name) && functions(new_mod)[name] !== meta.entry
-        decl = functions(new_mod)[name]
-        @assert value_type(decl) == value_type(meta.entry)
+    decl = get(new_mod.functions, name, nothing)
+    if decl !== nothing && decl != meta.entry
+        @assert decl.value_type == meta.entry.value_type
         replace_uses!(decl, meta.entry)
         erase!(decl)
     end
-    LLVM.name!(meta.entry, name)
+    meta.entry.name = name
 
     io = IOBuffer()
     write(io, new_mod)
@@ -201,26 +201,32 @@ function runtime_config(@nospecialize(job::CompilerJob))
                    toplevel=false, only_entry=false, strip=false, name=nothing)
 end
 
+# build the runtime library, returning its bitcode
 function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
-    mod = LLVM.Module("GPUCompiler run-time library")
-    sources = MethodInstance[]
-    code_instances = CodeInstance[]
-    relocs = Relocations()
+    @dispose mod=LLVM.Module("GPUCompiler run-time library") begin
+        sources = MethodInstance[]
+        code_instances = CodeInstance[]
+        relocs = Relocations()
 
-    for method in runtime_methods()
-        resolved = runtime_method_instance(job, method)
-        resolved === nothing && continue
-        source = resolved
-        push!(sources, source)
-        push!(code_instances, emit_function!(mod, relocs, config, source, method, job.world))
+        for method in runtime_methods()
+            resolved = runtime_method_instance(job, method)
+            resolved === nothing && continue
+            source = resolved
+            push!(sources, source)
+            push!(code_instances,
+                  emit_function!(mod, relocs, config, source, method, job.world))
+        end
+
+        # we cannot optimize the runtime library, because the code would then be optimized
+        # again during main compilation (and optimizing twice isn't safe). for example,
+        # optimization removes Julia address spaces, which would then lead to type
+        # mismatches when using functions from the runtime library from IR that has not been
+        # stripped of AS info.
+
+        io = IOBuffer()
+        write(io, mod)
+        return take!(io), sources, code_instances, relocs
     end
-
-    # we cannot optimize the runtime library, because the code would then be optimized again
-    # during main compilation (and optimizing twice isn't safe). for example, optimization
-    # removes Julia address spaces, which would then lead to type mismatches when using
-    # functions from the runtime library from IR that has not been stripped of AS info.
-
-    return mod, sources, code_instances, relocs
 end
 
 # Runtime.methods is a Dict, but library layout and source validation require the same order.
@@ -275,11 +281,8 @@ const runtime_libs_lock = ReentrantLock()
     cached = Base.@lock runtime_libs_lock begin
         cached = get(runtime_libs, key, nothing)
         if cached === nothing || !runtime_library_valid(cached, job)
-            lib, sources, code_instances, relocations = build_runtime(job, config)
-            io = IOBuffer()
-            write(io, lib)
-            cached = RuntimeLibrary(take!(io), sources, code_instances, job.world,
-                                    relocations)
+            bytes, sources, code_instances, relocations = build_runtime(job, config)
+            cached = RuntimeLibrary(bytes, sources, code_instances, job.world, relocations)
             runtime_libs[key] = cached
         end
         cached

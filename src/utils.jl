@@ -316,22 +316,6 @@ macro unlocked(ex)
 end
 
 
-## constant expression pruning
-
-# for some reason, after cloning the LLVM IR can contain unused constant expressions.
-# these result in false positives when checking that values are unused and can be deleted.
-# this helper function removes such unused constant expression uses of a value.
-# the process needs to be recursive, as constant expressions can refer to one another.
-function prune_constexpr_uses!(root::LLVM.Value)
-    for use in uses(root)
-        val = user(use)
-        if val isa ConstantExpr
-            prune_constexpr_uses!(val)
-            isempty(uses(val)) && LLVM.unsafe_destroy!(val)
-        end
-    end
-end
-
 ## replacing a global with a runtime value
 
 # Replace every use of `gv` with the function-local value `replacement(f)`, then erase it.
@@ -343,18 +327,15 @@ end
 # in the callback).
 function replace_global_with_local!(gv::LLVM.GlobalVariable, replacement)
     convert_users_to_instructions!([gv])
-    for use in collect(uses(gv))
-        inst = user(use)
+    for use in collect(gv.uses)
+        inst = use.user
         inst isa LLVM.Instruction ||
-            error("Unexpected use of global '$(LLVM.name(gv))': $inst")
-        f = LLVM.parent(LLVM.parent(inst))
-        ops = operands(inst)
-        for i in 1:length(ops)
-            ops[i] == gv || continue
-            ops[i] = replacement(f)
-        end
+            error("Unexpected use of global '$(gv.name)': $inst")
+        f = inst.parent.parent
+        # an instruction is visited once per use, but all its uses are replaced at once
+        any(==(gv), inst.operands) && replace!(inst.operands, gv => replacement(f))
     end
-    @assert isempty(uses(gv)) "global '$(LLVM.name(gv))' still has uses after replacement"
+    @assert isempty(gv.uses) "global '$(gv.name)' still has uses after replacement"
     erase!(gv)
     return
 end
@@ -375,32 +356,32 @@ end
 # The old function is left in place; the caller fixes up attributes and call sites and then drops it
 # with `replace_function!`. `changes` is forwarded to `clone_into!`.
 function clone_with_converted_args!(mod::LLVM.Module, f::LLVM.Function, new_types::Vector, reconstruct;
-                                    changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
-    ft = function_type(f)
-    param_types = parameters(ft)
+                                    changes = LLVM.CloneFunctionChangeType.GlobalChanges)
+    ft = f.function_type
+    param_types = ft.parameters
     @assert length(new_types) == length(param_types)
     new_ptypes = LLVM.LLVMType[something(new_types[i], pty) for (i, pty) in enumerate(param_types)]
-    new_ft = LLVM.FunctionType(return_type(ft), new_ptypes)
+    new_ft = LLVM.FunctionType(ft.return_type, new_ptypes)
 
     new_f = LLVM.Function(mod, "", new_ft)
-    linkage!(new_f, linkage(f))
-    callconv!(new_f, callconv(f))
-    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
-        LLVM.name!(new_arg, LLVM.name(arg))
+    new_f.linkage = f.linkage
+    new_f.callconv = f.callconv
+    for (arg, new_arg) in zip(f.parameters, new_f.parameters)
+        new_arg.name = arg.name
     end
 
     @dispose builder=IRBuilder() begin
         entry = BasicBlock(new_f, "conversion")
-        position!(builder, entry)
+        position!(builder, LLVM.at_end(entry))
         body_values = LLVM.Value[
-            new_types[i] === nothing ? parameters(new_f)[i] :
-                                       reconstruct(builder, parameters(new_f)[i], i)
+            new_types[i] === nothing ? new_f.parameters[i] :
+                                       reconstruct(builder, new_f.parameters[i], i)
             for i in 1:length(param_types)]
         value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => body_values[i] for (i, param) in enumerate(parameters(f)))
+            param => body_values[i] for (i, param) in enumerate(f.parameters))
         value_map[f] = new_f
         clone_into!(new_f, f; value_map, changes)
-        br!(builder, blocks(new_f)[2])  # fall through to the cloned entry block
+        br!(builder, new_f.blocks[2])  # fall through to the cloned entry block
     end
 
     return new_f
@@ -411,13 +392,12 @@ end
 # `clone_into!` leaves behind when the signature changes -- hands the name and metadata to `new_f`,
 # and erases `f`.
 function replace_function!(f::LLVM.Function, new_f::LLVM.Function)
-    fn = LLVM.name(f)
-    prune_constexpr_uses!(f)
-    @assert isempty(uses(f))
+    remove_dead_constant_users!(f)
+    @assert isempty(f.uses)
     replace_metadata_uses!(f, new_f)
+    take_name!(new_f, f)
     erase!(f)
-    LLVM.name!(new_f, fn)
-    prune_constexpr_uses!(new_f)
+    remove_dead_constant_users!(new_f)
     return new_f
 end
 
@@ -431,18 +411,18 @@ end
 
 # mark a function as kernel
 function mark_kernel!(f::LLVM.Function)
-    mod = LLVM.parent(f)
-    push!(metadata(mod)["julia.kernel"], MDNode([f]))
+    mod = f.parent
+    push!(get!(mod.metadata, "julia.kernel").operands, MDNode([f]))
     return f
 end
 
 # iterate over all kernels in the module
 function kernels(mod::LLVM.Module)
     vals = LLVM.Function[]
-    if haskey(metadata(mod), "julia.kernel")
-        kernels_md = metadata(mod)["julia.kernel"]
-        for kernel_md in operands(kernels_md)
-            push!(vals, LLVM.Value(operands(kernel_md)[1]))
+    if haskey(mod.metadata, "julia.kernel")
+        kernels_md = mod.metadata["julia.kernel"]
+        for kernel_md in kernels_md.operands
+            push!(vals, LLVM.Value(kernel_md.operands[1]))
         end
     end
     return vals

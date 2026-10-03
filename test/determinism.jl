@@ -2,7 +2,7 @@
     # Restore codegen-counter order and merge only equivalent constant clones.
     JuliaContext() do ctx
         p = typed_ptrs ? "i64*" : "ptr"
-        mod = parse(LLVM.Module, """
+        @dispose mod=parse(LLVM.Module, """
             @"_j_const#2" = private unnamed_addr constant i64 2, align 8
             @"_j_const#2.1" = private unnamed_addr constant i64 2, align 4
             @"_j_const#1.1" = private unnamed_addr constant i64 1, align 8
@@ -35,28 +35,28 @@
               %v = load i64, $p @"_j_str_x#3.1"
               ret i64 %v
             }
-            """)
-        GPUCompiler.canonicalize_module_layout!(mod)
-        @test (verify(mod); true)
+            """) begin
+            GPUCompiler.canonicalize_module_layout!(mod)
+            @test (verify(mod); true)
 
-        # emission order, then uncountered declarations by name
-        @test [LLVM.name(f) for f in functions(mod)] ==
-              ["julia_a_10", "jfptr_a_11", "julia_b_12", "julia_c_13", "ijl_throw", "llvm.trap"]
-        @test [LLVM.name(g) for g in globals(mod)] ==
-              ["_j_const#1", "_j_const#2", "_j_const#2.1", "_j_str_x#3", "_j_str_x#3.1",
-               "+Core.Tuple#15", "jl_global#20", "jl_nothing"]
+            # emission order, then uncountered declarations by name
+            @test [f.name for f in mod.functions] ==
+                  ["julia_a_10", "jfptr_a_11", "julia_b_12", "julia_c_13", "ijl_throw", "llvm.trap"]
+            @test [g.name for g in mod.globals] ==
+                  ["_j_const#1", "_j_const#2", "_j_const#2.1", "_j_str_x#3", "_j_str_x#3.1",
+                   "+Core.Tuple#15", "jl_global#20", "jl_nothing"]
 
-        # the identical clone was folded into the copy that kept the bare name...
-        @test !haskey(globals(mod), "_j_const#1.1")
-        @test occursin("@\"_j_const#1\"", string(functions(mod)["julia_b_12"]))
-        # ...while a same-named constant with different content is left alone
-        @test occursin("@\"_j_str_x#3.1\"", string(functions(mod)["julia_c_13"]))
+            # the identical clone was folded into the copy that kept the bare name...
+            @test !haskey(mod.globals, "_j_const#1.1")
+            @test occursin("@\"_j_const#1\"", string(mod.functions["julia_b_12"]))
+            # ...while a same-named constant with different content is left alone
+            @test occursin("@\"_j_str_x#3.1\"", string(mod.functions["julia_c_13"]))
 
-        # idempotent
-        before = string(mod)
-        GPUCompiler.canonicalize_module_layout!(mod)
-        @test string(mod) == before
-        dispose(mod)
+            # idempotent
+            before = string(mod)
+            GPUCompiler.canonicalize_module_layout!(mod)
+            @test string(mod) == before
+        end
     end
 end
 
@@ -65,7 +65,7 @@ end
     # folded onto the first-listed one, references repointed, and the list shrunk, while a CU
     # with different content (another producer) is left as is. The result must still verify.
     JuliaContext() do ctx
-        mod = parse(LLVM.Module, """
+        @dispose mod=parse(LLVM.Module, """
             define void @f() !dbg !4 {
               ret void, !dbg !7, !custom !12
             }
@@ -94,31 +94,31 @@ end
             !10 = !{i32 2, !"Dwarf Version", i32 4}
             !11 = !{i32 2, !"Debug Info Version", i32 3}
             !12 = !{!1}
-            """)
-        @test GPUCompiler.dedup_compile_units!(mod)
-        @test (verify(mod); true)
-        ir = string(mod)
+            """) begin
+            @test GPUCompiler.dedup_compile_units!(mod)
+            @test (verify(mod); true)
+            ir = string(mod)
 
-        # Two CUs remain even though the duplicate was also reachable through custom metadata.
-        @test count("distinct !DICompileUnit", ir) == 2
-        @test occursin(r"!llvm\.dbg\.cu = !\{!\d+, !\d+\}", ir)
+            # Two CUs remain even though the duplicate was also reachable through custom metadata.
+            @test count("distinct !DICompileUnit", ir) == 2
+            @test occursin(r"!llvm\.dbg\.cu = !\{!\d+, !\d+\}", ir)
 
-        # both Julia subprograms now share the canonical CU; the vendor one is untouched
-        function unit_producer(fname)
-            m = match(Regex("!DISubprogram\\(name: \"$fname\".*?unit: !(\\d+)"), ir)
-            m === nothing && return nothing
-            cu = match(Regex("^!$(m.captures[1]) = distinct !DICompileUnit\\(.*?producer: \"([^\"]+)\"", "m"), ir)
-            cu === nothing ? nothing : cu.captures[1]
+            # both Julia subprograms now share the canonical CU; the vendor one is untouched
+            function unit_producer(fname)
+                m = match(Regex("!DISubprogram\\(name: \"$fname\".*?unit: !(\\d+)"), ir)
+                m === nothing && return nothing
+                cu = match(Regex("^!$(m.captures[1]) = distinct !DICompileUnit\\(.*?producer: \"([^\"]+)\"", "m"), ir)
+                cu === nothing ? nothing : cu.captures[1]
+            end
+            @test unit_producer("f") == "julia"
+            @test unit_producer("h") == "julia"
+            @test unit_producer("g") == "vendor"
+            @test occursin(r"!DISubprogram\(name: \"f\".*?unit: !(\d+)", ir) &&
+                  match(r"!DISubprogram\(name: \"f\".*?unit: !(\d+)", ir).captures[1] ==
+                  match(r"!DISubprogram\(name: \"h\".*?unit: !(\d+)", ir).captures[1]
+
+            # nothing left to do
+            @test !GPUCompiler.dedup_compile_units!(mod)
         end
-        @test unit_producer("f") == "julia"
-        @test unit_producer("h") == "julia"
-        @test unit_producer("g") == "vendor"
-        @test occursin(r"!DISubprogram\(name: \"f\".*?unit: !(\d+)", ir) &&
-              match(r"!DISubprogram\(name: \"f\".*?unit: !(\d+)", ir).captures[1] ==
-              match(r"!DISubprogram\(name: \"h\".*?unit: !(\d+)", ir).captures[1]
-
-        # nothing left to do
-        @test !GPUCompiler.dedup_compile_units!(mod)
-        dispose(mod)
     end
 end

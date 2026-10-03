@@ -10,7 +10,7 @@
 module Runtime
 
 using ..GPUCompiler
-using LLVM
+using LLVM, LLVM.IR, LLVM.Build
 using LLVM.Interop
 
 
@@ -97,9 +97,7 @@ function compile(def, return_type, types, llvm_return_type=nothing, llvm_types=n
         args = [gensym() for typ in types]
         # The stub only satisfies host-side symbol resolution.
         stub_types = resolve_types(types, Ptr{Cchar})
-        stub = LLVM.Context() do _
-            build_runtime_stub(llvm_name, return_type, stub_types, args)
-        end
+        stub = build_runtime_stub(llvm_name, return_type, stub_types, args)
         @eval @inline $def($(args...)) = $stub
     end
 
@@ -111,38 +109,26 @@ end
 #   define weak <rt> @gpu_<name>(<args>) { ret <fake> }
 #   define <rt> @entry(<args>) { %r = call <rt> @gpu_<name>(<args>); ret <rt> %r }
 #
-# Returns the `Base.llvmcall(...)`-shaped quote produced by `LLVM.Interop.call_function`,
+# Returns the `Base.llvmcall(...)`-shaped quote produced by `LLVM.Interop.generate_llvmcall`,
 # suitable for splicing as the stub's body.
 function build_runtime_stub(llvm_name::String, @nospecialize(return_type::Type),
                             @nospecialize(types::Tuple), args::Vector)
-    rt = convert(LLVMType, return_type; allow_boxed=true)
-    arg_tys = LLVMType[convert(LLVMType, t; allow_boxed=true) for t in types]
+    generate_llvmcall(return_type, Tuple{types...}, args...) do builder, params...
+        entry = current_function(builder)
+        ft = entry.function_type
 
-    # entry function (`call_function` puts the module on it)
-    entry, entry_ft = create_function(rt, arg_tys)
-    mod = LLVM.parent(entry)
-
-    # weak definition of `gpu_<name>` that returns a harmless placeholder on CPU
-    extern = LLVM.Function(mod, llvm_name, LLVM.FunctionType(rt, arg_tys))
-    linkage!(extern, LLVM.API.LLVMWeakAnyLinkage)
-    @dispose builder=IRBuilder() begin
-        position!(builder, BasicBlock(extern, "entry"))
-        emit_fake_return!(builder, rt)
-    end
-
-    # entry: call the weak symbol, return its result
-    @dispose builder=IRBuilder() begin
-        position!(builder, BasicBlock(entry, "entry"))
-        result = call!(builder, LLVM.function_type(extern), extern,
-                       collect(parameters(entry)))
-        if rt isa LLVM.VoidType
-            ret!(builder)
-        else
-            ret!(builder, result)
+        # weak definition of `gpu_<name>` that returns a harmless placeholder on CPU
+        extern = LLVM.Function(current_module(builder), llvm_name, ft)
+        extern.linkage = LLVM.Linkage.WeakAny
+        @dispose extern_builder=IRBuilder() begin
+            position!(extern_builder, LLVM.at_end(BasicBlock(extern, "entry")))
+            emit_fake_return!(extern_builder, ft.return_type)
         end
-    end
 
-    return call_function(entry, return_type, Tuple{types...}, args...)
+        # entry: call the weak symbol, return its result
+        result = call!(builder, ft, extern, collect(Value, params))
+        ft.return_type isa LLVM.VoidType ? nothing : result
+    end
 end
 
 # Emit a placeholder return of the given LLVM type — a sentinel value that
@@ -157,7 +143,7 @@ function emit_fake_return!(builder::IRBuilder, rt::LLVMType)
         ret!(builder, const_inttoptr(ConstantInt(i64, 1), rt))
     elseif rt isa LLVM.IntegerType
         ret!(builder, ConstantInt(rt, 0))
-    elseif rt isa LLVM.LLVMFloat || rt isa LLVM.LLVMDouble
+    elseif rt isa LLVM.FloatType || rt isa LLVM.DoubleType
         ret!(builder, ConstantFP(rt, 0.0))
     else
         error("Unsupported runtime stub return type: $rt")
@@ -210,35 +196,17 @@ const tag_size = sizeof(tag_type)
 const gc_bits = 0x3 # FIXME
 
 # get the type tag of a type at run-time
-@generated function type_tag(::Val{type_name}) where type_name
-    @dispose ctx=Context() begin
-        T_tag = convert(LLVMType, tag_type)
-        T_ptag = LLVM.PointerType(T_tag)
+@llvmgenerated builder function type_tag(::Val{type_name})::tag_type where type_name
+    T_tag = convert(LLVMType, tag_type)
+    T_ptag = LLVM.PointerType(T_tag)
+    T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
 
-        T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
+    # this isn't really a function, but we abuse it to get the JIT to resolve the address
+    typ = LLVM.Function(current_module(builder), "jl_" * String(type_name) * "_type",
+                        LLVM.FunctionType(T_pjlvalue))
 
-        # create function
-        llvm_f, _ = create_function(T_tag)
-        mod = LLVM.parent(llvm_f)
-
-        # this isn't really a function, but we abuse it to get the JIT to resolve the address
-        typ = LLVM.Function(mod, "jl_" * String(type_name) * "_type",
-                            LLVM.FunctionType(T_pjlvalue))
-
-        # generate IR
-        @dispose builder=IRBuilder() begin
-            entry = BasicBlock(llvm_f, "entry")
-            position!(builder, entry)
-
-            typ_var = bitcast!(builder, typ, T_ptag)
-
-            tag = load!(builder, T_tag, typ_var)
-
-            ret!(builder, tag)
-        end
-
-        call_function(llvm_f, tag_type)
-    end
+    typ_var = bitcast!(builder, typ, T_ptag)
+    load!(builder, T_tag, typ_var)
 end
 
 # we use `jl_value_ptr`, a Julia pseudo-intrinsic that can be used to box and unbox values
