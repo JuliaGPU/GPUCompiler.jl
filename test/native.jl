@@ -1565,6 +1565,70 @@ end
     end
 end
 
+@testset "pointer-valued relocation words" begin
+    # Slots are generally loaded as pointers, which code may also return or dereference.
+    # Whether a strategy patches, bakes or tabulates the word, that pointer must be the same.
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
+        target = GPUCompiler.JuliaValueRef(:pointer_probe)
+        expected = GPUCompiler.resolve_relocation_target(target)
+        for strategy in (:bake, :patch, :table)
+            job, _ = Native.create_job(identity, (Nothing,); relocations=strategy,
+                                       jlruntime=false)
+            JuliaContext() do ctx
+                m = parse(LLVM.Module, """
+                    @slot = external global ptr
+                    @jl_float32_type = external global ptr
+
+                    define ptr @value() {
+                        %value = load ptr, ptr @slot, align 8, !nonnull !0, !invariant.load !0
+                        ret ptr %value
+                    }
+
+                    define i64 @header() {
+                        %value = load ptr, ptr @slot, align 8, !nonnull !0, !invariant.load !0
+                        %header = getelementptr i64, ptr %value, i64 -1
+                        %word = load i64, ptr %header
+                        ret i64 %word
+                    }
+
+                    define ptr @type() {
+                        %type = load ptr, ptr @jl_float32_type, align 8, !nonnull !0
+                        ret ptr %type
+                    }
+
+                    !0 = !{}""")
+                relocs = GPUCompiler.Relocations(
+                    [GPUCompiler.Relocation(GPUCompiler.SlotSite, "slot", 0, target)])
+                obj, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.CodeGenFileType.Object)
+                @test verification_error(m) === nothing
+                if strategy === :table
+                    # the words are loaded as such, keeping what is known about the access,
+                    # but not what was known about the pointer
+                    loads = [inst for f in ("value", "type")
+                                  for inst in m.functions[f].entry.instructions
+                                  if inst isa LLVM.LoadInst]
+                    @test all(load -> load.value_type == LLVM.Int64Type(), loads)
+                    @test !any(load -> haskey(load.metadata, LLVM.MD_nonnull), loads)
+                    @test any(load -> haskey(load.metadata, LLVM.MD_invariant_load), loads)
+                end
+
+                fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)), "value",
+                                                 relocs; table=strategy === :table)
+                @dispose lljit=lljit begin
+                    GC.@preserve table begin
+                        @test UInt(ccall(fptr, Ptr{Cvoid}, ())) == expected
+                        header = pointer(lookup(lljit, "header"))
+                        @test ccall(header, UInt, ()) ==
+                              unsafe_load(Ptr{UInt}(expected - sizeof(UInt)))
+                        type = pointer(lookup(lljit, "type"))
+                        @test ccall(type, Ptr{Cvoid}, ()) == pointer_from_objref(Float32)
+                    end
+                end
+            end
+        end
+    end
+end
+
 @testset "unlowered relocation table" begin
     # Emitting a `:table` module through the 3-argument `emit_asm` hands the lowering an
     # empty manifest, leaving the real one unlowered and the module's slots stranded. The
@@ -1786,8 +1850,8 @@ end
         for rec in relocs.records
             @test occursin("@$(rec.name)", string(addr))
         end
-        # Direct and merged references retain the same load type. Mixing pointer loads
-        # with rebuilt integer loads/inttoptr miscompiles the `nothing` case on Metal.
+        # Direct and merged references retain their load type, so that later optimization
+        # sees consistent pointer expressions; only the `:table` lowering loads words.
         for f in ("direct", "entry")
             load = only(inst for bb in mod.functions[f].blocks for inst in bb.instructions
                         if inst isa LLVM.LoadInst)
