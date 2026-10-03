@@ -818,9 +818,10 @@ Rewrite every record into an indexed load from a back-end-provided table of word
 copies into `relocs.table` so that [`resolved_relocation_table`](@ref) delivers the words in
 that same order regardless of what happens to the records afterwards.
 
-Slots become `load(gep(base, index))` and are erased. Interior boxes cannot be patched
-after load — the platforms needing this have no writable program-scope storage — so each is
-demoted to a per-function stack copy whose header word comes from the table.
+Slots become word loads `load(gep(base, index))`, converted back with `inttoptr` where a
+slot was loaded as a pointer, and are erased. Interior boxes cannot be patched after load —
+the platforms needing this have no writable program-scope storage — so each is demoted to a
+per-function stack copy whose header word comes from the table.
 [`relocation_table_pointer`](@ref) supplies the base pointer; since it can only do so where
 the state is available, callees still holding a relocation use are inlined first.
 """
@@ -864,7 +865,8 @@ function emit_table_relocations!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
     mod_gvs = mod.globals
     slots = LLVM.GlobalVariable[mod_gvs[rec.name] for rec in relocs.records
                        if rec.kind === SlotSite && haskey(mod_gvs, rec.name)]
-    check_relocation_slot_uses!(mod, slots)
+    loads = check_relocation_slot_uses!(mod, slots)
+    load_relocation_words!(loads, T_word)
     # Expand all constant users before choosing entry insertion points. Expanding a later
     # slot could otherwise insert a use before the entry instruction saved for an earlier one.
     convert_users_to_instructions!(slots)
@@ -910,8 +912,10 @@ end
 
 # Slots denote read-only words, not general storage. In particular, don't merge a table
 # address with an unrelated pointer: a back-end may not have a common address space for them.
+# Returns the loads of the words, however their address was forwarded.
 function check_relocation_slot_uses!(mod::LLVM.Module, slots::Vector{LLVM.GlobalVariable})
     dl = mod.datalayout
+    loads = LLVM.LoadInst[]
     seen = Set{LLVM.Value}(slots)
     worklist = LLVM.Value[slots...]
     while !isempty(worklist)
@@ -920,6 +924,7 @@ function check_relocation_slot_uses!(mod::LLVM.Module, slots::Vector{LLVM.Global
             if val isa LLVM.LoadInst
                 is_word_type(val.value_type) ||
                     error("Unsupported relocation slot load of LLVM type $(val.value_type)")
+                push!(loads, val)
                 # Julia names these loads after globals with session-specific counters.
                 val.name = ""
                 # The packed table guarantees word alignment, even if the old global had more.
@@ -941,6 +946,36 @@ function check_relocation_slot_uses!(mod::LLVM.Module, slots::Vector{LLVM.Global
         for address in forwarded_addresses(val)
             address in seen ||
                 error("Relocation slot address merged with unsupported address $address in $val")
+        end
+    end
+    return loads
+end
+
+# Metadata that describes a loaded pointer, and so does not apply to a loaded word.
+const PointerLoadMetadataKinds =
+    (MD_nonnull, MD_dereferenceable, MD_dereferenceable_or_null, MD_align)
+
+# Load the slots' values as the words the table holds. A pointer-typed load would read a
+# host address as a pointer into the target's default address space, which on Metal is
+# thread memory, and shader validation does not preserve such a value's bits. Converting
+# the word back with `inttoptr` keeps the IR valid for existing users, while comparisons
+# fold to integer ones.
+function load_relocation_words!(loads::Vector{LLVM.LoadInst}, T_word::LLVMType)
+    @dispose builder=IRBuilder() begin
+        for load in loads
+            load.value_type isa LLVM.PointerType || continue
+            position!(builder, LLVM.before(load))
+            word = load!(builder, T_word, load.pointer_operand;
+                         align=load.alignment, volatile=load.volatile)
+            if isatomic(load)
+                word.ordering = load.ordering
+                word.syncscope = load.syncscope
+            end
+            for (kind, md) in load.metadata
+                kind in PointerLoadMetadataKinds || (word.metadata[kind] = md)
+            end
+            replace_uses!(load, inttoptr!(builder, word, load.value_type))
+            erase!(load)
         end
     end
     return

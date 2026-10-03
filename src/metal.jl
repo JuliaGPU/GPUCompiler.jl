@@ -10,11 +10,13 @@ const LLVMDowngrader_jll =
 # Metal has no target machine, so provide our own TTI
 struct MetalTTI <: LLVM.AbstractTargetTransformInfo end
 
-# teache LLVM about Metal's address-space hierarchy:
+# teach LLVM about Metal's address-space hierarchy (named as in Metal.jl's `AS`):
 #   0: Generic    1: Device       2: Constant
 #   3: ThreadGroup 4: Thread      5: ThreadGroup_ImgBlock  6: Ray
-# AS 0 is the flat/generic space; only casts involving it are legal, and the
-# specific spaces are mutually disjoint.
+# The AIR we emit has no generic space, though: AS 0 is thread memory. We only present it
+# as the flat space so that `InferAddressSpacesPass` moves pointers derived from a specific
+# space into that space; a pointer still in AS 0 afterwards is a thread pointer. Only casts
+# involving AS 0 are legal, and the specific spaces are mutually disjoint.
 LLVM.flat_address_space(::MetalTTI) = UInt(0)
 LLVM.is_noop_addr_space_cast(::MetalTTI, from::Unsigned, to::Unsigned) =
     from == 0 || to == 0

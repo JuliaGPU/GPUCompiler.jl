@@ -427,10 +427,35 @@ end
         # the table base is loaded out of the kernel-state argument, and the words out of the
         # table -- a bake would instead leave a private constant holding the resolved address
         @test occursin("reloc_table", air)
-        @test occursin(r"load (i64|ptr), (i64 addrspace\(1\)\*|ptr addrspace\(1\))", air)
+        @test occursin(r"load i64, (i64 addrspace\(1\)\*|ptr addrspace\(1\))", air)
         # nothing is left of the site globals the records named
         for rec in relocs.records
             @test !occursin("@$(rec.name) ", air)
+        end
+    end
+end
+
+@testset "relocation words" begin
+    # The table holds host words, such as the address of a Symbol, that the device only
+    # compares. Loaded as a pointer, a word would be a pointer into thread memory, whose bits
+    # Metal's shader validation does not preserve; so it is loaded as an integer, just like
+    # the Symbol argument it is compared against.
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
+        mod = @eval module $(gensym())
+            function kernel(ptr, sym::Symbol)
+                unsafe_store!(ptr, sym === :foo ? 1f0 : sym === :bar ? 2f0 : 3f0)
+                return
+            end
+        end
+        tt = (Core.LLVMPtr{Float32,1}, Symbol)
+
+        air = sprint(io -> Metal.code_native_table(io, mod.kernel, tt; kernel=true))
+        @test occursin("reloc_table", air)
+        @test !occursin("load ptr, ptr addrspace(1)", air)
+        # LLVM 20 folds the comparison of the converted words into one of the words
+        if LLVM.version() >= v"20"
+            @test occursin("icmp eq i64", air)
+            @test !occursin("icmp eq ptr", air)
         end
     end
 end
@@ -439,7 +464,7 @@ end
     # With five possible values, inference widens `pick`'s result to `Val`, so `v` is boxed
     # and `===` compares its address with those of the singletons. LLVM merges the loads of
     # those addresses into one load from a `phi` of their slots, which the table lowering
-    # redirects to the device-space table (#959).
+    # redirects to the device-space table (#959), still reading the words as integers.
     if GPUCompiler.supports_relocatable_ir() && LLVM.version() >= v"17"
         mod = @eval module $(gensym())
             pick(i) = i == 1 ? Val(1) : i == 2 ? Val(2) : i == 3 ? Val(3) :
@@ -470,7 +495,7 @@ end
 
         @test @filecheck begin
             @check "phi ptr addrspace(1)"
-            @check "load ptr, ptr addrspace(1)"
+            @check "load i64, ptr addrspace(1)"
             Metal.code_native_table(mod.kernel, tt; kernel=true)
         end
         for f in (mod.kernel, mod.maybe_kernel, mod.loop_kernel)
@@ -478,6 +503,7 @@ end
             @test occursin("reloc_table", air)
             @test !occursin(r"(?m)^@.*jl_global", air)
             @test !occursin(r"(?m)^@.*jl_nothing", air)
+            @test !occursin("load ptr, ptr addrspace(1)", air)
         end
     end
 end
