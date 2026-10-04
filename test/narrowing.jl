@@ -257,3 +257,28 @@ end
 end
 
 end
+
+@testset "PTX" begin
+    # a kernel whose index is bounded by a branch condition
+    mod = @eval module $(gensym())
+        function kernel(a::Ptr{Float32}, i::Int, j::Int)
+            if i % UInt < 1024 && j % UInt < 1024
+                unsafe_store!(a, 1f0, i * 1024 + j + 1)
+            end
+            return
+        end
+    end
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check "{{(shl|mul|add|or)( nuw)?( nsw)? i32}}"
+        @check "zext {{(nneg )?}}i32 {{.*}} to i64"
+        @check "getelementptr"
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Float32},Int,Int}; narrow_indices=true)
+    end
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
+        @check_not "trunc i64"
+        @check "{{(shl|mul|add|or)( nuw)?( nsw)? i64}}"
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Float32},Int,Int})
+    end
+end

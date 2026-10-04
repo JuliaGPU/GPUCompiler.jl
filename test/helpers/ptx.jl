@@ -6,7 +6,8 @@ import ..TestRuntime
 
 struct CompilerParams <: AbstractCompilerParams
     patch::Bool
-    CompilerParams(patch::Bool=false) = new(patch)
+    narrow_indices::Bool
+    CompilerParams(patch::Bool=false, narrow_indices::Bool=false) = new(patch, narrow_indices)
 end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
@@ -14,6 +15,9 @@ PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
 # `patch=true` keeps relocations symbolic (as CUDA.jl does); plain jobs resolve them in IR.
 GPUCompiler.relocation_lowering(@nospecialize(job::PTXCompilerJob)) =
     job.config.params.patch ? :patch : :bake
+
+GPUCompiler.optimization_options(@nospecialize(job::PTXCompilerJob)) =
+    (; narrow_indices=job.config.params.narrow_indices)
 
 struct PTXKernelState
     data::Int64
@@ -47,14 +51,14 @@ function create_job(@nospecialize(func), @nospecialize(types);
                     cap=v"7.0", ptx=v"6.0", feature_set=:baseline,
                     minthreads=nothing, maxthreads=nothing,
                     blocks_per_sm=nothing, maxregs=nothing,
-                    fastmath=false, patch::Bool=false,
+                    fastmath=false, patch::Bool=false, narrow_indices::Bool=false,
                     kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = PTXCompilerTarget(; cap, ptx, feature_set,
                                  minthreads, maxthreads, blocks_per_sm, maxregs,
                                  fastmath)
-    params = CompilerParams(patch)
+    params = CompilerParams(patch, narrow_indices)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end

@@ -313,6 +313,9 @@ uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 #   for `InstCombinePass`, retaining only the simplification subset of the peephole
 #   transforms (useful e.g. for downstream rewriters like Enzyme that get confused by
 #   InstCombine's more aggressive rewrites).
+# - `narrow_indices::Bool = false`: narrow 64-bit index computations to 32 bits where LLVM's
+#   analyses prove that the values fit (see `src/narrowing.jl`). This only pays off when the
+#   IR carries range facts, e.g., `llvm.assume`s bounding array dimensions and indices.
 #
 # Returning a `NamedTuple` keeps this single extension point lightweight: downstream
 # users add new keys without GPUCompiler having to grow an interface method per option.

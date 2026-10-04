@@ -74,6 +74,12 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         end
         optimize_module!(job, mod)
         run!(DeadArgumentEliminationPass(), mod, tm)
+
+        # this needs to happen after the last instcombine, which would widen the narrowed
+        # index computations again
+        if get(optimization_options(job), :narrow_indices, false) && opt_level >= 1
+            narrow_indices!(mod, tm)
+        end
     end
     return
 end
