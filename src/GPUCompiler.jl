@@ -1,6 +1,6 @@
 module GPUCompiler
 
-using LLVM, LLVM.IR, LLVM.Build, LLVM.Passes, LLVM.ORC
+using LLVM, LLVM.IR, LLVM.Build, LLVM.Passes, LLVM.Analysis, LLVM.ORC
 using LLVM.Interop
 
 
@@ -89,6 +89,7 @@ include("jlgen.jl")
 include("irgen.jl")
 include("determinism.jl")
 include("optim.jl")
+include("narrowing.jl")
 include("validation.jl")
 include("rtlib.jl")
 include("mcgen.jl")
