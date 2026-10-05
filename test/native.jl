@@ -2377,6 +2377,29 @@ end
     end
 end
 
+@testset "global accesses through unknown addresses" begin
+    # the address of the binding is not one we resolved, so it must not be dereferenced
+    if GPUCompiler.supports_relocatable_ir()
+        job, _ = Native.create_job(identity, (Nothing,))
+        JuliaContext() do ctx
+            load = LLVM.version() >= v"17" ? "load ptr, ptr inttoptr (i64 4096 to ptr)" :
+                                             "load i8*, i8** inttoptr (i64 4096 to i8**)"
+            mod = parse(LLVM.Module, """
+                define void @f() {
+                  %v = $load, !tbaa !0
+                  ret void
+                }
+                !0 = !{!1, !1, i64 0}
+                !1 = !{!"jtbaa_binding", !2, i64 0}
+                !2 = !{!"jtbaa"}
+                """)
+            @test_throws_message(InvalidIRError, GPUCompiler.check_ir(job, mod)) do msg
+                occursin(GPUCompiler.NONCONST_GLOBAL, msg)
+            end
+        end
+    end
+end
+
 @testset "specialized vararg invoke" begin
     mod = @eval module $(gensym())
         @noinline child(x, xs...) = x + sum(xs)

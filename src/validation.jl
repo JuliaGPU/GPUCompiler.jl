@@ -208,9 +208,12 @@ function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Reloc
         elseif isa(inst, LLVM.LoadInst)
             check_ir!(job, errors, inst)
         end
-        if isa(inst, LLVM.LoadInst) || isa(inst, LLVM.StoreInst)
+        if (isa(inst, LLVM.LoadInst) || isa(inst, LLVM.StoreInst)) && is_binding_access(inst)
             binding = accessed_binding(inst, relocs, dl)
-            if binding !== nothing
+            if binding === nothing
+                @safe_debug "Decoding the binding of a global access failed" inst bb=inst.parent
+                push!(errors, (NONCONST_GLOBAL, backtrace(inst), nothing))
+            else
                 gr = binding.globalref
                 push!(errors, (global_access_error(job, gr), backtrace(inst), gr))
             end
@@ -255,18 +258,16 @@ end
 
 const BINDING_VALUE_OFFSET = fieldoffset(Core.Binding, Base.fieldindex(Core.Binding, :value))
 
-# The binding whose value a load or store accesses, or `nothing`.
-#
 # Codegen reads and writes non-constant globals through a pointer to the binding's value,
 # without calling into the runtime. Often nothing else gives the access away: Julia 1.10 does
 # not check the read of a global that was assigned at compile time, and on targets that cannot
 # throw, the check for an undefined value is lowered to an exception like any other. Codegen
-# tags these accesses with a TBAA type it uses for nothing else, which we trust to mean that
-# the address points into a binding.
+# tags these accesses with a TBAA type it uses for nothing else.
+is_binding_access(inst::LLVM.Instruction) = tbaa_type(inst) == "jtbaa_binding"
+
+# The binding whose value a load or store accesses, or `nothing` if it cannot be identified.
 function accessed_binding(inst::Union{LLVM.LoadInst,LLVM.StoreInst}, relocs::Relocations,
                           dl::LLVM.DataLayout)
-    tbaa_type(inst) == "jtbaa_binding" || return nothing
-
     ptr = inst.pointer_operand
     offset = 0
     while true
@@ -283,8 +284,8 @@ function accessed_binding(inst::Union{LLVM.LoadInst,LLVM.StoreInst}, relocs::Rel
         # a literal address, as emitted by Julia 1.10 or resolved from a relocation
         addr = first(ptr.operands)
         addr isa ConstantInt || return nothing
-        base = convert(UInt, addr) + (offset - BINDING_VALUE_OFFSET) % UInt
-        Base.unsafe_pointer_to_objref(Ptr{Cvoid}(base))
+        ref = object_at(convert(UInt, addr) + (offset - BINDING_VALUE_OFFSET) % UInt, relocs)
+        ref === nothing ? nothing : something(ref)
     elseif ptr isa LLVM.LoadInst && offset == BINDING_VALUE_OFFSET
         # a relocation slot
         ref = referenced_object(ptr, relocs)
