@@ -55,6 +55,26 @@ end
     end
 end
 
+using Logging
+
+safe_log() = GPUCompiler.@safe_debug "safe_log"
+
+@testset "safe logging" begin
+    # the compiler may run in an older world than the global logger's methods
+    # (e.g., when invoked through `invoke_in_world` to reuse precompiled code)
+    world = Base.get_world_counter()
+    @eval struct NewerLogger <: AbstractLogger end
+    @eval Logging.min_enabled_level(::NewerLogger) = Logging.Info
+    @eval Logging.shouldlog(::NewerLogger, args...) = true
+    @eval Logging.handle_message(::NewerLogger, args...; kwargs...) = nothing
+    old_logger = global_logger(NewerLogger())
+    try
+        @test Base.invoke_in_world(world, safe_log) === nothing
+    finally
+        global_logger(old_logger)
+    end
+end
+
 @testset "mangling" begin
     using demumble_jll
 
