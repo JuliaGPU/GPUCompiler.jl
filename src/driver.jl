@@ -327,6 +327,7 @@ const __llvm_initialized = Ref(false)
             end
 
             finish_linked_module!(job, ir)
+            lower_syncscopes!(job, ir)
 
             # Resolve early so optimization sees concrete values.
             resolve_early = resolve_relocations && relocation_lowering(job) === :bake

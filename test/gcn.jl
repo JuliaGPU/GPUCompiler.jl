@@ -56,6 +56,34 @@ end
     end
 end
 
+@testset "synchronization scopes" begin
+    # front-ends spell scopes like LLVM's SPIR-V back-end; they're renamed for the target
+    mod = @eval module $(gensym())
+        kernel() = Base.llvmcall("""
+            fence syncscope("singlethread") seq_cst
+            fence syncscope("subgroup") seq_cst
+            fence syncscope("device") seq_cst
+            fence syncscope("workgroup") seq_cst
+            fence seq_cst
+            fence syncscope("agent-one-as") seq_cst
+            fence syncscope("device-mem-local") acquire
+            ret void
+            """, Nothing, Tuple{})
+    end
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_kernel[0-9_]*}}"
+        @check "fence syncscope(\"singlethread\") seq_cst"
+        @check "fence syncscope(\"wavefront\") seq_cst"
+        @check "fence syncscope(\"agent\") seq_cst"
+        @check "fence syncscope(\"workgroup\") seq_cst"
+        @check "fence seq_cst"
+        @check "fence syncscope(\"agent-one-as\") seq_cst"
+        # GCN orders all memory, so the memory a scope names is dropped
+        @check "fence syncscope(\"agent\") acquire"
+        GCN.code_llvm(mod.kernel, Tuple{})
+    end
+end
+
 @testset "kernel calling convention" begin
     mod = @eval module $(gensym())
         kernel() = return

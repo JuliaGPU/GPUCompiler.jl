@@ -2107,6 +2107,37 @@ end
         end
     end
 
+    @testset "memory (Metal $metal, AIR $air)" for (metal, air) in targets
+        # the scope names the memory an ordered operation or fence orders, which becomes the
+        # flags of the operation or, before MSL 4.1, of the fences around it
+        ir = lower_metal_atomics(kernel("""
+            %a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope("device-mem-global") release, align 4
+            %b = load atomic i32, ptr addrspace(3) %t syncscope("workgroup-mem-local+image") acquire, align 4
+            %c = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope("device-mem-none") monotonic, align 4
+            fence syncscope("device-mem-image+imageblock") seq_cst
+            %d = load atomic i32, ptr addrspace(1) %p syncscope("device-mem-local") monotonic, align 4
+            """); metal, air)
+        ordered = metal >= v"4.1"
+        args(order, scope, flags) = air >= v"2.9" ?
+            "i32 $order, i32 $scope, i32 $flags, i1 true" : "i32 $order, i32 $scope, i1 true"
+        op(order, scope, flags) = ordered ? args(order, scope, flags) : args(0, scope, 0)
+        fence(flags, order, scope) = "call void @air.atomic.fence(i32 $flags, i32 $(ordered ? order : 5), i32 $scope)"
+        @test @filecheck begin
+            @check_label "define void @f"
+            @check_next cond=!ordered fence(1, 3, 2)
+            @check_next "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(op(3, 2, 1)))"
+            @check_next "call i32 @air.atomic.local.load.i32(ptr addrspace(3) %t, $(op(2, 1, 6)))"
+            @check_next cond=!ordered fence(6, 2, 1)
+            # (relaxed operations don't order memory)
+            @check_next "call i32 @air.atomic.global.add.s.i32(ptr addrspace(1) %p, i32 1, $(args(0, 2, 0)))"
+            @check_next fence(12, 5, 2)
+            # a relaxed load that is strengthened to an acquire one covers the memory it loads
+            @check_next "call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p, $(op(2, 2, 3)))"
+            @check_next cond=!ordered fence(3, 2, 2)
+            ir
+        end
+    end
+
     @testset "operations" begin
         ir = lower_metal_atomics(kernel("""
             %xchg = atomicrmw xchg ptr addrspace(1) %p, i32 1 monotonic, align 4
@@ -2376,6 +2407,17 @@ end
                  "misaligned atomic operation"),
                 ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"agent\") monotonic, align 4",
                  "synchronization scope \"agent\""),
+                # memory that is unknown, repeated or out of order
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"device-mem-texture\") release, align 4",
+                 "synchronization scope \"device-mem-texture\""),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"device-mem-global+global\") release, align 4",
+                 "synchronization scope \"device-mem-global+global\""),
+                ("fence syncscope(\"workgroup-mem-local+global\") release",
+                 "synchronization scope \"workgroup-mem-local+global\""),
+                ("fence syncscope(\"device-mem-none+global\") release",
+                 "synchronization scope \"device-mem-none+global\""),
+                ("fence syncscope(\"agent-mem-global\") release",
+                 "synchronization scope \"agent-mem-global\""),
                 # a pointer that may not be on the stack
                 ("%s = alloca i32, align 4\n%m = select i1 %b, ptr %s, ptr %g\n%a = atomicrmw add ptr %m, i32 1 monotonic, align 4",
                  "atomic operation in address space 0"),
@@ -2388,6 +2430,13 @@ end
         @test occursin("ordered atomic operation",
                        lower_metal_atomics(kernel("%a = atomicrmw add ptr addrspace(1) %p, i32 1 seq_cst, align 4");
                                            metal=v"3.1", air=v"2.6"))
+        # and so do fences that order specific memory
+        @test occursin("fence that orders specific memory",
+                       lower_metal_atomics(kernel("fence syncscope(\"device-mem-global\") seq_cst");
+                                           metal=v"3.1", air=v"2.6"))
+        @test !occursin("fence that orders specific memory",
+                        lower_metal_atomics(kernel("fence syncscope(\"device\") seq_cst");
+                                            metal=v"3.1", air=v"2.6"))
     end
 
     @testset "unsupported atomics without validation" begin

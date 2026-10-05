@@ -105,6 +105,9 @@ pass_by_value(job::CompilerJob{MetalCompilerTarget}) = false
 # from `llvm.fma` to `air.fma`) rather than Julia's Float64-based `fma_emulated` fallback.
 have_fma(@nospecialize(target::MetalCompilerTarget), T::Type) = true
 
+# MSL's ordered atomics and fences take the memory they order (see `metal_syncscope`)
+syncscope_memory(@nospecialize(target::MetalCompilerTarget)) = true
+
 
 ## job
 
@@ -472,6 +475,10 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
             action isa String ? action : nothing
         elseif inst isa LLVM.FenceInst && metal_thread_scope(inst) === nothing
             "fence with synchronization scope $(repr(inst.syncscope.name))"
+        elseif inst isa LLVM.FenceInst && job.config.target.metal < v"3.2" &&
+               metal_memory_flags(inst) != METAL_MEM_FLAGS
+            # (`lower_fences!` keeps the fence, which orders whatever the back-end decides)
+            "fence that orders specific memory (Metal $(job.config.target.metal) has no fences that take memory flags)"
         else
             nothing
         end
@@ -739,10 +746,11 @@ end
 # - the remaining operations are selected to `air.atomic.*` calls (`select_atomic!`), in the
 #   form the target's AIR and MSL versions use.
 #
-# Front-ends can also call `air.atomic.*` intrinsics directly, e.g., to pass memory flags that
-# LLVM cannot express. They do so in the MSL 4.1 (AIR 2.9) form, which `legalize_atomic_abi!`
-# rewrites for older targets. `validate_ir` rejects the atomics that cannot be lowered (see
-# `metal_atomic_action`), so the lowering can assume every atomic it sees is supported.
+# Front-ends pass MSL's memory flags, which LLVM cannot express, in the synchronization scope
+# (see `metal_syncscope`). They can also call `air.atomic.*` intrinsics directly, in the MSL 4.1
+# (AIR 2.9) form, which `legalize_atomic_abi!` rewrites for older targets. `validate_ir`
+# rejects the atomics that cannot be lowered (see `metal_atomic_action`), so the lowering can
+# assume every atomic it sees is supported.
 
 # MSL memory_order values: relaxed=0, acquire=2, release=3, acq_rel=4, seq_cst=5
 metal_memory_order(order::LLVM.AtomicOrdering.T) =
@@ -751,32 +759,52 @@ metal_memory_order(order::LLVM.AtomicOrdering.T) =
     order == LLVM.AtomicOrdering.AcquireRelease ? 4 :
     order == LLVM.AtomicOrdering.SequentiallyConsistent ? 5 : 0
 
-# MSL mem_flags naming the memory an ordered operation orders. LLVM orders all memory, so
-# cover device and threadgroup memory, the writable address spaces LLVM code can access.
+# MSL mem_flags naming the memory an ordered operation orders. LLVM orders all memory, so by
+# default cover device and threadgroup memory, the writable address spaces LLVM code can access.
 const METAL_MEM_FLAGS = 1 | 2   # mem_device | mem_threadgroup
 
-# The MSL thread_scope for the synchronization scope of an atomic operation or fence: thread=0,
-# simdgroup=4, threadgroup=1, device=2. Scopes are spelled like the LLVM SPIR-V back-end
-# does: `singlethread`, `subgroup`, `workgroup`, `device`, and the system scope (LLVM's
-# default). Metal code can only synchronize with other threads on the same device (MSL has no
-# scope that includes the host or other devices), so the system scope is the device scope.
-# Threadgroup memory is only shared within a threadgroup, and MSL never uses a wider scope
-# for it. Returns `nothing` for other scopes, which `validate_ir` rejects (like the NVPTX and
-# AMDGPU back-ends do) rather than guessing what they mean.
-function metal_thread_scope(inst::LLVM.Instruction, as::Union{Nothing,Int}=nothing)
-    ss = inst.syncscope.name
-    scope = if ss == "singlethread"
+# The MSL thread_scope and mem_flags for the synchronization scope of an atomic operation or
+# fence. The thread scope is thread=0, simdgroup=4, threadgroup=1 or device=2, spelled like the
+# LLVM SPIR-V back-end does: `singlethread`, `subgroup`, `workgroup`, `device`, and the system
+# scope (LLVM's default). Metal code can only synchronize with other threads on the same device
+# (MSL has no scope that includes the host or other devices), so the system scope is the device
+# scope. The memory a scope names (see `split_syncscope`) is device, threadgroup, texture and
+# threadgroup imageblock memory, whose bits are MSL's mem_flags; plain scopes order device and
+# threadgroup memory. The flags only matter to ordered operations.
+#
+# Returns `nothing` for other scopes, which `validate_ir` rejects (like the NVPTX and AMDGPU
+# back-ends do) rather than guessing what they mean.
+function metal_syncscope(name::String)
+    parts = split_syncscope(name)
+    parts === nothing && return nothing
+    base, memory = parts
+    scope = if base == "singlethread"
         0
-    elseif ss == "subgroup"
+    elseif base == "subgroup"
         4
-    elseif ss == "workgroup"
+    elseif base == "workgroup"
         1
-    elseif ss == "device" || ss == "system"
+    elseif base == "device" || base == "system"
         2
     else
         return nothing
     end
-    return as == 3 && scope == 2 ? 1 : scope
+    return (; scope, flags=something(memory, METAL_MEM_FLAGS))
+end
+
+# The MSL thread_scope of an atomic operation or fence (see `metal_syncscope`). Threadgroup
+# memory is only shared within a threadgroup, and MSL never uses a wider scope for it.
+function metal_thread_scope(inst::LLVM.Instruction, as::Union{Nothing,Int}=nothing)
+    ss = metal_syncscope(inst.syncscope.name)
+    ss === nothing && return nothing
+    return as == 3 && ss.scope == 2 ? 1 : ss.scope
+end
+
+# The MSL mem_flags of an atomic operation or fence (see `metal_syncscope`)
+function metal_memory_flags(inst::LLVM.Instruction)
+    ss = metal_syncscope(inst.syncscope.name)
+    # (`validate_ir` rejects unknown scopes; without validation, use the default flags)
+    return ss === nothing ? METAL_MEM_FLAGS : ss.flags
 end
 
 # read-modify-write operations AIR has 32-bit intrinsics for, and the intrinsic names
@@ -1022,6 +1050,9 @@ function strengthen_relaxed_load!(@nospecialize(job::CompilerJob{MetalCompilerTa
         inst.pointer_operand.value_type.addrspace == 1 &&
         metal_thread_scope(inst, 1) == 2 || return false
     inst.ordering = LLVM.AtomicOrdering.Acquire
+    # (the memory a relaxed load's scope names doesn't matter, but the acquire has to cover
+    # the device memory it loads)
+    inst.syncscope = SyncScope("device"; context=context(inst))
     return true
 end
 
@@ -1075,7 +1106,7 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
     relaxed_device_load = inst isa LLVM.LoadInst && as == 1 &&
                           atomic_ordering(inst) == LLVM.AtomicOrdering.Monotonic
     scope = ConstantInt(T_i32, relaxed_device_load ? 2 : metal_thread_scope(inst, as))
-    flags = ConstantInt(T_i32, is_ordered(order) ? METAL_MEM_FLAGS : 0)
+    flags = ConstantInt(T_i32, is_ordered(order) ? metal_memory_flags(inst) : 0)
     # MSL sets the volatile bit on every atomic before 4.1, but since then only on atomics
     # of `volatile` objects. Without it, the back-end treats a load like a plain one (e.g.,
     # a relaxed load of memory the kernel doesn't write is hoisted into the uniform preamble,
@@ -1278,8 +1309,7 @@ end
 # seq_cst. Before Metal 3.2 the intrinsic is unavailable; retain the bare fence. Such targets
 # still require a back-end that accepts bare fences.
 #
-# Cover device and threadgroup memory (`METAL_MEM_FLAGS`), the shared writable LLVM address
-# spaces, and map the scope like for atomics (`metal_thread_scope`).
+# Map the scope and the memory it orders like for atomics (`metal_syncscope`).
 function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
     metal = job.config.target.metal
     metal >= v"3.2" || return false
@@ -1305,7 +1335,7 @@ function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod
             position!(builder, LLVM.before(inst))
             builder.debug_location = inst.debug_location
             call!(builder, fence_ft, fence_fn,
-                  [ConstantInt(T_int32, METAL_MEM_FLAGS), ConstantInt(T_int32, order),
+                  [ConstantInt(T_int32, metal_memory_flags(inst)), ConstantInt(T_int32, order),
                    ConstantInt(T_int32, scope)])
         end
         erase!(inst)

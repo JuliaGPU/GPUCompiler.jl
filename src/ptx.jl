@@ -109,6 +109,11 @@ dwarf_version(target::PTXCompilerTarget) = Int32(2) # Cuda only supports dwarfv2
 
 can_vectorize(job::CompilerJob{PTXCompilerTarget}) = true
 
+# NVPTX knows `block`, `cluster` and `device`. PTX has no scope for a warp, so use the block
+# one for subgroups, like Clang does.
+llvm_syncscope(::PTXCompilerTarget, name::String) =
+    name in ("subgroup", "workgroup") ? "block" : name
+
 ## job
 
 function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
