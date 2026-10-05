@@ -38,6 +38,38 @@ GPUCompiler.nest_params(params::EnzymeCompilerParams, other::AbstractCompilerPar
 module Runtime end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,<:AbstractEnzymeCompilerParams}) = Runtime
 
+
+## interpreter
+
+# Enzyme infers primal code with its own interpreter. This one only delegates to the default
+# `GPUInterpreter`, without exposing the latter's type or fields to GPUCompiler.
+struct MockInterpreter{I<:CC.AbstractInterpreter} <: CC.AbstractInterpreter
+    inner::I
+end
+
+GPUCompiler.get_interpreter(@nospecialize(job::CompilerJob{<:Any,PrimalCompilerParams})) =
+    MockInterpreter(@invoke GPUCompiler.get_interpreter(job::CompilerJob))
+
+CC.InferenceParams(interp::MockInterpreter) = CC.InferenceParams(interp.inner)
+CC.OptimizationParams(interp::MockInterpreter) = CC.OptimizationParams(interp.inner)
+CC.get_inference_cache(interp::MockInterpreter) = CC.get_inference_cache(interp.inner)
+CC.method_table(interp::MockInterpreter) = CC.method_table(interp.inner)
+CC.may_optimize(interp::MockInterpreter) = CC.may_optimize(interp.inner)
+CC.may_compress(interp::MockInterpreter) = CC.may_compress(interp.inner)
+CC.may_discard_trees(interp::MockInterpreter) = CC.may_discard_trees(interp.inner)
+CC.lock_mi_inference(::MockInterpreter, ::Core.MethodInstance) = nothing
+CC.unlock_mi_inference(::MockInterpreter, ::Core.MethodInstance) = nothing
+@static if isdefined(CC, :get_inference_world)
+    CC.get_inference_world(interp::MockInterpreter) = CC.get_inference_world(interp.inner)
+else
+    CC.get_world_counter(interp::MockInterpreter) = CC.get_world_counter(interp.inner)
+end
+@static if GPUCompiler.HAS_INTEGRATED_CACHE
+    CC.cache_owner(interp::MockInterpreter) = CC.cache_owner(interp.inner)
+else
+    CC.code_cache(interp::MockInterpreter) = CC.code_cache(interp.inner)
+end
+
 function GPUCompiler.compile_unhooked(output::Symbol, job::CompilerJob{<:EnzymeTarget})
     config = job.config
     primal_target = (job.config.target::EnzymeTarget).target

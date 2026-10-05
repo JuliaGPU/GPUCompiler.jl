@@ -409,7 +409,10 @@ isintrinsic(@nospecialize(job::CompilerJob), fn::String) = false
 # should return an `LLVMPtr` in the matching address space.
 runtime_cstring_type(@nospecialize(job::CompilerJob)) = Ptr{Cchar}
 
-# provide a specific interpreter to use.
+# provide a specific interpreter to use. a custom interpreter must infer in `job.world` and
+# store its results where GPUCompiler looks them up: on 1.11+, under
+# `CC.cache_owner(interp) === cache_owner(job)`; on 1.10, in the `CodeCache` behind
+# `CC.code_cache(interp)`.
 @static if HAS_INTEGRATED_CACHE
 function get_interpreter(@nospecialize(job::CompilerJob))
     GPUInterpreter(job.world;

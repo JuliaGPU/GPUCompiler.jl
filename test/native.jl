@@ -2615,7 +2615,8 @@ end
 end
 
 @testset "Mock Enzyme toplevel" begin
-    # Enzyme jobs can also be compiled directly, returning the entry point Enzyme generated
+    # Enzyme jobs can also be compiled directly, returning the entry point Enzyme generated.
+    # the primal function is inferred with Enzyme's own interpreter.
     mod = @eval module $(gensym())
         @noinline callee(x) = x + 1
         caller(x) = callee(x) * 2
@@ -2623,8 +2624,15 @@ end
     end
     for f in (mod.caller, mod.constant)
         source = methodinstance(typeof(f), Tuple{Int})
-        job = CompilerJob(source, CompilerConfig(Enzyme.EnzymeTarget(),
-                                                 Enzyme.EnzymeCompilerParams(); kernel=false))
+        target = Enzyme.EnzymeTarget()
+        primal_job = CompilerJob(source, CompilerConfig(target.target,
+                                                        Enzyme.PrimalCompilerParams();
+                                                        kernel=false))
+        @test GPUCompiler.get_interpreter(primal_job) isa Enzyme.MockInterpreter
+        @test precompile(primal_job)
+
+        job = CompilerJob(source, CompilerConfig(target, Enzyme.EnzymeCompilerParams();
+                                                 kernel=false))
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job)
             @test startswith(meta.entry.name, "enzyme_")
