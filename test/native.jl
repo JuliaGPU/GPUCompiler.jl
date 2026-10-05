@@ -2337,20 +2337,42 @@ end
 
 @testset "non-constant globals" begin
     mod = @eval module $(gensym())
+        const c = 1
         x = 1
-        function kernel(p)
+        global y::Int = 1
+        function read_const(p)
+            unsafe_store!(p, c)
+            return
+        end
+        function read_untyped(p)
             unsafe_store!(p, x)
+            return
+        end
+        function read_typed(p)
+            unsafe_store!(p, y)
+            return
+        end
+        function write_typed(p)
+            global y = unsafe_load(p)
             return
         end
     end
 
-    @static if VERSION >= v"1.12-"
-        @test_throws_message(InvalidIRError,
-                             Native.code_execution(mod.kernel, Tuple{Ptr{Int}})) do msg
-            occursin(GPUCompiler.NONCONST_GLOBAL, msg) &&
-            occursin(r"\(.*\.x\)", msg) &&
-            !occursin(GPUCompiler.DELAYED_BINDING, msg) &&
-            occursin("[1] kernel", msg)
+    # most of these accesses do not call into the runtime, and on targets that cannot throw,
+    # nothing else is left of them but a pointer to the binding's value
+    strategies = GPUCompiler.supports_relocatable_ir() ? (:bake, :patch) : (:bake,)
+    for jlruntime in (true, false), relocations in strategies
+        Native.code_execution(mod.read_const, Tuple{Ptr{Int}}; jlruntime, relocations)
+
+        for (f, name) in ((mod.read_untyped, :x), (mod.read_typed, :y),
+                          (mod.write_typed, :y))
+            @test_throws_message(InvalidIRError,
+                                 Native.code_execution(f, Tuple{Ptr{Int}};
+                                                       jlruntime, relocations)) do msg
+                occursin("$(GPUCompiler.NONCONST_GLOBAL) ($mod.$name)", msg) &&
+                !occursin(GPUCompiler.DELAYED_BINDING, msg) &&
+                occursin("[1] $(nameof(f))", msg)
+            end
         end
     end
 end

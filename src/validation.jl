@@ -201,11 +201,19 @@ function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Reloc
 end
 
 function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Relocations)
+    dl = f.parent.datalayout
     for bb in f.blocks, inst in bb.instructions
         if isa(inst, LLVM.CallInst)
             check_ir!(job, errors, inst, relocs)
         elseif isa(inst, LLVM.LoadInst)
             check_ir!(job, errors, inst)
+        end
+        if isa(inst, LLVM.LoadInst) || isa(inst, LLVM.StoreInst)
+            binding = accessed_binding(inst, relocs, dl)
+            if binding !== nothing
+                gr = binding.globalref
+                push!(errors, (global_access_error(job, gr), backtrace(inst), gr))
+            end
         end
     end
 
@@ -243,6 +251,63 @@ end
 function global_access_error(@nospecialize(job::CompilerJob), gr::GlobalRef)
     defined = Base.invoke_in_world(job.world, isdefined, gr.mod, gr.name)
     return defined ? NONCONST_GLOBAL : DELAYED_BINDING
+end
+
+const BINDING_VALUE_OFFSET = fieldoffset(Core.Binding, Base.fieldindex(Core.Binding, :value))
+
+# The binding whose value a load or store accesses, or `nothing`.
+#
+# Codegen reads and writes non-constant globals through a pointer to the binding's value,
+# without calling into the runtime. Often nothing else gives the access away: Julia 1.10 does
+# not check the read of a global that was assigned at compile time, and on targets that cannot
+# throw, the check for an undefined value is lowered to an exception like any other. Codegen
+# tags these accesses with a TBAA type it uses for nothing else, which we trust to mean that
+# the address points into a binding.
+function accessed_binding(inst::Union{LLVM.LoadInst,LLVM.StoreInst}, relocs::Relocations,
+                          dl::LLVM.DataLayout)
+    tbaa_type(inst) == "jtbaa_binding" || return nothing
+
+    ptr = inst.pointer_operand
+    offset = 0
+    while true
+        ptr = strip_pointer_casts(ptr)
+        ptr isa LLVM.GetElementPtrInst ||
+            (ptr isa ConstantExpr && ptr.opcode == LLVM.Opcode.GetElementPtr) || break
+        delta = LLVM.constant_offset(Int, ptr, dl)
+        delta === nothing && return nothing
+        offset += delta
+        ptr = ptr.operands[1]
+    end
+
+    obj = if ptr isa ConstantExpr && ptr.opcode == LLVM.Opcode.IntToPtr
+        # a literal address, as emitted by Julia 1.10 or resolved from a relocation
+        addr = first(ptr.operands)
+        addr isa ConstantInt || return nothing
+        base = convert(UInt, addr) + (offset - BINDING_VALUE_OFFSET) % UInt
+        Base.unsafe_pointer_to_objref(Ptr{Cvoid}(base))
+    elseif ptr isa LLVM.LoadInst && offset == BINDING_VALUE_OFFSET
+        # a relocation slot
+        ref = referenced_object(ptr, relocs)
+        ref === nothing ? nothing : something(ref)
+    else
+        nothing
+    end
+    return obj isa Core.Binding ? obj : nothing
+end
+
+# the name of the TBAA type of a memory access, or `nothing`
+function tbaa_type(inst::LLVM.Instruction)
+    md = LLVM.metadata(inst)
+    haskey(md, LLVM.MD_tbaa) || return nothing
+    tag = md[LLVM.MD_tbaa]
+    # struct-path tags are `!{base type, access type, offset}`, and types `!{name, ...}`
+    ops = LLVM.operands(tag)
+    length(ops) >= 2 || return nothing
+    access = ops[2]
+    access isa LLVM.MDNode || return nothing
+    name = first(LLVM.operands(access))
+    name isa LLVM.MDString || return nothing
+    return convert(String, name)
 end
 
 # the contents of a constant string global, or `nothing`
