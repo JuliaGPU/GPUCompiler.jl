@@ -306,6 +306,32 @@ end
     end
 end
 
+@testset "interactive reflection" begin
+    mod = @eval module $(gensym())
+        kernel(x::Int) = nothing
+    end
+    job, _ = Native.create_job(mod.kernel, (Int,))
+
+    # Cthulhu.jl is reached through the hook its package extension sets
+    original = GPUCompiler.descender[]
+    try
+        GPUCompiler.descender[] = nothing
+        @test_throws "using Cthulhu" GPUCompiler.code_typed(job; interactive=true)
+
+        calls = []
+        GPUCompiler.descender[] = (sig; kwargs...) -> push!(calls, (sig, NamedTuple(kwargs)))
+        GPUCompiler.code_typed(job; interactive=true, optimize=false)
+        GPUCompiler.code_warntype(job; interactive=true)
+        @test length(calls) == 2
+        @test all(((sig, _),) -> sig == Tuple{typeof(mod.kernel), Int}, calls)
+        @test all(((_, kw),) -> kw.interp isa GPUCompiler.GPUInterpreter, calls)
+        @test calls[1][2].warntype == false && calls[1][2].optimize == false
+        @test calls[2][2].warntype == true
+    finally
+        GPUCompiler.descender[] = original
+    end
+end
+
 @testset "method instances for type-valued callees and arguments" begin
     # JuliaLang/julia#62001: closed type-valued callees and arguments
     # dispatch on Core.TypeEgal keys instead of Type{T}

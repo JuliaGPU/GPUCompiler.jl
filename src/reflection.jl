@@ -1,8 +1,5 @@
 import InteractiveUtils
 
-using UUIDs
-const Cthulhu = Base.PkgId(UUID("f68482b8-f384-11e8-15f7-abe071a5a75f"), "Cthulhu")
-
 
 #
 # syntax highlighting
@@ -191,6 +188,18 @@ include("reflection_compat.jl")
 # code_* replacements
 #
 
+# interactive reflection lives in the CthulhuExt package extension, which publishes its
+# entry point through this hook. Cthulhu is not loaded on demand: doing so would compile
+# and initialize a large package in the middle of a debugging session.
+const descender = Ref{Union{Nothing,Function}}(nothing)
+
+function descend(@nospecialize(sig); kwargs...)
+    f = descender[]
+    f === nothing && error("""Interactive code reflection requires Cthulhu.jl.
+                              Run `using Cthulhu` first; if it is not installed, install it with `import Pkg; Pkg.add("Cthulhu")`.""")
+    Base.invokelatest(f, sig; kwargs...)
+end
+
 function code_lowered(@nospecialize(job::CompilerJob); kwargs...)
     sig = job.source.specTypes  # XXX: can we just use the method instance?
     code_lowered_by_type(sig; kwargs...)
@@ -199,12 +208,8 @@ end
 function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
     sig = job.source.specTypes  # XXX: can we just use the method instance?
     if interactive
-        # call Cthulhu without introducing a dependency on Cthulhu
-        mod = get(Base.loaded_modules, Cthulhu, nothing)
-        mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
         interp = get_interpreter(job)
-        descend_code_typed = getfield(mod, :descend_code_typed)
-        descend_code_typed(sig; interp, kwargs...)
+        descend(sig; warntype=false, interp, kwargs...)
     else
         interp = get_interpreter(job)
         Base.code_typed_by_type(sig; interp, kwargs...)
@@ -215,13 +220,8 @@ function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Boo
     sig = job.source.specTypes  # XXX: can we just use the method instance?
     if interactive
         @assert io == stdout
-        # call Cthulhu without introducing a dependency on Cthulhu
-        mod = get(Base.loaded_modules, Cthulhu, nothing)
-        mod===nothing && error("Interactive code reflection requires Cthulhu; please install and load this package first.")
-
         interp = get_interpreter(job)
-        descend_code_warntype = getfield(mod, :descend_code_warntype)
-        descend_code_warntype(sig; interp, kwargs...)
+        descend(sig; warntype=true, interp, kwargs...)
     else
         interp = get_interpreter(job)
         code_warntype_by_type(io, sig; interp, kwargs...)
