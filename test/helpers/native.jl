@@ -23,6 +23,11 @@ NativeCompilerJob = CompilerJob{NativeCompilerTarget,CompilerParams}
 GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
+# `method_table` can also be a tuple of tables, ordered from most to least specific
+GPUCompiler.method_tables(@nospecialize(job::NativeCompilerJob)) =
+    let mt = job.config.params.method_table
+        mt isa Tuple ? mt : (mt,)
+    end
 GPUCompiler.can_safepoint(@nospecialize(job::NativeCompilerJob)) = job.config.params.entry_safepoint
 
 # Every mode ends up in an ORC JIT: `patch` emits definitions for `load` to write after adding

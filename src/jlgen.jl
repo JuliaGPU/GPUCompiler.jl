@@ -122,11 +122,37 @@ end
 
 Base.Experimental.@MethodTable(GLOBAL_METHOD_TABLE)
 
+"""
+    GPUCompiler.SHARED_METHOD_TABLE
+
+Overlays that apply to all code GPUCompiler compiles for a device, whatever the back-end.
+This is meant for package extensions that provide generic device overrides, e.g., for a
+package that should behave differently when its code isn't compiled for the host:
+
+```julia
+Base.Experimental.@overlay GPUCompiler.SHARED_METHOD_TABLE MyPackage.is_native() = false
+```
+
+The default [`method_table_view`](@ref) consults this table after the back-end's own
+tables (see [`method_tables`](@ref)), and before Base. The native target, which compiles
+code for the host like Julia does, doesn't use it. Neither do back-ends that still override
+`method_table_view`, or interpreters that use `GLOBAL_METHOD_TABLE` directly (like Enzyme's
+for CPU code), so code compiled that way behaves as if it were compiled by Julia.
+"""
+Base.Experimental.@MethodTable(SHARED_METHOD_TABLE)
+@public SHARED_METHOD_TABLE
+
 # Priority-lookup method table. On 1.11+ we re-export CompilerCaching's; the 1.10 copy
 # (with the older `MethodMatchResult`-returning `findall` signature) lives in deprecated.jl.
 @static if HAS_INTEGRATED_CACHE
     using CompilerCaching: StackedMethodTable
 end
+
+# look up methods in each table in turn, then in Base
+stack_method_tables(world::UInt) = CC.InternalMethodTable(world)
+stack_method_tables(world::UInt, mt::Core.MethodTable) = StackedMethodTable(world, mt)
+stack_method_tables(world::UInt, mt::Core.MethodTable, rest::Core.MethodTable...) =
+    StackedMethodTable(world, mt, stack_method_tables(world, rest...))
 
 
 ## interpreter
