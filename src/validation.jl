@@ -140,6 +140,7 @@ const POINTER_FUNCTION = "call through a literal pointer"
 const CCALL_FUNCTION   = "call to an external C function"
 const LAZY_FUNCTION    = "call to a lazy-initialized function"
 const DELAYED_BINDING  = "use of an undefined name"
+const NONCONST_GLOBAL  = "use of a non-constant global"
 const DYNAMIC_CALL     = "dynamic function invocation"
 const UNKNOWN_INTRINSIC = "call to an unknown LLVM intrinsic"
 const UNSUPPORTED_ALLOCATION = "allocation of an object with references"
@@ -154,6 +155,8 @@ function Base.showerror(io::IO, err::InvalidIRError)
                 printstyled(io, " (call to ", meta, ")"; color=:red)
             elseif kind == DELAYED_BINDING
                 printstyled(io, " (use of '", meta, "')"; color=:red)
+            elseif kind == NONCONST_GLOBAL
+                printstyled(io, " (", meta, ")"; color=:red)
             elseif kind == STATIC_ASSERTION
                 printstyled(io, " (", meta, ")"; color=:red)
             elseif kind == UNSUPPORTED_ALLOCATION
@@ -235,6 +238,13 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.LoadInst)
     return errors
 end
 
+# Codegen accesses a global at run time when it is not a defined constant in the job's world.
+# Tell apart names that are undefined from globals that are defined but not constant.
+function global_access_error(@nospecialize(job::CompilerJob), gr::GlobalRef)
+    defined = Base.invoke_in_world(job.world, isdefined, gr.mod, gr.name)
+    return defined ? NONCONST_GLOBAL : DELAYED_BINDING
+end
+
 # the contents of a constant string global, or `nothing`
 function constant_string(val::LLVM.Value)
     while val isa LLVM.ConstantExpr
@@ -287,8 +297,8 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
                 # pry the binding from the IR
                 ref = referenced_object(inst.arguments[1], relocs)
                 ref === nothing && error("Unknown binding")
-                obj = something(ref)
-                push!(errors, (DELAYED_BINDING, bt, obj.globalref))
+                gr = something(ref).globalref
+                push!(errors, (global_access_error(job, gr), bt, gr))
             catch e
                 @safe_debug "Decoding arguments to jl_reresolve_binding_value_seqcst failed" inst bb=inst.parent
                 push!(errors, (DELAYED_BINDING, bt, nothing))

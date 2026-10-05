@@ -2335,6 +2335,26 @@ end
     end
 end
 
+@testset "non-constant globals" begin
+    mod = @eval module $(gensym())
+        x = 1
+        function kernel(p)
+            unsafe_store!(p, x)
+            return
+        end
+    end
+
+    @static if VERSION >= v"1.12-"
+        @test_throws_message(InvalidIRError,
+                             Native.code_execution(mod.kernel, Tuple{Ptr{Int}})) do msg
+            occursin(GPUCompiler.NONCONST_GLOBAL, msg) &&
+            occursin(r"\(.*\.x\)", msg) &&
+            !occursin(GPUCompiler.DELAYED_BINDING, msg) &&
+            occursin("[1] kernel", msg)
+        end
+    end
+end
+
 @testset "specialized vararg invoke" begin
     mod = @eval module $(gensym())
         @noinline child(x, xs...) = x + sum(xs)
