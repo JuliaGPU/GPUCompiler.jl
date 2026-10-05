@@ -31,6 +31,10 @@ function finish_module!(job::CompilerJob{NativeCompilerTarget}, mod::LLVM.Module
     return entry
 end
 
+# code for the host, which shouldn't see the overlays for devices
+method_table_view(@nospecialize(job::CompilerJob{NativeCompilerTarget})) =
+    stack_method_tables(job.world, method_tables(job)...)
+
 ## job
 
 uses_julia_runtime(job::CompilerJob{NativeCompilerTarget}) = job.config.target.jlruntime

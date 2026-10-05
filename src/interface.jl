@@ -108,8 +108,9 @@ Julia 1.11+, the job-level `cache_owner(job)` returns the pre-boxed token stored
 
 The default token covers the full `target` and `params` instances plus `always_inline`.
 That is sufficient because the inference inputs derived from a job — `method_table`,
-`method_table_view`, `inference_params`, `optimization_params` and `julia_ir_passes` —
-must be pure functions of those values, so back-ends normally leave this untouched.
+`method_tables`, `method_table_view`, `inference_params`, `optimization_params` and
+`julia_ir_passes` — must be pure functions of those values, so back-ends normally leave this
+untouched.
 
 When overriding, the returned value must match under `===`/`jl_egal` after package-image
 deserialization: use immutable containers, and only reference mutable objects (like method
@@ -636,7 +637,36 @@ end # HAS_INTEGRATED_CACHE
 #       results correctly.
 # deprecate method_table on next-breaking release
 method_table(@nospecialize(job::CompilerJob)) = GLOBAL_METHOD_TABLE
-method_table_view(@nospecialize(job::CompilerJob)) = get_method_table_view(job.world, method_table(job))
+
+"""
+    method_tables(job::CompilerJob)::Tuple{Vararg{Core.MethodTable}}
+
+The method tables with overlays for code compiled by `job`, ordered from most to least
+specific: a method in an earlier table wins over one in a later table, even when the latter
+is more specific. The default is the job's [`method_table`](@ref).
+
+Back-ends that combine several tables, e.g., their own overlays with the ones from a package
+of device intrinsics, should return all of them here rather than override
+[`method_table_view`](@ref). GPUCompiler then adds [`SHARED_METHOD_TABLE`](@ref) at the
+bottom of the stack.
+
+Like `method_table`, this may only depend on the job's `target` and `params` (see
+[`cache_owner`](@ref)).
+"""
+method_tables(@nospecialize(job::CompilerJob)) = (method_table(job),)
+@public method_tables
+
+"""
+    method_table_view(job::CompilerJob)::Core.Compiler.MethodTableView
+
+The view that inference uses to look up methods for `job`. The default stacks the tables
+from [`method_tables`](@ref), then [`SHARED_METHOD_TABLE`](@ref), over Base's method table.
+
+Back-ends should not need to override this. Ones that do replace the whole stack, including
+`SHARED_METHOD_TABLE`, so code compiled for them behaves as if it were compiled by Julia.
+"""
+method_table_view(@nospecialize(job::CompilerJob)) =
+    stack_method_tables(job.world, method_tables(job)..., SHARED_METHOD_TABLE)
 
 # the inference parameters to use when constructing the GPUInterpreter
 function inference_params(@nospecialize(job::CompilerJob))

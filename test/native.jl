@@ -2391,6 +2391,75 @@ end
     end
 end
 
+@testset "shared method table" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+
+        Base.Experimental.@MethodTable(method_table)
+        Base.Experimental.@MethodTable(other_method_table)
+
+        @inline shared() = 0
+        @inline stacked() = 0
+        shared_kernel() = shared()
+        stacked_kernel() = stacked()
+
+        Base.Experimental.@overlay GPUCompiler.SHARED_METHOD_TABLE shared() = 1
+        Base.Experimental.@overlay GPUCompiler.SHARED_METHOD_TABLE stacked() = 1
+        Base.Experimental.@overlay other_method_table stacked() = 2
+        Base.Experimental.@overlay method_table stacked() = 3
+    end
+
+    # shared overlays apply to code for devices, but not to code for the host
+    if :NVPTX in LLVM.backends()
+        @test @filecheck begin
+            @check_label "@julia_shared_kernel"
+            @check "ret i64 1"
+            PTX.code_llvm(mod.shared_kernel, Tuple{})
+        end
+    end
+    @test @filecheck begin
+        @check_label "@julia_shared_kernel"
+        @check "ret i64 0"
+        Native.code_llvm(mod.shared_kernel, Tuple{})
+    end
+    @test mod.shared_kernel() == 0
+
+    # the tables from `method_tables` come first, in order
+    @test @filecheck begin
+        @check_label "@julia_stacked_kernel"
+        @check "ret i64 2"
+        Native.code_llvm(mod.stacked_kernel, Tuple{}; method_table=mod.other_method_table)
+    end
+    @test @filecheck begin
+        @check_label "@julia_stacked_kernel"
+        @check "ret i64 3"
+        Native.code_llvm(mod.stacked_kernel, Tuple{};
+                         method_table=(mod.method_table, mod.other_method_table))
+    end
+    @test @filecheck begin
+        @check_label "@julia_stacked_kernel"
+        @check "ret i64 2"
+        Native.code_llvm(mod.stacked_kernel, Tuple{};
+                         method_table=(mod.other_method_table, mod.method_table))
+    end
+
+    # an overlay whose result differs from Julia's must not be concretely evaluated by Julia
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        flag() = true
+        Base.@assume_effects :foldable probe() = flag()
+        kernel() = probe()
+        Base.Experimental.@overlay GPUCompiler.SHARED_METHOD_TABLE flag() = false
+    end
+    if :NVPTX in LLVM.backends()
+        @test @filecheck begin
+            @check_label "@julia_kernel"
+            @check "ret i8 0"
+            PTX.code_llvm(mod.kernel, Tuple{})
+        end
+    end
+end
+
 @testset "runtime functions from overlay methods" begin
     # runtime library functions (`signal_exception`, `malloc`, ...) should be resolved
     # through the job's method table, so that back-ends can keep GPU-only code out of
