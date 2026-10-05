@@ -2424,6 +2424,64 @@ end
     @test any(GPUCompiler.is_runtime_call, err.errors)
 end
 
+@testset "explanations in Julia code" begin
+    mod = @eval module $(gensym())
+        f(x) = x + 1
+        g = f
+        h = f
+        global typed::Function = f
+        function kernel(p)
+            unsafe_store!(p, g(1))
+            return
+        end
+        function typed_kernel(p)
+            unsafe_store!(p, typed(1))
+            return
+        end
+        function ambiguous(p)
+            unsafe_store!(p, g(1) + h(2.0))
+            return
+        end
+    end
+
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{Ptr{Int}};
+                                               jlruntime=false)) do msg
+        occursin(r"Julia code.*: .*\.g\(::Int64\), with .*\.g::Any", msg) &&
+        # Julia 1.14 types a type argument as `Core.TypeEgal{T}`
+        occursin(r"Julia code.*: convert\(::(Type|Core\.TypeEgal)\{Int64\}, ::Any\)", msg)
+    end
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.typed_kernel, Tuple{Ptr{Int}};
+                                               jlruntime=false)) do msg
+        occursin(r"Julia code.*: .*\.typed\(::Int64\), with .*\.typed::Function", msg)
+    end
+
+    # neither callee is known, and both calls are on the same line (so that they are reported
+    # as a single error)
+    err = try
+        Native.code_execution(mod.ambiguous, Tuple{Ptr{Int}}; jlruntime=false)
+        nothing
+    catch err
+        err
+    end
+    @test err isa InvalidIRError
+    explanations = [get(err.explanations, error, nothing) for error in err.errors
+                    if error[1] == GPUCompiler.DYNAMIC_CALL && error[3] === nothing]
+    @test !isempty(explanations)
+    for explanation in explanations
+        @test explanation !== nothing
+        code, precision = explanation
+        if VERSION >= v"1.14-"
+            # the column of a debug location identifies the statement
+            @test precision === :exact
+        else
+            @test precision === :ambiguous
+            @test any(contains(".g(::Int64)"), code) && any(contains(".h(::Float64)"), code)
+        end
+    end
+end
+
 @testset "specialized vararg invoke" begin
     mod = @eval module $(gensym())
         @noinline child(x, xs...) = x + sum(xs)

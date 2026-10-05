@@ -75,8 +75,7 @@ function irgen(@nospecialize(job::CompilerJob))
         specfunc = compiled[job.source].specfunc
     end
 
-    compiled[job.source] =
-        (; compiled[job.source].ci, func, specfunc)
+    compiled[job.source] = (; compiled[job.source]..., func, specfunc)
 
     # minimal required optimization
     @tracepoint "rewrite" begin

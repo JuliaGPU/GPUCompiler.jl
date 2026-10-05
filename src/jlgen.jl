@@ -947,6 +947,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     end
 
     # process all compiled method instances
+    sources = IdDict{CodeInstance,CodeInfo}()
+    if codeinfo_pairs !== nothing && job.config.validate
+        for (ci′, src) in codeinfo_pairs
+            sources[ci′] = src
+        end
+    end
     compiled = Dict()
     function compiled_entry(ci′::CodeInstance; required::Bool=true)
         llvm_func_idx = Ref{Int32}(-1)
@@ -978,7 +984,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             nothing
         end
 
-        (; ci=ci′, func=llvm_func, specfunc=llvm_specfunc)
+        # the Julia IR it was compiled from, if we provided it, to explain errors in the IR
+        # (see `compiled_source`)
+        src = get(sources, ci′, nothing)
+
+        (; ci=ci′, func=llvm_func, specfunc=llvm_specfunc, src)
     end
 
     for (ci′, mi) in zip(code_instances, method_instances)

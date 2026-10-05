@@ -132,7 +132,11 @@ const IRError = Tuple{String, StackTraces.StackTrace, Any} # kind, bt, meta
 struct InvalidIRError <: Exception
     job::CompilerJob
     errors::Vector{IRError}
+    # the Julia code that errors were traced back to (see `explain_error`)
+    explanations::Dict{IRError,Any}
 end
+InvalidIRError(job::CompilerJob, errors::Vector{IRError}) =
+    InvalidIRError(job, errors, Dict{IRError,Any}())
 
 const RUNTIME_FUNCTION = "call to the Julia runtime"
 const UNKNOWN_FUNCTION = "call to an unknown function"
@@ -145,7 +149,8 @@ const DYNAMIC_CALL     = "dynamic function invocation"
 const UNKNOWN_INTRINSIC = "call to an unknown LLVM intrinsic"
 const UNSUPPORTED_ALLOCATION = "allocation of an object with references"
 
-function show_reason(io::IO, (kind, bt, meta)::IRError)
+function show_reason(io::IO, err::InvalidIRError, error::IRError)
+    kind, bt, meta = error
     prefix = kind == STATIC_ASSERTION ? "Reason: $kind" : "Reason: unsupported $kind"
     printstyled(io, "\n$prefix"; color=:red)
     if meta !== nothing
@@ -159,6 +164,17 @@ function show_reason(io::IO, (kind, bt, meta)::IRError)
             printstyled(io, " (", meta, ")"; color=:red)
         elseif kind == UNSUPPORTED_ALLOCATION
             printstyled(io, " (", meta, ")"; color=:red)
+        end
+    end
+    explanation = get(err.explanations, error, nothing)
+    if explanation !== nothing
+        code, precision = explanation
+        if precision === :exact
+            print(io, "\nJulia code: ", code)
+        elseif precision === :likely
+            print(io, "\nJulia code (likely): ", code)
+        else
+            print(io, "\nJulia code (one of): ", join(code, "; "))
         end
     end
     Base.show_backtrace(io, bt)
@@ -206,10 +222,10 @@ function Base.showerror(io::IO, err::InvalidIRError)
         # only collapse runtime calls where there are other errors to look at
         others = filter(!is_runtime_call, errors)
         if isempty(others) && (origin !== nothing || !has_other_errors)
-            foreach(error -> show_reason(io, error), errors)
+            foreach(error -> show_reason(io, err, error), errors)
             continue
         end
-        foreach(error -> show_reason(io, error), others)
+        foreach(error -> show_reason(io, err, error), others)
         runtime_calls = filter(is_runtime_call, errors)
         isempty(runtime_calls) && continue
         names = unique(String(error[3]) for error in runtime_calls)
@@ -243,19 +259,39 @@ end
 # `show` via `showerror`, avoiding the default field-dump that derefs disposed IR
 Base.show(io::IO, err::InvalidIRError) = showerror(io, err)
 
-function check_ir(job, mod::LLVM.Module, relocs::Relocations=Relocations())
-    errors = check_ir!(job, IRError[], mod, relocs)
+# `compiled` describes the functions in the module, as returned by `irgen`; with it, errors are
+# traced back to the Julia code that caused them.
+function check_ir(job, mod::LLVM.Module, relocs::Relocations=Relocations(); compiled=nothing)
+    explanations = Dict{IRError,Any}()
+    explain = if compiled === nothing
+        nothing
+    else
+        emitted = nothing
+        function (inst, error)
+            error[1] == DYNAMIC_CALL || return
+            explanation = try
+                emitted === nothing && (emitted = emitted_functions(mod, compiled))
+                explain_error(inst, error, emitted, job.world)
+            catch e
+                @safe_debug "Explaining an IR error failed" exception=(e, catch_backtrace())
+                nothing
+            end
+            explanation === nothing || (explanations[error] = explanation)
+        end
+    end
+    errors = check_ir!(job, IRError[], mod, relocs, explain)
     unique!(errors)
     if !isempty(errors)
-        throw(InvalidIRError(job, errors))
+        throw(InvalidIRError(job, errors, explanations))
     end
 
     return
 end
 
-function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Relocations)
+function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Relocations,
+                   explain=nothing)
     for f in mod.functions
-        check_ir!(job, errors, f, relocs)
+        check_ir!(job, errors, f, relocs, explain)
     end
 
     # custom validation
@@ -264,9 +300,11 @@ function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Reloc
     return errors
 end
 
-function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Relocations)
+function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Relocations,
+                   explain=nothing)
     dl = f.parent.datalayout
     for bb in f.blocks, inst in bb.instructions
+        nerrors = length(errors)
         if isa(inst, LLVM.CallInst)
             check_ir!(job, errors, inst, relocs)
         elseif isa(inst, LLVM.LoadInst)
@@ -280,6 +318,11 @@ function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Reloc
             else
                 gr = binding.globalref
                 push!(errors, (global_access_error(job, gr), backtrace(inst), gr))
+            end
+        end
+        if explain !== nothing
+            for i in nerrors+1:length(errors)
+                explain(inst, errors[i])
             end
         end
     end
@@ -532,6 +575,180 @@ function check_ir!(job, errors::Vector{IRError}, inst::LLVM.CallInst, relocs::Re
     end
 
     return errors
+end
+
+## explanations
+
+# Errors are found in the LLVM IR, but the user wrote Julia code. Trace an error back to the
+# statement in the (optimized) Julia IR that codegen compiled it from, and describe that
+# statement. Only debug information connects both: from Julia 1.14, codegen encodes the
+# statement in the column of the innermost location of an instruction, while on earlier
+# versions statements can only be matched by their source locations, which does not always
+# identify a single statement.
+
+# The functions codegen emitted, by the linkage name of their debug information.
+function emitted_functions(mod::LLVM.Module, compiled)
+    emitted = Dict{String,Any}()
+    functions = mod.functions
+    for entry in values(compiled)
+        for name in (entry.func, entry.specfunc)
+            name === nothing && continue
+            emitted[name] = entry
+            # functions may have been renamed since, but not their debug information
+            f = get(functions, name, nothing)
+            f === nothing && continue
+            sp = LLVM.subprogram(f)
+            sp === nothing && continue
+            linkage = linkage_name(sp)
+            linkage === nothing || (emitted[linkage] = entry)
+        end
+    end
+    return emitted
+end
+
+# the linkage name of a subprogram, which LLVM's C API does not expose
+function linkage_name(sp::LLVM.Metadata)
+    sp isa LLVM.MDNode || return nothing
+    ops = LLVM.operands(sp)
+    length(ops) >= 4 || return nothing
+    name = ops[4]
+    return name isa LLVM.MDString ? convert(String, name) : nothing
+end
+
+# the Julia IR that codegen compiled a function from
+function compiled_source(entry)
+    src = get(entry, :src, nothing)
+    src isa CodeInfo && return src
+    isdefined(entry.ci, :inferred) || return nothing
+    inferred = entry.ci.inferred
+    inferred isa CodeInfo && return inferred
+    inferred isa Union{String,Vector{UInt8}} || return nothing
+    return Base._uncompressed_ir(entry.ci, inferred)
+end
+
+# the lines of a statement and of the calls it was inlined into, innermost first
+@static if VERSION >= v"1.12-"
+    function statement_lines(src::CodeInfo, @nospecialize(def), pc::Int)
+        nodes = Base.IRShow.buildLineInfoNode(src.debuginfo, def, pc)
+        return Int[node.line for node in Iterators.reverse(nodes)]
+    end
+else
+    function statement_lines(src::CodeInfo, @nospecialize(def), pc::Int)
+        lines = Int[]
+        idx = src.codelocs[pc]
+        while idx > 0
+            node = src.linetable[idx]
+            push!(lines, node.line)
+            idx = node.inlined_at
+        end
+        return lines
+    end
+end
+
+# The statement that an error originates from, as `(description, :exact)` or
+# `(description, :likely)`, or as `(descriptions, :ambiguous)`; `nothing` if not found.
+function explain_error(inst::LLVM.Instruction, (kind, bt, meta)::IRError, emitted,
+                       world::UInt)
+    kind == DYNAMIC_CALL || return nothing
+
+    # find the function that codegen emitted this code in, and the lines leading up to it
+    loc = inst.debug_location
+    loc === nothing && return nothing
+    pc = Int(loc.column)
+    lines = Int[]
+    entry = nothing
+    while loc !== nothing
+        push!(lines, loc.line)
+        scope = loc.scope
+        name = scope === nothing ? nothing : linkage_name(scope)
+        entry = name === nothing ? nothing : get(emitted, name, nothing)
+        entry === nothing || break
+        loc = loc.inlined_at
+    end
+    entry === nothing && return nothing
+    src = compiled_source(entry)
+    src === nothing && return nothing
+    mi = entry.ci.def
+    mi isa MethodInstance || (mi = mi.def)  # an `ABIOverride`
+
+    if 0 < pc <= length(src.code)
+        description = describe_call(src, mi, pc, meta, world)
+        description === nothing || return (description, :exact)
+    end
+    candidates = filter(pc -> statement_lines(src, mi, pc) == lines, eachindex(src.code))
+    # prefer statements that match what was identified in the LLVM IR
+    descriptions = String[]
+    for strict in (true, false)
+        for pc in candidates
+            description = describe_call(src, mi, pc, meta, world; strict)
+            description === nothing || push!(descriptions, description)
+        end
+        isempty(descriptions) || break
+    end
+    unique!(descriptions)
+    isempty(descriptions) && return nothing
+    return length(descriptions) == 1 ? (only(descriptions), :likely) :
+                                       (descriptions, :ambiguous)
+end
+
+function value_type(src::CodeInfo, mi::MethodInstance, @nospecialize(x), world::UInt)
+    if x isa Core.SSAValue
+        return CC.widenconst(src.ssavaluetypes[x.id])
+    elseif x isa Core.Argument
+        src.slottypes === nothing || return CC.widenconst(src.slottypes[x.n])
+        return fieldtype(mi.specTypes, x.n)
+    end
+    value = constant_value(x, world)
+    return value === nothing ? Any : Core.Typeof(something(value))
+end
+
+# the global that an operand reads, if it is one. Julia 1.14 reads globals in optimized IR
+# through the binding partition the access was resolved to.
+function global_read(@nospecialize(x))
+    x isa GlobalRef && return x
+    @static if isdefined(Base, :partition_owner)
+        x isa Core.BindingPartition && return Base.partition_owner(x).globalref
+    end
+    return nothing
+end
+
+# the value of a constant operand, if it is one
+function constant_value(@nospecialize(x), world::UInt)
+    gr = global_read(x)
+    if gr !== nothing
+        Base.invoke_in_world(world, isdefined, gr.mod, gr.name) &&
+            Base.invoke_in_world(world, isconst, gr.mod, gr.name) || return nothing
+        return Some(Base.invoke_in_world(world, getglobal, gr.mod, gr.name))
+    elseif x isa QuoteNode
+        return Some(x.value)
+    elseif x isa Union{Core.SSAValue,Core.Argument,Expr}
+        return nothing
+    end
+    return Some(x)
+end
+
+# Describe a call that is dispatched at run time, to `callee` if that was identified. When
+# `strict`, the call has to be to that callee, instead of possibly being to it.
+function describe_call(src::CodeInfo, mi::MethodInstance, pc::Int, @nospecialize(callee),
+                       world::UInt; strict::Bool=false)
+    stmt = src.code[pc]
+    (stmt isa Expr && stmt.head === :call) || return nothing
+    f = constant_value(stmt.args[1], world)
+    if callee !== nothing
+        f === nothing && strict && return nothing
+        f === nothing || something(f) === callee || return nothing
+    end
+    args = join(("::$(value_type(src, mi, arg, world))" for arg in stmt.args[2:end]), ", ")
+    if f !== nothing
+        something(f) isa Core.Builtin && return nothing
+        return "$(something(f))($args)"
+    end
+    # a non-constant callee, e.g., one read from a global
+    callee = stmt.args[1]
+    T = value_type(src, mi, callee, world)
+    gr = callee isa Core.SSAValue ? global_read(src.code[callee.id]) : global_read(callee)
+    name = gr === nothing ? "the callee" : string(gr)
+    return "$name($args), with $name::$T"
 end
 
 # helper function to check for illegal values in an LLVM module
