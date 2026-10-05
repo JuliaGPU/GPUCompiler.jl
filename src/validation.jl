@@ -145,26 +145,90 @@ const DYNAMIC_CALL     = "dynamic function invocation"
 const UNKNOWN_INTRINSIC = "call to an unknown LLVM intrinsic"
 const UNSUPPORTED_ALLOCATION = "allocation of an object with references"
 
+function show_reason(io::IO, (kind, bt, meta)::IRError)
+    prefix = kind == STATIC_ASSERTION ? "Reason: $kind" : "Reason: unsupported $kind"
+    printstyled(io, "\n$prefix"; color=:red)
+    if meta !== nothing
+        if kind == RUNTIME_FUNCTION || kind == UNKNOWN_FUNCTION || kind == POINTER_FUNCTION || kind == DYNAMIC_CALL || kind == CCALL_FUNCTION || kind == LAZY_FUNCTION
+            printstyled(io, " (call to ", meta, ")"; color=:red)
+        elseif kind == DELAYED_BINDING
+            printstyled(io, " (use of '", meta, "')"; color=:red)
+        elseif kind == NONCONST_GLOBAL
+            printstyled(io, " (", meta, ")"; color=:red)
+        elseif kind == STATIC_ASSERTION
+            printstyled(io, " (", meta, ")"; color=:red)
+        elseif kind == UNSUPPORTED_ALLOCATION
+            printstyled(io, " (", meta, ")"; color=:red)
+        end
+    end
+    Base.show_backtrace(io, bt)
+end
+
+# Calls that codegen emits into Julia's runtime support on its own, e.g., for exception
+# handling, GC frames or boxing. They are invalid too, but where they occur alongside another
+# error, that one is usually what needs fixing, and they are not worth listing one by one.
+function is_runtime_call((kind, bt, meta)::IRError)
+    kind in (RUNTIME_FUNCTION, UNKNOWN_FUNCTION, POINTER_FUNCTION, LAZY_FUNCTION,
+             CCALL_FUNCTION) || return false
+    (meta isa AbstractString || meta isa Symbol) || return false
+    name = String(meta)
+    return startswith(name, "jl_") || startswith(name, "ijl_") || startswith(name, "julia.")
+end
+
+# The frames of the call in the outermost function that an error originates from, or `nothing`
+# if the backtrace does not reach that function.
+function error_origin(bt::StackTraces.StackTrace)
+    isempty(bt) && return nothing
+    any(frame -> frame.func === Symbol("multiple call sites"), bt) && return nothing
+    return bt[max(end-1, 1):end]
+end
+
 function Base.showerror(io::IO, err::InvalidIRError)
     print(io, "InvalidIRError: compiling ", err.job.source, " resulted in invalid LLVM IR")
-    for (kind, bt, meta) in err.errors
-        prefix = kind == STATIC_ASSERTION ? "Reason: $kind" : "Reason: unsupported $kind"
-        printstyled(io, "\n$prefix"; color=:red)
-        if meta !== nothing
-            if kind == RUNTIME_FUNCTION || kind == UNKNOWN_FUNCTION || kind == POINTER_FUNCTION || kind == DYNAMIC_CALL || kind == CCALL_FUNCTION || kind == LAZY_FUNCTION
-                printstyled(io, " (call to ", meta, ")"; color=:red)
-            elseif kind == DELAYED_BINDING
-                printstyled(io, " (use of '", meta, "')"; color=:red)
-            elseif kind == NONCONST_GLOBAL
-                printstyled(io, " (", meta, ")"; color=:red)
-            elseif kind == STATIC_ASSERTION
-                printstyled(io, " (", meta, ")"; color=:red)
-            elseif kind == UNSUPPORTED_ALLOCATION
-                printstyled(io, " (", meta, ")"; color=:red)
-            end
+
+    # group errors by where they originate from, keeping them in order
+    groups = Dict{Any,Vector{IRError}}()
+    origins = []
+    for error in err.errors
+        origin = error_origin(error[2])
+        key = origin === nothing ? nothing : [(frame.func, frame.file, frame.line) for frame in origin]
+        if !haskey(groups, key)
+            groups[key] = IRError[]
+            push!(origins, (key, origin))
         end
-        Base.show_backtrace(io, bt)
+        push!(groups[key], error)
     end
+
+    has_other_errors = any(!is_runtime_call, err.errors)
+    collapsed = 0
+    for (key, origin) in origins
+        errors = groups[key]
+        # only collapse runtime calls where there are other errors to look at
+        others = filter(!is_runtime_call, errors)
+        if isempty(others) && (origin !== nothing || !has_other_errors)
+            foreach(error -> show_reason(io, error), errors)
+            continue
+        end
+        foreach(error -> show_reason(io, error), others)
+        runtime_calls = filter(is_runtime_call, errors)
+        isempty(runtime_calls) && continue
+        names = unique(String(error[3]) for error in runtime_calls)
+        shown = names[1:min(end, 5)]
+        printstyled(io, "\nReason: unsupported calls into the Julia runtime from the same code (",
+                    join(shown, ", "), length(names) > length(shown) ? ", …" : "", ")";
+                    color=:red)
+        if origin === nothing
+            print(io, "\nin functions with several callers")
+        else
+            Base.show_backtrace(io, origin)
+        end
+        collapsed += length(runtime_calls)
+    end
+    if collapsed > 0
+        print(io, "\n\n", collapsed, " of the ", length(err.errors),
+              " errors were summarized; they are all listed in the `errors` field of this exception.")
+    end
+
     println(io)
     printstyled(io, "Hint"; bold = true, color = :cyan)
     printstyled(

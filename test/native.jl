@@ -2400,6 +2400,30 @@ end
     end
 end
 
+@testset "summarized runtime calls" begin
+    mod = @eval module $(gensym())
+        function kernel(p)
+            println("hi")
+            return
+        end
+    end
+
+    err = try
+        Native.code_execution(mod.kernel, Tuple{Ptr{Int}}; jlruntime=false)
+        nothing
+    catch err
+        err
+    end
+    @test err isa InvalidIRError
+    msg = sprint(showerror, err)
+    @test occursin("$(GPUCompiler.NONCONST_GLOBAL) (Base.stdout)", msg)
+    @test occursin("calls into the Julia runtime from the same code", msg)
+    @test occursin("errors were summarized", msg)
+    # every error is still available, but not every one is shown on its own
+    @test count("Reason:", msg) < length(err.errors)
+    @test any(GPUCompiler.is_runtime_call, err.errors)
+end
+
 @testset "specialized vararg invoke" begin
     mod = @eval module $(gensym())
         @noinline child(x, xs...) = x + sum(xs)
