@@ -50,6 +50,10 @@ function llvm_machine(target::GCNCompilerTarget)
 end
 
 
+# AMDGPU calls the device scope `agent`, and the subgroup one `wavefront`
+llvm_syncscope(::GCNCompilerTarget, name::String) =
+    name == "device" ? "agent" : name == "subgroup" ? "wavefront" : name
+
 ## job
 
 function isintrinsic(@nospecialize(job::CompilerJob{GCNCompilerTarget}), fn::String)

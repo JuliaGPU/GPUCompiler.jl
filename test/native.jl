@@ -769,6 +769,32 @@ end
     end
 end
 
+@testset "synchronization scopes" begin
+    # front-ends spell scopes like LLVM's SPIR-V back-end; CPUs only have the system scope
+    mod = @eval module $(gensym())
+        kernel() = Base.llvmcall("""
+            fence syncscope("singlethread") seq_cst
+            fence syncscope("subgroup") seq_cst
+            fence syncscope("device") seq_cst
+            fence syncscope("workgroup") seq_cst
+            fence seq_cst
+            fence syncscope("singlethread") seq_cst
+            fence syncscope("system") acquire
+            fence syncscope("agent") release
+            ret void
+            """, Nothing, Tuple{})
+    end
+    @test @filecheck implicit_check_not=["subgroup", "workgroup", "device", "agent"] begin
+        @check_label "define void @{{(julia|j)_kernel[0-9_]*}}"
+        @check "fence syncscope(\"singlethread\") seq_cst"
+        @check "fence seq_cst"
+        @check "fence syncscope(\"singlethread\") seq_cst"
+        @check "fence acquire"
+        @check "fence release"
+        Native.code_llvm(mod.kernel, Tuple{})
+    end
+end
+
 @testset "atomic field modifications" begin
     # from Julia 1.13, `@atomic x.f += 1` is a call to the `julia.atomicmodify`
     # pseudo-intrinsic, which has to be expanded (JuliaLang/julia#57010)

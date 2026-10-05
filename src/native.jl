@@ -35,6 +35,11 @@ end
 method_table_view(@nospecialize(job::CompilerJob{NativeCompilerTarget})) =
     stack_method_tables(job.world, method_tables(job)...)
 
+# LLVM's CPU back-ends only distinguish the system scope from `singlethread`, and X86 even
+# treats other scopes like `singlethread`, so use the system scope for them, like Clang does
+llvm_syncscope(::NativeCompilerTarget, name::String) =
+    name == "singlethread" ? name : "system"
+
 ## job
 
 uses_julia_runtime(job::CompilerJob{NativeCompilerTarget}) = job.config.target.jlruntime

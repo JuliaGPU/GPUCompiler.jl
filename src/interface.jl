@@ -72,6 +72,12 @@ end
 
 have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
 
+# the target's name for the synchronization scope `name` of an atomic instruction. front-ends
+# spell scopes like Clang's `__MEMORY_SCOPE_*` and LLVM's SPIR-V back-end do: `singlethread`,
+# `subgroup`, `workgroup`, `device`, and `system` (LLVM's default), which back-ends map to the
+# names their LLVM back-end knows. other names are passed on, for scopes specific to a target.
+llvm_syncscope(@nospecialize(target::AbstractCompilerTarget), name::String) = name
+
 dwarf_version(target::AbstractCompilerTarget) = Int32(4) # It seems every target supports v4 bar cuda
 
 # If your target performs nested compilation, this function should reconstruct your target with a new inner target

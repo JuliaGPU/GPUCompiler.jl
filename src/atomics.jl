@@ -15,6 +15,23 @@ atomic_value_type(inst::LLVM.LoadInst) = inst.value_type
 atomic_value_type(inst::Union{LLVM.StoreInst,LLVM.AtomicRMWInst}) = inst.value_operand.value_type
 atomic_value_type(inst::LLVM.AtomicCmpXchgInst) = inst.compare_operand.value_type
 
+# rename the synchronization scopes of atomic instructions to the target's (see
+# `llvm_syncscope`)
+function lower_syncscopes!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    target = job.config.target
+    changed = false
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        inst isa LLVM.FenceInst || is_atomic_memop(inst) || continue
+        scope = inst.syncscope
+        # (by ID, as a scope named "system" is called like the default one)
+        new_scope = SyncScope(llvm_syncscope(target, scope.name); context=context(inst))
+        new_scope.id == scope.id && continue
+        inst.syncscope = new_scope
+        changed = true
+    end
+    return changed
+end
+
 # the ordering of an atomic memory operation, merging a compare-exchange's orderings
 atomic_ordering(inst::LLVM.AtomicCmpXchgInst) = merged_ordering(inst)
 atomic_ordering(inst::LLVM.Instruction) = inst.ordering

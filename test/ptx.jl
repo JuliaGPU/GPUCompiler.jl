@@ -10,6 +10,31 @@
     end
 end
 
+@testset "synchronization scopes" begin
+    # front-ends spell scopes like LLVM's SPIR-V back-end; they're renamed for the target
+    mod = @eval module $(gensym())
+        kernel() = Base.llvmcall("""
+            fence syncscope("singlethread") seq_cst
+            fence syncscope("subgroup") seq_cst
+            fence syncscope("device") seq_cst
+            fence syncscope("workgroup") seq_cst
+            fence seq_cst
+            fence syncscope("cluster") seq_cst
+            ret void
+            """, Nothing, Tuple{})
+    end
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_kernel[0-9_]*}}"
+        @check "fence syncscope(\"singlethread\") seq_cst"
+        @check "fence syncscope(\"block\") seq_cst"
+        @check "fence syncscope(\"device\") seq_cst"
+        @check "fence syncscope(\"block\") seq_cst"
+        @check "fence seq_cst"
+        @check "fence syncscope(\"cluster\") seq_cst"
+        PTX.code_llvm(mod.kernel, Tuple{})
+    end
+end
+
 @testset "kernel state survives a runtime rebuild" begin
     # Clearing the runtime cache forces the library link inside `emit_llvm` to rebuild
     # the runtime (nested compilation); the kernel must still get its state argument
