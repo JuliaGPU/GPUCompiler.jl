@@ -303,7 +303,8 @@ end
 
 
 @testset "Mock Enzyme" begin
-    Enzyme.deferred_codegen_id(typeof(identity), Tuple{Vector{Float64}}, Val(false))
+    id = Enzyme.deferred_codegen_id(typeof(identity), Tuple{Vector{Float64}}, Val(false))
+    @test id isa UInt && id >= UInt(1) << 62
     # Check that we can call this function from the CPU, to support deferred codegen for Enzyme.
-    @test ccall("extern deferred_codegen", llvmcall, UInt, (UInt,), 3) == 3
+    @test ccall("extern deferred_codegen", llvmcall, UInt, (UInt,), id) == id
 end

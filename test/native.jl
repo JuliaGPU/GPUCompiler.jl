@@ -2589,9 +2589,16 @@ end
     ir = sprint(io->Native.code_llvm(io, dkernel, Tuple{Vector{Float64}};
                                      debuginfo=:none, dump_module=true))
     @test !occursin("deferred_codegen", ir)
-    # the deferred function is only called from within the module, so it gets internalized
+    # the deferred call resolves to the entry point the sibling compiler returned, which is
+    # only called from within the module, so it gets internalized
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_dkernel_[0-9]+}}"
+        @check "call {{.*}} @enzyme_{{(julia|j)_kernel_[0-9]+}}"
+        @check_label "define internal {{.*}} @enzyme_{{(julia|j)_kernel_[0-9]+}}"
+        @check "call {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+        Native.code_llvm(dkernel, Tuple{Vector{Float64}}; debuginfo=:none, dump_module=true)
+    end
     @test occursin(r"define internal .*@julia_kernel", ir)
-    @test occursin(r"call .*@julia_kernel", ir)
 
     # Enzyme's wrappers are `alwaysinline`, and should be dropped entirely once inlined
     function dkernel_inline(a)
@@ -2604,7 +2611,29 @@ end
     ir = sprint(io->Native.code_llvm(io, dkernel_inline, Tuple{Vector{Float64}};
                                      debuginfo=:none, dump_module=true))
     @test !occursin("deferred_codegen", ir)
-    @test !occursin("@julia_kernel", ir)
+    @test !occursin(r"@(enzyme_)?(julia|j)_kernel", ir)
+end
+
+@testset "Mock Enzyme toplevel" begin
+    # Enzyme jobs can also be compiled directly, returning the entry point Enzyme generated
+    mod = @eval module $(gensym())
+        @noinline callee(x) = x + 1
+        caller(x) = callee(x) * 2
+        constant(x) = 42
+    end
+    for f in (mod.caller, mod.constant)
+        source = methodinstance(typeof(f), Tuple{Int})
+        job = CompilerJob(source, CompilerConfig(Enzyme.EnzymeTarget(),
+                                                 Enzyme.EnzymeCompilerParams(); kernel=false))
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job)
+            @test startswith(meta.entry.name, "enzyme_")
+            @test haskey(meta.compiled, source)
+            if f === mod.caller
+                @test occursin(r"define .*@(julia|j)_callee", string(ir))
+            end
+        end
+    end
 end
 
 @testset "Mock Enzyme deferred relocations" begin

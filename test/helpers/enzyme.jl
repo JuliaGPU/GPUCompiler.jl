@@ -1,7 +1,8 @@
 module Enzyme
 
 using ..GPUCompiler
-using LLVM, LLVM.IR
+using LLVM, LLVM.IR, LLVM.Build
+import Core.Compiler as CC
 
 struct EnzymeTarget{Target<:AbstractCompilerTarget} <: AbstractCompilerTarget
     target::Target
@@ -17,6 +18,7 @@ GPUCompiler.llvm_machine(target::EnzymeTarget) = GPUCompiler.llvm_machine(target
 GPUCompiler.nest_target(::EnzymeTarget, other::AbstractCompilerTarget) = EnzymeTarget(other)
 GPUCompiler.have_fma(target::EnzymeTarget, T::Type) = GPUCompiler.have_fma(target.target, T)
 GPUCompiler.dwarf_version(target::EnzymeTarget) = GPUCompiler.dwarf_version(target.target)
+GPUCompiler.llvm_targetinfo(target::EnzymeTarget) = GPUCompiler.llvm_targetinfo(target.target)
 
 abstract type AbstractEnzymeCompilerParams <: AbstractCompilerParams end
 struct EnzymeCompilerParams{Params<:AbstractCompilerParams} <: AbstractEnzymeCompilerParams
@@ -32,6 +34,9 @@ EnzymeCompilerParams(params=PrimalCompilerParams(); always_inline=false) =
 
 GPUCompiler.nest_params(params::EnzymeCompilerParams, other::AbstractCompilerParams) =
     EnzymeCompilerParams(other; params.always_inline)
+
+module Runtime end
+GPUCompiler.runtime_module(::CompilerJob{<:Any,<:AbstractEnzymeCompilerParams}) = Runtime
 
 function GPUCompiler.compile_unhooked(output::Symbol, job::CompilerJob{<:EnzymeTarget})
     config = job.config
@@ -52,18 +57,37 @@ function GPUCompiler.compile_unhooked(output::Symbol, job::CompilerJob{<:EnzymeT
         # ??? entry_abi
     )
     primal_job = CompilerJob(job.source, primal_config, job.world)
+    @assert output === :llvm
     ir, meta = GPUCompiler.compile_unhooked(output, primal_job)
 
-    # Normally, Enzyme would run here and transform the output of the primal job.
-    if output === :llvm && job.config.params.always_inline
-        push!(meta.entry.function_attributes, EnumAttribute(:alwaysinline))
+    # Enzyme generates a new function that calls (a transformed version of) the primal, and
+    # returns that as the entry point, with only the metadata GPUCompiler needs.
+    primal = meta.entry
+    ft = primal.function_type
+    entry = LLVM.Function(ir, "enzyme_" * primal.name, ft)
+    entry.callconv = primal.callconv
+    for i in 1:length(ft.parameters)
+        append!(entry.parameter_attributes[i], primal.parameter_attributes[i])
+    end
+    @dispose builder=IRBuilder() begin
+        position!(builder, LLVM.at_end(BasicBlock(entry, "top")))
+        ret = call!(builder, ft, primal, collect(entry.parameters))
+        ret.callconv = primal.callconv
+        ft.return_type == LLVM.VoidType() ? ret!(builder) : ret!(builder, ret)
+    end
+    if job.config.params.always_inline
+        push!(entry.function_attributes, EnumAttribute(:alwaysinline))
+        push!(primal.function_attributes, EnumAttribute(:alwaysinline))
     end
 
-    return ir, meta
+    return ir, (; entry, meta.compiled, meta.relocations)
 end
 
 import GPUCompiler: deferred_codegen_jobs
-import Core.Compiler as CC
+
+# Enzyme's ids are word-sized values (pointers or hashes), passed as a `UInt`, rather than
+# the small sequential ids GPUCompiler's own `deferred_codegen` uses.
+const deferred_codegen_ids = Threads.Atomic{Int}(1 << 62)
 
 function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::Type,
                                        always_inline::Type)
@@ -122,11 +146,11 @@ function deferred_codegen_id_generator(world::UInt, source, self, ft::Type, tt::
     config = CompilerConfig(target, params; kernel=false)
     job = CompilerJob(mi, config, world)
 
-    id = length(deferred_codegen_jobs) + 1
+    id = Threads.atomic_add!(deferred_codegen_ids, 1)
     deferred_codegen_jobs[id] = job
 
     # return the deferred_codegen_id
-    push!(new_ci.code, CC.ReturnNode(id))
+    push!(new_ci.code, CC.ReturnNode(reinterpret(UInt, id)))
     push!(new_ci.ssaflags, 0x00)
         @static if isdefined(Core, :DebugInfo)
     else
@@ -149,7 +173,7 @@ end
 
 @inline function deferred_codegen(f::Type, tt::Type; always_inline::Bool=false)
     id = deferred_codegen_id(f, tt, Val(always_inline))
-    ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), id)
+    ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (UInt,), id)
 end
 
 end

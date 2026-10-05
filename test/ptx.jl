@@ -243,8 +243,8 @@ end
     ir = sprint(io->PTX.code_llvm(io, dkernel, Tuple{Ptr{Float64}};
                                   debuginfo=:none, dump_module=true, kernel=true))
     @test !occursin("deferred_codegen", ir)
-    @test occursin(r"define internal .*@julia_kernel", ir)
-    @test occursin(r"call .*@julia_kernel", ir)
+    @test occursin(r"define internal .*@enzyme_(julia|j)_kernel", ir)
+    @test occursin(r"call .*@(julia|j)_kernel", ir)
 end
 
 end
