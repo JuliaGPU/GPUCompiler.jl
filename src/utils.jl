@@ -154,10 +154,11 @@ using Logging
 
 const STDERR_HAS_COLOR = Ref{Bool}(false)
 
-# Prevent invalidation when packages define custom loggers
-# Using invoke in combination with @nospecialize eliminates backedges to these methods
+# Call into the latest world: custom loggers are usually defined after the compiler,
+# which may run in an older world (e.g. through `invoke_in_world`). As a dynamic call,
+# combined with @nospecialize, it also avoids invalidation by recording no backedges.
 function _invoked_min_enabled_level(@nospecialize(logger))
-    return invoke(Logging.min_enabled_level, Tuple{typeof(logger)}, logger)::LogLevel
+    return Base.invokelatest(Logging.min_enabled_level, logger)::LogLevel
 end
 
 # define safe loggers for use in generated functions (where task switches are not allowed)
