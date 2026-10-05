@@ -249,8 +249,9 @@ function Base.showerror(io::IO, err::InvalidIRError)
     printstyled(io, "Hint"; bold = true, color = :cyan)
     printstyled(
         io,
-        ": catch this exception as `err` and call `code_typed(err; interactive = true)` to",
-        " introspect the erroneous code with Cthulhu.jl";
+        ": to introspect the erroneous code with Cthulhu.jl, wrap the failing call in",
+        " `@device_code_typed only_failed=true interactive=true`, or call",
+        " `code_typed(e; interactive=true)` on this exception from within a `catch e` block";
         color = :cyan,
     )
     return

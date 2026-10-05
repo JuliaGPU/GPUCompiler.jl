@@ -243,6 +243,10 @@ end
     output = inspected()
     @test occursin("bad", output) && !occursin("good", output)
 
+    # which is what the error message suggests doing
+    err = try compile_bad() catch err; err end
+    @test occursin("@device_code_typed only_failed=true interactive=true", sprint(showerror, err))
+
     # without a failure, nothing is inspected and the macro returns as usual
     @test isempty(GPUCompiler.@device_code_typed only_failed=true compile_good())
     @test isempty(GPUCompiler.@device_code_typed only_failed=true nothing)
