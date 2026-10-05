@@ -777,6 +777,7 @@ end
             fence syncscope("subgroup") seq_cst
             fence syncscope("device") seq_cst
             fence syncscope("workgroup") seq_cst
+            fence syncscope("workgroup-mem-none") seq_cst
             fence seq_cst
             fence syncscope("singlethread") seq_cst
             fence syncscope("system") acquire

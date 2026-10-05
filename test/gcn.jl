@@ -66,6 +66,7 @@ end
             fence syncscope("workgroup") seq_cst
             fence seq_cst
             fence syncscope("agent-one-as") seq_cst
+            fence syncscope("device-mem-local") acquire
             ret void
             """, Nothing, Tuple{})
     end
@@ -77,6 +78,8 @@ end
         @check "fence syncscope(\"workgroup\") seq_cst"
         @check "fence seq_cst"
         @check "fence syncscope(\"agent-one-as\") seq_cst"
+        # GCN orders all memory, so the memory a scope names is dropped
+        @check "fence syncscope(\"agent\") acquire"
         GCN.code_llvm(mod.kernel, Tuple{})
     end
 end

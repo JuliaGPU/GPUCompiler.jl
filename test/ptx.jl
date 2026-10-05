@@ -20,6 +20,8 @@ end
             fence syncscope("workgroup") seq_cst
             fence seq_cst
             fence syncscope("cluster") seq_cst
+            fence syncscope("device-mem-global") acquire
+            fence syncscope("workgroup-mem-local+image") release
             ret void
             """, Nothing, Tuple{})
     end
@@ -31,6 +33,9 @@ end
         @check "fence syncscope(\"block\") seq_cst"
         @check "fence seq_cst"
         @check "fence syncscope(\"cluster\") seq_cst"
+        # PTX orders all memory, so the memory a scope names is dropped
+        @check "fence syncscope(\"device\") acquire"
+        @check "fence syncscope(\"block\") release"
         PTX.code_llvm(mod.kernel, Tuple{})
     end
 end

@@ -78,6 +78,11 @@ have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
 # names their LLVM back-end knows. other names are passed on, for scopes specific to a target.
 llvm_syncscope(@nospecialize(target::AbstractCompilerTarget), name::String) = name
 
+# whether the target restricts ordered atomics and fences to the memory their synchronization
+# scope names (see `split_syncscope`). other targets order all memory, which LLVM does anyway,
+# so the memory is dropped from the scope before `llvm_syncscope` renames it.
+syncscope_memory(@nospecialize(target::AbstractCompilerTarget)) = false
+
 dwarf_version(target::AbstractCompilerTarget) = Int32(4) # It seems every target supports v4 bar cuda
 
 # If your target performs nested compilation, this function should reconstruct your target with a new inner target
