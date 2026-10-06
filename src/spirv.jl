@@ -146,6 +146,11 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 
 ## job
 
+# the `__spirv_*` builtins of SPIR-V instructions, e.g. the ones `lower_atomics!` selects,
+# which the back-ends translate (plain or Itanium-mangled)
+isintrinsic(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}), fn::String) =
+    occursin(r"^(_Z\d+)?__spirv_", fn)
+
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                         entry::LLVM.Function)
     # update calling convention

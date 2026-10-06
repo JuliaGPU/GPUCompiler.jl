@@ -497,6 +497,9 @@ end
                          for scope in scopes]...)
     end
 
+    # validation accepts the builtins the atomics are lowered to
+    @test SPIRV.code_execution(mod.add!, Tuple{Ptr, Val{:device}}; backend)[1] isa String
+
     # generic pointers, which the optimizer can't make specific across a call
     # (output is captured before checking it, as a large module can block the pipe
     #  `@filecheck` reads it from while the compiler holds Julia's codegen lock)
