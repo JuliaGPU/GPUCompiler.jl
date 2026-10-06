@@ -123,3 +123,29 @@ function demote_private_atomic!(inst::LLVM.Instruction)
     end
     return
 end
+
+# Replace a `cmpxchg` of pointers with one of integers of the same size, like `AtomicExpand`'s
+# `convertCmpXchgToIntegerType`, for targets that only support integer atomics (complementing
+# LLVM.jl's `cast_atomic_to_integer!`). Returns the new instruction.
+function cast_cmpxchg_to_integer!(inst::LLVM.AtomicCmpXchgInst)
+    T = atomic_value_type(inst)
+    T_int = LLVM.IntType(atomic_bits(inst))
+    new = @dispose builder=IRBuilder() begin
+        position!(builder, LLVM.before(inst))
+        builder.debug_location = inst.debug_location
+        cmp = ptrtoint!(builder, inst.compare_operand, T_int)
+        desired = ptrtoint!(builder, inst.new_value_operand, T_int)
+        new = atomic_cmpxchg!(builder, inst.pointer_operand, cmp, desired,
+                              inst.success_ordering, inst.failure_ordering;
+                              scope=inst.syncscope, align=inst.alignment,
+                              volatile=inst.volatile, weak=inst.weak)
+        copy_atomic_metadata!(new, inst)
+        old = inttoptr!(builder, extract_value!(builder, new, 0), T)
+        res = insert_value!(builder, UndefValue(inst.value_type), old, 0)
+        res = insert_value!(builder, res, extract_value!(builder, new, 1), 1)
+        replace_uses!(inst, res)
+        new
+    end
+    erase!(inst)
+    return new
+end

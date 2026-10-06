@@ -479,9 +479,9 @@ end
 end
 
 @testset "LLVM atomics" begin
-    # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`, Atomix' `get`/`set!`) must
-    # reach the back-end, while Julia's `unordered` heap-reference accesses, which SPIR-V
-    # cannot express when they are of pointers, become plain ones
+    # atomics in user code (e.g. UnsafeAtomics' `load`/`store!`, Atomix' `get`/`set!`) are
+    # selected to SPIR-V builtins, while Julia's `unordered` heap-reference accesses, which
+    # SPIR-V cannot express when they are of pointers, become plain ones
     mod = @eval module $(gensym())
         import ..SPIRV: Atomics
         function kernel(p::Ptr{Int32}, q::Ptr{Int32},
@@ -498,10 +498,8 @@ end
     @test @filecheck begin
         @check_label "define spir_kernel void @_Z6kernel"
         @check_not "unordered"
-        @check "load atomic i32"
-        @check_same "acquire"
-        @check "store atomic i32"
-        @check_same "release"
+        @check "call i32 @_Z18__spirv_AtomicLoadPU3AS1Vijj({{.+}}, i32 0, i32 898)"
+        @check "call void @_Z19__spirv_AtomicStorePU3AS1Vijji({{.+}}, i32 0, i32 900, i32 {{.+}})"
         @check_not "unordered"
         @check "ret void"
         SPIRV.code_llvm(mod.kernel, tt; backend, kernel=true)

@@ -96,6 +96,10 @@ function runtime_cstring_type(job::CompilerJob{SPIRVCompilerTarget})
     end
 end
 
+# atomics and fences can be restricted to the memory their synchronization scope names, which
+# `lower_atomics!` passes to SPIR-V in their MemorySemantics
+syncscope_memory(@nospecialize(target::SPIRVCompilerTarget)) = true
+
 # OpenCL requires `fma` to be supported, and correctly rounded, so `fma` should use it rather
 # than Julia's Float64-based `fma_emulated` fallback (which fails without Float64 support).
 have_fma(@nospecialize(target::SPIRVCompilerTarget), T::Type) = true
@@ -201,6 +205,9 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # SPIR-V cannot express atomic loads and stores of pointers, which is what Julia's
     # `unordered` heap-reference accesses are (see `demote_unordered_atomics!`)
     demote_unordered_atomics!(mod)
+
+    # the SPIR-V back-ends mishandle atomics, so select the instructions for them here
+    lower_atomics!(job, mod)
 
     # the SPIR-V back-ends lower the floating-point minimum and maximum intrinsics to OpenCL's
     # `fmin`/`fmax`, which ignore NaNs and don't order signed zeros
@@ -394,6 +401,28 @@ end
 
 ## atomics
 
+# lowering of LLVM atomics
+#
+# Both SPIR-V back-ends mishandle plain LLVM atomics and fences: the LLVM back-end caches the
+# IDs of synchronization scopes across contexts, so later compilations get wrong scopes; both
+# emit fences that order no memory, and ordered atomics that only order the memory their
+# pointer points to; and the Khronos translator exits the process on operations it doesn't
+# support. So `lower_atomics!` does what `AtomicExpand` and instruction selection do on other
+# targets, and turns every atomic operation and fence into a call to the `__spirv_*` builtin
+# for its SPIR-V instruction, with constant Scope and MemorySemantics operands, which both
+# back-ends translate as they are:
+#
+# - atomics on the thread's own memory become plain accesses (`demote_private_atomic!`);
+# - operations SPIR-V cannot express are rewritten in terms of ones it can (see
+#   `spirv_atomic_action`): floating-point and pointer loads, stores and exchanges, and pointer
+#   compare-exchanges, are cast to integers, and read-modify-write operations without an
+#   instruction the target supports become compare-exchange loops (using LLVM.jl's copies of
+#   `AtomicExpand`'s expansions);
+# - the remaining operations and fences are selected to `__spirv_*` calls (`select_atomic!`).
+#
+# `validate_ir` rejects the atomics that cannot be lowered, which `lower_atomics!` leaves
+# alone.
+
 # SPIR-V Scope operands
 const SPIRV_SCOPE_CROSS_DEVICE = 0
 const SPIRV_SCOPE_DEVICE = 1
@@ -541,6 +570,177 @@ function spirv_atomic_action(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}
     end
 
     return action
+end
+
+# The SPIR-V Scope of an atomic operation or fence (see `spirv_syncscope`). Invocation is not
+# a valid scope for atomic operations in the OpenCL environment, so those that are not on the
+# thread's own memory (which are demoted) use the narrowest one that always is.
+function spirv_scope(inst::LLVM.Instruction)
+    scope = spirv_syncscope(inst.syncscope.name).scope
+    if scope == SPIRV_SCOPE_INVOCATION && !(inst isa LLVM.FenceInst)
+        return SPIRV_SCOPE_WORKGROUP
+    end
+    return scope
+end
+
+# The SPIR-V MemorySemantics of an atomic operation or fence with the given ordering. LLVM's
+# orderings order all memory, so unless the synchronization scope names the memory (see
+# `spirv_syncscope`), they order subgroup, workgroup and cross-workgroup memory, whatever
+# the pointer's address space, like DPC++ does for every atomic, also relaxed ones. Fences
+# also order image memory, like the Khronos translator's do.
+function spirv_semantics(inst::LLVM.Instruction, order::LLVM.AtomicOrdering.T)
+    memory = something(spirv_syncscope(inst.syncscope.name).memory,
+                       SPIRV_SUBGROUP_MEMORY | SPIRV_WORKGROUP_MEMORY |
+                       SPIRV_CROSS_WORKGROUP_MEMORY |
+                       (inst isa LLVM.FenceInst ? SPIRV_IMAGE_MEMORY : 0))
+    ordering = order == LLVM.AtomicOrdering.Acquire ? 0x2 :
+               order == LLVM.AtomicOrdering.Release ? 0x4 :
+               order == LLVM.AtomicOrdering.AcquireRelease ? 0x8 :
+               order == LLVM.AtomicOrdering.SequentiallyConsistent ? 0x10 : 0x0
+    return ordering | memory
+end
+
+# Itanium-mangled names of the types of `__spirv_*` builtin parameters, like Clang mangles
+# OpenCL C's (pointers to volatile values in an address space, scopes and semantics unsigned)
+function spirv_mangle(T::LLVMType, elty::Union{Nothing,LLVMType}=nothing)
+    if T isa LLVM.PointerType
+        return "PU3AS$(T.addrspace)V" * spirv_mangle(elty)
+    elseif T isa LLVM.IntegerType
+        return T.width == 32 ? "i" : "l"
+    elseif T isa LLVM.HalfType
+        return "Dh"
+    elseif T isa LLVM.FloatType
+        return "f"
+    else
+        return "d"
+    end
+end
+
+# Call the `__spirv_*` builtin `name`, which takes the operands `args`
+function call_spirv_builtin!(builder::IRBuilder, mod::LLVM.Module, name::String,
+                             T_ret::LLVMType, args::Vector{<:LLVM.Value}, mangled::String)
+    fn = "_Z$(length(name))$(name)$(mangled)"
+    ft = LLVM.FunctionType(T_ret, LLVMType[arg.value_type for arg in args])
+    f = declare!(mod, fn, ft) do
+        f = LLVM.Function(mod, fn, ft)
+        # (not `argmemonly` or `readonly`: they order other memory)
+        for attr in (:mustprogress, :nounwind, :willreturn)
+            push!(f.function_attributes, EnumAttribute(attr))
+        end
+        f
+    end
+    return call!(builder, ft, f, args)
+end
+
+# Replace an atomic operation or fence by the equivalent `__spirv_*` call.
+function select_atomic!(mod::LLVM.Module, inst::LLVM.Instruction)
+    T_i32 = LLVM.Int32Type()
+    scope = ConstantInt(T_i32, spirv_scope(inst))
+    semantics(order) = ConstantInt(T_i32, spirv_semantics(inst, order))
+
+    @dispose builder=IRBuilder() begin
+        position!(builder, LLVM.before(inst))
+        builder.debug_location = inst.debug_location
+        if inst isa LLVM.FenceInst
+            call_spirv_builtin!(builder, mod, "__spirv_MemoryBarrier", LLVM.VoidType(),
+                                [scope, semantics(inst.ordering)], "jj")
+            erase!(inst)
+            return
+        end
+
+        ptr = inst.pointer_operand
+        T = atomic_value_type(inst)
+        mangled = spirv_mangle(ptr.value_type, T) * "jj"
+        new = if inst isa LLVM.LoadInst
+            call_spirv_builtin!(builder, mod, "__spirv_AtomicLoad", T,
+                                [ptr, scope, semantics(inst.ordering)], mangled)
+        elseif inst isa LLVM.StoreInst
+            call_spirv_builtin!(builder, mod, "__spirv_AtomicStore", LLVM.VoidType(),
+                                [ptr, scope, semantics(inst.ordering), inst.value_operand],
+                                mangled * spirv_mangle(T))
+        elseif inst isa LLVM.AtomicRMWInst
+            val = inst.value_operand
+            if inst.binop == LLVM.AtomicRMWBinOp.FSub
+                val = fneg!(builder, val)
+            end
+            name = "__spirv_Atomic$(SPIRV_ATOMICRMW_OPS[inst.binop])"
+            call_spirv_builtin!(builder, mod, name, T,
+                                [ptr, scope, semantics(inst.ordering), val],
+                                mangled * spirv_mangle(T))
+        else
+            # SPIR-V requires the failure ordering to be no stronger than the success one,
+            # which LLVM doesn't, so strengthen the latter (like `AtomicExpand` does for
+            # targets with a single ordering). a weak compare-exchange may fail spuriously,
+            # so a strong one is fine too. derive the success flag from the old value.
+            cmp, desired = inst.compare_operand, inst.new_value_operand
+            old = call_spirv_builtin!(builder, mod, "__spirv_AtomicCompareExchange", T,
+                                      [ptr, scope, semantics(merged_ordering(inst)),
+                                       semantics(inst.failure_ordering), desired, cmp],
+                                      mangled * "j" * spirv_mangle(T)^2)
+            success = icmp!(builder, LLVM.IntPredicate.EQ, old, cmp)
+            res = insert_value!(builder, UndefValue(inst.value_type), old, 0)
+            insert_value!(builder, res, success, 1)
+        end
+        isempty(inst.uses) || replace_uses!(inst, new)
+    end
+    erase!(inst)
+    return
+end
+
+function lower_atomics!(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
+                        mod::LLVM.Module)
+    changed = false
+    @tracepoint "lower atomics" begin
+
+    # (the expansions split blocks, so collect the atomics first)
+    atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
+               if is_atomic_memop(inst)]
+    for inst in atomics
+        action = spirv_atomic_action(job, inst)
+        if action === :demote
+            demote_private_atomic!(inst)
+        elseif action === :cast && inst isa LLVM.AtomicCmpXchgInst
+            cast_cmpxchg_to_integer!(inst)
+        elseif action === :cast
+            cast_atomic_to_integer!(inst)
+        elseif action === :cmpxchg_loop
+            expand_to_cmpxchg!(inst)
+        else
+            continue
+        end
+        changed = true
+    end
+
+    # select what is left, including the operations the expansions introduced
+    unsupported = IRError[]
+    for f in mod.functions, bb in f.blocks, inst in collect(bb.instructions)
+        if is_atomic_memop(inst)
+            action = spirv_atomic_action(job, inst)
+        elseif inst isa LLVM.FenceInst
+            action = spirv_syncscope(inst.syncscope.name) === nothing ?
+                     "fence with synchronization scope $(repr(inst.syncscope.name))" : :select
+        else
+            continue
+        end
+        if action === :select
+            select_atomic!(mod, inst)
+            changed = true
+        elseif action isa String
+            push!(unsupported, (action, backtrace(inst), string(inst)))
+        else
+            error("Atomic operation was not legalized ($action): $inst")
+        end
+    end
+
+    # `validate_ir` rejects the unsupported atomics left in the module, but validation can be
+    # disabled (e.g., for reflection). Rather than having the back-ends miscompile them, or
+    # the Khronos translator exit, fail here.
+    if !isempty(unsupported) && !job.config.validate
+        throw(InvalidIRError(job, unsupported))
+    end
+
+    end
+    return changed
 end
 
 
