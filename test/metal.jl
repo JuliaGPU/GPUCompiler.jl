@@ -1331,6 +1331,134 @@ end
         @test "air.fast_sqrt.f32" in called_names(f)
         @test (verify(mod); true)
     end
+
+    # transcendentals, including those only newer LLVMs have
+    ops = [("exp", 1), ("exp2", 1), ("log", 1), ("log10", 1), ("pow", 2)]
+    LLVM.version() >= v"18" && push!(ops, ("exp10", 1))
+    LLVM.version() >= v"19" && append!(ops, [("tan", 1), ("asin", 1), ("tanh", 1)])
+    LLVM.version() >= v"20" && push!(ops, ("atan2", 2))
+    Context() do ctx
+        ir = IOBuffer()
+        for (op, n) in ops, (t, s) in (("float", "f32"), ("half", "f16"))
+            args = join(fill(t, n), ", ")
+            vals = join(fill("$t %x", n), ", ")
+            println(ir, "declare $t @llvm.$op.$s($args)")
+            println(ir, "define void @$(op)_$s($t %x) {")
+            println(ir, "  %a = call $t @llvm.$op.$s($vals)")
+            println(ir, "  %b = call afn $t @llvm.$op.$s($vals)")
+            println(ir, "  ret void\n}")
+        end
+        mod = parse(LLVM.Module, String(take!(ir)))
+        for (op, _) in ops
+            f = mod.functions["$(op)_f32"]
+            @test GPUCompiler.lower_math_intrinsics!(f)
+            @test called_names(f) == ["air.$op.f32", "air.fast_$op.f32"]
+            f = mod.functions["$(op)_f16"]
+            @test GPUCompiler.lower_math_intrinsics!(f)
+            @test called_names(f) == ["air.$op.f16", "air.$op.f16"]
+        end
+        @test (verify(mod); true)
+    end
+end
+
+@testset "rounding and sincos lowering" begin
+    mod = @eval module $(gensym())
+        f() = return
+    end
+    job, _ = Metal.create_job(mod.f, Tuple{})
+    function called_names(f)
+        [i.called_operand.name for bb in f.blocks for i in bb.instructions if i isa LLVM.CallBase]
+    end
+
+    # `air.round` loses the sign of negative results that round to zero, so it is restored
+    # unless the call ignores the sign of zero
+    Context() do ctx
+        ir = """
+        declare float @llvm.round.f32(float)
+        declare half @llvm.round.f16(half)
+        define float @f(float %x) {
+          %a = call afn float @llvm.round.f32(float %x)
+          ret float %a
+        }
+        define float @g(float %x) {
+          %a = call nsz float @llvm.round.f32(float %x)
+          ret float %a
+        }
+        define half @h(half %x) {
+          %a = call half @llvm.round.f16(half %x)
+          ret half %a
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f, g, h = mod.functions["f"], mod.functions["g"], mod.functions["h"]
+        foreach(f -> GPUCompiler.lower_llvm_intrinsics!(job, f), (f, g, h))
+        @test called_names(f) == ["air.fast_round.f32"]
+        @test any(i -> i isa LLVM.OrInst, (i for bb in f.blocks for i in bb.instructions))
+        @test called_names(g) == ["air.round.f32"]
+        @test !any(i -> i isa LLVM.OrInst, (i for bb in g.blocks for i in bb.instructions))
+        @test called_names(h) == ["air.round.f16"]
+        @test (verify(mod); true)
+    end
+
+    # `air.ldexp` takes an `i32` exponent; wider ones are clamped (LLVM 17+)
+    LLVM.version() >= v"17" && Context() do ctx
+        ir = """
+        declare float @llvm.ldexp.f32.i32(float, i32)
+        declare half @llvm.ldexp.f16.i64(half, i64)
+        define float @f(float %x, i32 %n) {
+          %a = call afn float @llvm.ldexp.f32.i32(float %x, i32 %n)
+          ret float %a
+        }
+        define half @g(half %x, i64 %n) {
+          %a = call half @llvm.ldexp.f16.i64(half %x, i64 %n)
+          ret half %a
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f, g = mod.functions["f"], mod.functions["g"]
+        foreach(f -> GPUCompiler.lower_llvm_intrinsics!(job, f), (f, g))
+        @test called_names(f) == ["air.fast_ldexp.f32"]
+        @test called_names(g) == ["air.ldexp.f16"]
+        insts = [i for bb in g.blocks for i in bb.instructions]
+        @test count(i -> i isa LLVM.SelectInst, insts) == 2     # clamped to the i32 range
+        @test any(i -> i isa LLVM.TruncInst, insts)
+        @test (verify(mod); true)
+    end
+
+    # `air.sincos` returns the cosine through a pointer (LLVM 20+)
+    LLVM.version() >= v"20" && Context() do ctx
+        ir = """
+        declare { float, float } @llvm.sincos.f32(float)
+        define float @f(float %x) {
+          %a = call afn { float, float } @llvm.sincos.f32(float %x)
+          %s = extractvalue { float, float } %a, 0
+          %c = extractvalue { float, float } %a, 1
+          %r = fadd float %s, %c
+          ret float %r
+        }
+        """
+        mod = parse(LLVM.Module, ir)
+        f = mod.functions["f"]
+        GPUCompiler.lower_llvm_intrinsics!(job, f)
+        @test called_names(f) == ["air.fast_sincos.f32"]
+        @test (verify(mod); true)
+    end
+end
+
+@testset "no C library" begin
+    # LLVM would rewrite these into calls to `ldexpf`, `exp10f` and `tanf`, which the AIR
+    # triple's (Darwin) target library info claims to exist
+    mod = @eval module $(gensym())
+        pow2(i) = ccall("llvm.pow.f32", llvmcall, Float32, (Float32, Float32), 2f0, Float32(i))
+        pow10(x) = ccall("llvm.pow.f32", llvmcall, Float32, (Float32, Float32), 10f0, x)
+        tan(x) = @fastmath ccall("llvm.sin.f32", llvmcall, Float32, (Float32,), x) /
+                           ccall("llvm.cos.f32", llvmcall, Float32, (Float32,), x)
+    end
+    for (f, T) in ((mod.pow2, Int32), (mod.pow10, Float32), (mod.tan, Float32))
+        ir = sprint(io -> Metal.code_llvm(io, f, Tuple{T}; dump_module=true))
+        @test occursin("\"no-builtins\"", ir)
+        @test !occursin(r"@_*(ldexpf|exp10f|tanf)\b", ir)
+    end
 end
 
 @testset "integer power lowering" begin

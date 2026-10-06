@@ -355,6 +355,16 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
         apply_fastmath!(mod)
     end
 
+    # Metal has no C library, but the target library info LLVM derives from the
+    # `air64-apple-macosx` triple claims Darwin's libm. That lets LLVM rewrite math
+    # intrinsics into libcalls the back-end can't resolve (e.g. `pow(2, x)` into `ldexpf`, or
+    # `sin(x)/cos(x)` into `tanf`), so declare every function free of builtins, as LLVM does
+    # for NVPTX and AMDGPU. Only callees with stricter builtin settings than their caller
+    # are not inlined, so the runtime functions linked later can still be.
+    for f in mod.functions
+        isdeclaration(f) || push!(f.function_attributes, StringAttribute("no-builtins"))
+    end
+
     for f in kernels(mod)
         # update calling conventions
         f = pass_by_reference!(job, mod, f)
@@ -2610,27 +2620,51 @@ const AIR_MATH_INTRINSICS = Dict(
     "llvm.ceil"  => ("air.ceil",  "air.fast_ceil"),
     "llvm.trunc" => ("air.trunc", "air.fast_trunc"),
     "llvm.rint"  => ("air.rint",  "air.fast_rint"),
-    # Julia doesn't emit these (Metal.jl calls `air.sin`/`air.cos` directly), but Enzyme's
-    # derivatives of those calls do, and Apple's back-end crashes on them. The f16 builtins
-    # are less accurate than rounding the f32 ones on some GPUs (M1), but match what Apple's
-    # frontend and Metal.jl use for half.
+    # transcendentals, which Julia implements in software but Metal.jl overrides with these
+    # intrinsics (and Enzyme's derivatives emit). Apple's back-end crashes on the `llvm.*`
+    # forms. The f16 `sin`/`cos` builtins are less accurate than rounding the f32 ones on
+    # some GPUs (M1), but match what Apple's frontend uses for half. Older LLVMs lack some of
+    # these intrinsics, which then can't occur.
+    "llvm.exp"   => ("air.exp",   "air.fast_exp"),
+    "llvm.exp2"  => ("air.exp2",  "air.fast_exp2"),
+    "llvm.exp10" => ("air.exp10", "air.fast_exp10"),   # LLVM 18+
+    "llvm.log"   => ("air.log",   "air.fast_log"),
+    "llvm.log2"  => ("air.log2",  "air.fast_log2"),
+    "llvm.log10" => ("air.log10", "air.fast_log10"),
+    "llvm.pow"   => ("air.pow",   "air.fast_pow"),
     "llvm.sin"   => ("air.sin",   "air.fast_sin"),
     "llvm.cos"   => ("air.cos",   "air.fast_cos"),
+    "llvm.tan"   => ("air.tan",   "air.fast_tan"),     # LLVM 19+
+    "llvm.asin"  => ("air.asin",  "air.fast_asin"),    # LLVM 19+
+    "llvm.acos"  => ("air.acos",  "air.fast_acos"),    # LLVM 19+
+    "llvm.atan"  => ("air.atan",  "air.fast_atan"),    # LLVM 19+
+    "llvm.atan2" => ("air.atan2", "air.fast_atan2"),   # LLVM 20+
+    "llvm.sinh"  => ("air.sinh",  "air.fast_sinh"),    # LLVM 19+
+    "llvm.cosh"  => ("air.cosh",  "air.fast_cosh"),    # LLVM 19+
+    "llvm.tanh"  => ("air.tanh",  "air.fast_tanh"),    # LLVM 19+
 )
+
+# The AIR function implementing a call to a floating-point math intrinsic: the `precise` one,
+# or the `fast` one (if any) when the call allows approximations. Returns `nothing` for types
+# Metal has no math functions for: f64 (rejected by `validate_ir`) and vectors (we don't
+# vectorize, so these only come from the user, and not every AIR function has them).
+function air_math_function(call::LLVM.CallBase, precise::String, fast::Union{String,Nothing})
+    typ = call.value_type
+    typ isa LLVM.StructType && (typ = first(typ.elements))  # `llvm.sincos`
+    (typ isa LLVM.HalfType || typ isa LLVM.FloatType) || return nothing
+    # the relaxed variant exists for f32 only; f16 always uses the precise op
+    use_fast = fast !== nothing && typ isa LLVM.FloatType && call.fast_math.afn
+    return "$(use_fast ? fast : precise).$(type_suffix(typ))"
+end
+
 function lower_math_intrinsics!(fun::LLVM.Function)
     math_intrinsics = intrinsic_table(AIR_MATH_INTRINSICS)
     return lower_intrinsic_calls!(fun) do builder, call, intr
         mapping = get(math_intrinsics, intr, nothing)
         mapping === nothing && return nothing
-        # Metal floats are f16/f32 only; skip f64 (rejected by validate_ir) and vector types
-        # (these ops have no `air.<op>.v4f32`) rather than synthesize a nonexistent intrinsic.
-        typ = call.value_type
-        (typ isa LLVM.HalfType || typ isa LLVM.FloatType) || return nothing
-        precise, fast = mapping
-        # the relaxed variant exists for f32 only; f16 always uses the precise op
-        use_fast = fast !== nothing && typ isa LLVM.FloatType && call.fast_math.afn
-        call_declared!(builder, "$(use_fast ? fast : precise).$(type_suffix(typ))", typ,
-                       collect(LLVM.Value, call.arguments))
+        fn = air_math_function(call, mapping...)
+        fn === nothing && return nothing
+        call_declared!(builder, fn, call.value_type, collect(LLVM.Value, call.arguments))
     end
 end
 
@@ -2800,16 +2834,65 @@ function lower_is_fpclass!(builder::IRBuilder, call::LLVM.CallBase)
 end
 
 # copysign, by twiddling the sign bit
-function lower_copysign!(builder::IRBuilder, call::LLVM.CallBase)
-    arg0, arg1 = call.arguments
-    typ = call.value_type
+function copysign!(builder::IRBuilder, mag::LLVM.Value, sgn::LLVM.Value)
+    typ = mag.value_type
     jltyp = julia_float_type(typ)
     ityp = LLVM.IntType(8*sizeof(jltyp))
-    arg0′ = bitcast!(builder, arg0, ityp)
-    arg1′ = bitcast!(builder, arg1, ityp)
-    sign = and!(builder, arg1′, LLVM.ConstantInt(ityp, Base.sign_mask(jltyp)))
-    mantissa = and!(builder, arg0′, LLVM.ConstantInt(ityp, ~Base.sign_mask(jltyp)))
+    mag′ = bitcast!(builder, mag, ityp)
+    sgn′ = bitcast!(builder, sgn, ityp)
+    sign = and!(builder, sgn′, LLVM.ConstantInt(ityp, Base.sign_mask(jltyp)))
+    mantissa = and!(builder, mag′, LLVM.ConstantInt(ityp, ~Base.sign_mask(jltyp)))
     return bitcast!(builder, or!(builder, sign, mantissa), typ)
+end
+lower_copysign!(builder::IRBuilder, call::LLVM.CallBase) =
+    copysign!(builder, call.arguments...)
+
+# `air.round` rounds halfway cases away from zero like `llvm.round`, but returns +0.0 for
+# negative inputs that round to zero, so restore the sign unless the call ignores it
+function lower_round!(builder::IRBuilder, call::LLVM.CallBase)
+    fn = air_math_function(call, "air.round", "air.fast_round")
+    fn === nothing && return nothing
+    x, = call.arguments
+    res = call_declared!(builder, fn, x.value_type, LLVM.Value[x])
+    return call.fast_math.nsz ? res : copysign!(builder, res, x)
+end
+
+# `air.ldexp` takes an `i32` exponent, while `llvm.ldexp` accepts any width. Clamping a wider
+# exponent to the `i32` range doesn't change the result, as both bounds over- or underflow.
+function lower_ldexp!(builder::IRBuilder, call::LLVM.CallBase)
+    fn = air_math_function(call, "air.ldexp", "air.fast_ldexp")
+    fn === nothing && return nothing
+    x, n = call.arguments
+    T_i32 = LLVM.Int32Type()
+    width = n.value_type.width
+    if width < 32
+        n = sext!(builder, n, T_i32)
+    elseif width > 32
+        for (pred, bound) in ((LLVM.IntPredicate.SLT, typemin(Int32)),
+                              (LLVM.IntPredicate.SGT, typemax(Int32)))
+            bound = LLVM.ConstantInt(n.value_type, bound)
+            n = select!(builder, icmp!(builder, pred, n, bound), bound, n)
+        end
+        n = trunc!(builder, n, T_i32)
+    end
+    return call_declared!(builder, fn, x.value_type, LLVM.Value[x, n])
+end
+
+# `llvm.sincos` returns both results, `air.sincos` returns the sine and stores the cosine
+function lower_sincos!(builder::IRBuilder, call::LLVM.CallBase)
+    x, = call.arguments
+    typ = x.value_type
+    fn = air_math_function(call, "air.sincos", "air.fast_sincos")
+    fn === nothing && return nothing
+    f = builder.insert_block.parent
+    cos_ptr = @dispose entry_builder=IRBuilder() begin
+        position!(entry_builder, LLVM.at_begin(f.entry))
+        alloca!(entry_builder, typ)
+    end
+    sin = call_declared!(builder, fn, typ, LLVM.Value[x, cos_ptr])
+    cos = load!(builder, typ, cos_ptr)
+    res = insert_value!(builder, UndefValue(call.value_type), sin, 0)
+    return insert_value!(builder, res, cos, 1)
 end
 
 # IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
@@ -3016,9 +3099,11 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
     removable = Set(LLVM.Intrinsic.(REMOVABLE_INTRINSICS))
     value_intrinsics = intrinsic_table(AIR_VALUE_INTRINSICS)
     bit_intrinsics = intrinsic_table(AIR_BIT_INTRINSICS)
-    is_fpclass, copysign, minimum, maximum, powi =
+    is_fpclass, copysign, minimum, maximum, powi, round =
         LLVM.Intrinsic.(("llvm.is.fpclass", "llvm.copysign", "llvm.minimum", "llvm.maximum",
-                         "llvm.powi"))
+                         "llvm.powi", "llvm.round"))
+    # (LLVM 17+ and 20+, respectively)
+    ldexp, sincos = tryparse.(LLVM.Intrinsic, ("llvm.ldexp", "llvm.sincos"))
     changed |= lower_intrinsic_calls!(fun) do builder, call, intr
         if intr in removable
             :erase
@@ -3037,6 +3122,12 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             lower_minimum_maximum!(builder, call, intr == minimum ? "min" : "max")
         elseif intr == powi
             lower_powi!(builder, call)
+        elseif intr == round
+            lower_round!(builder, call)
+        elseif intr == ldexp
+            lower_ldexp!(builder, call)
+        elseif intr == sincos
+            lower_sincos!(builder, call)
         end
     end
 
