@@ -922,6 +922,32 @@ function lower_minimum_maximum!(mod::LLVM.Module)
     return changed
 end
 
+# Align a local memory variable to 4 bytes, and pad it to a multiple of 4 bytes, so that the
+# 32-bit word containing any of its 8- or 16-bit values is part of it. Only internal
+# definitions can be padded: the size of others is up to the host or the runtime. Returns the
+# padded variable.
+function pad_local_memory!(gv::LLVM.GlobalVariable)
+    gv.alignment = max(gv.alignment, 4)
+    T = gv.global_value_type
+    padding = -Int(LLVM.abi_size(LLVM.parent(gv).datalayout, T)) & 3
+    padding == 0 && return gv
+
+    mod = LLVM.parent(gv)
+    T_pad = LLVM.ArrayType(LLVM.Int8Type(), padding)
+    T_padded = LLVM.StructType([T, T_pad])
+    new = GlobalVariable(mod, T_padded, "", 3)
+    new.initializer = ConstantStruct(T_padded, [gv.initializer, null(T_pad)])
+    new.linkage = gv.linkage
+    new.alignment = gv.alignment
+    new.constant = gv.constant
+    new.unnamed_addr = gv.unnamed_addr
+    name = gv.name
+    replace_uses!(gv, const_bitcast(new, gv.value_type))
+    erase!(gv)
+    new.name = name
+    return new
+end
+
 # convert alloca [N x i128] to alloca [N x <2 x i64>]
 # SPIR-V doesn't support i128 types, but we can represent them as vectors
 function convert_i128_allocas!(mod::LLVM.Module)

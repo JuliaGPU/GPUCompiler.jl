@@ -711,3 +711,26 @@ end
     end
     @test !occursin("fcmp", lower("minnum", "nsz"))
 end
+
+@testset "local memory padding" begin
+    # 8- and 16-bit atomics access the 32-bit word containing the value, so the local memory
+    # variables they access are aligned and padded to words
+    ir = Context(; opaque_pointers=true) do ctx
+        mod = parse(LLVM.Module, """
+            @odd = internal addrspace(3) global [6 x i8] zeroinitializer, align 2
+            @even = internal addrspace(3) global [8 x i8] zeroinitializer, align 8
+            define void @kernel(i64 %i) {
+              %p = getelementptr i8, ptr addrspace(3) @odd, i64 %i
+              store i8 1, ptr addrspace(3) %p
+              store i8 2, ptr addrspace(3) @even
+              ret void
+            }""")
+        GPUCompiler.pad_local_memory!(mod.globals["odd"])
+        GPUCompiler.pad_local_memory!(mod.globals["even"])
+        verify(mod)
+        string(mod)
+    end
+    @test occursin("@odd = internal addrspace(3) global { [6 x i8], [2 x i8] } zeroinitializer, align 4", ir)
+    @test occursin("@even = internal addrspace(3) global [8 x i8] zeroinitializer, align 8", ir)
+    @test occursin("getelementptr i8, ptr addrspace(3) @odd", ir)
+end
