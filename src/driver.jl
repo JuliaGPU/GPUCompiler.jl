@@ -83,7 +83,20 @@ The default [`relocation_lowering`](@ref) strategy resolves Julia-value relocati
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     run_compile_hook(job)
-    return compile_unhooked(target, job)
+    return report_failure(job) do
+        compile_unhooked(target, job)
+    end
+end
+
+function report_failure(f, @nospecialize(job::CompilerJob))
+    hook = compile_failure_hook[]
+    hook === nothing && return f()
+    try
+        f()
+    catch err
+        err isa InterruptException || Base.invokelatest(hook, job, err)
+        rethrow()
+    end
 end
 
 function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);

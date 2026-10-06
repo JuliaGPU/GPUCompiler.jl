@@ -333,36 +333,77 @@ end
 
 `job_filter(job)` selects which jobs to inspect. Jobs rejected by the filter do not
 count toward the check that at least one kernel was observed.
+
+The macros also accept `only_failed=true`, which only inspects the jobs that fail to
+compile while evaluating the user code, including failures the code recovers from. Any
+error then propagates as usual. This is meant for debugging a failing kernel without
+inspecting every other kernel the code compiles.
 """
 function emit_hooked_compilation(inner_hook, ex...; job_filter=Returns(true))
     user_code = ex[end]
-    user_kwargs = ex[1:end-1]
+    user_kwargs = Any[ex[1:end-1]...]
+    i = findfirst(kw -> Meta.isexpr(kw, :(=)) && kw.args[1] === :only_failed, user_kwargs)
+    only_failed = i === nothing ? false : esc(popat!(user_kwargs, i).args[2])
     quote
-        # The job set and hook output are shared by child tasks, so update them together.
-        jobs = Set()
-        jobs_lock = ReentrantLock()
-        function outer_hook(job)
-            $job_filter(job) || return
-            Base.@lock jobs_lock begin
-                job in jobs && return
-                push!(jobs, job)
-                # the user hook might invoke the compiler again, so disable the hook
-                $with_compile_hook(nothing) do
+        run_user_code = () -> $(esc(user_code))
+
+        if $only_failed
+            # a failure is reported by every `compile` it propagates through; keep the
+            # innermost one, which is reported first
+            failures = []
+            failures_lock = ReentrantLock()
+            function record_failure(job, err)
+                Base.@lock failures_lock begin
+                    any(failure -> failure[2] === err, failures) || push!(failures, (job, err))
+                end
+            end
+            try
+                $with(run_user_code, $compile_failure_hook => record_failure)
+            finally
+                $inspect_failures(Base.@lock(failures_lock, copy(failures)), $job_filter) do job
                     $inner_hook(job; $(map(esc, user_kwargs)...))
                 end
             end
-        end
+        else
+            # The job set and hook output are shared by child tasks, so update them together.
+            jobs = Set()
+            jobs_lock = ReentrantLock()
+            function outer_hook(job)
+                $job_filter(job) || return
+                Base.@lock jobs_lock begin
+                    job in jobs && return
+                    push!(jobs, job)
+                    # the user hook might invoke the compiler again, so disable the hook
+                    $with_compile_hook(nothing) do
+                        $inner_hook(job; $(map(esc, user_kwargs)...))
+                    end
+                end
+            end
 
-        # now invoke the user code with this hook in place
-        $with_compile_hook(outer_hook) do
-            $(esc(user_code))
-        end
+            # now invoke the user code with this hook in place
+            $with_compile_hook(run_user_code, outer_hook)
 
-        if isempty(jobs)
-            error("no kernels executed while evaluating the given expression")
+            if isempty(jobs)
+                error("no kernels executed while evaluating the given expression")
+            end
         end
 
         nothing
+    end
+end
+
+function inspect_failures(hook, failures, job_filter)
+    for job in unique(first.(failures))
+        # this runs while the user code's error propagates, which a failure to inspect
+        # should not replace
+        try
+            with(active_compile_hook => nothing, compile_failure_hook => nothing) do
+                job_filter(job) && hook(job)
+            end
+        catch inspect_err
+            inspect_err isa InterruptException && rethrow()
+            @error "Failed to inspect $job" exception=(inspect_err, catch_backtrace())
+        end
     end
 end
 
@@ -390,6 +431,9 @@ end
 
 Evaluates the expression `ex` and returns the result of
 `InteractiveUtils.code_typed` for every compiled GPU kernel.
+
+To debug a kernel that fails to compile, use `only_failed=true interactive=true`, which
+inspects only that kernel with Cthulhu.jl before rethrowing its error.
 
 See also: `InteractiveUtils.@code_typed`
 """

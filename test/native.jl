@@ -222,6 +222,86 @@ end
     @test only(seen) == job
 end
 
+@testset "reflection of failed compilations" begin
+    mod = @eval module $(gensym())
+        good(x::Int) = nothing
+        bad(x::Int) = println(x)
+        struct WrappedError <: Exception
+            inner
+        end
+    end
+    compile_good() = Native.code_execution(mod.good, (Int,))
+    compile_bad() = Native.code_execution(mod.bad, (Int,))
+    io = IOBuffer()
+    inspected() = String(take!(io))
+
+    # only the job that failed is inspected, after which the error propagates
+    @test_throws InvalidIRError GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        compile_good()
+        compile_bad()
+    end
+    output = inspected()
+    @test occursin("bad", output) && !occursin("good", output)
+
+    # without a failure, nothing is inspected and the macro returns as usual
+    @test isempty(GPUCompiler.@device_code_typed only_failed=true compile_good())
+    @test isempty(GPUCompiler.@device_code_typed only_failed=true nothing)
+
+    # failures are found regardless of how the error that escapes is wrapped
+    @test_throws CompositeException GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        @sync Threads.@spawn compile_bad()
+    end
+    @test occursin("bad", inspected())
+    @test_throws LoadError GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        try
+            compile_bad()
+        catch err
+            throw(LoadError("script.jl", 1, err))
+        end
+    end
+    @test occursin("bad", inspected())
+    @test_throws mod.WrappedError GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        try
+            compile_bad()
+        catch err
+            throw(mod.WrappedError(err))
+        end
+    end
+    @test occursin("bad", inspected())
+
+    # failures the code recovers from are inspected too
+    GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        try
+            compile_bad()
+        catch
+        end
+    end
+    @test occursin("bad", inspected())
+
+    # unrelated errors propagate without inspection
+    @test_throws "unrelated" GPUCompiler.@device_code_warntype io=io only_failed=true error("unrelated")
+    @test isempty(inspected())
+
+    # a failure to inspect is reported, but does not replace the original error
+    mod2 = @eval module $(gensym())
+        macro broken_code(ex...)
+            hook = (job;) -> error("broken reflection")
+            $GPUCompiler.emit_hooked_compilation(hook, ex...)
+        end
+        macro broken_filter(ex...)
+            $GPUCompiler.emit_hooked_compilation(identity, ex...;
+                                                 job_filter=job -> error("broken filter"))
+        end
+        broken_code(f) = @broken_code only_failed=true f()
+        broken_filter(f) = @broken_filter only_failed=true f()
+    end
+    for f in (mod2.broken_code, mod2.broken_filter)
+        @test_logs (:error, r"Failed to inspect") match_mode=:any begin
+            @test (try f(compile_bad) catch err; err end) isa InvalidIRError
+        end
+    end
+end
+
 @testset "method instances for type-valued callees and arguments" begin
     # JuliaLang/julia#62001: closed type-valued callees and arguments
     # dispatch on Core.TypeEgal keys instead of Type{T}
