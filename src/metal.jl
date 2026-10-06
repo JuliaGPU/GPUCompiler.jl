@@ -830,46 +830,6 @@ end
 const EXPANDABLE_ATOMICRMW_OPS =
     filter(op -> !haskey(AIR_ATOMICRMW_OPS, op), instances(LLVM.AtomicRMWBinOp.T))
 
-function atomic_bits(T::LLVMType)
-    T isa LLVM.IntegerType && return Int(T.width)
-    T isa LLVM.HalfType && return 16
-    T isa LLVM.BFloatType && return 16
-    T isa LLVM.FloatType && return 32
-    T isa LLVM.DoubleType && return 64
-    T isa LLVM.PointerType && return 64
-    return nothing
-end
-
-# Does `ptr` point to the thread's own stack, i.e., is every object it can be derived from an
-# `alloca`? That is the case for atomics on objects that Julia's `AllocOpt` moved to the stack,
-# e.g., a non-escaping mutable struct with `@atomic` fields (GPUCompiler.jl#934). Metal cannot
-# express those (MSL only has atomics on device and threadgroup memory), but they don't need
-# to be atomic: no other thread can access a thread's stack, even when it has a pointer to it
-# (thread memory is private to every thread), so plain accesses behave the same. Anything this
-# cannot trace back to an `alloca`, e.g., a function argument or a loaded pointer, is not
-# known to be private.
-function is_thread_private(ptr::LLVM.Value)
-    seen = Set{LLVM.Value}()
-    worklist = LLVM.Value[ptr]
-    while !isempty(worklist)
-        val = pop!(worklist)
-        val in seen && continue
-        push!(seen, val)
-        if val isa LLVM.AllocaInst
-            continue
-        elseif val isa LLVM.GetElementPtrInst || val isa LLVM.BitCastInst
-            push!(worklist, val.operands[1])
-        elseif val isa LLVM.PHIInst
-            append!(worklist, first.(val.incoming))
-        elseif val isa LLVM.SelectInst
-            push!(worklist, val.operands[2], val.operands[3])
-        else
-            return false
-        end
-    end
-    return true
-end
-
 # How to lower `inst`, an atomic memory operation, for the job's target. Like the rule tables
 # of LLVM's legalizers, the rules are tried in order and the first that applies decides. Returns
 # the action, or the reason why the operation cannot be lowered (which `validate_ir` reports):
@@ -935,20 +895,6 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
         return :cmpxchg_loop
     end
     return :select
-end
-
-# Replace an atomic operation on the thread's own memory (see `is_thread_private`) by plain
-# accesses. Its ordering and scope don't matter either: no other thread can observe the memory
-# it accesses, so it cannot synchronize with any.
-function demote_private_atomic!(inst::LLVM.Instruction)
-    if inst isa LLVM.LoadInst || inst isa LLVM.StoreInst
-        # (a plain access has the default, system scope)
-        inst.syncscope = SyncScope("system")
-        inst.ordering = LLVM.AtomicOrdering.NotAtomic
-    else
-        lower_atomic!(inst)
-    end
-    return
 end
 
 # The ordering to lower an atomic operation with: without ordered atomics (MSL < 4.1), the
