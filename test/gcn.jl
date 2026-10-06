@@ -458,6 +458,65 @@ LLVM.version() >= v"20" && @testset "usub_sat atomics" begin
     @test occursin("ds_cmpst_rtn_b32", asm)
 end
 
+@testset "sub-word atomics with a used result" begin
+    # before LLVM 21, the back-end crashes on 8- and 16-bit atomic operations on uniform
+    # addresses whose result is used (llvm/llvm-project#128388), so they are expanded to a
+    # compare-exchange loop
+    jltype(T) = T == "i8" ? Int8 : T == "i16" ? Int16 : Int32
+    function rmw_source(T, op; used=true, as=1)
+        align = sizeof(jltype(T))
+        ptr = typed_ptrs ? "$T addrspace($as)*" : "ptr addrspace($as)"
+        """
+        define void @entry($ptr %p, $T %x) #0 {
+          %old = atomicrmw $op $ptr %p, $T %x syncscope("agent") monotonic, align $align
+          $(used ? "%q = getelementptr inbounds $T, $ptr %p, i64 1" : "")
+          $(used ? "store $T %old, $ptr %q, align $align" : "")
+          ret void
+        }
+        attributes #0 = { alwaysinline }"""
+    end
+    function rmw_ir(T, op; used=true, as=1, backend)
+        JT, ir = jltype(T), rmw_source(T, op; used, as)
+        mod = @eval module $(gensym())
+            kernel(p::Core.LLVMPtr{$JT,$as}, x::$JT) =
+                (Base.llvmcall(($ir, "entry"), Nothing, Tuple{Core.LLVMPtr{$JT,$as},$JT}, p, x);
+                 return)
+        end
+        kernel = Base.invokelatest(getfield, mod, :kernel)
+        Base.invokelatest(sprint, io->GCN.code_llvm(io, kernel, Tuple{Core.LLVMPtr{JT,as},JT};
+                                                    dev_isa="gfx1030", kernel=true, backend))
+    end
+
+    for (T, op, as) in (("i8", "add", 1), ("i16", "max", 3), ("i8", "umin", 0))
+        @test occursin("atomicrmw $op", rmw_ir(T, op; as, backend=:inprocess)) ==
+              (LLVM.version() >= v"21")
+        @test occursin("atomicrmw $op", rmw_ir(T, op; as, backend=:external))
+    end
+    # other operations, unused results and wider atomics are unaffected
+    @test occursin("atomicrmw xchg", rmw_ir("i8", "xchg"; backend=:inprocess))
+    @test occursin("atomicrmw add", rmw_ir("i8", "add"; used=false, backend=:inprocess))
+    @test occursin("atomicrmw add", rmw_ir("i32", "add"; backend=:inprocess))
+
+    # the back-end crashes the process, so generate code in another one
+    script = """
+        using GPUCompiler, LLVM
+        include($(repr(joinpath(@__DIR__, "helpers", "runtime.jl"))))
+        include($(repr(joinpath(@__DIR__, "helpers", "gcn.jl"))))
+        kernel_i8(p::Core.LLVMPtr{Int8,1}, x::Int8) =
+            (Base.llvmcall(($(repr(rmw_source("i8", "add"; as=1))), "entry"), Nothing,
+                           Tuple{Core.LLVMPtr{Int8,1},Int8}, p, x); return)
+        kernel_i16(p::Core.LLVMPtr{Int16,3}, x::Int16) =
+            (Base.llvmcall(($(repr(rmw_source("i16", "max"; as=3))), "entry"), Nothing,
+                           Tuple{Core.LLVMPtr{Int16,3},Int16}, p, x); return)
+        for (f, tt) in ((kernel_i8, Tuple{Core.LLVMPtr{Int8,1},Int8}),
+                        (kernel_i16, Tuple{Core.LLVMPtr{Int16,3},Int16}))
+            GCN.code_native(devnull, f, tt; dev_isa="gfx1030", kernel=true, backend=:inprocess)
+        end
+        """
+    cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`
+    @test success(pipeline(cmd; stdout, stderr))
+end
+
 @testset "s_load for kernarg struct access" begin
     mod = @eval module $(gensym())
         struct MyStruct

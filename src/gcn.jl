@@ -347,6 +347,11 @@ function expand_atomics!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
     return !isempty(insts)
 end
 
+# the operations AMDGPUAtomicOptimizer combines across a wavefront
+const OPTIMIZED_ATOMICRMW_OPS = let Op = LLVM.AtomicRMWBinOp
+    (Op.Add, Op.Sub, Op.And, Op.Or, Op.Xor, Op.Min, Op.Max, Op.UMin, Op.UMax)
+end
+
 function needs_cmpxchg_expansion(target::GCNCompilerTarget, version::VersionNumber,
                                  inst::LLVM.AtomicRMWInst)
     as = inst.pointer_operand.value_type.addrspace
@@ -361,6 +366,15 @@ function needs_cmpxchg_expansion(target::GCNCompilerTarget, version::VersionNumb
         as == 0 && return true
         as == 3 && occursin(r"^gfx(103\d|11\d\d|10-3-generic|11(-\d+)?-generic)$",
                             target.dev_isa) && return true
+    end
+
+    # Before LLVM 21, the atomic optimizer broadcasts the result of 8- and 16-bit operations
+    # on uniform addresses with an illegal `readfirstlane`, crashing the back-end
+    # (llvm/llvm-project#128388). Expand the operations it optimizes when their result is
+    # used, without trying to predict whether the address is uniform.
+    if version < v"21" && T isa LLVM.IntegerType && T.width in (8, 16) && as in (0, 1, 3) &&
+       inst.binop in OPTIMIZED_ATOMICRMW_OPS && !isempty(inst.uses)
+        return true
     end
 
     return false
