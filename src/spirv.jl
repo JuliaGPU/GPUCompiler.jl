@@ -119,7 +119,8 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # `unordered` heap-reference accesses are (see `demote_unordered_atomics!`)
     demote_unordered_atomics!(mod)
 
-    # the SPIR-V back-ends lower `llvm.minimum`/`llvm.maximum` to NaN-ignoring `fmin`/`fmax`
+    # the SPIR-V back-ends lower the floating-point minimum and maximum intrinsics to OpenCL's
+    # `fmin`/`fmax`, which ignore NaNs and don't order signed zeros
     lower_minimum_maximum!(mod)
 
     # IGC drops fields when legalizing aggregates built by nested `insertvalue`s
@@ -381,23 +382,39 @@ function flatten_insertvalue!(builder::IRBuilder, agg::LLVM.Value, val::LLVM.Val
     return insert_value!(builder, agg, val, idx)
 end
 
-# expand `llvm.minimum` and `llvm.maximum`, which Julia uses for `min` and `max` of
-# floating-point numbers. these return NaN when either operand is NaN, and order -0.0 before
-# +0.0, but both SPIR-V back-ends translate them to OpenCL's `fmin` and `fmax`, which return
-# the other operand when one is NaN, and may return either zero. so use `llvm.minnum` and
-# `llvm.maxnum` (which translate to the same `fmin` and `fmax`) and fix up those cases,
-# unless the call's fast-math flags say they don't occur.
+# expand the floating-point minimum and maximum intrinsics, which both SPIR-V back-ends
+# translate to OpenCL's `fmin` and `fmax`. those return the other operand when one is a
+# (quiet) NaN, like `llvm.minnum` and `llvm.maxnum`, but may return either zero when comparing
+# -0.0 and +0.0, so lower every family to `llvm.minnum` and `llvm.maxnum` and fix up what
+# differs, unless the call's fast-math flags say it doesn't occur:
+#
+# - `llvm.minimum`/`llvm.maximum` (Julia's `min` and `max` of floating-point numbers) return
+#   NaN when either operand is NaN, and order -0.0 before +0.0;
+# - `llvm.minnum`/`llvm.maxnum` order -0.0 before +0.0 (as LLVM specifies them since 22);
+# - `llvm.minimumnum`/`llvm.maximumnum` return the other operand for any NaN, including a
+#   signaling one (for which `fmin` may return NaN), and order -0.0 before +0.0.
+#
+# the `llvm.minnum`/`llvm.maxnum` calls this introduces are marked `nsz` when the signs of
+# zeros are fixed up separately, so running this again doesn't change them.
 function lower_minimum_maximum!(mod::LLVM.Module)
     changed = false
     @tracepoint "lower minimum/maximum" begin
 
-    for f in collect(mod.functions)
+    calls = Tuple{LLVM.CallInst,Bool,Symbol}[]
+    for f in mod.functions
         isdeclaration(f) || continue
-        fn = f.name
-        is_minimum = startswith(fn, "llvm.minimum.")
-        is_minimum || startswith(fn, "llvm.maximum.") || continue
+        m = match(r"^llvm\.(min|max)(imum|num|imumnum)\.", f.name)
+        m === nothing && continue
+        is_min = m[1] == "min"
+        nans = m[2] == "imum" ? :propagate : m[2] == "num" ? :quiet : :ignore
+        for use in f.uses
+            call = use.user
+            call isa LLVM.CallInst && push!(calls, (call, is_min, nans))
+        end
+    end
 
-        typ = f.function_type.return_type
+    for (call, is_min, nans) in calls
+        typ = call.value_type
         eltyp = typ isa LLVM.VectorType ? typ.element_type : typ
         bits = if eltyp isa LLVM.HalfType
             16
@@ -412,44 +429,53 @@ function lower_minimum_maximum!(mod::LLVM.Module)
         if typ isa LLVM.VectorType
             ityp = LLVM.VectorType(ityp, typ.length)
         end
-        num = LLVM.Function(mod, LLVM.Intrinsic(is_minimum ? "llvm.minnum" : "llvm.maxnum"),
+
+        x, y = call.arguments
+        flags = NamedTuple(call.fast_math)
+        fix_zeros = !flags.nsz
+        fix_nans = nans !== :quiet && !flags.nnan
+        nans === :quiet && !fix_zeros && continue
+
+        num = LLVM.Function(mod, LLVM.Intrinsic(is_min ? "llvm.minnum" : "llvm.maxnum"),
                             LLVMType[typ])
+        @dispose builder=IRBuilder() begin
+            position!(builder, LLVM.before(call))
+            builder.debug_location = call.debug_location
 
-        for use in collect(f.uses)
-            call = use.user
-            call isa LLVM.CallInst || continue
-            x, y = call.arguments
-            flags = NamedTuple(call.fast_math)
-            @dispose builder=IRBuilder() begin
-                position!(builder, LLVM.before(call))
-                builder.debug_location = call.debug_location
+            res = call!(builder, num.function_type, num, LLVM.Value[x, y])
+            res.fast_math = flags
+            fix_zeros && (res.fast_math.nsz = true)
 
-                res = call!(builder, num.function_type, num, LLVM.Value[x, y])
-                res.fast_math = flags
-
-                # if both operands are zero, combine their sign bits
-                if !flags.nsz
-                    zero = LLVM.null(typ)
-                    both_zero = and!(builder, fcmp!(builder, LLVM.RealPredicate.OEQ, x, zero),
-                                              fcmp!(builder, LLVM.RealPredicate.OEQ, y, zero))
-                    xi = bitcast!(builder, x, ityp)
-                    yi = bitcast!(builder, y, ityp)
-                    zi = is_minimum ? or!(builder, xi, yi) : and!(builder, xi, yi)
-                    res = select!(builder, both_zero, bitcast!(builder, zi, typ), res)
-                end
-
-                # if either operand is NaN, return a NaN
-                if !flags.nnan
-                    either_nan = fcmp!(builder, LLVM.RealPredicate.UNO, x, y)
-                    res = select!(builder, either_nan, fadd!(builder, x, y), res)
-                end
-
-                replace_uses!(call, res)
-                erase!(call)
+            # if both operands are zero, combine their sign bits
+            if fix_zeros
+                zero = LLVM.null(typ)
+                both_zero = and!(builder, fcmp!(builder, LLVM.RealPredicate.OEQ, x, zero),
+                                          fcmp!(builder, LLVM.RealPredicate.OEQ, y, zero))
+                xi = bitcast!(builder, x, ityp)
+                yi = bitcast!(builder, y, ityp)
+                zi = is_min ? or!(builder, xi, yi) : and!(builder, xi, yi)
+                res = select!(builder, both_zero, bitcast!(builder, zi, typ), res)
             end
-            changed = true
+
+            if fix_nans && nans === :propagate
+                # if either operand is NaN, return a NaN
+                either_nan = fcmp!(builder, LLVM.RealPredicate.UNO, x, y)
+                res = select!(builder, either_nan, fadd!(builder, x, y), res)
+            elseif fix_nans
+                # if one operand is NaN, return the other one
+                res = select!(builder, fcmp!(builder, LLVM.RealPredicate.UNO, y, y), x, res)
+                res = select!(builder, fcmp!(builder, LLVM.RealPredicate.UNO, x, x), y, res)
+            end
+
+            replace_uses!(call, res)
+            erase!(call)
         end
-        isempty(f.uses) && erase!(f)
+        changed = true
+    end
+
+    for f in collect(mod.functions)
+        isdeclaration(f) && isempty(f.uses) || continue
+        occursin(r"^llvm\.(min|max)imum(num)?\.", f.name) && erase!(f)
     end
 
     end

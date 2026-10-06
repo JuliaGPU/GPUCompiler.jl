@@ -267,11 +267,11 @@ end
 
     @test @filecheck begin
         @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
-        @check "call float @llvm.minnum.f32"
+        @check "call nsz float @llvm.minnum.f32"
         @check "fcmp uno float"
-        @check "call float @llvm.maxnum.f32"
+        @check "call nsz float @llvm.maxnum.f32"
         @check "fcmp uno float"
-        @check "call <4 x float> @llvm.minnum.v4f32"
+        @check "call nsz <4 x float> @llvm.minnum.v4f32"
         @check "fcmp uno <4 x float>"
         @check_not "llvm.minimum"
         @check_not "llvm.maximum"
@@ -613,4 +613,101 @@ end
     end
 end
 
+end
+
+@testset "min and max lowering" begin
+    # `lower_minimum_maximum!` lowers every family of floating-point minimum and maximum to
+    # `llvm.minnum`/`llvm.maxnum`, which the back-ends translate to OpenCL's `fmin`/`fmax`.
+    # check the result on the host, implementing those intrinsics like `fmin`/`fmax` may:
+    # returning either operand when they compare equal, and NaN for a signaling NaN.
+    function fminmax(name, pred, equal)
+        """
+        define float @$name(float %x, float %y) {
+          %xi = bitcast float %x to i32
+          %yi = bitcast float %y to i32
+          %xq = and i32 %xi, 2143289344
+          %xsnan = icmp eq i32 %xq, 2139095040
+          %xm = and i32 %xi, 4194303
+          %xpayload = icmp ne i32 %xm, 0
+          %xs = and i1 %xsnan, %xpayload
+          %yq = and i32 %yi, 2143289344
+          %ysnan = icmp eq i32 %yq, 2139095040
+          %ym = and i32 %yi, 4194303
+          %ypayload = icmp ne i32 %ym, 0
+          %ys = and i1 %ysnan, %ypayload
+          %signaling = or i1 %xs, %ys
+          %xnan = fcmp uno float %x, %x
+          %ynan = fcmp uno float %y, %y
+          %lt = fcmp $pred float %x, %y
+          %eq = fcmp oeq float %x, %y
+          %r0 = select i1 %lt, float %x, float %y
+          %r1 = select i1 %eq, float $equal, float %r0
+          %r2 = select i1 %ynan, float %x, float %r1
+          %r3 = select i1 %xnan, float %y, float %r2
+          %r4 = select i1 %signaling, float 0x7FF8000000000000, float %r3
+          ret float %r4
+        }
+        """
+    end
+    function lower(intr, flags="")
+        Context() do ctx
+            mod = parse(LLVM.Module, """
+                declare float @llvm.$intr.f32(float, float)
+                define float @entry(float %x, float %y) {
+                  %r = call $flags float @llvm.$intr.f32(float %x, float %y)
+                  ret float %r
+                }""")
+            GPUCompiler.lower_minimum_maximum!(mod)
+            ir = string(mod)
+            # lowering again doesn't change anything
+            GPUCompiler.lower_minimum_maximum!(mod)
+            @test string(mod) == ir
+            ir
+        end
+    end
+    function evaluate(ir, equal)
+        ir = replace(ir, r"^(;|source_filename|declare|attributes).*$"m => "",
+                     "@llvm.minnum.f32" => "@fmin", "@llvm.maxnum.f32" => "@fmax")
+        ir *= fminmax("fmin", "olt", equal) * fminmax("fmax", "ogt", equal)
+        f = @eval (x, y) -> Base.llvmcall(($ir, "entry"), Float32, Tuple{Float32,Float32}, x, y)
+        (x, y) -> Base.invokelatest(f, x, y)
+    end
+
+    snan = reinterpret(Float32, 0x7f800001)
+    values = Float32[0, -0.0, 1, -1, Inf, NaN, snan]
+    # Julia's `min` and `max` propagate NaNs and order -0.0 before +0.0
+    isnum(x) = !isnan(x)
+    families = [("minimum", min, :propagate), ("maximum", max, :propagate),
+                ("minnum", min, :quiet), ("maxnum", max, :quiet)]
+    if LLVM.version() >= v"19"
+        append!(families, [("minimumnum", min, :number), ("maximumnum", max, :number)])
+    end
+    @testset "$intr" for (intr, op, nans) in families
+        ir = lower(intr)
+        for equal in ("%x", "%y")
+            f = evaluate(ir, equal)
+            for x in values, y in values
+                res = f(x, y)
+                signaling = x === snan || y === snan
+                if isnan(x) || isnan(y)
+                    if nans === :propagate || (isnan(x) && isnan(y))
+                        @test isnan(res)
+                    elseif nans === :quiet && signaling
+                        # (`llvm.minnum` may return NaN for a signaling NaN)
+                        @test isnan(res) || res === (isnan(x) ? y : x)
+                    else
+                        @test res === (isnan(x) ? y : x)
+                    end
+                else
+                    @test res === op(x, y)
+                end
+            end
+        end
+
+        # fast-math flags say which cases don't need fixing up
+        @test !occursin("bitcast", lower(intr, "nsz"))
+        @test !occursin("fcmp uno", lower(intr, "nnan"))
+        @test occursin("bitcast", lower(intr, "nnan"))
+    end
+    @test !occursin("fcmp", lower("minnum", "nsz"))
 end
