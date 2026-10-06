@@ -355,6 +355,16 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
         apply_fastmath!(mod)
     end
 
+    # Metal has no C library, but the target library info LLVM derives from the
+    # `air64-apple-macosx` triple claims Darwin's libm. That lets LLVM rewrite math
+    # intrinsics into libcalls the back-end can't resolve (e.g. `pow(2, x)` into `ldexpf`, or
+    # `sin(x)/cos(x)` into `tanf`), so declare every function free of builtins, as LLVM does
+    # for NVPTX and AMDGPU. Only callees with stricter builtin settings than their caller
+    # are not inlined, so the runtime functions linked later can still be.
+    for f in mod.functions
+        isdeclaration(f) || push!(f.function_attributes, StringAttribute("no-builtins"))
+    end
+
     for f in kernels(mod)
         # update calling conventions
         f = pass_by_reference!(job, mod, f)

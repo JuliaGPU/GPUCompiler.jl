@@ -1333,6 +1333,22 @@ end
     end
 end
 
+@testset "no C library" begin
+    # LLVM would rewrite these into calls to `ldexpf`, `exp10f` and `tanf`, which the AIR
+    # triple's (Darwin) target library info claims to exist
+    mod = @eval module $(gensym())
+        pow2(i) = ccall("llvm.pow.f32", llvmcall, Float32, (Float32, Float32), 2f0, Float32(i))
+        pow10(x) = ccall("llvm.pow.f32", llvmcall, Float32, (Float32, Float32), 10f0, x)
+        tan(x) = @fastmath ccall("llvm.sin.f32", llvmcall, Float32, (Float32,), x) /
+                           ccall("llvm.cos.f32", llvmcall, Float32, (Float32,), x)
+    end
+    for (f, T) in ((mod.pow2, Int32), (mod.pow10, Float32), (mod.tan, Float32))
+        ir = sprint(io -> Metal.code_llvm(io, f, Tuple{T}; dump_module=true))
+        @test occursin("\"no-builtins\"", ir)
+        @test !occursin(r"@_*(ldexpf|exp10f|tanf)\b", ir)
+    end
+end
+
 @testset "integer power lowering" begin
     # AIR has no integer power, so `llvm.powi` (as emitted for `@fastmath x^n`) is expanded
     # into multiplies: unrolled for a constant exponent, and a loop over its bits otherwise.
