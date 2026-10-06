@@ -95,7 +95,9 @@ function is_thread_private(ptr::LLVM.Value)
         push!(seen, val)
         if val isa LLVM.AllocaInst
             continue
-        elseif val isa LLVM.GetElementPtrInst || val isa LLVM.BitCastInst
+        elseif val isa LLVM.GetElementPtrInst || val isa LLVM.BitCastInst ||
+               val isa LLVM.AddrSpaceCastInst
+            # (a cast to a generic pointer still points to the stack)
             push!(worklist, val.operands[1])
         elseif val isa LLVM.PHIInst
             append!(worklist, first.(val.incoming))
