@@ -404,6 +404,60 @@ end
     @test occursin("global_atomic_add_x2", asm)
 end
 
+LLVM.version() >= v"20" && @testset "usub_sat atomics" begin
+    # LLVM 22 and 23 fail to select 32-bit `usub_sat` on flat memory, and on local memory
+    # before gfx12 (llvm/llvm-project#229442), so it's expanded to a compare-exchange loop
+    function rmw_kernel(as, op="usub_sat")
+        ir = """
+            define void @entry(ptr addrspace($as) %p, i32 %v) #0 {
+              %r = atomicrmw $op ptr addrspace($as) %p, i32 %v syncscope("agent") monotonic, align 4, !amdgpu.no.fine.grained.memory !0
+              ret void
+            }
+            attributes #0 = { alwaysinline }
+            !0 = !{}"""
+        mod = @eval module $(gensym())
+            kernel(p::Core.LLVMPtr{UInt32,$as}, v::UInt32) =
+                (Base.llvmcall(($ir, "entry"), Nothing, Tuple{Core.LLVMPtr{UInt32,$as}, UInt32},
+                               p, v); return)
+        end
+        Base.invokelatest(getfield, mod, :kernel), Tuple{Core.LLVMPtr{UInt32,as},UInt32}
+    end
+
+    # (flat pointers in kernel arguments are global pointers to the back-end)
+    for (dev_isa, as, expanded, instruction) in (
+            ("gfx1030", 3, true, "ds_cmpst_rtn_b32"),
+            ("gfx1100", 3, true, "ds_cmpstore_rtn_b32"),
+            ("gfx10-3-generic", 3, true, "ds_cmpst_rtn_b32"),
+            ("gfx11-generic", 3, true, "ds_cmpstore_rtn_b32"),
+            ("gfx1200", 3, false, "ds_sub_clamp_u32"),
+            ("gfx1030", 0, true, "flat_atomic_cmpswap"),
+            ("gfx1100", 0, true, "flat_atomic_cmpswap_b32"),
+            ("gfx1200", 0, true, "flat_atomic_cmpswap_b32"),
+            ("gfx90a", 0, true, "flat_atomic_cmpswap"),
+            ("gfx1100", 1, false, "global_atomic_csub_u32"),
+            ("gfx1200", 1, false, "global_atomic_sub_clamp_u32"),
+        )
+        f, tt = rmw_kernel(as)
+        kernel = as != 0
+        ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa, kernel))
+        @test occursin("atomicrmw usub_sat", ir) != expanded
+        asm = sprint(io->GCN.code_native(io, f, tt; dev_isa, kernel))
+        @test occursin(instruction, asm)
+
+        # Julia's LLVM, and other operations, are unaffected
+        ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa, kernel, backend=:inprocess))
+        @test occursin("atomicrmw usub_sat", ir) == (LLVM.version() < v"22" || !expanded)
+        f, tt = rmw_kernel(as, "usub_cond")
+        ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa, kernel))
+        @test occursin("atomicrmw usub_cond", ir)
+    end
+
+    # the expansion is a workaround, not part of validation
+    f, tt = rmw_kernel(3)
+    asm = sprint(io->GCN.code_native(io, f, tt; dev_isa="gfx1030", kernel=true, validate=false))
+    @test occursin("ds_cmpst_rtn_b32", asm)
+end
+
 @testset "s_load for kernarg struct access" begin
     mod = @eval module $(gensym())
         struct MyStruct

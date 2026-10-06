@@ -114,6 +114,10 @@ function finish_ir!(
             end
         end
     end
+
+    # after optimization, which can change address spaces, and also without validation
+    expand_atomics!(job, mod)
+
     return entry
 end
 
@@ -325,6 +329,42 @@ end
 
 
 ## LLVM passes
+
+# Expand atomic read-modify-writes that the back-end cannot compile to compare-exchange
+# loops. These work around bugs in the back-end, and should be revisited when updating it.
+function expand_atomics!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                         mod::LLVM.Module)
+    target = job.config.target
+    version = backend_llvm_version(target)
+    # (expansion changes the control flow, so collect the instructions first)
+    insts = LLVM.AtomicRMWInst[]
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        if inst isa LLVM.AtomicRMWInst && needs_cmpxchg_expansion(target, version, inst)
+            push!(insts, inst)
+        end
+    end
+    foreach(expand_to_cmpxchg!, insts)
+    return !isempty(insts)
+end
+
+function needs_cmpxchg_expansion(target::GCNCompilerTarget, version::VersionNumber,
+                                 inst::LLVM.AtomicRMWInst)
+    as = inst.pointer_operand.value_type.addrspace
+    T = inst.value_operand.value_type
+
+    # LLVM 22 selects 32-bit `usub_sat` on gfx10.3 and later, but lacks the pattern for
+    # flat memory, and for local memory before gfx12, failing with "Cannot select"
+    # (llvm/llvm-project#229442, unfixed as of LLVM 23). Expand it on flat memory on every
+    # target, where LLVM otherwise expands it depending on the scope and metadata.
+    if version >= v"22" && inst.binop == LLVM.AtomicRMWBinOp.USubSat &&
+       T isa LLVM.IntegerType && T.width == 32
+        as == 0 && return true
+        as == 3 && occursin(r"^gfx(103\d|11\d\d|10-3-generic|11(-\d+)?-generic)$",
+                            target.dev_isa) && return true
+    end
+
+    return false
+end
 
 function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
