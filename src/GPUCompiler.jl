@@ -50,6 +50,10 @@ using ScopedValues: ScopedValue, with
 # here so that files included earlier (notably `deprecated.jl`) can reference it.
 const active_compile_hook = ScopedValue{Any}(nothing)
 
+# Called as `hook(job, err)` when compiling `job` throws `err`, for the `only_failed` mode
+# of the `@device_code_*` macros. Only `compile` reports to it, so back-ends need not.
+const compile_failure_hook = ScopedValue{Any}(nothing)
+
 include("utils.jl")
 @public run_compile_hook, with_compile_hook, emit_hooked_compilation
 include("mangling.jl")

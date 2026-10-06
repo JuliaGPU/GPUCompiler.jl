@@ -222,6 +222,116 @@ end
     @test only(seen) == job
 end
 
+@testset "reflection of failed compilations" begin
+    mod = @eval module $(gensym())
+        good(x::Int) = nothing
+        bad(x::Int) = println(x)
+        struct WrappedError <: Exception
+            inner
+        end
+    end
+    compile_good() = Native.code_execution(mod.good, (Int,))
+    compile_bad() = Native.code_execution(mod.bad, (Int,))
+    io = IOBuffer()
+    inspected() = String(take!(io))
+
+    # only the job that failed is inspected, after which the error propagates
+    @test_throws InvalidIRError GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        compile_good()
+        compile_bad()
+    end
+    output = inspected()
+    @test occursin("bad", output) && !occursin("good", output)
+
+    # which is what the error message suggests doing
+    err = try compile_bad() catch err; err end
+    @test occursin("@device_code_typed only_failed=true interactive=true", sprint(showerror, err))
+
+    # without a failure, nothing is inspected and the macro returns as usual
+    @test isempty(GPUCompiler.@device_code_typed only_failed=true compile_good())
+    @test isempty(GPUCompiler.@device_code_typed only_failed=true nothing)
+
+    # failures are found regardless of how the error that escapes is wrapped
+    @test_throws CompositeException GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        @sync Threads.@spawn compile_bad()
+    end
+    @test occursin("bad", inspected())
+    @test_throws LoadError GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        try
+            compile_bad()
+        catch err
+            throw(LoadError("script.jl", 1, err))
+        end
+    end
+    @test occursin("bad", inspected())
+    @test_throws mod.WrappedError GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        try
+            compile_bad()
+        catch err
+            throw(mod.WrappedError(err))
+        end
+    end
+    @test occursin("bad", inspected())
+
+    # failures the code recovers from are inspected too
+    GPUCompiler.@device_code_warntype io=io only_failed=true begin
+        try
+            compile_bad()
+        catch
+        end
+    end
+    @test occursin("bad", inspected())
+
+    # unrelated errors propagate without inspection
+    @test_throws "unrelated" GPUCompiler.@device_code_warntype io=io only_failed=true error("unrelated")
+    @test isempty(inspected())
+
+    # a failure to inspect is reported, but does not replace the original error
+    mod2 = @eval module $(gensym())
+        macro broken_code(ex...)
+            hook = (job;) -> error("broken reflection")
+            $GPUCompiler.emit_hooked_compilation(hook, ex...)
+        end
+        macro broken_filter(ex...)
+            $GPUCompiler.emit_hooked_compilation(identity, ex...;
+                                                 job_filter=job -> error("broken filter"))
+        end
+        broken_code(f) = @broken_code only_failed=true f()
+        broken_filter(f) = @broken_filter only_failed=true f()
+    end
+    for f in (mod2.broken_code, mod2.broken_filter)
+        @test_logs (:error, r"Failed to inspect") match_mode=:any begin
+            @test (try f(compile_bad) catch err; err end) isa InvalidIRError
+        end
+    end
+end
+
+@testset "interactive reflection" begin
+    mod = @eval module $(gensym())
+        kernel(x::Int) = nothing
+    end
+    job, _ = Native.create_job(mod.kernel, (Int,))
+
+    # Cthulhu.jl is reached through the hook its package extension sets
+    original = GPUCompiler.descender[]
+    try
+        GPUCompiler.descender[] = nothing
+        @test_throws "using Cthulhu" GPUCompiler.code_typed(job; interactive=true)
+
+        calls = []
+        GPUCompiler.descender[] = (sig; kwargs...) -> push!(calls, (sig, NamedTuple(kwargs)))
+        GPUCompiler.code_typed(job; interactive=true, optimize=false)
+        GPUCompiler.code_warntype(job; interactive=true)
+        @test length(calls) == 2
+        @test all(((sig, _),) -> sig == Tuple{typeof(mod.kernel), Int}, calls)
+        @test all(((_, kw),) -> kw.interp isa GPUCompiler.GPUInterpreter, calls)
+        @test calls[1][2].warntype == false && calls[1][2].optimize == false
+        @test calls[2][2].warntype == true
+    finally
+        GPUCompiler.descender[] = original
+    end
+end
+
 @testset "method instances for type-valued callees and arguments" begin
     # JuliaLang/julia#62001: closed type-valued callees and arguments
     # dispatch on Core.TypeEgal keys instead of Type{T}
