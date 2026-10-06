@@ -20,19 +20,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # GetAsserts runs from the branch that triggered it, so its matrix decides which versions
+  # get tested; e.g. release branches don't test Julia master.
+  versions:
+    name: Determine Julia versions
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.event != 'pull_request'
+    permissions:
+      actions: read
+    outputs:
+      versions: ${{ steps.versions.outputs.result }}
+    steps:
+      - name: List the downloaded builds
+        id: versions
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: ${{ github.event.workflow_run.id }},
+              per_page: 100,
+            });
+            return jobs
+              .map(job => job.name.match(/^Download Julia (\S+) \(x86_64-linux-gnuassert\)$/))
+              .filter(match => match)
+              .map(match => match[1]);
+
   report-start:
     name: Report assertion tests started
+    needs: versions
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    if: github.event.workflow_run.conclusion == 'success'
     permissions:
       checks: write
     steps:
       - name: Report in-progress
         uses: actions/github-script@v9
+        env:
+          VERSIONS: ${{ needs.versions.outputs.versions }}
         with:
           script: |
-            // Keep in sync with the matrix below
-            const versions = ['1.12', '1.13', 'master'];
+            const versions = JSON.parse(process.env.VERSIONS);
             await Promise.all(versions.map(version =>
               github.rest.checks.create({
                 owner: context.repo.owner,
@@ -46,7 +75,8 @@ jobs:
 
   test:
     name: Julia ${{ matrix.version }} (assert) - Linux
-    needs: report-start
+    needs: [versions, report-start]
+    if: needs.versions.outputs.versions != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -55,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.12', '1.13', 'master']
+        version: ${{ fromJSON(needs.versions.outputs.versions) }}
     steps:
       - name: Download Julia build
         uses: actions/download-artifact@v8
@@ -85,8 +115,8 @@ jobs:
 
   report-result:
     name: Report assertion test results
-    needs: test
-    if: always() && github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.conclusion == 'success'
+    needs: [versions, test]
+    if: always() && needs.versions.result == 'success' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -94,10 +124,11 @@ jobs:
     steps:
       - name: Report check run
         uses: actions/github-script@v9
+        env:
+          VERSIONS: ${{ needs.versions.outputs.versions }}
         with:
           script: |
-            // Keep in sync with the matrix above
-            const versions = ['1.12', '1.13', 'master'];
+            const versions = JSON.parse(process.env.VERSIONS);
             const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRunAttempt, {
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -126,17 +157,19 @@ jobs:
 
   report-failure:
     name: Report download failure
+    needs: versions
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.event != 'pull_request' && github.event.workflow_run.conclusion == 'failure'
+    if: github.event.workflow_run.conclusion == 'failure'
     permissions:
       checks: write
     steps:
       - name: Report check runs
         uses: actions/github-script@v9
+        env:
+          VERSIONS: ${{ needs.versions.outputs.versions }}
         with:
           script: |
-            // Keep in sync with the matrix above
-            const versions = ['1.12', '1.13', 'master'];
+            const versions = JSON.parse(process.env.VERSIONS);
             await Promise.all(versions.map(version =>
               github.rest.checks.create({
                 owner: context.repo.owner,
