@@ -39,8 +39,38 @@ end
 ## compiler entrypoint
 
 export compile
-# `compile_hook` is declared in `GPUCompiler.jl` so files included earlier
-# (notably `deprecated.jl`'s `cached_compilation`) can reference it too.
+
+"""
+    run_compile_hook(job)
+
+Report `job` to the hook installed by [`with_compile_hook`](@ref) or a `@device_code_*`
+macro in the current task, if any. Back-ends call this every time they look up a kernel,
+whether or not its compilation is cached, so that reflection also sees cached kernels;
+there is no need to recompile while a hook is installed. [`compile`](@ref) reports the
+jobs it compiles too, so a job may be reported more than once.
+
+Jobs need not be `CompilerJob`s or use LLVM. They must have stable `hash` and `isequal`
+semantics for deduplication, support `show`, and implement the requested GPUCompiler
+reflection functions: `code_lowered(job)`, `code_typed(job; kwargs...)`, or
+`code_warntype`, `code_llvm`, and `code_native` with `(io, job; kwargs...)`. The
+all-stage `@device_code` dump still requires a `CompilerJob` and the LLVM pipeline.
+"""
+function run_compile_hook(@nospecialize(job))
+    hook = active_compile_hook[]
+    # launches may run in a frozen world, while the hook lives in the latest one
+    hook === nothing || Base.invokelatest(hook, job)
+    return
+end
+
+"""
+    with_compile_hook(f, hook)
+
+Call `f()` with `hook` installed, calling `hook(job)` for the jobs that `f` and the tasks
+it spawns compile or launch (see [`run_compile_hook`](@ref)). The same job can be
+reported several times; pass `nothing` to report to no hook at all. Wait for child tasks
+before `f` returns to observe all of them.
+"""
+with_compile_hook(f, hook) = with(f, active_compile_hook => hook)
 
 """
     compile(target::Symbol, job::CompilerJob)
@@ -52,9 +82,7 @@ The default [`relocation_lowering`](@ref) strategy resolves Julia-value relocati
 `:llvm` result. Other strategies retain relocation metadata for their loader.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
-    if compile_hook[] !== nothing
-        Base.invokelatest(compile_hook[], job)
-    end
+    run_compile_hook(job)
     return compile_unhooked(target, job)
 end
 

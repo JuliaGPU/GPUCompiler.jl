@@ -278,7 +278,12 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
         obj = get(cache, key, nothing)
     end
 
-    if obj === nothing || compile_hook[] !== nothing
+    # only construct a job when there is a hook to report it to
+    if active_compile_hook[] !== nothing
+        run_compile_hook(CompilerJob(src, cfg, world))
+    end
+
+    if obj === nothing
         obj = actual_compilation(cache, src, world, cfg, compiler, linker)::V
         Base.@lock cached_compilation_lock begin
             cache[key] = obj
@@ -293,16 +298,28 @@ const cached_compilation_lock = ReentrantLock()
                                       cfg::CompilerConfig, compiler::Function,
                                       linker::Function)
     job = CompilerJob(src, cfg, world)
-    asm = nothing
-
-    # provide a hook to use in tools / debuggers
-    if compile_hook[] !== nothing
-        Base.invokelatest(compile_hook[], job)
-    end
-
     asm = compiler(job)
     obj = linker(job, asm)
     obj
 end
 
 @public cached_compilation
+
+
+## `compile_hook`
+
+# The hook used to be accessed directly: installed with `with(compile_hook => hook)`,
+# and checked by back-ends to bypass their caches. That still works, but back-ends
+# should report lookups with `run_compile_hook`, and tools install hooks with
+# `with_compile_hook`.
+Base.@deprecate_binding compile_hook active_compile_hook false ", use `run_compile_hook` or `with_compile_hook` instead."
+
+"""
+    compile_hook
+
+Deprecated: back-ends report the jobs they look up with [`run_compile_hook`](@ref), and
+tools install a hook with [`with_compile_hook`](@ref).
+"""
+compile_hook
+
+@public compile_hook
