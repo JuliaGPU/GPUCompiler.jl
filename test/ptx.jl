@@ -40,6 +40,91 @@ end
     end
 end
 
+@testset "atomic validation" begin
+    # validate textual IR, with NVPTX's synchronization scopes, for a PTX target
+    function validate_atomics(body; cap, ptx=v"8.4", system_atomics=true)
+        source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+        target = PTXCompilerTarget(; cap, ptx, system_atomics)
+        job = CompilerJob(source, CompilerConfig(target, PTX.CompilerParams(); kernel=true))
+        Context(; opaque_pointers=true) do ctx
+            mod = parse(LLVM.Module, """
+                target datalayout = "$(GPUCompiler.llvm_datalayout(target))"
+                define void @kernel(ptr addrspace(1) %p, ptr addrspace(3) %s,
+                                    ptr addrspace(7) %c, ptr addrspace(5) %l, ptr %g) {
+                  $body
+                  ret void
+                }""")
+            join(first.(GPUCompiler.validate_ir(job, mod)), "\n")
+        end
+    end
+
+    @testset "unsupported" begin
+        for (body, target, reason) in (
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"agent\") monotonic, align 4",
+                 (; cap=v"7.0"), "atomic operation with synchronization scope \"agent\""),
+                ("fence syncscope(\"agent\") seq_cst",
+                 (; cap=v"7.0"), "fence with synchronization scope \"agent\""),
+                ("%a = atomicrmw add ptr addrspace(5) %l, i32 1 syncscope(\"device\") monotonic, align 4",
+                 (; cap=v"7.0"), "atomic operation in address space 5"),
+                ("%a = atomicrmw add ptr addrspace(7) %c, i32 1 syncscope(\"cluster\") monotonic, align 4",
+                 (; cap=v"8.0"), "atomic operation on shared::cluster memory"),
+                ("%a = load atomic fp128, ptr addrspace(1) %p syncscope(\"device\") monotonic, align 16",
+                 (; cap=v"9.0"), "atomic operation on a fp128 value"),
+                ("%a = cmpxchg ptr addrspace(1) %p, i128 0, i128 1 syncscope(\"device\") monotonic monotonic, align 16",
+                 (; cap=v"8.0", ptx=v"7.8"), "128-bit atomic operation (requires compute capability 9.0 and PTX ISA 8.3)"),
+                ("%a = atomicrmw xchg ptr addrspace(1) %p, i128 1 syncscope(\"device\") monotonic, align 16",
+                 (; cap=v"9.0", ptx=v"8.0"), "128-bit atomic operation (requires compute capability 9.0 and PTX ISA 8.3)"),
+                ("%a = cmpxchg ptr addrspace(1) %p, i128 0, i128 1 monotonic monotonic, align 16",
+                 (; cap=v"9.0", ptx=v"8.3"), "system-scope 128-bit atomic operation (requires PTX ISA 8.4)"),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i64 1 syncscope(\"device\") monotonic, align 4",
+                 (; cap=v"7.0"), "atomic operation with alignment 4 (requires at least 8-byte alignment)"),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4",
+                 (; cap=v"5.2"), "system-scope atomic operation (requires compute capability 6.0"),
+                ("%a = cmpxchg ptr %g, i32 0, i32 1 monotonic monotonic, align 4",
+                 (; cap=v"5.2"), "system-scope atomic operation (requires compute capability 6.0"),
+                ("%a = atomicrmw fadd ptr addrspace(1) %p, double 1.0 seq_cst, align 8",
+                 (; cap=v"5.2"), "system-scope atomic operation (requires compute capability 6.0"),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4",
+                 (; cap=v"6.1", system_atomics=false), "system-scope atomic operation (not supported on this platform"),
+                ("%a = load atomic i128, ptr addrspace(1) %p syncscope(\"device\") seq_cst, align 16",
+                 (; cap=v"9.0"), "sequentially-consistent 128-bit atomic load or store"),
+                ("store atomic i128 0, ptr addrspace(1) %p syncscope(\"device\") seq_cst, align 16",
+                 (; cap=v"9.0"), "sequentially-consistent 128-bit atomic load or store"),
+            )
+            @test occursin(reason, validate_atomics(body; target...))
+        end
+    end
+
+    @testset "supported" begin
+        for (body, target) in (
+                # system scope where it doesn't need system-scope atomics
+                ("%a = atomicrmw add ptr addrspace(3) %s, i32 1 monotonic, align 4", (; cap=v"5.2")),
+                ("%a = load atomic i32, ptr addrspace(1) %p acquire, align 4\nstore atomic i32 %a, ptr addrspace(1) %p release, align 4",
+                 (; cap=v"5.2", system_atomics=false)),
+                ("fence seq_cst", (; cap=v"5.2", system_atomics=false)),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"device\") monotonic, align 4", (; cap=v"5.2")),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 monotonic, align 4", (; cap=v"6.0")),
+                # a cluster is a block before sm_90
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"cluster\") monotonic, align 4\nfence syncscope(\"cluster\") acquire",
+                 (; cap=v"8.0", ptx=v"7.8")),
+                ("%a = atomicrmw add ptr addrspace(7) %c, i32 1 syncscope(\"cluster\") monotonic, align 4", (; cap=v"9.0", ptx=v"7.8")),
+                # operations NVPTX expands
+                ("%a = atomicrmw nand ptr addrspace(1) %p, i8 1 syncscope(\"block\") monotonic, align 1", (; cap=v"5.2")),
+                ("%a = atomicrmw fmax ptr %g, half 1.0 syncscope(\"singlethread\") monotonic, align 2", (; cap=v"5.2")),
+                ("%a = load atomic ptr, ptr addrspace(1) %p unordered, align 8", (; cap=v"5.2")),
+                ("%a = cmpxchg ptr addrspace(1) %p, i128 0, i128 1 syncscope(\"device\") seq_cst seq_cst, align 16",
+                 (; cap=v"9.0", ptx=v"8.3")),
+                ("%a = load atomic i128, ptr addrspace(1) %p acquire, align 16", (; cap=v"9.0", ptx=v"8.4")),
+            )
+            @test validate_atomics(body; target...) == ""
+        end
+    end
+
+    # the platform restriction is part of the target identity
+    @test hash(PTXCompilerTarget(cap=v"6.1")) !=
+          hash(PTXCompilerTarget(cap=v"6.1", system_atomics=false))
+end
+
 @testset "kernel state survives a runtime rebuild" begin
     # Clearing the runtime cache forces the library link inside `emit_llvm` to rebuild
     # the runtime (nested compilation); the kernel must still get its state argument
@@ -542,6 +627,32 @@ end
         occursin(GPUCompiler.UNKNOWN_INTRINSIC, msg) &&
         occursin(r"\[\d+\] kernel", msg)
     end
+end
+
+@testset "atomic validation" begin
+    # atomics in Julia code are reported with the frame that performs them.
+    # emit the atomic directly, as Julia's own intrinsics lower to a CAS loop calling `+`
+    # (dynamically, on 1.10) or fold an unused swap into a store, depending on the version.
+    mod = @eval module $(gensym())
+        function kernel(p::Ptr{Int})
+            Base.llvmcall("""%ptr = inttoptr i64 %0 to i64*
+                             %old = atomicrmw add i64* %ptr, i64 1 monotonic, align 8
+                             ret void""", Cvoid, Tuple{Ptr{Int}}, p)
+            return
+        end
+    end
+    @test_throws_message(InvalidIRError,
+                         PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; cap=v"5.2")) do msg
+        occursin("Reason: unsupported system-scope atomic operation (requires compute capability 6.0", msg) &&
+        occursin(r"\[\d+\] kernel", msg)
+    end
+    @test_throws_message(InvalidIRError,
+                         PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; cap=v"6.1",
+                                            system_atomics=false)) do msg
+        occursin("Reason: unsupported system-scope atomic operation (not supported on this platform", msg)
+    end
+    asm, _ = PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; cap=v"6.1")
+    @test occursin("atom.sys.global.add.u64", asm)
 end
 
 @testset "float boxes" begin

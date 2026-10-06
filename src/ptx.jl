@@ -31,6 +31,11 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
 
     fastmath::Bool = Base.JLOptions().fast_math == 1
 
+    # can system-scope atomics be used? the ISA supports them from sm_60 on (which
+    # `validate_ir` checks separately), but some platforms reject them, e.g. Pascal GPUs
+    # under Windows, or Tegra GPUs before sm_72.
+    system_atomics::Bool = true
+
     # deprecated; remove with next major version
     exitable::Union{Nothing,Bool} = nothing
     unreachable::Union{Nothing,Bool} = nothing
@@ -48,6 +53,7 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.blocks_per_sm, h)
     h = hash(target.maxregs, h)
     h = hash(target.fastmath, h)
+    h = hash(target.system_atomics, h)
 
     h
 end
@@ -342,6 +348,110 @@ function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     else
         LLVM.DebugEmissionKind.NoDebug
     end
+end
+
+
+## validation
+
+# Atomic operations and fences come from many front-ends (CUDA.jl's atomic functions,
+# UnsafeAtomics and Atomix, Enzyme, Julia's atomic intrinsics), so they are validated here,
+# on the IR, rather than in any of them. The NVPTX back-end does not reject everything the
+# target cannot run: it silently drops a system scope before sm_60, emits PTX that `ptxas`
+# or the driver reject, or aborts the process. Validation runs after `lower_syncscopes!`, so
+# the scopes are the ones NVPTX knows.
+function validate_ir(job::CompilerJob{PTXCompilerTarget}, mod::LLVM.Module)
+    errors = IRError[]
+    dl = mod.datalayout
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        reason = if is_atomic_memop(inst)
+            ptx_atomic_error(job, dl, inst)
+        elseif inst isa LLVM.FenceInst
+            ptx_syncscope_error(inst, "fence")
+        else
+            nothing
+        end
+        reason === nothing || push!(errors, (reason, backtrace(inst), string(inst)))
+    end
+    return errors
+end
+
+# the synchronization scopes of NVPTX, as `lower_syncscopes!` leaves them. a cluster is a
+# single block on targets without clusters, where NVPTX uses the block scope instead.
+const PTX_SYNCSCOPES = ("singlethread", "block", "cluster", "device", "system")
+
+ptx_syncscope_error(inst::LLVM.Instruction, what="atomic operation") =
+    inst.syncscope.name in PTX_SYNCSCOPES ? nothing :
+    "$what with synchronization scope $(repr(inst.syncscope.name))"
+
+# Why the target cannot run the atomic memory operation `inst`, or `nothing` if it can.
+# Operations PTX has no instruction for (e.g. 8- and 16-bit read-modify-writes, most
+# floating-point ones, or `fadd` on older devices) are fine: NVPTX expands them to
+# compare-exchange loops.
+function ptx_atomic_error(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
+                          dl::LLVM.DataLayout, inst::LLVM.Instruction)
+    target = job.config.target
+    reason = ptx_syncscope_error(inst)
+    reason === nothing || return reason
+    system = inst.syncscope.name == "system"
+
+    as = inst.pointer_operand.value_type.addrspace
+    if !(as in (0, 1, 3, 7))
+        return "atomic operation in address space $as (PTX only supports atomics on generic, global and shared memory)"
+    end
+    if as == 7 && (target.cap < v"9.0" || target.ptx < v"7.8")
+        return "atomic operation on shared::cluster memory (requires compute capability 9.0 and PTX ISA 7.8)"
+    end
+
+    # (vectors aren't supported either: integer vectors crash NVPTX 23.1, and PTX only has
+    # vector atomics for a few floating-point reductions)
+    T = atomic_value_type(inst)
+    bits = if T isa LLVM.IntegerType || T isa LLVM.FloatingPointType || T isa LLVM.PointerType
+        Int(LLVM.bit_size(dl, T))
+    end
+    if !(bits in (8, 16, 32, 64) || (bits == 128 && T isa LLVM.IntegerType))
+        return "atomic operation on a $(string(T)) value"
+    end
+    if bits == 128
+        if target.cap < v"9.0" || target.ptx < v"8.3"
+            return "128-bit atomic operation (requires compute capability 9.0 and PTX ISA 8.3)"
+        end
+        # (NVPTX emits `.sys` 128-bit atomics with PTX ISA 8.3, which `ptxas` rejects)
+        if system && target.ptx < v"8.4"
+            return "system-scope 128-bit atomic operation (requires PTX ISA 8.4)"
+        end
+    end
+    if inst.alignment < bits ÷ 8
+        return "atomic operation with alignment $(inst.alignment) (requires at least $(bits ÷ 8)-byte alignment)"
+    end
+
+    # loads and stores only take a scope from sm_70 on (before, they are volatile accesses,
+    # bracketed by `membar`s that support every scope), and shared memory is only visible
+    # within a block or cluster, so this only concerns read-modify-writes on other memory
+    if system && (inst isa LLVM.AtomicRMWInst || inst isa LLVM.AtomicCmpXchgInst) &&
+       !(as in (3, 7))
+        if target.cap < v"6.0"
+            return "system-scope atomic operation (requires compute capability 6.0; use device scope if system-wide atomicity is not required)"
+        elseif !target.system_atomics
+            return "system-scope atomic operation (not supported on this platform; use device scope if system-wide atomicity is not required)"
+        end
+    end
+
+    return nvptx_atomic_error(inst)
+end
+
+# Why the NVPTX back-end cannot compile the atomic memory operation `inst`, although the
+# target supports it, or `nothing` if it can. These work around bugs in the back-end, and
+# should be revisited when updating it.
+function nvptx_atomic_error(inst::LLVM.Instruction)
+    # NVPTX's instruction printer aborts on the ordering of the `atom.cas.b128` and
+    # `atom.exch.b128` that it legalizes these to (LLVM 23.1, and main as of October 2026)
+    T = atomic_value_type(inst)
+    if (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) &&
+       inst.ordering == LLVM.AtomicOrdering.SequentiallyConsistent &&
+       T isa LLVM.IntegerType && T.width == 128
+        return "sequentially-consistent 128-bit atomic load or store (not supported by the NVPTX back-end)"
+    end
+    return nothing
 end
 
 
