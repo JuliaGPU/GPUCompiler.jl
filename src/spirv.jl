@@ -17,7 +17,37 @@ const SPIRV_Tools_jll =
 
 ## target
 
-export SPIRVCompilerTarget
+export SPIRVCompilerTarget, SPIRVAtomics
+
+# The atomic operations that the device, its driver and the SPIR-V toolchain run correctly
+# (not: that are native in hardware), for which `lower_atomics!` selects SPIR-V instructions.
+# Floating-point operations without such an instruction become compare-exchange loops, which
+# need integer atomics of the same width.
+#
+# There is nothing to enable native floating-point min/max
+# (SPV_EXT_shader_atomic_float_min_max): those may return either zero when comparing -0.0 and
+# +0.0, while LLVM's `atomicrmw fmin` and `fmax` order -0.0 before +0.0, and `atomicrmw` has
+# no fast-math flags to relax that. So these are compare-exchange loops too, which rules them
+# out for half-precision numbers, and needs `int64` for double-precision ones.
+#
+# Which synchronization scopes and memory orderings the device supports is not conveyed
+# either: front-ends must only use those their device supports (e.g., OpenCL 3.0 makes the
+# device scope optional, and the system scope needs fine-grained SVM atomics).
+Base.@kwdef struct SPIRVAtomics
+    # 64-bit integer atomics (cl_khr_int64_base_atomics and cl_khr_int64_extended_atomics).
+    # enabled by default, as GPUCompiler emitted them without checking before.
+    int64::Bool = true
+
+    # atomic addition and subtraction of half-, single- and double-precision floating-point
+    # numbers in global and local memory (SPV_EXT_shader_atomic_float_add and
+    # SPV_EXT_shader_atomic_float16_add, e.g. from cl_ext_float_atomics)
+    fadd_f16_global::Bool = false
+    fadd_f32_global::Bool = false
+    fadd_f64_global::Bool = false
+    fadd_f16_local::Bool = false
+    fadd_f32_local::Bool = false
+    fadd_f64_local::Bool = false
+end
 
 Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     version::Union{Nothing,VersionNumber} = nothing
@@ -27,6 +57,8 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     # `String` -- not a `Vector` -- so `jl_egal`-based owner/config lookups can match
     # structurally equivalent targets after package-image deserialization.
     extensions::String = ""
+    # the atomics the device supports; the extensions they need are added to `extensions`
+    atomics::SPIRVAtomics = SPIRVAtomics()
     supports_fp16::Bool = true
     supports_fp64::Bool = true
     supports_bfloat16::Bool = false
@@ -68,6 +100,41 @@ end
 # than Julia's Float64-based `fma_emulated` fallback (which fails without Float64 support).
 have_fma(@nospecialize(target::SPIRVCompilerTarget), T::Type) = true
 
+# the SPIR-V extensions that the atomic instructions the target supports need
+function spirv_atomic_extensions(atomics::SPIRVAtomics)
+    extensions = String[]
+    f16 = atomics.fadd_f16_global || atomics.fadd_f16_local
+    if f16 || atomics.fadd_f32_global || atomics.fadd_f32_local ||
+       atomics.fadd_f64_global || atomics.fadd_f64_local
+        push!(extensions, "SPV_EXT_shader_atomic_float_add")
+    end
+    # (the half-precision extension extends the first one)
+    f16 && push!(extensions, "SPV_EXT_shader_atomic_float16_add")
+    return extensions
+end
+
+# The `--spirv-ext` specifier to compile with: the target's, with the extensions its atomics
+# need enabled. The back-ends only declare the extensions that the module uses.
+function spirv_extensions(target::SPIRVCompilerTarget)
+    spec = target.extensions
+    entries = filter(!isempty, strip.(split(spec, ',')))
+    for ext in spirv_atomic_extensions(target.atomics)
+        # the last entry that mentions the extension decides
+        enabled = nothing
+        for entry in entries
+            if entry[1] in ('+', '-') && (entry[2:end] == ext || entry[2:end] == "all")
+                enabled = entry[1] == '+'
+            end
+        end
+        if enabled === false
+            error("The SPIR-V extension $ext, which the atomics of the target need, is disabled by its extensions $(repr(spec))")
+        end
+        enabled === true && continue
+        spec = isempty(spec) ? "+$ext" : "$spec,+$ext"
+    end
+    return spec
+end
+
 llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
     "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1" :
     "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1"
@@ -85,6 +152,9 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     if job.config.kernel
         entry.callconv = LLVM.CallConv.SPIRKERNEL
     end
+
+    # (fail early when the extensions conflict with the atomics)
+    spirv_extensions(job.config.target)
 
     return entry
 end
@@ -222,7 +292,7 @@ end
         # options; unlike `llc`, it rejects unknown extensions instead of ignoring them.
         backend = ExternalBackend(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV")
         version = something(target.version, v"0.0")
-        extensions = target.extensions
+        extensions = spirv_extensions(target)
         GC.@preserve extensions begin
             options = Ref(SPIRVCompileOptions(Int === Int64, version.major, version.minor,
                                               Base.unsafe_convert(Cstring, extensions),
@@ -234,7 +304,7 @@ end
         # translate in-process through libllvm_spirv. like `llvm-spirv`, the translator
         # takes the triple from the module and rejects unknown extensions.
         version = something(target.version, v"0.0")
-        extensions = target.extensions
+        extensions = spirv_extensions(target)
         GC.@preserve extensions begin
             options = Ref(LLVMSPIRVTranslateOptions(version.major, version.minor,
                                                     Base.unsafe_convert(Cstring, extensions),

@@ -9,10 +9,11 @@ GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types);
                    supports_fp16=true, supports_fp64=true, supports_bfloat16=false,
-                   backend::Symbol, driver::Symbol=:generic, kwargs...)
+                   backend::Symbol, driver::Symbol=:generic, extensions::String="",
+                   atomics::SPIRVAtomics=SPIRVAtomics(), kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = SPIRVCompilerTarget(; backend, validate=true, optimize=true,
+    target = SPIRVCompilerTarget(; backend, validate=true, optimize=true, extensions, atomics,
                                    supports_fp16, supports_fp64, supports_bfloat16, driver)
     params = CompilerParams()
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
