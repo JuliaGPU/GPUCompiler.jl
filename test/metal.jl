@@ -1331,6 +1331,34 @@ end
         @test "air.fast_sqrt.f32" in called_names(f)
         @test (verify(mod); true)
     end
+
+    # transcendentals, including those only newer LLVMs have
+    ops = [("exp", 1), ("exp2", 1), ("log", 1), ("log10", 1), ("pow", 2)]
+    LLVM.version() >= v"18" && push!(ops, ("exp10", 1))
+    LLVM.version() >= v"19" && append!(ops, [("tan", 1), ("asin", 1), ("tanh", 1)])
+    LLVM.version() >= v"20" && push!(ops, ("atan2", 2))
+    Context() do ctx
+        ir = IOBuffer()
+        for (op, n) in ops, (t, s) in (("float", "f32"), ("half", "f16"))
+            args = join(fill(t, n), ", ")
+            vals = join(fill("$t %x", n), ", ")
+            println(ir, "declare $t @llvm.$op.$s($args)")
+            println(ir, "define void @$(op)_$s($t %x) {")
+            println(ir, "  %a = call $t @llvm.$op.$s($vals)")
+            println(ir, "  %b = call afn $t @llvm.$op.$s($vals)")
+            println(ir, "  ret void\n}")
+        end
+        mod = parse(LLVM.Module, String(take!(ir)))
+        for (op, _) in ops
+            f = mod.functions["$(op)_f32"]
+            @test GPUCompiler.lower_math_intrinsics!(f)
+            @test called_names(f) == ["air.$op.f32", "air.fast_$op.f32"]
+            f = mod.functions["$(op)_f16"]
+            @test GPUCompiler.lower_math_intrinsics!(f)
+            @test called_names(f) == ["air.$op.f16", "air.$op.f16"]
+        end
+        @test (verify(mod); true)
+    end
 end
 
 @testset "no C library" begin

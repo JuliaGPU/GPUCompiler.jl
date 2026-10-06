@@ -2620,12 +2620,28 @@ const AIR_MATH_INTRINSICS = Dict(
     "llvm.ceil"  => ("air.ceil",  "air.fast_ceil"),
     "llvm.trunc" => ("air.trunc", "air.fast_trunc"),
     "llvm.rint"  => ("air.rint",  "air.fast_rint"),
-    # Julia doesn't emit these (Metal.jl calls `air.sin`/`air.cos` directly), but Enzyme's
-    # derivatives of those calls do, and Apple's back-end crashes on them. The f16 builtins
-    # are less accurate than rounding the f32 ones on some GPUs (M1), but match what Apple's
-    # frontend and Metal.jl use for half.
+    # transcendentals, which Julia implements in software but Metal.jl overrides with these
+    # intrinsics (and Enzyme's derivatives emit). Apple's back-end crashes on the `llvm.*`
+    # forms. The f16 `sin`/`cos` builtins are less accurate than rounding the f32 ones on
+    # some GPUs (M1), but match what Apple's frontend uses for half. Older LLVMs lack some of
+    # these intrinsics, which then can't occur.
+    "llvm.exp"   => ("air.exp",   "air.fast_exp"),
+    "llvm.exp2"  => ("air.exp2",  "air.fast_exp2"),
+    "llvm.exp10" => ("air.exp10", "air.fast_exp10"),   # LLVM 18+
+    "llvm.log"   => ("air.log",   "air.fast_log"),
+    "llvm.log2"  => ("air.log2",  "air.fast_log2"),
+    "llvm.log10" => ("air.log10", "air.fast_log10"),
+    "llvm.pow"   => ("air.pow",   "air.fast_pow"),
     "llvm.sin"   => ("air.sin",   "air.fast_sin"),
     "llvm.cos"   => ("air.cos",   "air.fast_cos"),
+    "llvm.tan"   => ("air.tan",   "air.fast_tan"),     # LLVM 19+
+    "llvm.asin"  => ("air.asin",  "air.fast_asin"),    # LLVM 19+
+    "llvm.acos"  => ("air.acos",  "air.fast_acos"),    # LLVM 19+
+    "llvm.atan"  => ("air.atan",  "air.fast_atan"),    # LLVM 19+
+    "llvm.atan2" => ("air.atan2", "air.fast_atan2"),   # LLVM 20+
+    "llvm.sinh"  => ("air.sinh",  "air.fast_sinh"),    # LLVM 19+
+    "llvm.cosh"  => ("air.cosh",  "air.fast_cosh"),    # LLVM 19+
+    "llvm.tanh"  => ("air.tanh",  "air.fast_tanh"),    # LLVM 19+
 )
 function lower_math_intrinsics!(fun::LLVM.Function)
     math_intrinsics = intrinsic_table(AIR_MATH_INTRINSICS)
