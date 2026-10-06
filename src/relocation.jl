@@ -151,16 +151,19 @@ struct Relocations
     # `emit_table_relocations!`). Empty for every other strategy.
     table::Vector{RelocationTarget}
     frozen::Base.RefValue{Bool}
+    # The values `bake_relocations!` resolved into the IR, by address, so that the addresses
+    # can be identified later on (see `referenced_object`) without dereferencing them.
+    resolved::Dict{UInt,Any}
 end
 
 Relocations(records::Vector{Relocation}) =
-    Relocations(records, RelocationTarget[], Ref(false))
+    Relocations(records, RelocationTarget[], Ref(false), Dict{UInt,Any}())
 Relocations() = Relocations(Relocation[])
 
 # Resolving into IR consumes the records; loaders (and anything else working after lowering)
 # copy cached metadata first, which is also how they get a mutable manifest back.
 Base.copy(relocs::Relocations) =
-    Relocations(copy(relocs.records), copy(relocs.table), Ref(false))
+    Relocations(copy(relocs.records), copy(relocs.table), Ref(false), copy(relocs.resolved))
 Base.isempty(relocs::Relocations) = isempty(relocs.records)
 Base.length(relocs::Relocations) = length(relocs.records)
 
@@ -624,6 +627,7 @@ function link_relocatable!(dest_mod::LLVM.Module, dest_relocs::Relocations,
                             src_mod::LLVM.Module, src_relocs::Relocations;
                             only_needed=false)
     link!(dest_mod, src_mod; only_needed)
+    merge!(dest_relocs.resolved, src_relocs.resolved)
     for rec in src_relocs.records
         # A site absent from the linked module was dead (DCE'd or not imported under
         # `only_needed`); its relocation dies with it.
@@ -690,13 +694,16 @@ end
     bake_relocations!(mod, relocs)
 
 Resolve every record in the current Julia process and write the resulting words into the IR,
-leaving `relocs` empty. The module then embeds session-local addresses and must not be
-persisted across sessions. Drop dead records first with [`prune_dead_relocations!`](@ref).
+leaving `relocs` without records. The module then embeds session-local addresses and must not
+be persisted across sessions. Drop dead records first with [`prune_dead_relocations!`](@ref).
 """
 function bake_relocations!(mod::LLVM.Module, relocs::Relocations)
     check_mutable(relocs, "resolve into IR")
     foreach_relocation(mod, relocs) do rec, gv
         word = resolve_relocation_target(rec.target)
+        if rec.target isa JuliaValueRef
+            relocs.resolved[word] = rec.target.value
+        end
         if rec.kind === SlotSite
             gv.initializer = slot_initializer(gv, word)
             gv.linkage = LLVM.Linkage.Private
@@ -1050,11 +1057,19 @@ function referenced_object(value, relocs::Relocations)
     elseif value isa ConstantExpr && value.opcode == LLVM.Opcode.IntToPtr
         addr = first(value.operands)
         addr isa ConstantInt || return nothing
-        addr = convert(UInt, addr)
-        addr < UInt(64 << 4) && return small_typeof(addr)   # jl_max_tags << 4
-        return Some(Base.unsafe_pointer_to_objref(Ptr{Cvoid}(addr)))
+        return object_at(convert(UInt, addr), relocs)
     end
     return nothing
+end
+
+# The Julia value at a literal address in the IR, or `nothing` if it is not known.
+function object_at(addr::UInt, relocs::Relocations)
+    addr < UInt(64 << 4) && return small_typeof(addr)   # jl_max_tags << 4
+    obj = get(relocs.resolved, addr, relocs)
+    obj === relocs || return Some(obj)
+    # Julia 1.10 embeds the address of every value in the IR, without telling us which
+    supports_relocatable_ir() && return nothing
+    return Some(Base.unsafe_pointer_to_objref(Ptr{Cvoid}(addr)))
 end
 
 # Codegen refers to some types by their small tag instead of their address, e.g., in the

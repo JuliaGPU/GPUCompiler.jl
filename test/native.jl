@@ -2335,6 +2335,153 @@ end
     end
 end
 
+@testset "non-constant globals" begin
+    mod = @eval module $(gensym())
+        const c = 1
+        x = 1
+        global y::Int = 1
+        function read_const(p)
+            unsafe_store!(p, c)
+            return
+        end
+        function read_untyped(p)
+            unsafe_store!(p, x)
+            return
+        end
+        function read_typed(p)
+            unsafe_store!(p, y)
+            return
+        end
+        function write_typed(p)
+            global y = unsafe_load(p)
+            return
+        end
+    end
+
+    # most of these accesses do not call into the runtime, and on targets that cannot throw,
+    # nothing else is left of them but a pointer to the binding's value
+    strategies = GPUCompiler.supports_relocatable_ir() ? (:bake, :patch) : (:bake,)
+    for jlruntime in (true, false), relocations in strategies
+        Native.code_execution(mod.read_const, Tuple{Ptr{Int}}; jlruntime, relocations)
+
+        for (f, name) in ((mod.read_untyped, :x), (mod.read_typed, :y),
+                          (mod.write_typed, :y))
+            @test_throws_message(InvalidIRError,
+                                 Native.code_execution(f, Tuple{Ptr{Int}};
+                                                       jlruntime, relocations)) do msg
+                occursin("$(GPUCompiler.NONCONST_GLOBAL) ($mod.$name)", msg) &&
+                !occursin(GPUCompiler.DELAYED_BINDING, msg) &&
+                occursin("[1] $(nameof(f))", msg)
+            end
+        end
+    end
+end
+
+@testset "global accesses through unknown addresses" begin
+    # the address of the binding is not one we resolved, so it must not be dereferenced
+    if GPUCompiler.supports_relocatable_ir()
+        job, _ = Native.create_job(identity, (Nothing,))
+        JuliaContext() do ctx
+            load = LLVM.version() >= v"17" ? "load ptr, ptr inttoptr (i64 4096 to ptr)" :
+                                             "load i8*, i8** inttoptr (i64 4096 to i8**)"
+            mod = parse(LLVM.Module, """
+                define void @f() {
+                  %v = $load, !tbaa !0
+                  ret void
+                }
+                !0 = !{!1, !1, i64 0}
+                !1 = !{!"jtbaa_binding", !2, i64 0}
+                !2 = !{!"jtbaa"}
+                """)
+            @test_throws_message(InvalidIRError, GPUCompiler.check_ir(job, mod)) do msg
+                occursin(GPUCompiler.NONCONST_GLOBAL, msg)
+            end
+        end
+    end
+end
+
+@testset "summarized runtime calls" begin
+    mod = @eval module $(gensym())
+        function kernel(p)
+            println("hi")
+            return
+        end
+    end
+
+    err = try
+        Native.code_execution(mod.kernel, Tuple{Ptr{Int}}; jlruntime=false)
+        nothing
+    catch err
+        err
+    end
+    @test err isa InvalidIRError
+    msg = sprint(showerror, err)
+    @test occursin("$(GPUCompiler.NONCONST_GLOBAL) (Base.stdout)", msg)
+    @test occursin("calls into the Julia runtime from the same code", msg)
+    @test occursin("errors were summarized", msg)
+    # every error is still available, but not every one is shown on its own
+    @test count("Reason:", msg) < length(err.errors)
+    @test any(GPUCompiler.is_runtime_call, err.errors)
+end
+
+@testset "explanations in Julia code" begin
+    mod = @eval module $(gensym())
+        f(x) = x + 1
+        g = f
+        h = f
+        global typed::Function = f
+        function kernel(p)
+            unsafe_store!(p, g(1))
+            return
+        end
+        function typed_kernel(p)
+            unsafe_store!(p, typed(1))
+            return
+        end
+        function ambiguous(p)
+            unsafe_store!(p, g(1) + h(2.0))
+            return
+        end
+    end
+
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{Ptr{Int}};
+                                               jlruntime=false)) do msg
+        occursin(r"Julia code.*: .*\.g\(::Int64\), with .*\.g::Any", msg) &&
+        # Julia 1.14 types a type argument as `Core.TypeEgal{T}`
+        occursin(r"Julia code.*: convert\(::(Type|Core\.TypeEgal)\{Int64\}, ::Any\)", msg)
+    end
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.typed_kernel, Tuple{Ptr{Int}};
+                                               jlruntime=false)) do msg
+        occursin(r"Julia code.*: .*\.typed\(::Int64\), with .*\.typed::Function", msg)
+    end
+
+    # neither callee is known, and both calls are on the same line (so that they are reported
+    # as a single error)
+    err = try
+        Native.code_execution(mod.ambiguous, Tuple{Ptr{Int}}; jlruntime=false)
+        nothing
+    catch err
+        err
+    end
+    @test err isa InvalidIRError
+    explanations = [get(err.explanations, error, nothing) for error in err.errors
+                    if error[1] == GPUCompiler.DYNAMIC_CALL && error[3] === nothing]
+    @test !isempty(explanations)
+    for explanation in explanations
+        @test explanation !== nothing
+        code, precision = explanation
+        if VERSION >= v"1.14-"
+            # the column of a debug location identifies the statement
+            @test precision === :exact
+        else
+            @test precision === :ambiguous
+            @test any(contains(".g(::Int64)"), code) && any(contains(".h(::Float64)"), code)
+        end
+    end
+end
+
 @testset "specialized vararg invoke" begin
     mod = @eval module $(gensym())
         @noinline child(x, xs...) = x + sum(xs)

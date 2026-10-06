@@ -416,7 +416,7 @@ const __llvm_initialized = Ref(false)
 
     if job.config.toplevel && job.config.validate
         @tracepoint "validation" begin
-            check_ir(job, ir, relocations)
+            check_ir(job, ir, relocations; compiled)
         end
     end
 

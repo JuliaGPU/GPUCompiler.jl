@@ -1905,7 +1905,9 @@ end
         end
     end
 
-    # small tags are resolved on every version, while addresses are still dereferenced
+    # small tags are resolved on every version, while addresses only when they are the
+    # address of a value that was resolved into the IR (or on Julia 1.10, which embeds
+    # addresses without relocations)
     Context() do ctx
         relocs = GPUCompiler.Relocations()
         ref(addr) = GPUCompiler.referenced_object(
@@ -1918,8 +1920,12 @@ end
         @test tag < 64 << 4
         @test something(ref(tag)) === Core.SimpleVector
         @test ref(63 << 4) === nothing  # unused tag
-        addr = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), Core.SimpleVector)
-        @test something(ref(UInt(addr))) === Core.SimpleVector
+        addr = UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), Core.SimpleVector))
+        if GPUCompiler.supports_relocatable_ir()
+            @test ref(addr) === nothing
+            relocs.resolved[addr] = Core.SimpleVector
+        end
+        @test something(ref(addr)) === Core.SimpleVector
     end
 end
 
