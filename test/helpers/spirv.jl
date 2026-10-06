@@ -106,9 +106,10 @@ function atomics_job(; backend=:llvm, atomics=SPIRVAtomics(), validate=true)
     CompilerJob(source, config)
 end
 
-# a kernel with global, local, generic, private and constant pointers
-atomics_kernel(body) = """
+# a kernel with global, local, generic, private and constant pointers, and `globals`
+atomics_kernel(body; globals="") = """
     target datalayout = "$(GPUCompiler.llvm_datalayout(SPIRVCompilerTarget()))"
+    $globals
     define spir_kernel void @kernel(ptr addrspace(1) %g, ptr addrspace(3) %l, ptr %p,
                                     ptr addrspace(2) %constant) {
       %generic = addrspacecast ptr addrspace(1) %g to ptr addrspace(4)
@@ -118,10 +119,10 @@ atomics_kernel(body) = """
     """
 
 # the reasons `validate_ir` gives for rejecting the atomics in `body`
-function atomics_errors(body; kwargs...)
+function atomics_errors(body; globals="", kwargs...)
     job = atomics_job(; kwargs...)
     LLVM.Context(; opaque_pointers=true) do ctx
-        mod = parse(LLVM.Module, atomics_kernel(body))
+        mod = parse(LLVM.Module, atomics_kernel(body; globals))
         map(first, GPUCompiler.validate_ir(job, mod))
     end
 end
@@ -129,10 +130,10 @@ end
 # lower the atomics in `body` like `finish_ir!` does, returning the IR, and translate it to
 # SPIR-V with the job's back-end, returning the disassembly (validated by `spirv-val`), with
 # integer constants replaced by their value, e.g. `OpAtomicIAdd %uint %g 1 896 1`
-function lower_atomics(body; kwargs...)
+function lower_atomics(body; globals="", kwargs...)
     job = atomics_job(; kwargs...)
     LLVM.Context(; opaque_pointers=true) do ctx
-        mod = parse(LLVM.Module, atomics_kernel(body))
+        mod = parse(LLVM.Module, atomics_kernel(body; globals))
         GPUCompiler.lower_atomics!(job, mod)
         GPUCompiler.lower_minimum_maximum!(mod)
         LLVM.verify(mod)

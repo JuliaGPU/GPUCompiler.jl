@@ -725,8 +725,8 @@ end
               store i8 2, ptr addrspace(3) @even
               ret void
             }""")
-        GPUCompiler.pad_local_memory!(mod.globals["odd"])
-        GPUCompiler.pad_local_memory!(mod.globals["even"])
+        GPUCompiler.pad_variable!(mod.globals["odd"])
+        GPUCompiler.pad_variable!(mod.globals["even"])
         verify(mod)
         string(mod)
     end

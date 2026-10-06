@@ -1,5 +1,11 @@
 using .SPIRV: atomics_job, atomics_kernel, atomics_errors, lower_atomics
 
+# a local memory variable, and a dynamically-sized one, as SPIRVIntrinsics emits them
+const SHARED = """
+    @shared = internal addrspace(3) global [6 x i8] zeroinitializer, align 2
+    @dynamic = external addrspace(3) global [0 x i8], align 2
+    """
+
 @testset "extensions" begin
     float_add = "SPV_EXT_shader_atomic_float_add"
     float16_add = "SPV_EXT_shader_atomic_float16_add"
@@ -53,37 +59,32 @@ end
                  "%r = cmpxchg weak ptr addrspace(1) %g, i64 0, i64 1 syncscope(\"singlethread\") release acquire, align 8",
                  "%r = cmpxchg ptr addrspace(3) %l, ptr null, ptr null monotonic seq_cst, align 8",
                  "%r = load atomic double, ptr addrspace(1) %g syncscope(\"system\") acquire, align 8",
+                 # (8- and 16-bit ones become operations on the containing word)
+                 "%r = atomicrmw add ptr addrspace(1) %g, i8 1 monotonic, align 1",
+                 "%r = atomicrmw xchg ptr addrspace(4) %generic, half 0xH3C00 monotonic, align 2",
+                 "%r = atomicrmw fmin ptr addrspace(1) %g, half 0xH3C00 monotonic, align 2",
+                 "%r = load atomic half, ptr addrspace(1) %g monotonic, align 2",
                  # (atomics on the thread's own memory are demoted)
                  "%s = alloca half\n  store atomic half 0xH0000, ptr %s monotonic, align 2",
                  "fence syncscope(\"workgroup-mem-local+image\") release",
                  "fence syncscope(\"singlethread\") acquire"]
         @test atomics_errors(body) == []
     end
+    # (local memory only if it is a variable of known size, which can be padded to words)
+    @test atomics_errors("%r = cmpxchg ptr addrspace(3) @shared, i16 0, i16 1 monotonic monotonic, align 2";
+                         globals=SHARED) == []
     # (with a native half-precision addition)
     @test atomics_errors("%r = atomicrmw fadd ptr addrspace(1) %g, half 0xH3C00 monotonic, align 2";
                          atomics=SPIRVAtomics(; fadd_f16_global=true)) == []
+    # (8- and 16-bit operations, including floating-point ones, only need 32-bit atomics)
+    @test atomics_errors("%r = atomicrmw fmin ptr addrspace(1) %g, half 0xH3C00 monotonic, align 2";
+                         atomics=SPIRVAtomics(; int64=false)) == []
     # (a native double-precision addition doesn't need 64-bit integer atomics)
     @test atomics_errors("%r = atomicrmw fsub ptr addrspace(3) %l, double 1.0 monotonic, align 8";
                          atomics=SPIRVAtomics(; int64=false, fadd_f64_local=true)) == []
 
     # unsupported operations
     for (body, reason) in [
-        "%r = atomicrmw add ptr addrspace(1) %g, i8 1 monotonic, align 1" =>
-            "8-bit atomic operation",
-        "%r = atomicrmw xchg ptr addrspace(1) %g, i16 1 monotonic, align 2" =>
-            "16-bit atomic operation",
-        "%r = cmpxchg ptr addrspace(1) %g, i16 0, i16 1 monotonic monotonic, align 2" =>
-            "16-bit atomic operation",
-        "%r = atomicrmw fadd ptr addrspace(1) %g, bfloat 1.0 monotonic, align 2" =>
-            "16-bit atomic operation",
-        "%r = atomicrmw xchg ptr addrspace(1) %g, half 0xH3C00 monotonic, align 2" =>
-            "half-precision atomic operation",
-        "%r = load atomic half, ptr addrspace(1) %g monotonic, align 2" =>
-            "half-precision atomic operation",
-        "%r = atomicrmw fadd ptr addrspace(1) %g, half 0xH3C00 monotonic, align 2" =>
-            "half-precision atomic operation",
-        "%r = atomicrmw fmin ptr addrspace(1) %g, half 0xH3C00 monotonic, align 2" =>
-            "half-precision atomic operation",
         "%r = atomicrmw add ptr addrspace(1) %g, i128 1 monotonic, align 16" =>
             "atomic operation on a i128 value",
         "%r = atomicrmw add ptr %p, i32 1 monotonic, align 4" =>
@@ -102,12 +103,51 @@ end
             "misaligned atomic operation",
         "%r = atomicrmw volatile add ptr addrspace(1) %g, i32 1 monotonic, align 4" =>
             "volatile atomic operation"]
-        # (bfloat values are rejected separately)
         @test any(startswith(reason), atomics_errors(body))
     end
     if LLVM.version() >= v"17"
         @test atomics_errors("%r = atomicrmw fadd ptr addrspace(1) %g, <2 x float> zeroinitializer monotonic, align 8") ==
               ["atomic operation on a <2 x float> value"]
+    end
+
+    # 8- and 16-bit operations are performed on the containing 32-bit word, so they are rejected
+    # on local memory that may not be part of a variable that can be padded to words
+    unknown_size = "8- or 16-bit atomic operation on local memory of unknown size"
+    unknown_variable = "8- or 16-bit atomic operation on a global variable of unknown size"
+    unknown_origin = "8- or 16-bit atomic operation on local or generic memory of unknown origin"
+    globals = SHARED * """
+        @external = addrspace(3) global [6 x i8] zeroinitializer, align 2
+        @global = internal addrspace(1) global [6 x i8] zeroinitializer, align 2
+        @global_external = addrspace(1) global [6 x i8] zeroinitializer, align 2
+        @global_declared = external addrspace(1) global [6 x i8], align 2
+        """
+    for (body, reason) in [
+        "%r = atomicrmw add ptr addrspace(1) @global_external, i8 1 monotonic, align 1" => unknown_variable,
+        "%r = load atomic i16, ptr addrspace(1) @global_declared monotonic, align 2" => unknown_variable,
+        "%p4 = addrspacecast ptr addrspace(1) @global_external to ptr addrspace(4)\n" *
+        "  %r = atomicrmw xchg ptr addrspace(4) %p4, half 0xH3C00 monotonic, align 2" => unknown_variable,
+        "%r = atomicrmw add ptr addrspace(3) @dynamic, i8 1 monotonic, align 1" => unknown_size,
+        "%r = atomicrmw add ptr addrspace(3) @external, i8 1 monotonic, align 1" => unknown_size,
+        "%p4 = addrspacecast ptr addrspace(3) @dynamic to ptr addrspace(4)\n" *
+        "  %r = load atomic half, ptr addrspace(4) %p4 monotonic, align 2" => unknown_size,
+        "%c = icmp eq ptr addrspace(1) %g, null\n" *
+        "  %s = select i1 %c, ptr addrspace(3) @shared, ptr addrspace(3) @dynamic\n" *
+        "  %r = atomicrmw xchg ptr addrspace(3) %s, i16 1 monotonic, align 2" => unknown_size,
+        "%r = atomicrmw add ptr addrspace(3) %l, i8 1 monotonic, align 1" => unknown_origin,
+        "%p4 = addrspacecast ptr addrspace(3) %l to ptr addrspace(4)\n" *
+        "  %r = cmpxchg ptr addrspace(4) %p4, i16 0, i16 1 monotonic monotonic, align 2" => unknown_origin]
+        errors = atomics_errors(body; globals)
+        @test length(errors) == 1 && startswith(only(errors), reason)
+    end
+    # (global memory is accessible by contract, and so are generic pointers to it)
+    for body in ["%c = icmp eq ptr addrspace(1) %g, null\n" *
+                 "  %p4 = addrspacecast ptr addrspace(3) @shared to ptr addrspace(4)\n" *
+                 "  %s = select i1 %c, ptr addrspace(4) %generic, ptr addrspace(4) %p4\n" *
+                 "  %r = atomicrmw add ptr addrspace(4) %s, i8 1 monotonic, align 1",
+                 "%r = atomicrmw add ptr addrspace(1) getelementptr (i8, ptr addrspace(1) @global, i64 4), i16 1 monotonic, align 2",
+                 # (32-bit operations don't access other memory)
+                 "%r = atomicrmw add ptr addrspace(3) @dynamic, i32 1 monotonic, align 4"]
+        @test atomics_errors(body; globals) == []
     end
 
     # without 64-bit integer atomics, only a native double-precision addition remains
@@ -391,6 +431,83 @@ end
         "CHECK: OpAtomicCompareExchange %uint")
 end
 
+@testset "8- and 16-bit operations" begin
+    # SPIR-V only has 32- and 64-bit atomics, so these are masked operations on the 32-bit
+    # word containing the value: bitwise ones directly, others in a compare-exchange loop, and
+    # loads extract the value from a load of the word
+    ir, asm = lower_atomics("""
+        %i = ptrtoint ptr addrspace(1) %g to i64
+        %offset = and i64 %i, 2
+        %l16 = getelementptr i8, ptr addrspace(3) @shared, i64 %offset
+        %a = load atomic i8, ptr addrspace(1) %g syncscope("device") acquire, align 1
+        %b = atomicrmw or ptr addrspace(3) %l16, i16 1 syncscope("workgroup") monotonic, align 2
+        %c = atomicrmw add ptr addrspace(1) %g, i8 1 syncscope("device") monotonic, align 1
+        store atomic i16 2, ptr addrspace(4) %generic syncscope("device") release, align 2
+        %d = cmpxchg ptr addrspace(1) %g, i16 1, i16 2 syncscope("device") acq_rel acquire, align 2
+        """; backend, globals=SHARED)
+    word = "%AlignedAddr{{[0-9]*}}"
+    @test filecheck(ir,
+        "CHECK: [[WORD:%[0-9]+]] = call i32 @$(builtin("Load", "i32", 1; operands=0))(ptr addrspace(1) $word, i32 1, i32 $(MEMORY | 0x2))",
+        "CHECK: lshr i32 [[WORD]]",
+        "CHECK: trunc i32 {{%.+}} to i8",
+        "CHECK: call i32 @$(builtin("Or", "i32", 3))(ptr addrspace(3) $word, i32 2, i32 $MEMORY,",
+        "CHECK: atomicrmw.start:",
+        "CHECK: call i32 @$(builtin("CompareExchange", "i32", 1; operands=2))(ptr addrspace(1) $word, i32 1, i32 $MEMORY, i32 $MEMORY,",
+        "CHECK: call i32 @$(builtin("CompareExchange", "i32", 4; operands=2))(ptr addrspace(4) $word, i32 1, i32 $(MEMORY | 0x4), i32 $MEMORY,",
+        "CHECK: partword.cmpxchg.loop:",
+        "CHECK: call i32 @$(builtin("CompareExchange", "i32", 1; operands=2))(ptr addrspace(1) $word, i32 1, i32 $(MEMORY | 0x8), i32 $(MEMORY | 0x2),")
+    @test !occursin(r"OpAtomic\w+ %(uchar|ushort|half)", asm)
+    @test filecheck(asm,
+        "CHECK: OpAtomicLoad %uint {{%.+}} 1 $(MEMORY | 0x2)",
+        "CHECK: OpAtomicOr %uint {{%.+}} 2 $MEMORY",
+        "CHECK: OpAtomicCompareExchange %uint {{%.+}} 1 $MEMORY $MEMORY",
+        "CHECK: OpAtomicCompareExchange %uint {{%.+}} 1 $(MEMORY | 0x4) $MEMORY",
+        "CHECK: OpAtomicCompareExchange %uint {{%.+}} 1 $(MEMORY | 0x8) $(MEMORY | 0x2)")
+
+    # half-precision loads, stores and exchanges are cast to 16-bit integer ones first, and
+    # arithmetic without a native instruction is computed in the loop
+    ir, asm = lower_atomics("""
+        %i = ptrtoint ptr addrspace(1) %g to i64
+        %offset = and i64 %i, 2
+        %l16 = getelementptr i8, ptr addrspace(3) @shared, i64 %offset
+        %a = load atomic half, ptr addrspace(1) %g syncscope("device") monotonic, align 2
+        %b = atomicrmw xchg ptr addrspace(3) %l16, half 0xH3C00 syncscope("workgroup") monotonic, align 2
+        %c = atomicrmw fadd ptr addrspace(1) %g, half 0xH3C00 syncscope("device") monotonic, align 2
+        %d = atomicrmw fmax ptr addrspace(1) %g, half 0xH3C00 syncscope("device") monotonic, align 2
+        """; backend, globals=SHARED)
+    @test filecheck(ir,
+        "CHECK: call i32 @$(builtin("Load", "i32", 1; operands=0))(ptr addrspace(1) $word, i32 1, i32 $MEMORY)",
+        "CHECK: bitcast i16 {{%.+}} to half",
+        "CHECK: call i32 @$(builtin("CompareExchange", "i32", 3; operands=2))(ptr addrspace(3) $word,",
+        "CHECK: fadd half",
+        "CHECK: call i32 @$(builtin("CompareExchange", "i32", 1; operands=2))(ptr addrspace(1) $word,",
+        "CHECK: call nsz half @llvm.maxnum.f16",
+        "CHECK: call i32 @$(builtin("CompareExchange", "i32", 1; operands=2))(ptr addrspace(1) $word,")
+    @test !occursin(r"OpAtomic\w+ %(uchar|ushort|half)", asm)
+    @test filecheck(asm, "CHECK-NOT: OpExtension", "CHECK: OpExtInst %half {{%.+}} fmax")
+
+    # variables that these access are padded to words, but other variables aren't
+    globals = """
+        @global = internal addrspace(1) global [3 x i8] zeroinitializer, align 1
+        @shared = internal addrspace(3) global [6 x i8] zeroinitializer, align 2
+        @unrelated = internal addrspace(3) global [6 x i8] zeroinitializer, align 2
+        @external = addrspace(3) global [6 x i8] zeroinitializer, align 2
+        @dynamic = external addrspace(3) global [0 x i8], align 2
+        """
+    ir, asm = lower_atomics("""
+        %a = atomicrmw add ptr addrspace(3) getelementptr (i8, ptr addrspace(3) @shared, i64 4), i16 1 syncscope("workgroup") monotonic, align 2
+        %g8 = atomicrmw add ptr addrspace(1) getelementptr (i8, ptr addrspace(1) @global, i64 2), i8 1 syncscope("device") monotonic, align 1
+        store i8 0, ptr addrspace(3) @unrelated
+        %b = atomicrmw add ptr addrspace(3) @external, i32 1 syncscope("workgroup") monotonic, align 4
+        %c = atomicrmw add ptr addrspace(3) @dynamic, i32 1 syncscope("workgroup") monotonic, align 4
+        """; backend, globals)
+    @test occursin("@global = internal addrspace(1) global { [3 x i8], [1 x i8] } zeroinitializer, align 4", ir)
+    @test occursin("@shared = internal addrspace(3) global { [6 x i8], [2 x i8] } zeroinitializer, align 4", ir)
+    @test occursin("@unrelated = internal addrspace(3) global [6 x i8] zeroinitializer, align 2", ir)
+    @test occursin("@external = addrspace(3) global [6 x i8] zeroinitializer, align 2", ir)
+    @test occursin("@dynamic = external addrspace(3) global [0 x i8], align 2", ir)
+end
+
 @testset "compare-exchange loops" begin
     # read-modify-write operations without an instruction (like floating-point min and max,
     # whose native instructions may return either zero) become compare-exchange loops
@@ -454,6 +571,7 @@ end
     # end-to-end, from Julia code emitting LLVM atomics (like UnsafeAtomics does), which also
     # exercises typed pointers on Julia versions that still use them
     mod = @eval module $(gensym())
+        using LLVM, LLVM.IR, LLVM.Build, LLVM.Interop
         import ..SPIRV: Atomics
         const Op = Atomics.Op
         const Ordering = Atomics.Ordering
@@ -475,6 +593,25 @@ end
         function publish(data::Core.LLVMPtr{Float32,1}, flag::Core.LLVMPtr{Int32,3})
             unsafe_store!(data, 1f0)
             Atomics.store!(flag, Int32(1), Val(Ordering.Release), Val(:workgroup))
+            return
+        end
+
+        # a static local array, like SPIRVIntrinsics' `emit_localmemory` (CLLocalArray)
+        @inline @llvmgenerated builder function local_halfs(::Val{len})::Core.LLVMPtr{Float16,3} where {len}
+            T = LLVM.ArrayType(LLVM.Int8Type(), 2 * len)
+            gv = GlobalVariable(current_module(builder), T, "local_memory", 3)
+            gv.linkage = LLVM.Linkage.Internal
+            gv.initializer = null(T)
+            gv.alignment = 2
+            ptr = gep!(builder, T, gv, [ConstantInt(0), ConstantInt(0)])
+            bitcast!(builder, ptr, convert(LLVMType, Core.LLVMPtr{Float16,3}))
+        end
+        function local_half(out::Core.LLVMPtr{Float16,1}, i::Int)
+            p = local_halfs(Val(3)) + 2 * (i % 3)
+            Atomics.store!(p, Float16(0), Val(Ordering.Monotonic), Val(:workgroup))
+            Atomics.modify!(p, Float16(1), Val(Op.FAdd), Val(Ordering.Monotonic), Val(:workgroup))
+            Atomics.modify!(p, Float16(2), Val(Op.Xchg), Val(Ordering.Monotonic), Val(:workgroup))
+            unsafe_store!(out, Atomics.load(p, Float16, Val(Ordering.Monotonic), Val(:workgroup)))
             return
         end
 
@@ -518,6 +655,16 @@ end
                                          backend, kernel=true))
     @test filecheck(asm, "CHECK: OpAtomicStore {{%.+}} %uint_2 %uint_900 %uint_1")
 
+    # half-precision atomics on a static local array, through the whole pipeline: the array
+    # is padded, and the atomics are performed on 32-bit words
+    tt = Tuple{Core.LLVMPtr{Float16,1}, Int}
+    ir = sprint(io -> SPIRV.code_llvm(io, mod.local_half, tt; backend, kernel=true,
+                                      dump_module=true))
+    @test occursin(r"addrspace\(3\) global \{ \[6 x i8\], \[2 x i8\] \} zeroinitializer, align 4", ir)
+    asm, _ = SPIRV.code_execution(mod.local_half, tt; backend)
+    @test filecheck(asm, "CHECK: OpAtomicCompareExchange %uint")
+    @test !occursin(r"OpAtomic\w+ %(uchar|ushort|half)", asm)
+
     tt = Tuple{Core.LLVMPtr{Float32,1}}
     asm = sprint(io -> SPIRV.code_native(io, mod.fadd!, tt; backend, kernel=true))
     @test filecheck(asm, "CHECK-NOT: OpAtomicFAddEXT", "CHECK: OpAtomicCompareExchange")
@@ -543,7 +690,7 @@ end
     else
         failures, rejected = SPIRV.check_atomics_matrix(backend)
         @test isempty(failures) || failures
-        # (8- and 16-bit operations other than native half-precision additions)
+        # (bfloat values, which the target doesn't support)
         @test rejected > 0
     end
 end
@@ -553,7 +700,7 @@ end
     job = atomics_job(; backend, validate=false)
     Context(; opaque_pointers=true) do ctx
         mod = parse(LLVM.Module, atomics_kernel("""
-            %a = atomicrmw add ptr addrspace(1) %g, i8 1 monotonic, align 1
+            %a = atomicrmw add ptr addrspace(1) %g, i32 1 syncscope("agent") monotonic, align 4
             %b = atomicrmw add ptr addrspace(1) %g, i32 1 monotonic, align 4
             """))
         err = try
@@ -563,26 +710,26 @@ end
             err
         end
         @test err isa GPUCompiler.InvalidIRError
-        @test startswith(only(err.errors)[1], "8-bit atomic operation")
+        @test startswith(only(err.errors)[1], "atomic operation with synchronization scope")
     end
 
-    # e.g. when reflecting, which compiles without validation. the Khronos translator would
-    # exit the process on a half-precision addition it has no extension for, so try that in
-    # another process
+    # e.g. when reflecting, which compiles without validation. the Khronos translator can exit
+    # the process on what it doesn't support, so try that in another process
     script = """
         using GPUCompiler, LLVM
         include($(repr(joinpath(@__DIR__, "..", "helpers", "runtime.jl"))))
         include($(repr(joinpath(@__DIR__, "..", "helpers", "spirv.jl"))))
         import .SPIRV: Atomics
 
-        kernel(p) = (Atomics.modify!(p, Float16(1), Val(Atomics.Op.FAdd)); return)
-        job, _ = SPIRV.create_job(kernel, (Core.LLVMPtr{Float16,1},); backend=:$backend,
+        kernel(p) = (Atomics.modify!(p, Int32(1), Val(Atomics.Op.Add),
+                                     Val(Atomics.Ordering.Monotonic), Val(:agent)); return)
+        job, _ = SPIRV.create_job(kernel, (Core.LLVMPtr{Int32,1},); backend=:$backend,
                                   kernel=true, validate=false)
         try
             GPUCompiler.code_native(devnull, job)
         catch err
             err isa GPUCompiler.InvalidIRError &&
-                occursin("half-precision atomic operation", sprint(showerror, err)) && exit(42)
+                occursin("synchronization scope", sprint(showerror, err)) && exit(42)
             rethrow()
         end
         """

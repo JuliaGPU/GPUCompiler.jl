@@ -27,8 +27,8 @@ export SPIRVCompilerTarget, SPIRVAtomics
 # There is nothing to enable native floating-point min/max
 # (SPV_EXT_shader_atomic_float_min_max): those may return either zero when comparing -0.0 and
 # +0.0, while LLVM's `atomicrmw fmin` and `fmax` order -0.0 before +0.0, and `atomicrmw` has
-# no fast-math flags to relax that. So these are compare-exchange loops too, which rules them
-# out for half-precision numbers, and needs `int64` for double-precision ones.
+# no fast-math flags to relax that. So these are compare-exchange loops too (on the containing
+# 32-bit word for half-precision numbers), which need `int64` for double-precision ones.
 #
 # Which synchronization scopes and memory orderings the device supports is not conveyed
 # either: front-ends must only use those their device supports (e.g., OpenCL 3.0 makes the
@@ -420,8 +420,9 @@ end
 # - atomics on the thread's own memory become plain accesses (`demote_private_atomic!`);
 # - operations SPIR-V cannot express are rewritten in terms of ones it can (see
 #   `spirv_atomic_action`): floating-point and pointer loads, stores and exchanges, and pointer
-#   compare-exchanges, are cast to integers, and read-modify-write operations without an
-#   instruction the target supports become compare-exchange loops (using LLVM.jl's copies of
+#   compare-exchanges, are cast to integers, 8- and 16-bit operations become masked operations
+#   on the containing 32-bit word, and read-modify-write operations without an instruction
+#   the target supports become compare-exchange loops (using LLVM.jl's copies of
 #   `AtomicExpand`'s expansions);
 # - the remaining operations and fences are selected to `__spirv_*` calls (`select_atomic!`).
 #
@@ -514,10 +515,13 @@ end
 #   targets), so that only the integer forms of these instructions are used;
 # - `:cmpxchg_loop`: a read-modify-write operation without a SPIR-V instruction the target
 #   supports, which becomes a compare-exchange loop (`AtomicExpand`'s `insertRMWCmpXchgLoop`);
+# - `:partword`: an 8- or 16-bit operation (other than a native half-precision addition),
+#   which becomes a masked operation on the containing 32-bit word (`AtomicExpand`'s
+#   `expandPartwordAtomicRMW` and `expandPartwordCmpXchg`, see `spirv_partword_storage`);
 # - `:select`: an operation SPIR-V can express, which becomes a `__spirv_Atomic*` call.
 #
-# Casts and loops need integer atomics of the same size, which rules out half-precision
-# numbers other than for a native addition, and needs 64-bit integer atomics for 64-bit values.
+# Casts and loops need integer atomics of the same size, so 64-bit integer atomics for 64-bit
+# values.
 function spirv_atomic_action(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
                              inst::LLVM.Instruction)
     atomics = job.config.target.atomics
@@ -543,9 +547,7 @@ function spirv_atomic_action(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}
 
     T = atomic_value_type(inst)
     bits = atomic_bits(inst)
-    if bits in (8, 16) && !(T isa LLVM.HalfType)
-        return "$bits-bit atomic operation (SPIR-V only supports 32- and 64-bit atomics)"
-    elseif bits === nothing || !(bits in (16, 32, 64))
+    if bits === nothing || !(bits in (8, 16, 32, 64))
         return "atomic operation on a $(string(T)) value"
     end
 
@@ -566,15 +568,66 @@ function spirv_atomic_action(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}
         :cmpxchg_loop
     end
 
-    if action !== :select || !(T isa LLVM.FloatingPointType)
-        if bits == 16
-            return "half-precision atomic operation (SPIR-V only supports half-precision atomic addition, if the target does)"
-        elseif bits == 64 && !atomics.int64
-            return "64-bit atomic operation (the target does not support 64-bit integer atomics)"
-        end
+    native = action === :select && T isa LLVM.FloatingPointType
+    if bits < 32 && !native
+        storage = spirv_partword_storage(inst.pointer_operand)
+        storage isa String && return storage
+        # (floating-point loads, stores and exchanges are cast to integers first)
+        return action === :cast ? :cast : :partword
+    end
+    if bits == 64 && !native && !atomics.int64
+        return "64-bit atomic operation (the target does not support 64-bit integer atomics)"
     end
 
     return action
+end
+
+# An 8- or 16-bit atomic operation is performed on the aligned 32-bit word containing the
+# value, which must be accessible. Returns the variables the operation may access, which need
+# padding for that (see `pad_variable!`), or why the word may not be accessible.
+#
+# For global memory passed to the kernel, GPUCompiler requires the word to be accessible: the
+# back-ends' allocators guarantee that by rounding buffer sizes up to 4 bytes, while buffers
+# from elsewhere (e.g., imported or host memory) and raw pointers are the caller's
+# responsibility. LLVM's partword lowering for AMDGPU and NVPTX makes the same assumption.
+# Variables in the module are only known to be accessible when they are internal, and can be
+# padded, so operations on other global or local memory variables (e.g., dynamically-sized
+# local memory), or on local memory of unknown origin (e.g., a pointer argument), also through
+# generic pointers, are rejected.
+function spirv_partword_storage(ptr::LLVM.Value)
+    variables = LLVM.GlobalVariable[]
+    seen = Set{LLVM.Value}()
+    worklist = LLVM.Value[ptr]
+    while !isempty(worklist)
+        val = pop!(worklist)
+        val in seen && continue
+        push!(seen, val)
+        as = val.value_type.addrspace
+        if val isa LLVM.GlobalVariable
+            if val.linkage in (LLVM.Linkage.Internal, LLVM.Linkage.Private) &&
+               val.initializer !== nothing
+                push!(variables, val)
+            else
+                memory = as == 3 ? "local memory" : "a global variable"
+                return "8- or 16-bit atomic operation on $memory of unknown size (SPIR-V performs it on the containing 32-bit word)"
+            end
+        elseif val isa Union{LLVM.GetElementPtrInst,LLVM.BitCastInst,LLVM.AddrSpaceCastInst} ||
+               (val isa LLVM.ConstantExpr &&
+                LLVM.opcode(val) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast,
+                                     LLVM.API.LLVMAddrSpaceCast))
+            push!(worklist, val.operands[1])
+        elseif val isa LLVM.PHIInst
+            append!(worklist, first.(val.incoming))
+        elseif val isa LLVM.SelectInst
+            push!(worklist, val.operands[2], val.operands[3])
+        elseif as == 1
+            # (global memory passed to the kernel is accessible by contract)
+            continue
+        else
+            return "8- or 16-bit atomic operation on local or generic memory of unknown origin (SPIR-V performs it on the containing 32-bit word, which must be accessible)"
+        end
+    end
+    return variables
 end
 
 # The SPIR-V Scope of an atomic operation or fence (see `spirv_syncscope`). Invocation is not
@@ -700,6 +753,16 @@ function lower_atomics!(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
     # (the expansions split blocks, so collect the atomics first)
     atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
                if is_atomic_memop(inst)]
+
+    # pad the local memory that 8- and 16-bit atomics may access
+    variables = Set{LLVM.GlobalVariable}()
+    for inst in atomics
+        action = spirv_atomic_action(job, inst)
+        action === :partword || (action === :cast && atomic_bits(inst) < 32) || continue
+        union!(variables, spirv_partword_storage(inst.pointer_operand))
+    end
+    foreach(pad_variable!, variables)
+    changed |= !isempty(variables)
     for inst in atomics
         action = spirv_atomic_action(job, inst)
         if action === :demote
@@ -707,7 +770,12 @@ function lower_atomics!(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
         elseif action === :cast && inst isa LLVM.AtomicCmpXchgInst
             cast_cmpxchg_to_integer!(inst)
         elseif action === :cast
-            cast_atomic_to_integer!(inst)
+            inst = cast_atomic_to_integer!(inst)
+            if spirv_atomic_action(job, inst) === :partword
+                expand_partword_atomic!(inst, 4)
+            end
+        elseif action === :partword
+            expand_partword_atomic!(inst, 4)
         elseif action === :cmpxchg_loop
             expand_to_cmpxchg!(inst)
         else
@@ -922,11 +990,11 @@ function lower_minimum_maximum!(mod::LLVM.Module)
     return changed
 end
 
-# Align a local memory variable to 4 bytes, and pad it to a multiple of 4 bytes, so that the
-# 32-bit word containing any of its 8- or 16-bit values is part of it. Only internal
+# Align a global or local memory variable to 4 bytes, and pad it to a multiple of 4 bytes, so
+# that the 32-bit word containing any of its 8- or 16-bit values is part of it. Only internal
 # definitions can be padded: the size of others is up to the host or the runtime. Returns the
 # padded variable.
-function pad_local_memory!(gv::LLVM.GlobalVariable)
+function pad_variable!(gv::LLVM.GlobalVariable)
     gv.alignment = max(gv.alignment, 4)
     T = gv.global_value_type
     padding = -Int(LLVM.abi_size(LLVM.parent(gv).datalayout, T)) & 3
@@ -935,7 +1003,7 @@ function pad_local_memory!(gv::LLVM.GlobalVariable)
     mod = LLVM.parent(gv)
     T_pad = LLVM.ArrayType(LLVM.Int8Type(), padding)
     T_padded = LLVM.StructType([T, T_pad])
-    new = GlobalVariable(mod, T_padded, "", 3)
+    new = GlobalVariable(mod, T_padded, "", gv.value_type.addrspace)
     new.initializer = ConstantStruct(T_padded, [gv.initializer, null(T_pad)])
     new.linkage = gv.linkage
     new.alignment = gv.alignment
