@@ -338,6 +338,35 @@ end
     end
 end
 
+@testset "Int128 kernel arguments" begin
+    # the back-end must lay out kernel arguments like the host does, which before Julia 1.12
+    # aligns Int128 to 8 bytes (JuliaGPU/AMDGPU.jl#1002)
+    mod = @eval module $(gensym())
+        kernel(a::Int32, b::Int128, c::Tuple{Int32,Int128}, d::Int64) = return
+    end
+    types = Tuple{Int32, Int128, Tuple{Int32,Int128}, Int64}
+    arg_offset(i) = fieldoffset(types, i)
+    arg_size(i) = sizeof(fieldtype(types, i))
+
+    @test @filecheck begin
+        @check "amdhsa.kernels:"
+        @check_next "- .args:"
+        @check ".offset: $(arg_offset(1)){{\$}}"
+        @check_next ".size: $(arg_size(1)){{\$}}"
+        @check_next ".value_kind: by_value"
+        @check ".offset: $(arg_offset(2)){{\$}}"
+        @check_next ".size: $(arg_size(2)){{\$}}"
+        @check_next ".value_kind: by_value"
+        @check ".offset: $(arg_offset(3)){{\$}}"
+        @check_next ".size: $(arg_size(3)){{\$}}"
+        @check_next ".value_kind: by_value"
+        @check ".offset: $(arg_offset(4)){{\$}}"
+        @check_next ".size: $(arg_size(4)){{\$}}"
+        @check_next ".value_kind: by_value"
+        GCN.code_native(mod.kernel, types; dump_module=true, kernel=true)
+    end
+end
+
 @testset "skip scalar trap" begin
     mod = @eval module $(gensym())
         workitem_idx_x() = ccall("llvm.amdgcn.workitem.id.x", llvmcall, Int32, ())

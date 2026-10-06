@@ -49,6 +49,18 @@ function llvm_machine(target::GCNCompilerTarget)
     return tm
 end
 
+# the external back-end replaces the module's datalayout with its own, which aligns i128 to
+# 16 bytes. it does keep a 64-bit alignment if the module asks for one (since
+# AMDGPU_LLVM_Backend_jll 23.1.1+4), which Julia needs before 1.12 to lay out kernel
+# arguments like the host does.
+function llvm_datalayout(target::GCNCompilerTarget)
+    dl = @invoke llvm_datalayout(target::AbstractCompilerTarget)
+    (dl === nothing || target.backend !== :external) && return dl
+    @dispose dl=dl begin
+        string(dl) * "-i128:$(8 * Base.datatype_alignment(Int128))"
+    end
+end
+
 
 # AMDGPU calls the device scope `agent`, and the subgroup one `wavefront`
 llvm_syncscope(::GCNCompilerTarget, name::String) =
