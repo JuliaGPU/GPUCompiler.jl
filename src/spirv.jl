@@ -173,6 +173,19 @@ function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
         append!(errors, check_ir_values(mod, LLVM.BFloatType()))
     end
 
+    # atomics that `lower_atomics!` cannot lower
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        reason = if is_atomic_memop(inst)
+            action = spirv_atomic_action(job, inst)
+            action isa String ? action : nothing
+        elseif inst isa LLVM.FenceInst && spirv_syncscope(inst.syncscope.name) === nothing
+            "fence with synchronization scope $(repr(inst.syncscope.name))"
+        else
+            nothing
+        end
+        reason === nothing || push!(errors, (reason, backtrace(inst), string(inst)))
+    end
+
     return errors
 end
 
@@ -376,6 +389,158 @@ function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=fa
             highlight(io, asm, source_code(job.config.target))
         end
     end
+end
+
+
+## atomics
+
+# SPIR-V Scope operands
+const SPIRV_SCOPE_CROSS_DEVICE = 0
+const SPIRV_SCOPE_DEVICE = 1
+const SPIRV_SCOPE_WORKGROUP = 2
+const SPIRV_SCOPE_SUBGROUP = 3
+const SPIRV_SCOPE_INVOCATION = 4
+
+# MemorySemantics bits naming the memory an operation orders
+const SPIRV_SUBGROUP_MEMORY = 0x80
+const SPIRV_WORKGROUP_MEMORY = 0x100
+const SPIRV_CROSS_WORKGROUP_MEMORY = 0x200
+const SPIRV_IMAGE_MEMORY = 0x800
+
+# The SPIR-V Scope of a synchronization scope, spelled like for `llvm_syncscope`, and the
+# MemorySemantics bits for the memory it names (see `split_syncscope`; `nothing` for all
+# memory). The system scope, LLVM's default, is the cross-device one. Returns `nothing` for
+# other scopes, and for imageblock memory, which SPIR-V doesn't have, which `validate_ir`
+# rejects rather than guessing what they mean.
+function spirv_syncscope(name::String)
+    parts = split_syncscope(name)
+    parts === nothing && return nothing
+    base, memory = parts
+    scope = if base == "singlethread"
+        SPIRV_SCOPE_INVOCATION
+    elseif base == "subgroup"
+        SPIRV_SCOPE_SUBGROUP
+    elseif base == "workgroup"
+        SPIRV_SCOPE_WORKGROUP
+    elseif base == "device"
+        SPIRV_SCOPE_DEVICE
+    elseif base == "system" || base == ""
+        SPIRV_SCOPE_CROSS_DEVICE
+    else
+        return nothing
+    end
+    if memory !== nothing
+        memory & 0b1000 == 0 || return nothing
+        memory = (memory & 0b001 == 0 ? 0 : SPIRV_CROSS_WORKGROUP_MEMORY) |
+                 (memory & 0b010 == 0 ? 0 : SPIRV_WORKGROUP_MEMORY) |
+                 (memory & 0b100 == 0 ? 0 : SPIRV_IMAGE_MEMORY)
+    end
+    return (; scope, memory)
+end
+
+# read-modify-write operations SPIR-V has instructions for, and the names of their builtins.
+# floating-point addition needs an extension the device may not support (see `SPIRVAtomics`),
+# and subtraction is the addition of the negated value.
+const SPIRV_ATOMICRMW_OPS = let Op = LLVM.AtomicRMWBinOp
+    Dict(Op.Xchg => "Exchange", Op.Add => "IAdd", Op.Sub => "ISub", Op.And => "And",
+         Op.Or => "Or", Op.Xor => "Xor", Op.Max => "SMax", Op.Min => "SMin",
+         Op.UMax => "UMax", Op.UMin => "UMin", Op.FAdd => "FAddEXT", Op.FSub => "FAddEXT")
+end
+
+# read-modify-write operations we expand to compare-exchange loops, which `expand_to_cmpxchg!`
+# computes like LLVM does (operations the LLVM in use doesn't support can't occur in the IR).
+# that includes floating-point min/max, see `SPIRVAtomics`.
+const SPIRV_EXPANDABLE_ATOMICRMW_OPS = let Op = LLVM.AtomicRMWBinOp
+    (Op.Nand, Op.FMax, Op.FMin, Op.UIncWrap, Op.UDecWrap, Op.USubCond, Op.USubSat,
+     Op.FMaximum, Op.FMinimum, Op.FMaximumNum, Op.FMinimumNum)
+end
+
+# can the target atomically add floating-point numbers of type `T` in address space `as`?
+# (generic pointers can point to global and local memory)
+function spirv_fadd_supported(atomics::SPIRVAtomics, T::LLVMType, as::Integer)
+    global_, local_ = if T isa LLVM.HalfType
+        atomics.fadd_f16_global, atomics.fadd_f16_local
+    elseif T isa LLVM.FloatType
+        atomics.fadd_f32_global, atomics.fadd_f32_local
+    elseif T isa LLVM.DoubleType
+        atomics.fadd_f64_global, atomics.fadd_f64_local
+    else
+        false, false
+    end
+    return as == 1 ? global_ : as == 3 ? local_ : global_ && local_
+end
+
+# How to lower `inst`, an atomic memory operation, for the job's target. Like the rule tables
+# of LLVM's legalizers, the rules are tried in order and the first that applies decides. Returns
+# the action, or the reason why the operation cannot be lowered (which `validate_ir` reports):
+#
+# - `:demote`: an atomic on the thread's own memory, which becomes plain accesses;
+# - `:cast`: a floating-point or pointer load, store or exchange, or a pointer
+#   compare-exchange, which becomes an integer one (like `AtomicExpand` does for most
+#   targets), so that only the integer forms of these instructions are used;
+# - `:cmpxchg_loop`: a read-modify-write operation without a SPIR-V instruction the target
+#   supports, which becomes a compare-exchange loop (`AtomicExpand`'s `insertRMWCmpXchgLoop`);
+# - `:select`: an operation SPIR-V can express, which becomes a `__spirv_Atomic*` call.
+#
+# Casts and loops need integer atomics of the same size, which rules out half-precision
+# numbers other than for a native addition, and needs 64-bit integer atomics for 64-bit values.
+function spirv_atomic_action(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
+                             inst::LLVM.Instruction)
+    atomics = job.config.target.atomics
+    op = inst isa LLVM.AtomicRMWInst ? inst.binop : nothing
+    if op !== nothing && !haskey(SPIRV_ATOMICRMW_OPS, op) &&
+       !(op in SPIRV_EXPANDABLE_ATOMICRMW_OPS)
+        return "atomicrmw $(LLVM.irname(op)) operation"
+    end
+
+    is_thread_private(inst.pointer_operand) && return :demote
+
+    # (SPIR-V only has volatile atomics with the Vulkan memory model)
+    inst.volatile && return "volatile atomic operation"
+
+    as = inst.pointer_operand.value_type.addrspace
+    if !(as in (1, 3, 4))
+        return "atomic operation in address space $as (SPIR-V only supports atomics on global, local and generic memory)"
+    end
+
+    if spirv_syncscope(inst.syncscope.name) === nothing
+        return "atomic operation with synchronization scope $(repr(inst.syncscope.name))"
+    end
+
+    T = atomic_value_type(inst)
+    bits = atomic_bits(inst)
+    if bits in (8, 16) && !(T isa LLVM.HalfType)
+        return "$bits-bit atomic operation (SPIR-V only supports 32- and 64-bit atomics)"
+    elseif bits === nothing || !(bits in (16, 32, 64))
+        return "atomic operation on a $(string(T)) value"
+    end
+
+    if inst.alignment < bits ÷ 8
+        return "misaligned atomic operation"
+    end
+
+    Op = LLVM.AtomicRMWBinOp
+    action = if inst isa LLVM.AtomicCmpXchgInst
+        T isa LLVM.PointerType ? :cast : :select
+    elseif op === nothing || op == Op.Xchg
+        T isa LLVM.IntegerType ? :select : :cast
+    elseif op == Op.FAdd || op == Op.FSub
+        spirv_fadd_supported(atomics, T, as) ? :select : :cmpxchg_loop
+    elseif haskey(SPIRV_ATOMICRMW_OPS, op)
+        :select
+    else
+        :cmpxchg_loop
+    end
+
+    if action !== :select || !(T isa LLVM.FloatingPointType)
+        if bits == 16
+            return "half-precision atomic operation (SPIR-V only supports half-precision atomic addition, if the target does)"
+        elseif bits == 64 && !atomics.int64
+            return "64-bit atomic operation (the target does not support 64-bit integer atomics)"
+        end
+    end
+
+    return action
 end
 
 

@@ -483,15 +483,17 @@ end
     # reach the back-end, while Julia's `unordered` heap-reference accesses, which SPIR-V
     # cannot express when they are of pointers, become plain ones
     mod = @eval module $(gensym())
-        function kernel(p::Ptr{Int32}, q::Ptr{Int32})
+        import ..SPIRV: Atomics
+        function kernel(p::Ptr{Int32}, q::Ptr{Int32},
+                        r::Core.LLVMPtr{Int32,1}, s::Core.LLVMPtr{Int32,1})
             y = Core.Intrinsics.atomic_pointerref(reinterpret(Ptr{Ptr{Int32}}, p), :unordered)
             Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Ptr{Int32}}, q), y, :unordered)
-            x = Core.Intrinsics.atomic_pointerref(p, :acquire)
-            Core.Intrinsics.atomic_pointerset(q, x, :release)
+            x = Atomics.load(r, Int32, Val(Atomics.Ordering.Acquire))
+            Atomics.store!(s, x, Val(Atomics.Ordering.Release))
             return
         end
     end
-    tt = Tuple{Ptr{Int32}, Ptr{Int32}}
+    tt = Tuple{Ptr{Int32}, Ptr{Int32}, Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}}
 
     @test @filecheck begin
         @check_label "define spir_kernel void @_Z6kernel"

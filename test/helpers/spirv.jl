@@ -49,6 +49,52 @@ for method in (:code_warntype, :code_llvm, :code_native)
     end
 end
 
+# LLVM atomics on `LLVMPtr`s, like UnsafeAtomics emits them, with the operation, ordering and
+# synchronization scope (`:system` for LLVM's default one) passed as `Val`s
+module Atomics
+    using LLVM, LLVM.IR, LLVM.Build, LLVM.Interop
+    const Ordering = LLVM.AtomicOrdering
+    const Op = LLVM.AtomicRMWBinOp
+
+    # (typed pointers point to `i8`)
+    typed_ptr(builder, p, T) = bitcast!(builder, p, LLVM.PointerType(T, p.value_type.addrspace))
+
+    @inline @llvmgenerated builder function modify!(p::Core.LLVMPtr{T}, x::T, ::Val{op},
+            ::Val{order}=Val(Ordering.Monotonic), ::Val{scope}=Val(:system))::T where {T,op,order,scope}
+        atomic_rmw!(builder, op, typed_ptr(builder, p, x.value_type), x, order;
+                    scope=String(scope))
+    end
+
+    # returns the old value
+    @inline @llvmgenerated builder function cas!(p::Core.LLVMPtr{T}, cmp::T, new::T,
+            ::Val{success}=Val(Ordering.Monotonic), ::Val{failure}=Val(Ordering.Monotonic),
+            ::Val{scope}=Val(:system), ::Val{weak}=Val(false))::T where {T,success,failure,scope,weak}
+        res = atomic_cmpxchg!(builder, typed_ptr(builder, p, cmp.value_type), cmp, new, success,
+                              failure; scope=String(scope), weak)
+        extract_value!(builder, res, 0)
+    end
+
+    @inline @llvmgenerated builder function load(p::Core.LLVMPtr{T}, ::Type{T},
+            ::Val{order}=Val(Ordering.Monotonic), ::Val{scope}=Val(:system))::T where {T,order,scope}
+        T_val = convert(LLVMType, T)
+        load!(builder, T_val, typed_ptr(builder, p, T_val); ordering=order,
+              scope=String(scope), align=sizeof(T))
+    end
+
+    @inline @llvmgenerated builder function store!(p::Core.LLVMPtr{T}, x::T,
+            ::Val{order}=Val(Ordering.Monotonic), ::Val{scope}=Val(:system))::Nothing where {T,order,scope}
+        LLVM.store!(builder, x, typed_ptr(builder, p, x.value_type); ordering=order,
+               scope=String(scope), align=sizeof(T))
+        return
+    end
+
+    @inline @llvmgenerated builder function fence(::Val{order},
+            ::Val{scope}=Val(:system))::Nothing where {order,scope}
+        fence!(builder, order; scope=String(scope))
+        return
+    end
+end
+
 # simulates codegen for a kernel function: validates by default. Returns the assembly and
 # the metadata without the IR (and its entry function), which only lives as long as the
 # context, and is disposed of here.
