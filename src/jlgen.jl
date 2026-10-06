@@ -438,20 +438,24 @@ end
 # which (on 1.12+) recursively walks callees so their CIs carry stored source for
 # `CompilerCaching.get_codeinfos` to read back into the `jl_emit_native` payload. Returns
 # the root `CodeInstance` (or `nothing` if inference failed).
+#
+# This only relies on the `AbstractInterpreter` interface, so that back-ends can provide
+# their own interpreter through `get_interpreter`.
 @static if HAS_INTEGRATED_CACHE
-    drive_inference!(interp::GPUInterpreter, mi::MethodInstance) =
+    drive_inference!(interp::CC.AbstractInterpreter, mi::MethodInstance) =
         CompilerCaching.typeinf!(interp, mi)
 else
     # 1.10: an inline copy that talks to the per-interpreter `CodeCache` instead of the
     # integrated one. Returns `nothing` (no integrated CI to hand back; the caller
     # fetches via `code_cache(interp)`).
-    function drive_inference!(interp::GPUInterpreter, mi::MethodInstance)
+    function drive_inference!(interp::CC.AbstractInterpreter, mi::MethodInstance)
         src = CC.typeinf_ext_toplevel(interp, mi)
         @assert src !== nothing "Inference of $mi failed"
 
         # For const-return CIs the inference result wasn't recorded — set it from the
         # returned source so callers re-using the CI don't need to re-infer.
-        wvc = WorldView(CC.code_cache(interp), interp.world, interp.world)
+        world = get_inference_world(interp)
+        wvc = WorldView(CC.code_cache(interp), world, world)
         if CC.haskey(wvc, mi)
             ci = CC.getindex(wvc, mi)
             if ci.inferred === nothing
@@ -637,7 +641,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     cache_handle = @static if HAS_INTEGRATED_CACHE
         cache_owner(job)
     else
-        interp.code_cache
+        CC.code_cache(interp).cache
     end
 
     # gather (CI, CodeInfo) pairs for jl_emit_native (1.12+).

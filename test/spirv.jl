@@ -563,9 +563,9 @@ end
     end
 
     @test @filecheck begin
-        @check_not "@{{(julia|j)_child}}"
+        @check_not "@{{(enzyme_)?(julia|j)_child}}"
         @check "define spir_kernel void @{{.*}}"
-        @check_not "@{{(julia|j)_child}}"
+        @check_not "@{{(enzyme_)?(julia|j)_child}}"
         SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float64}}; backend, kernel=true,
                         dump_module=true)
     end
