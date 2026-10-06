@@ -925,48 +925,12 @@ expand_to_cmpxchg_loop!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
                         inst::LLVM.AtomicRMWInst) =
     expand_to_cmpxchg!(lower_ordering!(job, inst))
 
-# 8- and 16-bit atomics as masked operations on the containing 32-bit word, like
-# `AtomicExpand` does. Like `AtomicExpand`, this assumes that the whole word can be accessed:
-# true for device buffers, which Metal allocates in pages, and for threadgroup arrays, which
-# Metal.jl aligns and pads to 4 bytes.
-function expand_partword_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                                 inst::LLVM.Instruction)
-    lower_ordering!(job, inst)
-    if inst isa LLVM.LoadInst
-        # a word-sized load, shifted
-        @dispose builder=IRBuilder() begin
-            position!(builder, LLVM.before(inst))
-            mask = partword_mask!(builder, inst.value_type, inst.pointer_operand;
-                                  align=inst.alignment, word_size=4)
-            word = load!(builder, mask.word_type, mask.aligned_addr)
-            word.alignment = mask.aligned_addr_alignment
-            word.ordering = inst.ordering
-            word.syncscope = inst.syncscope
-            word.volatile = inst.volatile
-            copy_atomic_metadata!(word, inst)
-            replace_uses!(inst, extract_masked_value!(builder, word, mask))
-        end
-        erase!(inst)
-        return
-    elseif inst isa LLVM.StoreInst
-        # an exchange whose result is unused (`AtomicExpand`'s `expandAtomicStoreToXChg`),
-        # which needs at least a monotonic ordering
-        order = inst.ordering == LLVM.AtomicOrdering.Unordered ?
-                LLVM.AtomicOrdering.Monotonic : inst.ordering
-        rmw = @dispose builder=IRBuilder() begin
-            position!(builder, LLVM.before(inst))
-            atomic_rmw!(builder, LLVM.AtomicRMWBinOp.Xchg, inst.pointer_operand,
-                        inst.value_operand, order, inst.syncscope)
-        end
-        rmw.alignment = inst.alignment
-        rmw.volatile = inst.volatile
-        copy_atomic_metadata!(rmw, inst)
-        erase!(inst)
-        inst = rmw
-    end
-    expand_partword!(inst, 4)
-    return
-end
+# 8- and 16-bit atomics as masked operations on the containing 32-bit word. This assumes that
+# the whole word can be accessed: true for device buffers, which Metal allocates in pages, and
+# for threadgroup arrays, which Metal.jl aligns and pads to 4 bytes.
+expand_partword_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                        inst::LLVM.Instruction) =
+    expand_partword_atomic!(lower_ordering!(job, inst), 4)
 
 # On targets without ordered atomics (MSL < 4.1), bracket the operation with fences
 # (`AtomicExpand`'s `bracketInstWithFences` with the default `emitLeadingFence` and
