@@ -138,50 +138,50 @@ function promote_bf16_intrinsics!(mod::LLVM.Module)
     bfify(@nospecialize T) =
         if T == i16
             bf
-        elseif T isa LLVM.VectorType && eltype(T) == i16
-            LLVM.VectorType(bf, Int(length(T)))
-        elseif typed_ptrs && T isa LLVM.PointerType && !is_opaque(T) && eltype(T) == i16
-            LLVM.PointerType(bf, addrspace(T))
+        elseif T isa LLVM.VectorType && T.element_type == i16
+            LLVM.VectorType(bf, Int(T.length))
+        elseif typed_ptrs && T isa LLVM.PointerType && !isopaque(T) && T.element_type == i16
+            LLVM.PointerType(bf, T.addrspace)
         else
             T
         end
 
-    for old in collect(functions(mod))
+    for old in collect(mod.functions)
         isdeclaration(old) || continue
-        fn = LLVM.name(old)
+        fn = old.name
         (startswith(fn, "air.") && occursin("bf16", fn)) || continue
 
-        old_ft = function_type(old)
-        old_params = collect(parameters(old_ft))
+        old_ft = old.function_type
+        old_params = collect(old_ft.parameters)
         new_params = LLVMType[bfify(T) for T in old_params]
-        new_ret = bfify(return_type(old_ft))
+        new_ret = bfify(old_ft.return_type)
         # already native `bfloat` (Julia 1.13+): nothing to repair
-        (new_ret == return_type(old_ft) && new_params == old_params) && continue
+        (new_ret == old_ft.return_type && new_params == old_params) && continue
         new_ft = LLVM.FunctionType(new_ret, new_params)
 
         # gather call sites before mutating the module
         worklist = LLVM.CallBase[]
-        for use in uses(old)
-            u = user(use)
-            (u isa LLVM.CallBase && called_operand(u) === old) && push!(worklist, u)
+        for use in old.uses
+            u = use.user
+            (u isa LLVM.CallBase && u.called_operand === old) && push!(worklist, u)
         end
 
         # swap the `i16` declaration for a `bfloat`-typed one under the same AIR name
-        LLVM.name!(old, fn * ".i16")
+        old.name = fn * ".i16"
         new = LLVM.Function(mod, fn, new_ft)
-        linkage!(new, linkage(old))
+        new.linkage = old.linkage
 
         for call in worklist
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
                 args = LLVM.Value[let a = arg
-                        value_type(a) == T ? a : bitcast!(builder, a, T)
-                    end for (arg, T) in zip(arguments(call), new_params)]
+                        a.value_type == T ? a : bitcast!(builder, a, T)
+                    end for (arg, T) in zip(call.arguments, new_params)]
                 new_call = call!(builder, new_ft, new, args)
                 if new_ret != LLVM.VoidType()
-                    res = value_type(call) == new_ret ? new_call :
-                          bitcast!(builder, new_call, value_type(call))
+                    res = call.value_type == new_ret ? new_call :
+                          bitcast!(builder, new_call, call.value_type)
                     replace_uses!(call, res)
                 end
                 erase!(call)
@@ -215,11 +215,11 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
                           "air_minor"   => job.config.target.air.minor,
                           "metal_major" => job.config.target.metal.major,
                           "metal_minor" => job.config.target.metal.minor]
-        if haskey(globals(mod), name)
-            gv = globals(mod)[name]
-            initializer!(gv, ConstantInt(LLVM.Int32Type(), value))
+        if haskey(mod.globals, name)
+            gv = mod.globals[name]
+            gv.initializer = ConstantInt(LLVM.Int32Type(), value)
             # change the linkage so that we can inline the value
-            linkage!(gv, LLVM.API.LLVMPrivateLinkage)
+            gv.linkage = LLVM.API.LLVMPrivateLinkage
         end
     end
 
@@ -232,7 +232,7 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
 
     # we emit properties (of the air and metal version) as private global constants,
     # so run the optimizer so that they are inlined before the rest of the optimizer runs.
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb=PassBuilder() begin
         LLVM.target_transform_info!(pb, MetalTTI())
         add!(pb, RecomputeGlobalsAAPass())
         add!(pb, GlobalOptPass())
@@ -271,10 +271,10 @@ end
 # clones alias scopes per instance, so the result stays correct.
 function optimize_module!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
                           mod::LLVM.Module)
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb=PassBuilder() begin
         LLVM.target_transform_info!(pb, MetalTTI())
         add!(pb, ModuleInlinerWrapperPass())
-        add!(pb, NewPMFunctionPassManager()) do fpm
+        add!(pb, FunctionPassManager()) do fpm
             add!(fpm, instcombine_pass(job))
             add!(fpm, SimplifyCFGPass())
         end
@@ -289,21 +289,21 @@ function validate_ir(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module)
     # Metal does not support double precision, except for logging
     function is_illegal_double(val)
         T_bad = LLVM.DoubleType()
-        if value_type(val) != T_bad
+        if val.value_type != T_bad
             return false
         end
 
         function used_for_logging(use::LLVM.Use)
-            usr = user(use)
+            usr = use.user
             if usr isa LLVM.CallInst
-                callee = called_operand(usr)
-                if callee isa LLVM.Function && startswith(name(callee), "metal_os_log")
+                callee = usr.called_operand
+                if callee isa LLVM.Function && startswith(callee.name, "metal_os_log")
                     return true
                 end
             end
             return false
         end
-        if all(used_for_logging, uses(val))
+        if all(used_for_logging, val.uses)
             return false
         end
 
@@ -342,30 +342,30 @@ end
 function split_aggregate_loads!(mod::LLVM.Module)
     aa_kinds = (LLVM.MD_tbaa, LLVM.MD_tbaa_struct, LLVM.MD_alias_scope, LLVM.MD_noalias)
     changed = false
-    for f in functions(mod)
+    for f in mod.functions
         isdeclaration(f) && continue
         worklist = LLVM.LoadInst[]
-        for bb in blocks(f), inst in instructions(bb)
+        for bb in f.blocks, inst in bb.instructions
             inst isa LLVM.LoadInst || continue
-            T = value_type(inst)
+            T = inst.value_type
             (T isa LLVM.StructType || T isa LLVM.ArrayType) || continue
             iszero(LLVM.API.LLVMGetVolatile(inst)) || continue
             LLVM.API.LLVMGetOrdering(inst) == LLVM.API.LLVMAtomicOrderingNotAtomic || continue
-            uselist = collect(uses(inst))
+            uselist = collect(inst.uses)
             isempty(uselist) && continue
-            all(u -> user(u) isa LLVM.ExtractValueInst, uselist) || continue
+            all(u -> u.user isa LLVM.ExtractValueInst, uselist) || continue
             push!(worklist, inst)
         end
         for ld in worklist
-            ptr = operands(ld)[1]
-            aggty = value_type(ld)
-            md = metadata(ld)
+            ptr = ld.operands[1]
+            aggty = ld.value_type
+            md = ld.metadata
             i32 = LLVM.Int32Type()
             @dispose builder=IRBuilder() begin
                 # build the field loads at the wide load's location, not the extractvalue's
-                position!(builder, ld)
-                for u in collect(uses(ld))
-                    ev = user(u)::LLVM.ExtractValueInst
+                position!(builder, LLVM.before(ld))
+                for u in collect(ld.uses)
+                    ev = u.user::LLVM.ExtractValueInst
                     n = LLVM.API.LLVMGetNumIndices(ev)
                     idxptr = LLVM.API.LLVMGetIndices(ev)
                     # extractvalue has integer indices; getelementptr takes Values, prefixed
@@ -375,9 +375,9 @@ function split_aggregate_loads!(mod::LLVM.Module)
                         push!(gepidx, ConstantInt(i32, unsafe_load(idxptr, k)))
                     end
                     gep = inbounds_gep!(builder, aggty, ptr, gepidx)
-                    fieldload = load!(builder, value_type(ev), gep)
+                    fieldload = load!(builder, ev.value_type, gep)
                     for kind in aa_kinds
-                        haskey(md, kind) && (metadata(fieldload)[kind] = md[kind])
+                        haskey(md, kind) && (fieldload.metadata[kind] = md[kind])
                     end
                     replace_uses!(ev, fieldload)
                     erase!(ev)
@@ -404,18 +404,18 @@ function merge_byte_gep_chains!(mod::LLVM.Module)
     changed = false
     i8 = LLVM.Int8Type()
     is_byte_gep(v) =
-        v isa LLVM.GetElementPtrInst && length(operands(v)) == 2 &&
+        v isa LLVM.GetElementPtrInst && length(v.operands) == 2 &&
         LLVM.LLVMType(LLVM.API.LLVMGetGEPSourceElementType(v)) == i8
 
     # the first `gep i8, (gep i8, p, A), B` in `f`, or `nothing`
     function next_chain(f)
-        for bb in blocks(f), inst in instructions(bb)
-            is_byte_gep(inst) && is_byte_gep(operands(inst)[1]) && return inst
+        for bb in f.blocks, inst in bb.instructions
+            is_byte_gep(inst) && is_byte_gep(inst.operands[1]) && return inst
         end
         return nothing
     end
 
-    for f in functions(mod)
+    for f in mod.functions
         isdeclaration(f) && continue
         # Rescan after each merge instead of keeping a worklist: a merge can erase a *different*
         # chained GEP (a now-dead inner GEP whose only use was the one we just folded), and a
@@ -424,18 +424,18 @@ function merge_byte_gep_chains!(mod::LLVM.Module)
         # instructions; each merge replaces a chained GEP with a shallower one (and shortens its
         # users), so the total chain depth strictly decreases and this terminates.
         while (gep = next_chain(f)) !== nothing
-            src  = operands(gep)[1]
-            base = operands(src)[1]
+            src  = gep.operands[1]
+            base = src.operands[1]
             inbounds = LLVM.API.LLVMIsInBounds(gep) != 0 && LLVM.API.LLVMIsInBounds(src) != 0
             @dispose builder=IRBuilder() begin
-                position!(builder, gep)
-                sum = add!(builder, operands(src)[2], operands(gep)[2])
+                position!(builder, LLVM.before(gep))
+                sum = add!(builder, src.operands[2], gep.operands[2])
                 newgep = inbounds ? inbounds_gep!(builder, i8, base, [sum]) :
                                     gep!(builder, i8, base, [sum])
                 replace_uses!(gep, newgep)
             end
             erase!(gep)
-            isempty(uses(src)) && erase!(src)
+            isempty(src.uses) && erase!(src)
             changed = true
         end
     end
@@ -444,7 +444,7 @@ end
 
 function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module,
                                   entry::LLVM.Function)
-    entry_fn = LLVM.name(entry)
+    entry_fn = entry.name
 
     # convert the kernel state argument to a reference
     if job.config.kernel && kernel_state_type(job) !== Nothing
@@ -469,9 +469,9 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         # by the rewrites above, so that loads/stores happen in the right address
         # space (e.g. constant globals in addrspace 2 rather than via a cast to 0,
         # which Metal's backend cannot handle correctly for dynamic indices).
-        @dispose pb=NewPMPassBuilder() begin
+        @dispose pb=PassBuilder() begin
             LLVM.target_transform_info!(pb, MetalTTI())
-            add!(pb, NewPMFunctionPassManager()) do fpm
+            add!(pb, FunctionPassManager()) do fpm
                 add!(fpm, InferAddressSpacesPass())
                 add!(fpm, SROAPass())
                 add!(fpm, instcombine_pass(job))
@@ -486,7 +486,7 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         add_module_metadata!(job, mod)
     end
 
-    return functions(mod)[entry_fn]
+    return mod.functions[entry_fn]
 end
 
 # lowering of LLVM IR to AIR-compatible IR
@@ -526,15 +526,15 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
 
     # lower LLVM intrinsics that AIR doesn't support
     changed = false
-    for f in functions(mod)
+    for f in mod.functions
         changed |= lower_llvm_intrinsics!(job, f)
     end
     if changed
         # lowering may have introduced additional functions marked `alwaysinline`,
         # and left dead declarations of the replaced LLVM intrinsics behind
-        @dispose pb=NewPMPassBuilder() begin
+        @dispose pb=PassBuilder() begin
             add!(pb, AlwaysInlinerPass())
-            add!(pb, NewPMFunctionPassManager()) do fpm
+            add!(pb, FunctionPassManager()) do fpm
                 add!(fpm, SimplifyCFGPass())
                 add!(fpm, instcombine_pass(job))
             end
@@ -549,19 +549,6 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     merge_byte_gep_chains!(mod)
 
     return
-end
-
-# Before LLVM 18, `ordering(inst)` calls `LLVMGetOrdering`, which incorrectly casts fences
-# to AtomicRMWInst. Use the stable textual form on all versions to keep this workaround tested.
-function fence_ordering(inst::LLVM.FenceInst)
-    # Scope names escape embedded quotes as \22; metadata follows the ordering.
-    m = match(r"^\s*fence(?:\s+syncscope\(\"[^\"]*\"\))?\s+(acquire|release|acq_rel|seq_cst)\b",
-              string(inst))
-    m === nothing && error("Unexpected fence instruction: $inst")
-    return m.captures[1] == "acquire" ? LLVM.API.LLVMAtomicOrderingAcquire :
-           m.captures[1] == "release" ? LLVM.API.LLVMAtomicOrderingRelease :
-           m.captures[1] == "acq_rel" ? LLVM.API.LLVMAtomicOrderingAcquireRelease :
-                                        LLVM.API.LLVMAtomicOrderingSequentiallyConsistent
 end
 
 # Lower LLVM fences to air.atomic.fence(flags, order, scope), as MSL's atomic_thread_fence
@@ -580,15 +567,15 @@ function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod
     metal >= v"3.2" || return false
 
     worklist = LLVM.FenceInst[]
-    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
         inst isa LLVM.FenceInst && push!(worklist, inst)
     end
     isempty(worklist) && return false
 
     T_int32 = LLVM.Int32Type()
     fence_ft = LLVM.FunctionType(LLVM.VoidType(), [T_int32, T_int32, T_int32])
-    fence_fn = if haskey(functions(mod), "air.atomic.fence")
-        functions(mod)["air.atomic.fence"]
+    fence_fn = if haskey(mod.functions, "air.atomic.fence")
+        mod.functions["air.atomic.fence"]
     else
         LLVM.Function(mod, "air.atomic.fence", fence_ft)
     end
@@ -597,7 +584,7 @@ function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod
         order = if metal < v"4.1"
             5   # seq_cst
         else
-            ord = fence_ordering(inst)
+            ord = inst.ordering
             if ord == LLVM.API.LLVMAtomicOrderingAcquire
                 2
             elseif ord == LLVM.API.LLVMAtomicOrderingRelease
@@ -608,12 +595,12 @@ function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod
                 5   # seq_cst (the only other ordering LLVM allows on a fence)
             end
         end
-        scope = syncscope(inst) == SyncScope("singlethread") ? 0 : 2
+        scope = inst.syncscope == SyncScope("singlethread") ? 0 : 2
         flags = 1 | 2   # device | threadgroup
 
         @dispose builder=IRBuilder() begin
-            position!(builder, inst)
-            debuglocation!(builder, inst)
+            position!(builder, LLVM.before(inst))
+            builder.debug_location = inst.debug_location
             call!(builder, fence_ft, fence_fn,
                   [ConstantInt(T_int32, flags), ConstantInt(T_int32, order),
                    ConstantInt(T_int32, scope)])
@@ -666,10 +653,10 @@ end
 # want to execute it earlier, adapt remapType to rewrite all pointer types.
 function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                        f::LLVM.Function)
-    ft = function_type(f)
+    ft = f.function_type
 
     # find the byref parameters
-    byref = BitVector(undef, length(parameters(ft)))
+    byref = BitVector(undef, length(ft.parameters))
     args = classify_arguments(job, ft; post_optimization=job.config.optimize)
     filter!(args) do arg
         arg.cc != GHOST
@@ -683,9 +670,9 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
         #       address space matches the contained one? doesn't matter right now as we
         #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
         #       device addrss space (i.e. no mismatch between parent and field possible)
-        dst = if src isa LLVM.PointerType && addrspace(src) == 0
+        dst = if src isa LLVM.PointerType && src.addrspace == 0
             if supports_typed_pointers(context())
-                LLVM.PointerType(remapType(eltype(src)), #=device=# 1)
+                LLVM.PointerType(remapType(src.element_type), #=device=# 1)
             else
                 LLVM.PointerType(#=device=# 1)
             end
@@ -697,18 +684,18 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
 
     # generate the new function type & definition
     new_types = LLVMType[]
-    for (i, param) in enumerate(parameters(ft))
+    for (i, param) in enumerate(ft.parameters)
         if byref[i]
             push!(new_types, remapType(param::LLVM.PointerType))
         else
             push!(new_types, param)
         end
     end
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_ft = LLVM.FunctionType(ft.return_type, new_types)
     new_f = LLVM.Function(mod, "", new_ft)
-    linkage!(new_f, linkage(f))
-    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
-        LLVM.name!(new_arg, LLVM.name(arg))
+    new_f.linkage = f.linkage
+    for (arg, new_arg) in zip(f.parameters, new_f.parameters)
+        new_arg.name = arg.name
     end
 
     # we cannot simply remap the function arguments, because that will not propagate the
@@ -719,28 +706,28 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
     new_args = LLVM.Value[]
     @dispose builder=IRBuilder() begin
         entry = BasicBlock(new_f, "conversion")
-        position!(builder, entry)
+        position!(builder, LLVM.at_end(entry))
 
         # perform argument conversions
-        for (i, param) in enumerate(parameters(ft))
+        for (i, param) in enumerate(ft.parameters)
             if byref[i]
                 # load the argument in a stack slot
                 llvm_typ = convert(LLVMType, args[i].typ)
-                val = load!(builder, llvm_typ, parameters(new_f)[i])
+                val = load!(builder, llvm_typ, new_f.parameters[i])
                 ptr = alloca!(builder, llvm_typ)
                 store!(builder, val, ptr)
                 push!(new_args, ptr)
             else
-                push!(new_args, parameters(new_f)[i])
+                push!(new_args, new_f.parameters[i])
             end
-            for attr in collect(parameter_attributes(f, i))
-                push!(parameter_attributes(new_f, i), attr)
+            for attr in collect(f.parameter_attributes[i])
+                push!(new_f.parameter_attributes[i], attr)
             end
         end
 
         # map the arguments
         value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => new_args[i] for (i,param) in enumerate(parameters(f))
+            param => new_args[i] for (i,param) in enumerate(f.parameters)
         )
 
         value_map[f] = new_f
@@ -748,19 +735,19 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
 
         # fall through
-        br!(builder, blocks(new_f)[2])
+        br!(builder, new_f.blocks[2])
     end
 
     # remove the old function
-    fn = LLVM.name(f)
+    fn = f.name
     prune_constexpr_uses!(f)
-    @assert isempty(uses(f))
+    @assert isempty(f.uses)
     replace_metadata_uses!(f, new_f)
     erase!(f)
-    LLVM.name!(new_f, fn)
+    new_f.name = fn
 
     # clean-up after this pass (which runs after optimization)
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb=PassBuilder() begin
         add!(pb, SimplifyCFGPass())
         add!(pb, SROAPass())
         add!(pb, EarlyCSEPass())
@@ -784,30 +771,31 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
                                     entry::LLVM.Function)
     # determine global variables we need to update
     global_map = Dict{LLVM.Value, LLVM.Value}()
-    for gv in globals(mod)
-        isconstant(gv) || continue
-        addrspace(value_type(gv)) == 0 || continue
+    for gv in mod.globals
+        gv.constant || continue
+        gv.value_type.addrspace == 0 || continue
 
         new_addrspace = metal_global_constant_addrspace(job, gv)
-        new_addrspace == addrspace(value_type(gv)) && continue
+        new_addrspace == gv.value_type.addrspace && continue
 
-        gv_ty = global_value_type(gv)
-        gv_name = LLVM.name(gv)
+        gv_ty = gv.global_value_type
+        gv_name = gv.name
 
-        LLVM.name!(gv, gv_name * ".old")
+        gv.name = gv_name * ".old"
         new_gv = GlobalVariable(mod, gv_ty, gv_name, new_addrspace)
 
-        alignment!(new_gv, alignment(gv))
-        unnamed_addr!(new_gv, unnamed_addr(gv))
-        initializer!(new_gv, initializer(gv))
-        constant!(new_gv, true)
-        linkage!(new_gv, linkage(gv))
-        visibility!(new_gv, visibility(gv))
+        new_gv.alignment = gv.alignment
+        gv.unnamed_addr == LLVM.UnnamedAddr.Global &&
+            (new_gv.unnamed_addr = LLVM.UnnamedAddr.Global)
+        new_gv.initializer = gv.initializer
+        new_gv.constant = true
+        new_gv.linkage = gv.linkage
+        new_gv.visibility = gv.visibility
 
         # we can't map the global variable directly, as the type change won't be applied
         # recursively. so instead map a constant expression converting the value of the
         # global into one with the old address space, avoiding a type change.
-        ptr = const_addrspacecast(new_gv, value_type(gv))
+        ptr = const_addrspacecast(new_gv, gv.value_type)
 
         global_map[gv] = ptr
     end
@@ -817,40 +805,40 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
     function_worklist = Set{LLVM.Function}()
     function check_user(val)
         if val isa LLVM.Instruction
-            bb = LLVM.parent(val)
-            f = LLVM.parent(bb)
+            bb = val.parent
+            f = bb.parent
 
             push!(function_worklist, f)
         elseif val isa LLVM.ConstantExpr
-            for use in uses(val)
-                check_user(user(use))
+            for use in val.uses
+                check_user(use.user)
             end
         end
     end
-    for gv in keys(global_map), use in uses(gv)
-        check_user(user(use))
+    for gv in keys(global_map), use in gv.uses
+        check_user(use.user)
     end
 
     # update functions that use the global
     if !isempty(function_worklist)
-        entry_fn = LLVM.name(entry)
+        entry_fn = entry.name
         for fun in function_worklist
-            fn = LLVM.name(fun)
+            fn = fun.name
 
             new_fun = clone(fun; value_map=global_map)
             replace_uses!(fun, new_fun)
             replace_metadata_uses!(fun, new_fun)
             erase!(fun)
 
-            LLVM.name!(new_fun, fn)
+            new_fun.name = fn
         end
-        entry = LLVM.functions(mod)[entry_fn]
+        entry = mod.functions[entry_fn]
     end
 
     # delete old globals
     for (old, new) in global_map
         prune_constexpr_uses!(old)
-        @assert isempty(uses(old))
+        @assert isempty(old.uses)
         replace_metadata_uses!(old, new)
         erase!(old)
     end
@@ -906,10 +894,10 @@ end
 # otherwise `nothing`.
 function addrspacecast_to_generic_source(@nospecialize(v))
     (v isa LLVM.Instruction || v isa LLVM.ConstantExpr) || return nothing
-    opcode(v) == LLVM.API.LLVMAddrSpaceCast || return nothing
-    addrspace(value_type(v)) == 0 || return nothing
-    src = operands(v)[1]
-    (value_type(src) isa LLVM.PointerType && addrspace(value_type(src)) != 0) ||
+    v.opcode == LLVM.API.LLVMAddrSpaceCast || return nothing
+    v.value_type.addrspace == 0 || return nothing
+    src = v.operands[1]
+    (src.value_type isa LLVM.PointerType && src.value_type.addrspace != 0) ||
         return nothing
     return src
 end
@@ -921,9 +909,9 @@ end
 # pointer>)` once a forwarder upstream has been de-integerized.
 function generic_ptr_behind_ptrtoint(@nospecialize(v))
     (v isa LLVM.Instruction || v isa LLVM.ConstantExpr) || return nothing
-    opcode(v) == LLVM.API.LLVMPtrToInt || return nothing
-    p = operands(v)[1]
-    (value_type(p) isa LLVM.PointerType && addrspace(value_type(p)) == 0) || return nothing
+    v.opcode == LLVM.API.LLVMPtrToInt || return nothing
+    p = v.operands[1]
+    (p.value_type isa LLVM.PointerType && p.value_type.addrspace == 0) || return nothing
     return p
 end
 
@@ -943,11 +931,11 @@ end
 function integer_param_pointer_image_type(arg::LLVM.Argument)
     ptrty = nothing
     forwarded = false
-    for use in uses(arg)
-        u = user(use)
-        if u isa LLVM.Instruction && opcode(u) == LLVM.API.LLVMIntToPtr
-            t = value_type(u)
-            (t isa LLVM.PointerType && addrspace(t) == 0) || return nothing
+    for use in arg.uses
+        u = use.user
+        if u isa LLVM.Instruction && u.opcode == LLVM.API.LLVMIntToPtr
+            t = u.value_type
+            (t isa LLVM.PointerType && t.addrspace == 0) || return nothing
             ptrty === nothing ? (ptrty = t) : (ptrty == t || return nothing)
         elseif u isa LLVM.CallInst
             forwarded = true
@@ -968,9 +956,9 @@ end
 # pipeline has internalized everything but the kernel entrypoints, so the runtime helpers qualify.
 function direct_callsites(f::LLVM.Function)
     callsites = LLVM.CallInst[]
-    for use in uses(f)
-        v = user(use)
-        (v isa LLVM.CallInst && called_operand(v) == f) || return nothing
+    for use in f.uses
+        v = use.user
+        (v isa LLVM.CallInst && v.called_operand == f) || return nothing
         push!(callsites, v)
     end
     return isempty(callsites) ? nothing : callsites
@@ -978,13 +966,13 @@ end
 
 # a function whose signature we may rewrite: it has a body and local (internal/private) linkage.
 retargetable(f::LLVM.Function) =
-    !isempty(blocks(f)) &&
-    linkage(f) in (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage)
+    !isempty(f.blocks) &&
+    f.linkage in (LLVM.API.LLVMInternalLinkage, LLVM.API.LLVMPrivateLinkage)
 
 # retarget a pointer type to address space `as`, taking its pointee from `srcptr` (only needed for
 # typed pointers; `eltype` is invalid on opaque ones, so keep it lazy)
 retarget_pointer(as::Integer, srcptr::LLVM.PointerType) =
-    supports_typed_pointers(context()) ? LLVM.PointerType(eltype(srcptr), as) :
+    supports_typed_pointers(context()) ? LLVM.PointerType(srcptr.element_type, as) :
                                          LLVM.PointerType(as)
 
 # the single source address space every call site's argument `i` is reached from via `extract`,
@@ -992,16 +980,16 @@ retarget_pointer(as::Integer, srcptr::LLVM.PointerType) =
 function agreed_source_addrspace(callsites, i, extract)
     as = -1
     for cs in callsites
-        src = extract(arguments(cs)[i])
+        src = extract(cs.arguments[i])
         src === nothing && return -1
-        src_as = addrspace(value_type(src))
+        src_as = src.value_type.addrspace
         as == -1 ? (as = src_as) : (as == src_as || return -1)
     end
     return as
 end
 
 # typed-pointer shim (Julia <= 1.11): bridge a pointee-type mismatch when unwrapping the integer
-bitcast_if_needed(builder, v, t) = value_type(v) == t ? v : bitcast!(builder, v, t)
+bitcast_if_needed(builder, v, t) = v.value_type == t ? v : bitcast!(builder, v, t)
 
 # Phase 1 (typed-pointer shim, Julia <= 1.11): a single de-integerization sweep. With typed
 # pointers a `Ptr` argument is lowered to an integer; rewrite every internal parameter that is the
@@ -1010,18 +998,18 @@ bitcast_if_needed(builder, v, t) = value_type(v) == t ? v : bitcast!(builder, v,
 # so a forwarder is de-integerized before the leaf it feeds. Returns whether anything changed.
 function convert_intptr_args_once!(mod::LLVM.Module)
     changed = false
-    for f in collect(functions(mod))
+    for f in collect(mod.functions)
         retargetable(f) || continue
         callsites = direct_callsites(f)
         callsites === nothing && continue
-        param_types = parameters(function_type(f))
+        param_types = collect(f.function_type.parameters)
         new_types = Vector{Any}(nothing, length(param_types))
         for (i, pty) in enumerate(param_types)
             pty isa LLVM.IntegerType || continue
-            ptrty = integer_param_pointer_image_type(parameters(f)[i])
+            ptrty = integer_param_pointer_image_type(f.parameters[i])
             ptrty === nothing && continue
             # only when every caller already passes `ptrtoint(<generic pointer>)` we can unwrap
-            all(cs -> generic_ptr_behind_ptrtoint(arguments(cs)[i]) !== nothing, callsites) || continue
+            all(cs -> generic_ptr_behind_ptrtoint(cs.arguments[i]) !== nothing, callsites) || continue
             new_types[i] = ptrty
         end
         any(!isnothing, new_types) || continue
@@ -1048,14 +1036,14 @@ end
 # Returns whether anything changed.
 function propagate_argument_address_spaces_once!(mod::LLVM.Module)
     changed = false
-    for f in collect(functions(mod))
+    for f in collect(mod.functions)
         retargetable(f) || continue
         callsites = direct_callsites(f)
         callsites === nothing && continue
-        param_types = parameters(function_type(f))
+        param_types = collect(f.function_type.parameters)
         new_types = Vector{Any}(nothing, length(param_types))
         for (i, pty) in enumerate(param_types)
-            (pty isa LLVM.PointerType && addrspace(pty) == 0) || continue
+            (pty isa LLVM.PointerType && pty.addrspace == 0) || continue
             as = agreed_source_addrspace(callsites, i, addrspacecast_to_generic_source)
             as > 0 && (new_types[i] = retarget_pointer(as, pty))
         end
@@ -1088,7 +1076,7 @@ function propagate_argument_address_spaces!(mod::LLVM.Module)
 end
 
 function select_source_and_null(sel::LLVM.SelectInst)
-    ops = collect(operands(sel))
+    ops = collect(sel.operands)
     cond, lhs, rhs = ops
     src_lhs = addrspacecast_to_generic_source(lhs)
     src_rhs = addrspacecast_to_generic_source(rhs)
@@ -1103,19 +1091,19 @@ end
 function rewrite_generic_null_selects!(mod::LLVM.Module)
     changed = false
     worklist = LLVM.ICmpInst[]
-    for f in functions(mod)
+    for f in mod.functions
         isdeclaration(f) && continue
-        for bb in blocks(f), inst in instructions(bb)
+        for bb in f.blocks, inst in bb.instructions
             inst isa LLVM.ICmpInst || continue
-            pred = predicate(inst)
+            pred = inst.predicate
             pred in (LLVM.API.LLVMIntEQ, LLVM.API.LLVMIntNE) || continue
-            ops = collect(operands(inst))
+            ops = collect(inst.operands)
             sel_idx = ops[1] isa LLVM.SelectInst && isnull(ops[2]) ? 1 :
                       ops[2] isa LLVM.SelectInst && isnull(ops[1]) ? 2 : 0
             sel_idx == 0 && continue
             sel = ops[sel_idx]::LLVM.SelectInst
-            value_type(sel) isa LLVM.PointerType || continue
-            addrspace(value_type(sel)) == 0 || continue
+            sel.value_type isa LLVM.PointerType || continue
+            sel.value_type.addrspace == 0 || continue
             select_info = select_source_and_null(sel)
             select_info === nothing && continue
             push!(worklist, inst)
@@ -1123,18 +1111,18 @@ function rewrite_generic_null_selects!(mod::LLVM.Module)
     end
 
     for inst in worklist
-        ops = collect(operands(inst))
+        ops = collect(inst.operands)
         sel = (ops[1] isa LLVM.SelectInst ? ops[1] : ops[2])::LLVM.SelectInst
         cond, src, cast_is_true_value = select_source_and_null(sel)
         @dispose builder=IRBuilder() begin
-            position!(builder, inst)
-            src_is_null = icmp!(builder, LLVM.API.LLVMIntEQ, src, null(value_type(src)))
-            replacement = if predicate(inst) == LLVM.API.LLVMIntEQ
+            position!(builder, LLVM.before(inst))
+            src_is_null = icmp!(builder, LLVM.API.LLVMIntEQ, src, null(src.value_type))
+            replacement = if inst.predicate == LLVM.API.LLVMIntEQ
                 select!(builder, cond,
                         cast_is_true_value ? src_is_null : ConstantInt(LLVM.Int1Type(), 1),
                         cast_is_true_value ? ConstantInt(LLVM.Int1Type(), 1) : src_is_null)
             else
-                src_is_not_null = icmp!(builder, LLVM.API.LLVMIntNE, src, null(value_type(src)))
+                src_is_not_null = icmp!(builder, LLVM.API.LLVMIntNE, src, null(src.value_type))
                 select!(builder, cond,
                         cast_is_true_value ? src_is_not_null : ConstantInt(LLVM.Int1Type(), 0),
                         cast_is_true_value ? ConstantInt(LLVM.Int1Type(), 0) : src_is_not_null)
@@ -1166,8 +1154,8 @@ function rewrite_parameters!(mod::LLVM.Module, f::LLVM.Function, callsites;
     # the caller keeps them (still valid on a narrowed pointer); drop them otherwise.
     for i in 1:length(new_types)
         (new_types[i] !== nothing && keep_attrs) || continue
-        for attr in collect(parameter_attributes(f, i))
-            push!(parameter_attributes(new_f, i), attr)
+        for attr in collect(f.parameter_attributes[i])
+            push!(new_f.parameter_attributes[i], attr)
         end
     end
 
@@ -1175,11 +1163,11 @@ function rewrite_parameters!(mod::LLVM.Module, f::LLVM.Function, callsites;
     # the old signature; collect them from the clone first, since the rewritten calls also target
     # `new_f` and must not be revisited.
     self_calls = LLVM.CallInst[]
-    for bb in blocks(new_f), inst in instructions(bb)
-        inst isa LLVM.CallInst && called_operand(inst) == new_f && push!(self_calls, inst)
+    for bb in new_f.blocks, inst in bb.instructions
+        inst isa LLVM.CallInst && inst.called_operand == new_f && push!(self_calls, inst)
     end
 
-    new_ft = function_type(new_f)
+    new_ft = new_f.function_type
     @dispose builder=IRBuilder() begin
         for cs in Iterators.flatten((callsites, self_calls))
             rewrite_retargeted_call!(builder, cs, new_f, new_ft, new_types, rewrite_arg, keep_attrs)
@@ -1195,21 +1183,21 @@ end
 function rewrite_retargeted_call!(builder::IRBuilder, cs::LLVM.CallInst, new_f::LLVM.Function,
                                   new_ft::LLVM.FunctionType, new_types::Vector, rewrite_arg,
                                   keep_attrs::Bool)
-    position!(builder, cs)
+    position!(builder, LLVM.before(cs))
     new_args = LLVM.Value[new_types[i] === nothing ? arg : rewrite_arg(builder, arg, i)
-                          for (i, arg) in enumerate(arguments(cs))]
-    new_call = call!(builder, new_ft, new_f, new_args, operand_bundles(cs))
-    callconv!(new_call, callconv(cs))
-    for attr in collect(function_attributes(cs))
-        push!(function_attributes(new_call), attr)
+                          for (i, arg) in enumerate(cs.arguments)]
+    new_call = call!(builder, new_ft, new_f, new_args, cs.operand_bundles)
+    new_call.callconv = cs.callconv
+    for attr in collect(cs.function_attributes)
+        push!(new_call.function_attributes, attr)
     end
-    for attr in collect(return_attributes(cs))
-        push!(return_attributes(new_call), attr)
+    for attr in collect(cs.return_attributes)
+        push!(new_call.return_attributes, attr)
     end
-    for i in 1:length(arguments(cs))
+    for i in 1:length(cs.arguments)
         (new_types[i] === nothing || keep_attrs) || continue
-        for attr in collect(argument_attributes(cs, i))
-            push!(argument_attributes(new_call, i), attr)
+        for attr in collect(cs.argument_attributes[i])
+            push!(new_call.argument_attributes[i], attr)
         end
     end
     replace_uses!(cs, new_call)
@@ -1222,51 +1210,51 @@ end
 #
 # Metal doesn't support passing values, so we need to convert those to references instead
 function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.Function)
-    ft = function_type(f)
+    ft = f.function_type
 
     # generate the new function type & definition
     args = classify_arguments(job, ft)
     new_types = LLVM.LLVMType[]
-    bits_as_reference = BitVector(undef, length(parameters(ft)))
+    bits_as_reference = BitVector(undef, length(ft.parameters))
     for arg in args
         if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
             # pass the value as a reference instead
-            push!(new_types, LLVM.PointerType(parameters(ft)[arg.idx], #=Constant=# 1))
+            push!(new_types, LLVM.PointerType(ft.parameters[arg.idx], #=Constant=# 1))
             bits_as_reference[arg.idx] = true
         elseif arg.cc != GHOST
-            push!(new_types, parameters(ft)[arg.idx])
+            push!(new_types, ft.parameters[arg.idx])
             bits_as_reference[arg.idx] = false
         end
     end
-    new_ft = LLVM.FunctionType(return_type(ft), new_types)
+    new_ft = LLVM.FunctionType(ft.return_type, new_types)
     new_f = LLVM.Function(mod, "", new_ft)
-    linkage!(new_f, linkage(f))
-    for (i, (arg, new_arg)) in enumerate(zip(parameters(f), parameters(new_f)))
-        LLVM.name!(new_arg, LLVM.name(arg))
+    new_f.linkage = f.linkage
+    for (i, (arg, new_arg)) in enumerate(zip(f.parameters, new_f.parameters))
+        new_arg.name = arg.name
     end
 
     # emit IR performing the "conversions"
     new_args = LLVM.Value[]
     @dispose builder=IRBuilder() begin
         entry = BasicBlock(new_f, "entry")
-        position!(builder, entry)
+        position!(builder, LLVM.at_end(entry))
 
         # perform argument conversions
         for arg in args
             if arg.cc != GHOST
                 if bits_as_reference[arg.idx]
                     # load the reference to get a value back
-                    val = load!(builder, parameters(ft)[arg.idx], parameters(new_f)[arg.idx])
+                    val = load!(builder, ft.parameters[arg.idx], new_f.parameters[arg.idx])
                     push!(new_args, val)
                 else
-                    push!(new_args, parameters(new_f)[arg.idx])
+                    push!(new_args, new_f.parameters[arg.idx])
                 end
             end
         end
 
         # map the arguments
         value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => new_args[i] for (i,param) in enumerate(parameters(f))
+            param => new_args[i] for (i,param) in enumerate(f.parameters)
         )
 
         value_map[f] = new_f
@@ -1274,34 +1262,34 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
                     changes=LLVM.API.LLVMCloneFunctionChangeTypeLocalChangesOnly)
 
         # fall through
-        br!(builder, blocks(new_f)[2])
+        br!(builder, new_f.blocks[2])
     end
 
     # set the attributes (needs to happen _after_ cloning)
     # TODO: verify that clone copies other attributes,
     #       and that other uses of clone don't set parameters before cloning
-    for i in 1:length(parameters(new_f))
+    for i in 1:length(new_f.parameters)
         if bits_as_reference[i]
             # add appropriate attributes
             # TODO: other attributes (nonnull, readonly, align, dereferenceable)?
             ## we've just emitted a load, so the pointer itself cannot be captured.
             ## `nocapture` was replaced by `captures(none)` in LLVM 21 (an
             ## integer-valued IntAttr, value 0 == CaptureInfo::none()).
-            push!(parameter_attributes(new_f, i),
+            push!(new_f.parameter_attributes[i],
                   LLVM.version() >= v"21" ? EnumAttribute("captures", 0)
                                           : EnumAttribute("nocapture", 0))
             ## Metal.jl emits separate buffers for each scalar argument
-            push!(parameter_attributes(new_f, i), EnumAttribute("noalias", 0))
+            push!(new_f.parameter_attributes[i], EnumAttribute("noalias", 0))
         end
     end
 
     # remove the old function
     # NOTE: if we ever have legitimate uses of the old function, create a shim instead
-    fn = LLVM.name(f)
-    @assert isempty(uses(f))
+    fn = f.name
+    @assert isempty(f.uses)
     replace_metadata_uses!(f, new_f)
     erase!(f)
-    LLVM.name!(new_f, fn)
+    new_f.name = fn
 
     return new_f
 end
@@ -1343,12 +1331,12 @@ for intr in [
 end
 
 function argument_type_name(typ)
-    if typ isa LLVM.IntegerType && width(typ) == 16
+    if typ isa LLVM.IntegerType && typ.width == 16
         "ushort"
-    elseif typ isa LLVM.IntegerType && width(typ) == 32
+    elseif typ isa LLVM.IntegerType && typ.width == 32
         "uint"
     elseif typ isa LLVM.VectorType
-         argument_type_name(eltype(typ)) * string(Int(length(typ)))
+         argument_type_name(typ.element_type) * string(Int(typ.length))
     else
         error("Cannot encode unknown type `$typ`")
     end
@@ -1360,7 +1348,7 @@ end
 
 function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 entry::LLVM.Function)
-    entry_ft = function_type(entry)
+    entry_ft = entry.function_type
 
     ## argument info
     arg_infos = Metadata[]
@@ -1371,9 +1359,9 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     for arg in args
         arg.idx ===  nothing && continue
         if job.config.optimize
-            @assert parameters(entry_ft)[arg.idx] isa LLVM.PointerType
+            @assert entry_ft.parameters[arg.idx] isa LLVM.PointerType
         else
-            parameters(entry_ft)[arg.idx] isa LLVM.PointerType || continue
+            entry_ft.parameters[arg.idx] isa LLVM.PointerType || continue
         end
 
         # NOTE: we emit the bare minimum of argument metadata to support
@@ -1405,7 +1393,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         end
 
         push!(md, MDString("air.address_space"))
-        push!(md, Metadata(ConstantInt(Int32(addrspace(parameters(entry_ft)[arg.idx])))))
+        push!(md, Metadata(ConstantInt(Int32(entry_ft.parameters[arg.idx].addrspace))))
 
         arg_type = if arg.typ <: Core.LLVMPtr
             arg.typ.parameters[1]
@@ -1431,8 +1419,8 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     end
 
     # Create metadata for argument intrinsics last
-    for intr_arg in parameters(entry)[i:end]
-        intr_fn = LLVM.name(intr_arg)
+    for intr_arg in entry.parameters[i:end]
+        intr_fn = intr_arg.name
 
         arg_info = Metadata[]
 
@@ -1440,7 +1428,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(arg_info, MDString("air.$intr_fn" ))
 
         push!(arg_info, MDString("air.arg_type_name" ))
-        push!(arg_info, MDString(argument_type_name(value_type(intr_arg))))
+        push!(arg_info, MDString(argument_type_name(intr_arg.value_type)))
 
         arg_info = MDNode(arg_info)
         push!(arg_infos, arg_info)
@@ -1455,7 +1443,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     stage_infos = MDNode(stage_infos)
 
     kernel_md = MDNode([entry, stage_infos, arg_infos])
-    push!(metadata(mod)["air.kernel"], kernel_md)
+    push!(get!(mod.metadata, "air.kernel").operands, kernel_md)
 
     return
 end
@@ -1471,7 +1459,7 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(max_buff, MDString("air.max_device_buffers"))
     push!(max_buff, Metadata(ConstantInt(Int32(31))))
     max_buff = MDNode(max_buff)
-    push!(metadata(mod)["llvm.module.flags"], max_buff)
+    push!(get!(mod.metadata, "llvm.module.flags").operands, max_buff)
 
     # register max constant buffer count
     max_const_buff_md = Metadata[]
@@ -1479,7 +1467,7 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(max_const_buff_md, MDString("air.max_constant_buffers"))
     push!(max_const_buff_md, Metadata(ConstantInt(Int32(31))))
     max_const_buff_md = MDNode(max_const_buff_md)
-    push!(metadata(mod)["llvm.module.flags"], max_const_buff_md)
+    push!(get!(mod.metadata, "llvm.module.flags").operands, max_const_buff_md)
 
     # register max threadgroup buffer count
     max_threadgroup_buff_md = Metadata[]
@@ -1487,7 +1475,7 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(max_threadgroup_buff_md, MDString("air.max_threadgroup_buffers"))
     push!(max_threadgroup_buff_md, Metadata(ConstantInt(Int32(31))))
     max_threadgroup_buff_md = MDNode(max_threadgroup_buff_md)
-    push!(metadata(mod)["llvm.module.flags"], max_threadgroup_buff_md)
+    push!(get!(mod.metadata, "llvm.module.flags").operands, max_threadgroup_buff_md)
 
     # register max texture buffer count
     max_textures_md = Metadata[]
@@ -1495,7 +1483,7 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(max_textures_md, MDString("air.max_textures"))
     push!(max_textures_md, Metadata(ConstantInt(Int32(128))))
     max_textures_md = MDNode(max_textures_md)
-    push!(metadata(mod)["llvm.module.flags"], max_textures_md)
+    push!(get!(mod.metadata, "llvm.module.flags").operands, max_textures_md)
 
     # register max write texture buffer count
     max_rw_textures_md = Metadata[]
@@ -1503,7 +1491,7 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(max_rw_textures_md, MDString("air.max_read_write_textures"))
     push!(max_rw_textures_md, Metadata(ConstantInt(Int32(8))))
     max_rw_textures_md = MDNode(max_rw_textures_md)
-    push!(metadata(mod)["llvm.module.flags"], max_rw_textures_md)
+    push!(get!(mod.metadata, "llvm.module.flags").operands, max_rw_textures_md)
 
     # register max sampler count
     max_samplers_md = Metadata[]
@@ -1511,13 +1499,13 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(max_samplers_md, MDString("air.max_samplers"))
     push!(max_samplers_md, Metadata(ConstantInt(Int32(16))))
     max_samplers_md = MDNode(max_samplers_md)
-    push!(metadata(mod)["llvm.module.flags"], max_samplers_md)
+    push!(get!(mod.metadata, "llvm.module.flags").operands, max_samplers_md)
 
     # add compiler identification
     llvm_ident_md = Metadata[]
     push!(llvm_ident_md, MDString("Julia $(VERSION) with Metal.jl"))
     llvm_ident_md = MDNode(llvm_ident_md)
-    push!(metadata(mod)["llvm.ident"], llvm_ident_md)
+    push!(get!(mod.metadata, "llvm.ident").operands, llvm_ident_md)
 
     # add AIR version
     air_md = Metadata[]
@@ -1525,7 +1513,7 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(air_md, Metadata(ConstantInt(Int32(job.config.target.air.minor))))
     push!(air_md, Metadata(ConstantInt(Int32(job.config.target.air.patch))))
     air_md = MDNode(air_md)
-    push!(metadata(mod)["air.version"], air_md)
+    push!(get!(mod.metadata, "air.version").operands, air_md)
 
     # add Metal language version
     air_lang_md = Metadata[]
@@ -1534,7 +1522,7 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     push!(air_lang_md, Metadata(ConstantInt(Int32(job.config.target.metal.minor))))
     push!(air_lang_md, Metadata(ConstantInt(Int32(job.config.target.metal.patch))))
     air_lang_md = MDNode(air_lang_md)
-    push!(metadata(mod)["air.language_version"], air_lang_md)
+    push!(get!(mod.metadata, "air.language_version").operands, air_lang_md)
 
     # record the compile options Apple's frontend emits. each option is a single-string node
     # under the `air.compile_options` named metadata. denorms and framebuffer fetch match
@@ -1544,11 +1532,11 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                    job.config.target.fastmath ? "air.compile.fast_math_enable" :
                                                 "air.compile.fast_math_disable",
                    "air.compile.framebuffer_fetch_enable"]
-        push!(metadata(mod)["air.compile_options"], MDNode([MDString(option)]))
+        push!(get!(mod.metadata, "air.compile_options").operands, MDNode([MDString(option)]))
     end
 
     # set sdk version
-    sdk_version!(mod, job.config.target.macos)
+    mod.sdk_version = job.config.target.macos
 
     return
 end
@@ -1570,30 +1558,30 @@ function scalarize_vector_minmax!(fun::LLVM.Function)
     minmax = LLVM.Intrinsic.(["llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum"])
 
     worklist = LLVM.CallBase[]
-    for bb in blocks(fun), inst in instructions(bb)
+    for bb in fun.blocks, inst in bb.instructions
         inst isa LLVM.CallBase || continue
-        callee = called_operand(inst)
+        callee = inst.called_operand
         (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
         LLVM.Intrinsic(callee) in minmax || continue
-        value_type(inst) isa LLVM.VectorType || continue
+        inst.value_type isa LLVM.VectorType || continue
         push!(worklist, inst)
     end
     isempty(worklist) && return false
 
-    mod = LLVM.parent(fun)
+    mod = fun.parent
     for call in worklist
-        vecty = value_type(call)::LLVM.VectorType
-        elty = eltype(vecty)
+        vecty = call.value_type::LLVM.VectorType
+        elty = vecty.element_type
         # the scalar overload of the same intrinsic, e.g. llvm.minimum.v4f32 -> llvm.minimum.f32
-        intr = LLVM.Intrinsic(called_operand(call))
+        intr = LLVM.Intrinsic(call.called_operand)
         scalar_f = LLVM.Function(mod, intr, LLVMType[elty])
-        scalar_ft = function_type(scalar_f)
-        arg0, arg1 = arguments(call)
+        scalar_ft = scalar_f.function_type
+        arg0, arg1 = call.arguments
         @dispose builder=IRBuilder() begin
-            position!(builder, call)
-            debuglocation!(builder, call)
+            position!(builder, LLVM.before(call))
+            builder.debug_location = call.debug_location
             res = PoisonValue(vecty)
-            for i in 0:Int(length(vecty))-1
+            for i in 0:Int(vecty.length)-1
                 idx = ConstantInt(LLVM.Int32Type(), i)
                 a = extract_element!(builder, arg0, idx)
                 b = extract_element!(builder, arg1, idx)
@@ -1641,9 +1629,9 @@ function expand_vector_reductions!(fun::LLVM.Function)
                      "llvm.umax" => or!,  "llvm.umin" => and!)
 
     worklist = Tuple{LLVM.CallBase, Any}[]
-    for bb in blocks(fun), inst in instructions(bb)
+    for bb in fun.blocks, inst in bb.instructions
         inst isa LLVM.CallBase || continue
-        callee = called_operand(inst)
+        callee = inst.called_operand
         (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
         op = get(reductions, LLVM.Intrinsic(callee), nothing)
         op === nothing && continue
@@ -1651,30 +1639,30 @@ function expand_vector_reductions!(fun::LLVM.Function)
     end
     isempty(worklist) && return false
 
-    mod = LLVM.parent(fun)
+    mod = fun.parent
     for (call, op) in worklist
-        args = collect(LLVM.Value, arguments(call))
+        args = collect(LLVM.Value, call.arguments)
         vec = last(args)                            # `fadd`/`fmul` take a start value first
-        elty = eltype(value_type(vec))
+        elty = vec.value_type.element_type
         if op isa String && elty == LLVM.Int1Type()
             op = i1_minmax[op]
         elseif op isa String
             f = LLVM.Function(mod, LLVM.Intrinsic(op), LLVMType[elty])
-            op = (builder, a, b) -> call!(builder, function_type(f), f, LLVM.Value[a, b])
+            op = (builder, a, b) -> call!(builder, f.function_type, f, LLVM.Value[a, b])
         end
         # each step carries the reduction's fast-math flags, as in SelectionDAG; min/max rely
         # on them to select the relaxed AIR builtins (see the minimum/maximum lowering)
-        fmf = elty isa LLVM.FloatingPointType ? LLVM.fast_math(call) : nothing
+        fmf = elty isa LLVM.FloatingPointType ? NamedTuple(call.fast_math) : nothing
         @dispose builder=IRBuilder() begin
-            position!(builder, call)
-            debuglocation!(builder, call)
+            position!(builder, LLVM.before(call))
+            builder.debug_location = call.debug_location
             res = length(args) == 2 ? args[1] : nothing
-            for i in 0:Int(length(value_type(vec)))-1
+            for i in 0:Int(vec.value_type.length)-1
                 lane = extract_element!(builder, vec, ConstantInt(LLVM.Int32Type(), i))
                 res === nothing && (res = lane; continue)
                 res = op(builder, res, lane)
                 # (steps on constants fold to constants, which carry no flags)
-                fmf !== nothing && res isa LLVM.Instruction && LLVM.fast_math!(res; fmf...)
+                fmf !== nothing && res isa LLVM.Instruction && (res.fast_math = fmf)
             end
             replace_uses!(call, res)
             erase!(call)
@@ -1714,34 +1702,34 @@ function lower_math_intrinsics!(fun::LLVM.Function)
     )
 
     worklist = Tuple{LLVM.CallBase, String, Union{String,Nothing}}[]
-    for bb in blocks(fun), inst in instructions(bb)
+    for bb in fun.blocks, inst in bb.instructions
         inst isa LLVM.CallBase || continue
-        callee = called_operand(inst)
+        callee = inst.called_operand
         (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
         mapping = get(math_intrinsics, LLVM.Intrinsic(callee), nothing)
         mapping === nothing && continue
         # Metal floats are f16/f32 only; skip f64 (rejected by validate_ir) and vector types
         # (these ops have no `air.<op>.v4f32`) rather than synthesize a nonexistent intrinsic.
-        typ = value_type(inst)
+        typ = inst.value_type
         (typ == LLVM.HalfType() || typ == LLVM.FloatType()) || continue
         push!(worklist, (inst, mapping[1], mapping[2]))
     end
     isempty(worklist) && return false
 
-    mod = LLVM.parent(fun)
-    fns = functions(mod)
+    mod = fun.parent
+    fns = mod.functions
     for (call, precise, fast) in worklist
-        typ = value_type(call)
+        typ = call.value_type
         # the relaxed variant exists for f32 only; f16 always uses the precise op
-        use_fast = fast !== nothing && typ == LLVM.FloatType() && LLVM.fast_math(call).afn
+        use_fast = fast !== nothing && typ == LLVM.FloatType() && call.fast_math.afn
         suffix = typ == LLVM.HalfType() ? "f16" : "f32"
         fn = "$(use_fast ? fast : precise).$suffix"
-        ft = function_type(called_operand(call))
+        ft = call.called_operand.function_type
         air = haskey(fns, fn) ? fns[fn] : LLVM.Function(mod, fn, ft)
         @dispose builder=IRBuilder() begin
-            position!(builder, call)
-            debuglocation!(builder, call)
-            new_value = call!(builder, ft, air, arguments(call))
+            position!(builder, LLVM.before(call))
+            builder.debug_location = call.debug_location
+            new_value = call!(builder, ft, air, call.arguments)
             replace_uses!(call, new_value)
             erase!(call)
         end
@@ -1756,7 +1744,7 @@ end
 # every chained min/max benefits, not just literal 3-argument calls. Integer only: float min/max
 # go through the NaN-propagating wrapper, which `air.f{min,max}3` would not preserve.
 function fuse_minmax3!(fun::LLVM.Function)
-    mod = LLVM.parent(fun)
+    mod = fun.parent
     pat = r"^air\.(min|max)\.(s|u)\.i(8|16|32|64)$"
     changed = false
 
@@ -1764,20 +1752,20 @@ function fuse_minmax3!(fun::LLVM.Function)
     # avoids mutating the instruction stream while iterating it.
     while true
         fold = nothing  # (outer, inner, other_operand)
-        for bb in blocks(fun), outer in instructions(bb)
+        for bb in fun.blocks, outer in bb.instructions
             outer isa LLVM.CallInst || continue
-            oc = called_operand(outer)
-            (oc isa LLVM.Function && match(pat, LLVM.name(oc)) !== nothing) || continue
-            oargs = arguments(outer)
+            oc = outer.called_operand
+            (oc isa LLVM.Function && match(pat, oc.name) !== nothing) || continue
+            oargs = outer.arguments
             length(oargs) == 2 || continue
             for i in 1:2
                 inner = oargs[i]
                 inner isa LLVM.CallInst || continue
-                ic = called_operand(inner)
+                ic = inner.called_operand
                 # same builtin (name pins down min/max, signedness and width)
-                (ic isa LLVM.Function && LLVM.name(ic) == LLVM.name(oc)) || continue
+                (ic isa LLVM.Function && ic.name == oc.name) || continue
                 # inner must feed only this outer, else folding it would drop a live value
-                length(collect(uses(inner))) == 1 || continue
+                length(collect(inner.uses)) == 1 || continue
                 fold = (outer, inner, oargs[i == 1 ? 2 : 1])
                 break
             end
@@ -1786,15 +1774,15 @@ function fuse_minmax3!(fun::LLVM.Function)
         fold === nothing && break
 
         outer, inner, other = fold
-        m = match(pat, LLVM.name(called_operand(outer)))
+        m = match(pat, outer.called_operand.name)
         fn3 = "air.$(m[1])3.$(m[2]).i$(m[3])"
-        T = value_type(outer)
+        T = outer.value_type
         ft3 = LLVM.FunctionType(T, LLVMType[T, T, T])
-        f3 = haskey(functions(mod), fn3) ? functions(mod)[fn3] : LLVM.Function(mod, fn3, ft3)
-        iargs = arguments(inner)
+        f3 = haskey(mod.functions, fn3) ? mod.functions[fn3] : LLVM.Function(mod, fn3, ft3)
+        iargs = inner.arguments
         @dispose builder=IRBuilder() begin
-            position!(builder, outer)
-            debuglocation!(builder, outer)
+            position!(builder, LLVM.before(outer))
+            builder.debug_location = outer.debug_location
             v = call!(builder, ft3, f3, LLVM.Value[iargs[1], iargs[2], other])
             replace_uses!(outer, v)
             erase!(outer)
@@ -1806,7 +1794,8 @@ function fuse_minmax3!(fun::LLVM.Function)
 end
 
 # 1.0 of a floating-point type, splat across the lanes of a vector type
-fp_one(typ::LLVMType) = LLVM.Value(LLVM.API.LLVMConstReal(typ, 1.0))
+fp_one(typ::LLVMType) = typ isa LLVM.VectorType ?
+    const_splat(typ, ConstantFP(typ.element_type, 1.0)) : ConstantFP(typ, 1.0)
 
 # `x^n` for a constant `n`, unrolled into multiplies like SelectionDAG's `ExpandPowI`
 function expand_powi!(builder::IRBuilder, x::LLVM.Value, n::Int)
@@ -1818,16 +1807,16 @@ function expand_powi!(builder::IRBuilder, x::LLVM.Value, n::Int)
         m >>= 1
         m != 0 && (sq = fmul!(builder, sq, sq))
     end
-    res = something(res, fp_one(value_type(x)))
-    return n < 0 ? fdiv!(builder, fp_one(value_type(x)), res) : res
+    res = something(res, fp_one(x.value_type))
+    return n < 0 ? fdiv!(builder, fp_one(x.value_type), res) : res
 end
 
 # `x^n` for any other `n`, as a loop over the exponent's bits like compiler-rt's `__powisf2`
 function build_powi!(mod::LLVM.Module, fn::String, typ::LLVMType, ntyp::LLVMType)
     f = LLVM.Function(mod, fn, LLVM.FunctionType(typ, LLVMType[typ, ntyp]))
-    linkage!(f, LLVM.API.LLVMInternalLinkage)
-    push!(function_attributes(f), EnumAttribute("alwaysinline"))
-    x, n = parameters(f)
+    f.linkage = LLVM.API.LLVMInternalLinkage
+    push!(f.function_attributes, EnumAttribute("alwaysinline"))
+    x, n = f.parameters
     one = fp_one(typ)
     zero = LLVM.ConstantInt(ntyp, 0)
 
@@ -1835,14 +1824,14 @@ function build_powi!(mod::LLVM.Module, fn::String, typ::LLVMType, ntyp::LLVMType
     bb_loop = BasicBlock(f, "loop")
     bb_done = BasicBlock(f, "done")
     @dispose builder=IRBuilder() begin
-        position!(builder, bb_entry)
+        position!(builder, LLVM.at_end(bb_entry))
         br!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, n, zero), bb_done, bb_loop)
 
         # multiply the squares selected by the bits of `n`, least significant first. like
         # `__powisf2`, shift the signed `n` by halving it (rounding towards zero), so as not
         # to take `abs(n)`, which InstCombine would turn into an `llvm.abs` after that has
         # already been lowered.
-        position!(builder, bb_loop)
+        position!(builder, LLVM.at_end(bb_loop))
         acc = phi!(builder, typ, "acc")
         sq = phi!(builder, typ, "sq")
         rest = phi!(builder, ntyp, "rest")
@@ -1851,13 +1840,13 @@ function build_powi!(mod::LLVM.Module, fn::String, typ::LLVMType, ntyp::LLVMType
         sq′ = fmul!(builder, sq, sq)
         rest′ = sdiv!(builder, rest, LLVM.ConstantInt(ntyp, 2))
         br!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, rest′, zero), bb_done, bb_loop)
-        append!(incoming(acc), [(one, bb_entry), (acc′, bb_loop)])
-        append!(incoming(sq), [(x, bb_entry), (sq′, bb_loop)])
-        append!(incoming(rest), [(n, bb_entry), (rest′, bb_loop)])
+        append!(acc.incoming, [(one, bb_entry), (acc′, bb_loop)])
+        append!(sq.incoming, [(x, bb_entry), (sq′, bb_loop)])
+        append!(rest.incoming, [(n, bb_entry), (rest′, bb_loop)])
 
-        position!(builder, bb_done)
+        position!(builder, LLVM.at_end(bb_done))
         pow = phi!(builder, typ, "pow")
-        append!(incoming(pow), [(one, bb_entry), (acc′, bb_loop)])
+        append!(pow.incoming, [(one, bb_entry), (acc′, bb_loop)])
         negative = icmp!(builder, LLVM.API.LLVMIntSLT, n, zero)
         ret!(builder, select!(builder, negative, fdiv!(builder, one, pow), pow))
     end
@@ -1868,7 +1857,7 @@ end
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
 
-    mod = LLVM.parent(fun)
+    mod = fun.parent
     changed = false
 
     # AIR lacks vector min/max intrinsics and vector reductions; scalarize them so the per-call
@@ -1882,10 +1871,10 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
     # determine worklist
     worklist = LLVM.CallBase[]
-    for bb in blocks(fun), inst in instructions(bb)
+    for bb in fun.blocks, inst in bb.instructions
         isa(inst, LLVM.CallBase) || continue
 
-        call_fun = called_operand(inst)
+        call_fun = inst.called_operand
         isa(call_fun, LLVM.Function) || continue
         LLVM.isintrinsic(call_fun) || continue
 
@@ -1894,9 +1883,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
     # lower intrinsics
     for call in worklist
-        bb = LLVM.parent(call)
-        call_fun = called_operand(call)
-        call_ft = function_type(call_fun)
+        bb = call.parent
+        call_fun = call.called_operand
+        call_ft = call_fun.function_type
         intr = LLVM.Intrinsic(call_fun)
 
         # unsupported, but safe to remove
@@ -1929,24 +1918,24 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             fn, signed = mappable_intrinsics[intr]
 
             # determine type of the intrinsic
-            typ = value_type(call)
+            typ = call.value_type
 
             # AIR has no native bfloat fabs/fmin/fmax (MSL promotes bfloat to float for
             # them), so do the same: call the float intrinsic on fpext'd operands and
             # fptrunc the result back. `optyp` is the type the AIR call actually uses.
             bf = LLVM.BFloatType()
-            promote_bf = typ == bf || (typ isa LLVM.VectorType && eltype(typ) == bf)
+            promote_bf = typ == bf || (typ isa LLVM.VectorType && typ.element_type == bf)
             optyp = if typ == bf
                 LLVM.FloatType()
             elseif promote_bf
-                LLVM.VectorType(LLVM.FloatType(), Int(length(typ)))
+                LLVM.VectorType(LLVM.FloatType(), Int(typ.length))
             else
                 typ
             end
             function type_suffix(typ)
                 # XXX: can't we use LLVM to do this kind of mangling?
                 if typ isa LLVM.IntegerType
-                    "i$(width(typ))"
+                    "i$(typ.width)"
                 elseif typ == LLVM.HalfType()
                     "f16"
                 elseif typ == LLVM.FloatType()
@@ -1954,13 +1943,13 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 elseif typ == LLVM.DoubleType()
                     "f64"
                 elseif typ isa LLVM.VectorType
-                    "v$(length(typ))$(type_suffix(eltype(typ)))"
+                    "v$(typ.length)$(type_suffix(typ.element_type))"
                 else
                     error("Unsupported intrinsic type: $typ")
                 end
             end
 
-            if optyp isa LLVM.IntegerType || (optyp isa LLVM.VectorType && eltype(optyp) isa LLVM.IntegerType)
+            if optyp isa LLVM.IntegerType || (optyp isa LLVM.VectorType && optyp.element_type isa LLVM.IntegerType)
                 fn *= "." * (signed::Bool ? "s" : "u") * "." * type_suffix(optyp)
             else
                 fn *= "." * type_suffix(optyp)
@@ -1970,16 +1959,16 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             # `i1 is_int_min_poison` flag that `air.abs` does not, so drop any operand whose
             # type isn't the result type before building the call. (For the others every
             # operand is the result type, so this is a no-op.)
-            air_args = LLVM.Value[a for a in arguments(call) if value_type(a) == typ]
+            air_args = LLVM.Value[a for a in call.arguments if a.value_type == typ]
             air_ft = LLVM.FunctionType(optyp, LLVMType[optyp for _ in air_args])
-            new_intr = if haskey(functions(mod), fn)
-                functions(mod)[fn]
+            new_intr = if haskey(mod.functions, fn)
+                mod.functions[fn]
             else
                 LLVM.Function(mod, fn, air_ft)
             end
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
 
                 call_args = promote_bf ?
                     LLVM.Value[fpext!(builder, a, optyp) for a in air_args] : air_args
@@ -2005,17 +1994,17 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
         if haskey(bit_renames, intr)
             llvm_base, air_base = bit_renames[intr]
             # keep the mangled type suffix, e.g. llvm.ctlz.i32 -> air.clz.i32
-            fn = air_base * LLVM.name(call_fun)[length(llvm_base)+1:end]
-            new_intr = if haskey(functions(mod), fn)
-                functions(mod)[fn]
+            fn = air_base * call_fun.name[length(llvm_base)+1:end]
+            new_intr = if haskey(mod.functions, fn)
+                mod.functions[fn]
             else
                 LLVM.Function(mod, fn, call_ft)
             end
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
 
-                new_value = call!(builder, call_ft, new_intr, arguments(call))
+                new_value = call!(builder, call_ft, new_intr, call.arguments)
                 replace_uses!(call, new_value)
                 erase!(call)
                 changed = true
@@ -2024,9 +2013,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
         # floating-point class tests, which LLVM forms out of combined comparisons (e.g., of
         # `isfinite` and `iszero`) but AIR does not support: test the value's bits instead
-        if intr == LLVM.Intrinsic("llvm.is.fpclass")
-            x, test = arguments(call)
-            typ = value_type(x)
+        if intr == tryparse(LLVM.Intrinsic, "llvm.is.fpclass")   # LLVM 16+
+            x, test = call.arguments
+            typ = x.value_type
 
             # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
             jltyp = if typ == LLVM.HalfType()
@@ -2041,8 +2030,8 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             mask = convert(Int, test)
 
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
 
                 ityp = LLVM.IntType(8*sizeof(jltyp))
                 bits = bitcast!(builder, x, ityp)
@@ -2100,9 +2089,9 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
         # copysign
         if intr == LLVM.Intrinsic("llvm.copysign")
-            arg0, arg1 = operands(call)
-            @assert value_type(arg0) == value_type(arg1)
-            typ = value_type(call)
+            arg0, arg1 = call.operands
+            @assert arg0.value_type == arg1.value_type
+            typ = call.value_type
 
             # XXX: LLVM C API doesn't have getPrimitiveSizeInBits
             jltyp = if typ == LLVM.HalfType()
@@ -2116,8 +2105,8 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             end
 
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
 
                 # get bits
                 typ′ = LLVM.IntType(8*sizeof(jltyp))
@@ -2138,7 +2127,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
         # IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
         if intr == LLVM.Intrinsic("llvm.minimum") || intr == LLVM.Intrinsic("llvm.maximum")
-            typ = value_type(call)
+            typ = call.value_type
             is_minimum = intr == LLVM.Intrinsic("llvm.minimum")
 
             # AIR has no bfloat min/max, so promote to float as MSL does: build the wrapper
@@ -2161,7 +2150,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             # @fastmath / fastmath=true set `nnan` (assume no NaNs), so we can skip the
             # NaN-propagating wrapper and call the relaxed AIR builtin directly, matching Apple's
             # -ffast-math: f32 has air.fast_f{min,max}; f16 has no fast form, so use air.f{min,max}.
-            fast_fn = if !LLVM.fast_math(call).nnan
+            fast_fn = if !call.fast_math.nnan
                 nothing
             elseif optyp == LLVM.FloatType()
                 is_minimum ? "air.fast_fmin.f32" : "air.fast_fmax.f32"
@@ -2174,17 +2163,17 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
             new_intr_fn = something(fast_fn, is_minimum ? "air.minimum.f$(8*sizeof(jltyp))" :
                                                           "air.maximum.f$(8*sizeof(jltyp))")
 
-            if haskey(functions(mod), new_intr_fn)
-                new_intr = functions(mod)[new_intr_fn]
+            if haskey(mod.functions, new_intr_fn)
+                new_intr = mod.functions[new_intr_fn]
             elseif fast_fn !== nothing
                 # relaxed builtin: just declare it, no wrapper needed
                 new_intr = LLVM.Function(mod, new_intr_fn, op_ft)
             else
                 new_intr = LLVM.Function(mod, new_intr_fn, op_ft)
-                push!(function_attributes(new_intr), EnumAttribute("alwaysinline"))
+                push!(new_intr.function_attributes, EnumAttribute("alwaysinline"))
 
-                arg0, arg1 = parameters(new_intr)
-                @assert value_type(arg0) == value_type(arg1)
+                arg0, arg1 = new_intr.parameters
+                @assert arg0.value_type == arg1.value_type
 
                 bb_check_arg0 = BasicBlock(new_intr, "check_arg0")
                 bb_nan_arg0 = BasicBlock(new_intr, "nan_arg0")
@@ -2197,24 +2186,24 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 @dispose builder=IRBuilder() begin
                     # first, check if either argument is NaN, and return it if so
 
-                    position!(builder, bb_check_arg0)
+                    position!(builder, LLVM.at_end(bb_check_arg0))
                     arg0_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, arg0, arg0)
                     br!(builder, arg0_nan, bb_nan_arg0, bb_check_arg1)
 
-                    position!(builder, bb_nan_arg0)
+                    position!(builder, LLVM.at_end(bb_nan_arg0))
                     ret!(builder, arg0)
 
-                    position!(builder, bb_check_arg1)
+                    position!(builder, LLVM.at_end(bb_check_arg1))
                     arg1_nan = fcmp!(builder, LLVM.API.LLVMRealUNO, arg1, arg1)
                     br!(builder, arg1_nan, bb_nan_arg1, bb_check_zero)
 
-                    position!(builder, bb_nan_arg1)
+                    position!(builder, LLVM.at_end(bb_nan_arg1))
                     ret!(builder, arg1)
 
                     # then, check if both arguments are zero and have a mismatching sign.
                     # if so, return in accordance to the intrinsic (minimum or maximum)
 
-                    position!(builder, bb_check_zero)
+                    position!(builder, LLVM.at_end(bb_check_zero))
 
                     typ′ = LLVM.IntType(8*sizeof(jltyp))
                     arg0′ = bitcast!(builder, arg0, typ′)
@@ -2231,7 +2220,7 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                     relevant_zero = and!(builder, args_zero, sign_mismatch)
                     br!(builder, relevant_zero, bb_compare_zero, bb_fallback)
 
-                    position!(builder, bb_compare_zero)
+                    position!(builder, LLVM.at_end(bb_compare_zero))
                     arg0_negative = icmp!(builder, LLVM.API.LLVMIntNE, arg0_sign,
                                           LLVM.ConstantInt(typ′, 0))
                     val = if is_minimum
@@ -2243,29 +2232,29 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
 
                     # finally, it's safe to use the existing minnum/maxnum intrinsics
 
-                    position!(builder, bb_fallback)
+                    position!(builder, LLVM.at_end(bb_fallback))
                     fallback_intr_fn = if is_minimum
                         "air.fmin.f$(8*sizeof(jltyp))"
                     else
                         "air.fmax.f$(8*sizeof(jltyp))"
                     end
-                    fallback_intr = if haskey(functions(mod), fallback_intr_fn)
-                        functions(mod)[fallback_intr_fn]
+                    fallback_intr = if haskey(mod.functions, fallback_intr_fn)
+                        mod.functions[fallback_intr_fn]
                     else
                         LLVM.Function(mod, fallback_intr_fn, op_ft)
                     end
-                    val = call!(builder, op_ft, fallback_intr, collect(parameters(new_intr)))
+                    val = call!(builder, op_ft, fallback_intr, collect(new_intr.parameters))
                     ret!(builder, val)
                 end
             end
 
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
 
                 call_args = promote_bf ?
-                    LLVM.Value[fpext!(builder, a, optyp) for a in arguments(call)] :
-                    collect(arguments(call))
+                    LLVM.Value[fpext!(builder, a, optyp) for a in call.arguments] :
+                    collect(call.arguments)
                 new_value = call!(builder, op_ft, new_intr, call_args)
                 if promote_bf
                     new_value = fptrunc!(builder, new_value, typ)
@@ -2282,29 +2271,29 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
         # A negative exponent takes the reciprocal, and `x^0` is 1 (even for NaN). The exponent
         # of a vector `powi` is a scalar.
         if intr == LLVM.Intrinsic("llvm.powi")
-            x, n = arguments(call)
+            x, n = call.arguments
 
             @dispose builder=IRBuilder() begin
-                position!(builder, call)
-                debuglocation!(builder, call)
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
 
-                new_value = if n isa LLVM.ConstantInt && width(value_type(n)) <= 64
+                new_value = if n isa LLVM.ConstantInt && n.value_type.width <= 64
                     expand_powi!(builder, x, convert(Int, n))
                 else
                     # the loop halves the exponent, which doesn't work for an `i1` (where 2
                     # wraps to 0)
-                    if width(value_type(n)) < 32
+                    if n.value_type.width < 32
                         n = sext!(builder, n, LLVM.Int32Type())
                     end
 
                     # keep the mangled value type, e.g. llvm.powi.v2f32.i16 -> air.powi.v2f32.i32
-                    fn = "air.powi.$(split(LLVM.name(call_fun), '.')[3]).i$(width(value_type(n)))"
-                    new_intr = if haskey(functions(mod), fn)
-                        functions(mod)[fn]
+                    fn = "air.powi.$(split(call_fun.name, '.')[3]).i$(n.value_type.width)"
+                    new_intr = if haskey(mod.functions, fn)
+                        mod.functions[fn]
                     else
-                        build_powi!(mod, fn, value_type(x), value_type(n))
+                        build_powi!(mod, fn, x.value_type, n.value_type)
                     end
-                    call!(builder, function_type(new_intr), new_intr, LLVM.Value[x, n])
+                    call!(builder, new_intr.function_type, new_intr, LLVM.Value[x, n])
                 end
                 replace_uses!(call, new_value)
                 erase!(call)
@@ -2323,11 +2312,11 @@ end
 function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
 
-    for f in functions(mod)
+    for f in mod.functions
         isdeclaration(f) || continue
-        fn = LLVM.name(f)
+        fn = f.name
 
-        fn_attrs = function_attributes(f)
+        fn_attrs = f.function_attributes
         function add_fn_attributes(names...)
             for name in names
                 if LLVM.version() >= v"16" && name in ["argmemonly", "inaccessiblememonly",
@@ -2342,7 +2331,7 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
         end
 
         function add_param_attributes(idx, names...)
-            param_attrs = parameter_attributes(f, idx)
+            param_attrs = f.parameter_attributes[idx]
             for name in names
                 if name == "nocapture" && LLVM.version() >= v"21"
                     # `nocapture` was replaced by `captures(none)` in LLVM 21 (an

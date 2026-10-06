@@ -244,11 +244,11 @@ end
 # this helper function removes such unused constant expression uses of a value.
 # the process needs to be recursive, as constant expressions can refer to one another.
 function prune_constexpr_uses!(root::LLVM.Value)
-    for use in uses(root)
-        val = user(use)
+    for use in root.uses
+        val = use.user
         if val isa ConstantExpr
             prune_constexpr_uses!(val)
-            isempty(uses(val)) && LLVM.unsafe_destroy!(val)
+            isempty(val.uses) && LLVM.unsafe_destroy!(val)
         end
     end
 end
@@ -270,31 +270,31 @@ end
 # with `replace_function!`. `changes` is forwarded to `clone_into!`.
 function clone_with_converted_args!(mod::LLVM.Module, f::LLVM.Function, new_types::Vector, reconstruct;
                                     changes = LLVM.API.LLVMCloneFunctionChangeTypeGlobalChanges)
-    ft = function_type(f)
-    param_types = parameters(ft)
+    ft = f.function_type
+    param_types = ft.parameters
     @assert length(new_types) == length(param_types)
     new_ptypes = LLVM.LLVMType[something(new_types[i], pty) for (i, pty) in enumerate(param_types)]
-    new_ft = LLVM.FunctionType(return_type(ft), new_ptypes)
+    new_ft = LLVM.FunctionType(ft.return_type, new_ptypes)
 
     new_f = LLVM.Function(mod, "", new_ft)
-    linkage!(new_f, linkage(f))
-    callconv!(new_f, callconv(f))
-    for (arg, new_arg) in zip(parameters(f), parameters(new_f))
-        LLVM.name!(new_arg, LLVM.name(arg))
+    new_f.linkage = f.linkage
+    new_f.callconv = f.callconv
+    for (arg, new_arg) in zip(f.parameters, new_f.parameters)
+        new_arg.name = arg.name
     end
 
     @dispose builder=IRBuilder() begin
         entry = BasicBlock(new_f, "conversion")
-        position!(builder, entry)
+        position!(builder, LLVM.at_end(entry))
         body_values = LLVM.Value[
-            new_types[i] === nothing ? parameters(new_f)[i] :
-                                       reconstruct(builder, parameters(new_f)[i], i)
+            new_types[i] === nothing ? new_f.parameters[i] :
+                                       reconstruct(builder, new_f.parameters[i], i)
             for i in 1:length(param_types)]
         value_map = Dict{LLVM.Value, LLVM.Value}(
-            param => body_values[i] for (i, param) in enumerate(parameters(f)))
+            param => body_values[i] for (i, param) in enumerate(f.parameters))
         value_map[f] = new_f
         clone_into!(new_f, f; value_map, changes)
-        br!(builder, blocks(new_f)[2])  # fall through to the cloned entry block
+        br!(builder, new_f.blocks[2])  # fall through to the cloned entry block
     end
 
     return new_f
@@ -305,12 +305,12 @@ end
 # `clone_into!` leaves behind when the signature changes -- hands the name and metadata to `new_f`,
 # and erases `f`.
 function replace_function!(f::LLVM.Function, new_f::LLVM.Function)
-    fn = LLVM.name(f)
+    fn = f.name
     prune_constexpr_uses!(f)
-    @assert isempty(uses(f))
+    @assert isempty(f.uses)
     replace_metadata_uses!(f, new_f)
     erase!(f)
-    LLVM.name!(new_f, fn)
+    new_f.name = fn
     prune_constexpr_uses!(new_f)
     return new_f
 end
@@ -325,18 +325,18 @@ end
 
 # mark a function as kernel
 function mark_kernel!(f::LLVM.Function)
-    mod = LLVM.parent(f)
-    push!(metadata(mod)["julia.kernel"], MDNode([f]))
+    mod = f.parent
+    push!(get!(mod.metadata, "julia.kernel").operands, MDNode([f]))
     return f
 end
 
 # iterate over all kernels in the module
 function kernels(mod::LLVM.Module)
     vals = LLVM.Function[]
-    if haskey(metadata(mod), "julia.kernel")
-        kernels_md = metadata(mod)["julia.kernel"]
-        for kernel_md in operands(kernels_md)
-            push!(vals, LLVM.Value(operands(kernel_md)[1]))
+    if haskey(mod.metadata, "julia.kernel")
+        kernels_md = mod.metadata["julia.kernel"]
+        for kernel_md in kernels_md.operands
+            push!(vals, LLVM.Value(kernel_md.operands[1]))
         end
     end
     return vals

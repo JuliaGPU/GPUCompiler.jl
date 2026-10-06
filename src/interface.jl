@@ -27,15 +27,15 @@ llvm_triple(@nospecialize(target::AbstractCompilerTarget)) = error("Not implemen
 function llvm_machine(@nospecialize(target::AbstractCompilerTarget))
     triple = llvm_triple(target)
 
-    t = Target(triple=triple)
+    t = LLVM.Target(triple=triple)
 
-    tm = TargetMachine(t, triple)
-    asm_verbosity!(tm, true)
+    tm = LLVM.TargetMachine(t, triple)
+    LLVM.asm_verbosity!(tm, true)
 
     return tm
 end
 
-llvm_datalayout(target::AbstractCompilerTarget) = DataLayout(llvm_machine(target))
+llvm_datalayout(target::AbstractCompilerTarget) = LLVM.DataLayout(llvm_machine(target))
 
 # a custom `TargetTransformInfo` for targets that don't have (or can't rely on) a
 # `TargetMachine`-supplied TTI. Return `nothing` to fall back to LLVM's native TTI.
@@ -45,7 +45,7 @@ llvm_targetinfo(@nospecialize(target::AbstractCompilerTarget)) = nothing
 function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     dl = llvm_datalayout(target)
     dl === nothing && return nothing
-    DataLayout(string(dl) * "-ni:10:11:12:13")
+    LLVM.DataLayout(string(dl) * "-ni:10:11:12:13")
 end
 
 have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false

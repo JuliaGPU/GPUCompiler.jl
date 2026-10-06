@@ -3,7 +3,7 @@
 # final preparations for the module to be compiled to machine code
 # these passes should not be run when e.g. compiling to write to disk.
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    @dispose pb=NewPMPassBuilder() begin
+    @dispose pb=PassBuilder() begin
         register!(pb, ResolveCPUReferencesPass(job))
 
         add!(pb, RecomputeGlobalsAAPass())
@@ -32,8 +32,8 @@ end
 function (self::ResolveCPUReferences)(mod::LLVM.Module)
     changed = false
 
-    for f in functions(mod)
-        fn = LLVM.name(f)
+    for f in mod.functions
+        fn = f.name
         if isdeclaration(f) && !LLVM.isintrinsic(f) && startswith(fn, "jl_")
             # lazily resolve the address of the binding; some symbols only exist
             # within the JIT (e.g. `jl_get_pgcstack_resolved`) and cannot be looked up,
@@ -49,8 +49,8 @@ function (self::ResolveCPUReferences)(mod::LLVM.Module)
 
             function replace_bindings!(value)
                 changed = false
-                for use in uses(value)
-                    val = user(use)
+                for use in value.uses
+                    val = use.user
                     if isa(val, LLVM.ConstantExpr)
                         # recurse
                         changed |= replace_bindings!(val)
@@ -72,11 +72,11 @@ function (self::ResolveCPUReferences)(mod::LLVM.Module)
     return changed
 end
 ResolveCPUReferencesPass(job) =
-    NewPMModulePass("ResolveCPUReferences", ResolveCPUReferences(job))
+    ModulePass("ResolveCPUReferences", ResolveCPUReferences(job))
 
 
 function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.API.LLVMAssemblyFile)
     tm = llvm_machine(job.config.target)
 
-    return String(emit(tm, mod, format))
+    return String(LLVM.emit(tm, mod, format))
 end

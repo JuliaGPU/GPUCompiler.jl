@@ -1,15 +1,15 @@
 # Deprecations scheduled for removal in the next major release.
 
 function defs(mod::LLVM.Module)
-    safe_depwarn("`GPUCompiler.defs(mod)` is deprecated; inline `filter(f -> !isdeclaration(f), collect(functions(mod)))`.",
+    safe_depwarn("`GPUCompiler.defs(mod)` is deprecated; inline `filter(f -> !isdeclaration(f), collect(mod.functions))`.",
                  :defs)
-    filter(f -> !isdeclaration(f), collect(functions(mod)))
+    filter(f -> !isdeclaration(f), collect(mod.functions))
 end
 
 function decls(mod::LLVM.Module)
-    safe_depwarn("`GPUCompiler.decls(mod)` is deprecated; inline `filter(f -> isdeclaration(f) && !LLVM.isintrinsic(f), collect(functions(mod)))`.",
+    safe_depwarn("`GPUCompiler.decls(mod)` is deprecated; inline `filter(f -> isdeclaration(f) && !LLVM.isintrinsic(f), collect(mod.functions))`.",
                  :decls)
-    filter(f -> isdeclaration(f) && !LLVM.isintrinsic(f), collect(functions(mod)))
+    filter(f -> isdeclaration(f) && !LLVM.isintrinsic(f), collect(mod.functions))
 end
 
 link_library!(mod::LLVM.Module, lib::LLVM.Module) = link_library!(mod, [lib])

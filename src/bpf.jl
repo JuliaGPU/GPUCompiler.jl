@@ -13,12 +13,12 @@ llvm_datalayout(::BPFCompilerTarget) = "e-m:e-p:64:64-i64:64-n32:64-S128"
 
 function llvm_machine(target::BPFCompilerTarget)
     triple = llvm_triple(target)
-    t = Target(;triple=triple)
+    t = LLVM.Target(;triple=triple)
 
     cpu = ""
     feat = ""
-    tm = TargetMachine(t, triple, cpu, feat)
-    asm_verbosity!(tm, true)
+    tm = LLVM.TargetMachine(t, triple; cpu, features=feat)
+    LLVM.asm_verbosity!(tm, true)
 
     return tm
 end
