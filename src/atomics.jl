@@ -69,24 +69,23 @@ end
 atomic_ordering(inst::LLVM.AtomicCmpXchgInst) = merged_ordering(inst)
 atomic_ordering(inst::LLVM.Instruction) = inst.ordering
 
-function atomic_bits(T::LLVMType)
-    T isa LLVM.IntegerType && return Int(T.width)
-    T isa LLVM.HalfType && return 16
-    T isa LLVM.BFloatType && return 16
-    T isa LLVM.FloatType && return 32
-    T isa LLVM.DoubleType && return 64
-    T isa LLVM.PointerType && return 64
-    return nothing
+# the size in bits of the value an atomic memory operation accesses, with pointers as large as
+# the module's data layout says, or `nothing` if it isn't a scalar
+function atomic_bits(inst::LLVM.Instruction)
+    T = atomic_value_type(inst)
+    T isa Union{LLVM.IntegerType,LLVM.FloatingPointType,LLVM.PointerType} || return nothing
+    mod = LLVM.parent(LLVM.parent(LLVM.parent(inst)))
+    return Int(LLVM.bit_size(mod.datalayout, T))
 end
 
 # Does `ptr` point to the thread's own stack, i.e., is every object it can be derived from an
 # `alloca`? That is the case for atomics on objects that Julia's `AllocOpt` moved to the stack,
-# e.g., a non-escaping mutable struct with `@atomic` fields (GPUCompiler.jl#934). Metal cannot
-# express those (MSL only has atomics on device and threadgroup memory), but they don't need
-# to be atomic: no other thread can access a thread's stack, even when it has a pointer to it
-# (thread memory is private to every thread), so plain accesses behave the same. Anything this
-# cannot trace back to an `alloca`, e.g., a function argument or a loaded pointer, is not
-# known to be private.
+# e.g., a non-escaping mutable struct with `@atomic` fields (GPUCompiler.jl#934). Metal and
+# SPIR-V cannot express those (they only have atomics on device/global and threadgroup/local
+# memory), but they don't need to be atomic: no other thread can access a thread's stack, even
+# when it has a pointer to it (thread memory is private to every thread), so plain accesses
+# behave the same. Anything this cannot trace back to an `alloca`, e.g., a function argument
+# or a loaded pointer, is not known to be private.
 function is_thread_private(ptr::LLVM.Value)
     seen = Set{LLVM.Value}()
     worklist = LLVM.Value[ptr]

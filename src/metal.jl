@@ -858,7 +858,7 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
     end
 
     T = atomic_value_type(inst)
-    bits = atomic_bits(T)
+    bits = atomic_bits(inst)
     if bits === nothing || !(bits in (8, 16, 32, 64))
         return "atomic operation on a $(string(T)) value"
     end
