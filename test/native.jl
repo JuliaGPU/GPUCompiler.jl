@@ -33,11 +33,11 @@ end
 
     # the hook sees every job compiled within its scope, and nothing outside it
     seen = []
-    with(GPUCompiler.compile_hook => job -> push!(seen, job)) do
+    GPUCompiler.with_compile_hook(job -> push!(seen, job)) do
         Native.code_execution(mod.f, (Int,))
     end
     @test length(seen) == 1 && only(seen).source.def.name === :f
-    @test GPUCompiler.compile_hook[] === nothing
+    @test GPUCompiler.active_compile_hook[] === nothing
     Native.code_execution(mod.g, (Int,))
     @test length(seen) == 1
 
@@ -82,14 +82,12 @@ end
     @test Set(only(keys(output)).source.def.name for output in outputs) == Set((:f, :g))
 
     # scoped: tasks spawned inside the scope inherit the hook, others don't
-    hook = job -> nothing
-    inherited = Ref{Any}(nothing)
-    with(GPUCompiler.compile_hook => hook) do
-        wait(Threads.@spawn inherited[] = GPUCompiler.compile_hook[])
-        @test GPUCompiler.compile_hook[] === hook
+    seen = []
+    GPUCompiler.with_compile_hook(job -> push!(seen, job)) do
+        wait(Threads.@spawn GPUCompiler.run_compile_hook(:inside))
     end
-    @test inherited[] === hook
-    @test fetch(Threads.@spawn GPUCompiler.compile_hook[]) === nothing
+    wait(Threads.@spawn GPUCompiler.run_compile_hook(:outside))
+    @test seen == [:inside]
 
     # the macros accept jobs of back-ends that do not compile through LLVM, as long
     # as they fire the hook and implement the reflection functions of their stages
@@ -100,7 +98,7 @@ end
         Base.show(io::IO, job::ForeignJob) = print(io, "ForeignJob(", job.name, ")")
         $GPUCompiler.code_lowered(job::ForeignJob) = Any[job.name]
         function $GPUCompiler.code_typed(job::ForeignJob; marker=job.name)
-            @assert $GPUCompiler.compile_hook[] === nothing
+            @assert $GPUCompiler.active_compile_hook[] === nothing
             Any[marker]
         end
         $GPUCompiler.code_native(io::IO, job::ForeignJob; marker=job.name) = print(io, marker)
@@ -109,8 +107,7 @@ end
             hook = (job; io::IO=stdout) -> print(io, job.name)
             $GPUCompiler.emit_hooked_compilation(hook, ex...; job_filter=job -> job isa ForeignJob)
         end
-        report(job) = $GPUCompiler.compile_hook[] === nothing ? nothing :
-                      Base.invokelatest($GPUCompiler.compile_hook[], job)
+        report(job) = $GPUCompiler.run_compile_hook(job)
         function filtered(io)
             @foreign_code io=io begin
                 report(:other_backend)
@@ -148,7 +145,7 @@ end
             dir=dir, mod3.report(mod3.ForeignJob(:foreign)))
         @test isempty(readdir(dir))
     end
-    @test GPUCompiler.compile_hook[] === nothing
+    @test GPUCompiler.active_compile_hook[] === nothing
 
     # One expression can report both CompilerJobs and a back-end's own job type.
     mixed = GPUCompiler.@device_code_typed begin
@@ -159,6 +156,70 @@ end
     @test length(mixed) == 2
     @test mixed[mod3.ForeignJob(:foreign)] == [:foreign]
     @test count(job -> job isa CompilerJob, keys(mixed)) == 1
+end
+
+@testset "compile hook and cached kernels" begin
+    mod = @eval module $(gensym())
+        mutable struct Results
+            asm::Union{Nothing,String}
+            Results() = new(nothing)
+        end
+        kernel(x::Int) = nothing
+    end
+
+    # a back-end that reports every lookup, like `GPUCompiler.cached_results` recommends
+    compiles = Ref(0)
+    function launch(job)
+        GPUCompiler.run_compile_hook(job)
+        res = GPUCompiler.cached_results(mod.Results, job)
+        if res === nothing || res.asm === nothing
+            asm = JuliaContext() do ctx
+                asm, meta = GPUCompiler.compile(:asm, job)
+                LLVM.dispose(meta.ir)
+                asm
+            end
+            compiles[] += 1
+            res = @something res GPUCompiler.cached_results(mod.Results, job)
+            res.asm = asm
+        end
+        return res
+    end
+    job, _ = Native.create_job(mod.kernel, (Int,); kernel=true)
+    launch(job)
+    @test compiles[] == 1
+
+    # reflection observes cached kernels without recompiling them
+    lowered = GPUCompiler.@device_code_lowered begin
+        launch(job)
+        launch(job)
+    end
+    @test length(lowered) == 1
+    @test compiles[] == 1
+
+    # the same goes for the legacy `cached_compilation`, whose cache is keyed on the
+    # world age, so both lookups have to happen in one function
+    function legacy_lookups(job)
+        cache = Dict{Any,Any}()
+        linked = Ref(0)
+        compiler(job) = nothing
+        linker(job, asm) = (linked[] += 1; :kernel)
+        GPUCompiler.cached_compilation(cache, job.source, job.config, compiler, linker)
+        seen = []
+        GPUCompiler.with_compile_hook(job -> push!(seen, job)) do
+            GPUCompiler.cached_compilation(cache, job.source, job.config, compiler, linker)
+        end
+        return seen, linked[]
+    end
+    seen, linked = legacy_lookups(job)
+    @test only(seen).source === job.source
+    @test linked == 1
+
+    # installing a hook through the deprecated `compile_hook` binding still works
+    seen = []
+    with(GPUCompiler.compile_hook => job -> push!(seen, job)) do
+        launch(job)
+    end
+    @test only(seen) == job
 end
 
 @testset "method instances for type-valued callees and arguments" begin

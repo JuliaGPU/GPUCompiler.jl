@@ -320,7 +320,7 @@ unsupported_reflection(f::Symbol, @nospecialize(job)) =
     emit_hooked_compilation(hook, ex...; job_filter=Returns(true)) -> Expr
 
 Build the body of a `@device_code_*` macro: an expression that evaluates the user's
-code (the last element of `ex`) with `hook` installed as the [`compile_hook`](@ref),
+code (the last element of `ex`) with `hook` installed (see [`with_compile_hook`](@ref)),
 calling `hook(job; kwargs...)` once per distinct job with the remaining elements of
 `ex` as keyword arguments. Back-ends define stage-specific macros with it, e.g.
 
@@ -347,14 +347,14 @@ function emit_hooked_compilation(inner_hook, ex...; job_filter=Returns(true))
                 job in jobs && return
                 push!(jobs, job)
                 # the user hook might invoke the compiler again, so disable the hook
-                $with($compile_hook => nothing) do
+                $with_compile_hook(nothing) do
                     $inner_hook(job; $(map(esc, user_kwargs)...))
                 end
             end
         end
 
         # now invoke the user code with this hook in place
-        $with($compile_hook => outer_hook) do
+        $with_compile_hook(outer_hook) do
             $(esc(user_code))
         end
 

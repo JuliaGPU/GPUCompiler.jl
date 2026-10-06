@@ -528,13 +528,17 @@ mutable struct MetalResults
     MetalResults() = new(nothing, nothing, [])
 end
 
+GPUCompiler.run_compile_hook(job)
 res = GPUCompiler.cached_results(MetalResults, job)
-if res === nothing || res.metallib === nothing || GPUCompiler.compile_hook[] !== nothing
+if res === nothing || res.metallib === nothing
     artifacts = ...compile...
     res = @something res GPUCompiler.cached_results(MetalResults, job)
     ...populate res from artifacts...
 end
 ```
+
+Reporting every lookup with [`run_compile_hook`](@ref) lets the `@device_code_*` macros
+observe cached kernels without recompiling them.
 
 Compiling the job (through `GPUCompiler.compile`) populates Julia's code cache, so the
 post-compile lookup in the example is guaranteed to succeed. To attach results without
