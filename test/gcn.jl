@@ -84,6 +84,83 @@ end
     end
 end
 
+@testset "atomic validation" begin
+    # validate textual IR, with AMDGPU's synchronization scopes, for a GCN target
+    function validate_atomics(body; backend=:inprocess)
+        source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+        target = GCNCompilerTarget(; dev_isa="gfx90a", backend)
+        job = CompilerJob(source, CompilerConfig(target, GCN.CompilerParams(); kernel=true))
+        datalayout = @dispose dl=GPUCompiler.llvm_datalayout(target) begin
+            string(dl)
+        end
+        Context(; opaque_pointers=true) do ctx
+            mod = parse(LLVM.Module, """
+                target datalayout = "$datalayout"
+                define void @kernel(ptr addrspace(1) %p, ptr addrspace(3) %s,
+                                    ptr addrspace(4) %c, ptr addrspace(5) %l, ptr %g) {
+                  $body
+                  ret void
+                }""")
+            join(first.(GPUCompiler.validate_ir(job, mod)), "\n")
+        end
+    end
+
+    @testset "unsupported" begin
+        for (body, reason) in (
+                ("%a = atomicrmw xchg ptr addrspace(1) %p, i128 1 syncscope(\"agent\") monotonic, align 16",
+                 "128-bit atomic operation (GCN supports atomics of at most 64 bits)"),
+                ("%a = cmpxchg ptr %g, i128 0, i128 1 syncscope(\"agent\") monotonic monotonic, align 16",
+                 "128-bit atomic operation"),
+                ("%a = load atomic i128, ptr addrspace(1) %p syncscope(\"agent\") acquire, align 16",
+                 "128-bit atomic operation"),
+                ("store atomic fp128 0xL0, ptr addrspace(3) %s syncscope(\"workgroup\") release, align 16",
+                 "128-bit atomic operation"),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i64 1 syncscope(\"agent\") monotonic, align 4",
+                 "atomic operation with alignment 4 (requires at least 8-byte alignment)"),
+                ("%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"device\") monotonic, align 4",
+                 "atomic operation with synchronization scope \"device\""),
+                ("%a = load atomic i32, ptr %g syncscope(\"system-one-as\") monotonic, align 4",
+                 "atomic operation with synchronization scope \"system-one-as\""),
+                ("fence syncscope(\"subgroup\") seq_cst",
+                 "fence with synchronization scope \"subgroup\""),
+                ("%a = load atomic i32, ptr addrspace(4) %c syncscope(\"agent\") monotonic, align 4",
+                 "atomic operation in address space 4"),
+            )
+            @test occursin(reason, validate_atomics(body))
+        end
+    end
+
+    @testset "supported" begin
+        for body in (
+                "%a = atomicrmw add ptr addrspace(1) %p, i64 1 syncscope(\"agent\") monotonic, align 8",
+                "%a = cmpxchg ptr %g, i64 0, i64 1 seq_cst seq_cst, align 8",
+                "%a = load atomic ptr, ptr addrspace(1) %p unordered, align 8",
+                # operations the back-end expands
+                "%a = atomicrmw nand ptr addrspace(3) %s, i8 1 syncscope(\"workgroup\") monotonic, align 1",
+                "%a = atomicrmw fmax ptr %g, half 1.0 syncscope(\"wavefront\") monotonic, align 2",
+                # private memory, where atomics are plain memory operations
+                "%a = atomicrmw add ptr addrspace(5) %l, i32 1 syncscope(\"agent\") monotonic, align 4",
+                # scopes that only order the address space of the operation
+                "%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"agent-one-as\") monotonic, align 4",
+                "fence syncscope(\"one-as\") seq_cst\nfence syncscope(\"singlethread-one-as\") acquire",
+            )
+            @test validate_atomics(body) == ""
+        end
+
+        # packed floating-point values (LLVM 19 added vector `atomicrmw fadd`)
+        if LLVM.version() >= v"19"
+            @test validate_atomics("%a = atomicrmw fadd ptr addrspace(1) %p, <2 x half> zeroinitializer syncscope(\"agent\") monotonic, align 4") == ""
+        end
+    end
+
+    # the cluster scope (the agent on targets without clusters) is only known from LLVM 22
+    cluster = "%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"cluster\") monotonic, align 4\n" *
+              "fence syncscope(\"cluster-one-as\") acquire"
+    @test occursin("synchronization scope \"cluster\"", validate_atomics(cluster)) ==
+          (LLVM.version() < v"22")
+    @test validate_atomics(cluster; backend=:external) == ""
+end
+
 @testset "kernel calling convention" begin
     mod = @eval module $(gensym())
         kernel() = return
@@ -294,6 +371,37 @@ end
             @test occursin("$(name)@rel32@lo", asm)
         end
     end
+end
+
+@testset "atomic validation" begin
+    # atomics in Julia code are reported with the frame that performs them, for both
+    # back-ends (Julia's LLVM would emit a libatomic call, failing only at load time)
+    function add_kernel(T)
+        ptr = typed_ptrs ? "$T addrspace(1)*" : "ptr addrspace(1)"
+        ir = """
+            define void @entry($ptr %p, $T %x) #0 {
+              %old = atomicrmw add $ptr %p, $T %x syncscope("agent") monotonic, align 16
+              ret void
+            }
+            attributes #0 = { alwaysinline }"""
+        JT = T == "i128" ? Int128 : Int64
+        mod = @eval module $(gensym())
+            kernel(p::Core.LLVMPtr{$JT,1}, x::$JT) =
+                (Base.llvmcall(($ir, "entry"), Nothing, Tuple{Core.LLVMPtr{$JT,1},$JT}, p, x);
+                 return)
+        end
+        Base.invokelatest(getfield, mod, :kernel), Tuple{Core.LLVMPtr{JT,1},JT}
+    end
+    f, tt = add_kernel("i128")
+    for backend in (:inprocess, :external)
+        @test_throws_message(InvalidIRError,
+                             Base.invokelatest(GCN.code_execution, f, tt; backend)) do msg
+            occursin("Reason: unsupported 128-bit atomic operation", msg) &&
+            occursin(r"\[\d+\] kernel", msg)
+        end
+    end
+    asm, _ = Base.invokelatest(GCN.code_execution, add_kernel("i64")...)
+    @test occursin("global_atomic_add_x2", asm)
 end
 
 @testset "s_load for kernarg struct access" begin

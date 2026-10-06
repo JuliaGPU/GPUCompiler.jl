@@ -243,6 +243,86 @@ const AMDGPUObjectFile = Cint(1)
     return String(code)
 end
 
+# the version of the LLVM that generates code for the target, which can differ from the one
+# GPUCompiler runs in. only the release matters, so JLL rebuilds are ignored.
+function backend_llvm_version(target::GCNCompilerTarget)
+    target.backend === :external || return LLVM.version()
+    jll = get(Base.loaded_modules, getfield(AMDGPU_LLVM_Backend_jll, :pkg), nothing)
+    # (without the back-end, `mcgen` reports a clearer error)
+    jll === nothing && return LLVM.version()
+    version = pkgversion(jll)
+    return VersionNumber(version.major, version.minor, version.patch)
+end
+
+
+## validation
+
+# Atomic operations and fences come from many front-ends (AMDGPU.jl's atomic functions,
+# UnsafeAtomics and Atomix, Enzyme, Julia's atomic intrinsics), so they are validated here,
+# on the IR, rather than in any of them. The AMDGPU back-end does not reject everything the
+# target cannot run: Julia's LLVM emits calls to libatomic for oversized or misaligned
+# atomics, which only fail when loading the code object, some atomics abort instruction
+# selection, and the errors it does report don't point at the Julia code.
+# Validation runs after `lower_syncscopes!`, so the scopes are the ones AMDGPU knows.
+function validate_ir(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+    errors = IRError[]
+    dl = mod.datalayout
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        reason = if is_atomic_memop(inst)
+            gcn_atomic_error(job, dl, inst)
+        elseif inst isa LLVM.FenceInst
+            gcn_syncscope_error(job.config.target, inst, "fence")
+        else
+            nothing
+        end
+        reason === nothing || push!(errors, (reason, backtrace(inst), string(inst)))
+    end
+    return errors
+end
+
+# the synchronization scopes of AMDGPU, as `lower_syncscopes!` leaves them, and their
+# variants that only order the address space of the operation (`one-as`)
+const GCN_SYNCSCOPES = ("singlethread", "wavefront", "workgroup", "agent", "system",
+                        "singlethread-one-as", "wavefront-one-as", "workgroup-one-as",
+                        "agent-one-as", "one-as")
+
+function gcn_syncscope_error(target::GCNCompilerTarget, inst::LLVM.Instruction,
+                             what="atomic operation")
+    name = inst.syncscope.name
+    name in GCN_SYNCSCOPES && return nothing
+    # (a cluster is the agent on targets without workgroup clusters)
+    name in ("cluster", "cluster-one-as") && backend_llvm_version(target) >= v"22" &&
+        return nothing
+    return "$what with synchronization scope $(repr(name))"
+end
+
+# Why the target cannot run the atomic memory operation `inst`, or `nothing` if it can.
+# Operations without an instruction (e.g. 8- and 16-bit ones, or ones on private memory)
+# are fine: the back-end expands them.
+function gcn_atomic_error(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                          dl::LLVM.DataLayout, inst::LLVM.Instruction)
+    reason = gcn_syncscope_error(job.config.target, inst)
+    reason === nothing || return reason
+
+    # (constant memory isn't writable, and the region (GDS) and buffer resource address
+    # spaces abort instruction selection)
+    as = inst.pointer_operand.value_type.addrspace
+    if !(as in (0, 1, 3, 5, 7))
+        return "atomic operation in address space $as (GCN only supports atomics on flat, global, local, private and buffer memory)"
+    end
+
+    # (this includes packed floating-point values, which some targets support natively)
+    bits = Int(LLVM.bit_size(dl, atomic_value_type(inst)))
+    if bits > 64
+        return "$bits-bit atomic operation (GCN supports atomics of at most 64 bits)"
+    end
+    if inst.alignment < bits ÷ 8
+        return "atomic operation with alignment $(inst.alignment) (requires at least $(bits ÷ 8)-byte alignment)"
+    end
+
+    return nothing
+end
+
 
 ## LLVM passes
 
