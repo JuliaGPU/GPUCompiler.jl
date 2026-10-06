@@ -3,6 +3,9 @@ name: GetAsserts
 # This workflow downloads Julia assert builds using the BUILDKITE_TOKEN secret.
 # It never checks out PR code, so the secret cannot be exfiltrated.
 # The builds are passed as artifacts to the TestAsserts workflow.
+#
+# Which Julia versions to download is up to the branch being tested, through its
+# `.github/assert-versions.json`, e.g. release branches don't test Julia master.
 
 on:
   push:
@@ -19,24 +22,66 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  versions:
+    name: Determine Julia versions
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.result }}
+    steps:
+      - name: Read the branch's versions
+        id: versions
+        uses: actions/github-script@v9
+        with:
+          script: |
+            // pull_request_target always runs this workflow from the default branch, so read
+            // the versions from the branch the PR targets
+            const ref = context.eventName === 'pull_request_target'
+              ? context.payload.pull_request.base.ref : context.ref;
+            const read = async ref => {
+              const {data} = await github.rest.repos.getContent({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                path: '.github/assert-versions.json',
+                ref,
+              });
+              return JSON.parse(Buffer.from(data.content, 'base64').toString());
+            };
+            let versions;
+            try {
+              versions = await read(ref);
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              core.info(`${ref} has no assert-versions.json, using the default branch's`);
+              versions = await read(context.payload.repository.default_branch);
+            }
+            // these end up in shell commands
+            if (!Array.isArray(versions) ||
+                !versions.every(v => typeof v === 'string' && /^(\d+\.\d+|master)$/.test(v)))
+              throw new Error(`Invalid assert-versions.json on ${ref}: ${JSON.stringify(versions)}`);
+            return versions;
+
   download:
     name: Download Julia ${{ matrix.version }} (${{ matrix.build }})
+    needs: versions
+    if: needs.versions.outputs.versions != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.12', '1.13', 'master']
+        version: ${{ fromJSON(needs.versions.outputs.versions) }}
         build: ['x86_64-linux-gnuassert']
     steps:
-      # Only checks out the base branch (never PR code)
+      # Only checks out the default branch, or the pushed commit (never PR code)
       - uses: actions/checkout@v7
 
       - name: Download Julia
         env:
           BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
+          VERSION: ${{ matrix.version }}
+          BUILD: ${{ matrix.build }}
         run: |
-          ./.github/download_build.sh ${{ matrix.version }} build_${{ matrix.build }} julia.tar.gz
+          ./.github/download_build.sh "$VERSION" "build_$BUILD" julia.tar.gz
 
       - name: Upload Julia build
         uses: actions/upload-artifact@v7
