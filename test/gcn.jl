@@ -405,8 +405,9 @@ end
 end
 
 LLVM.version() >= v"20" && @testset "usub_sat atomics" begin
-    # LLVM 22 and 23 fail to select 32-bit `usub_sat` on flat memory, and on local memory
-    # before gfx12 (llvm/llvm-project#229442), so it's expanded to a compare-exchange loop
+    # LLVM 22 fails to select 32-bit `usub_sat` on flat memory, and on local memory before
+    # gfx12 (llvm/llvm-project#229442). AMDGPU_LLVM_Backend_jll carries the fix, but with
+    # Julia's own LLVM the operation is expanded to a compare-exchange loop
     function rmw_kernel(as, op="usub_sat")
         ir = """
             define void @entry(ptr addrspace($as) %p, i32 %v) #0 {
@@ -424,7 +425,7 @@ LLVM.version() >= v"20" && @testset "usub_sat atomics" begin
     end
 
     # (flat pointers in kernel arguments are global pointers to the back-end)
-    for (dev_isa, as, expanded, instruction) in (
+    for (dev_isa, as, affected, instruction) in (
             ("gfx1030", 3, true, "ds_cmpst_rtn_b32"),
             ("gfx1100", 3, true, "ds_cmpstore_rtn_b32"),
             ("gfx10-3-generic", 3, true, "ds_cmpst_rtn_b32"),
@@ -432,30 +433,40 @@ LLVM.version() >= v"20" && @testset "usub_sat atomics" begin
             ("gfx1200", 3, false, "ds_sub_clamp_u32"),
             ("gfx1030", 0, true, "flat_atomic_cmpswap"),
             ("gfx1100", 0, true, "flat_atomic_cmpswap_b32"),
-            ("gfx1200", 0, true, "flat_atomic_cmpswap_b32"),
+            ("gfx1200", 0, true, "flat_atomic_sub_clamp_u32"),
             ("gfx90a", 0, true, "flat_atomic_cmpswap"),
             ("gfx1100", 1, false, "global_atomic_csub_u32"),
             ("gfx1200", 1, false, "global_atomic_sub_clamp_u32"),
         )
         f, tt = rmw_kernel(as)
         kernel = as != 0
+
+        # the back-end compiles the operation, expanding it where the hardware lacks it
         ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa, kernel))
-        @test occursin("atomicrmw usub_sat", ir) != expanded
+        @test occursin("atomicrmw usub_sat", ir)
         asm = sprint(io->GCN.code_native(io, f, tt; dev_isa, kernel))
         @test occursin(instruction, asm)
 
-        # Julia's LLVM, and other operations, are unaffected
+        # Julia's LLVM needs the workaround from version 22 on
         ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa, kernel, backend=:inprocess))
-        @test occursin("atomicrmw usub_sat", ir) == (LLVM.version() < v"22" || !expanded)
+        @test occursin("atomicrmw usub_sat", ir) == (LLVM.version() < v"22" || !affected)
+
+        # other operations are unaffected
         f, tt = rmw_kernel(as, "usub_cond")
-        ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa, kernel))
+        ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa, kernel, backend=:inprocess))
         @test occursin("atomicrmw usub_cond", ir)
     end
 
     # the expansion is a workaround, not part of validation
-    f, tt = rmw_kernel(3)
-    asm = sprint(io->GCN.code_native(io, f, tt; dev_isa="gfx1030", kernel=true, validate=false))
-    @test occursin("ds_cmpst_rtn_b32", asm)
+    if LLVM.version() >= v"22"
+        f, tt = rmw_kernel(3)
+        ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa="gfx1030", kernel=true,
+                                      backend=:inprocess, validate=false))
+        @test !occursin("atomicrmw usub_sat", ir)
+        asm = sprint(io->GCN.code_native(io, f, tt; dev_isa="gfx1030", kernel=true,
+                                         backend=:inprocess, validate=false))
+        @test occursin("ds_cmpst_rtn_b32", asm)
+    end
 end
 
 @testset "sub-word atomics with a used result" begin

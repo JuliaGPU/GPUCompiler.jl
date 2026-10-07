@@ -359,10 +359,11 @@ function needs_cmpxchg_expansion(target::GCNCompilerTarget, version::VersionNumb
 
     # LLVM 22 selects 32-bit `usub_sat` on gfx10.3 and later, but lacks the pattern for
     # flat memory, and for local memory before gfx12, failing with "Cannot select"
-    # (llvm/llvm-project#229442, unfixed as of LLVM 23). Expand it on flat memory on every
-    # target, where LLVM otherwise expands it depending on the scope and metadata.
-    if version >= v"22" && inst.binop == LLVM.AtomicRMWBinOp.USubSat &&
-       T isa LLVM.IntegerType && T.width == 32
+    # (llvm/llvm-project#229442). Expand it on flat memory on every target, where LLVM
+    # otherwise expands it depending on the scope and metadata. AMDGPU_LLVM_Backend_jll
+    # carries the fix since 23.1.3, so only Julia's own LLVM needs this.
+    if target.backend === :inprocess && version >= v"22" &&
+       inst.binop == LLVM.AtomicRMWBinOp.USubSat && T isa LLVM.IntegerType && T.width == 32
         as == 0 && return true
         as == 3 && occursin(r"^gfx(103\d|11\d\d|10-3-generic|11(-\d+)?-generic)$",
                             target.dev_isa) && return true
