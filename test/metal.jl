@@ -881,6 +881,10 @@ end
         declare float @llvm.fma.f32(float, float, float)
         declare half  @llvm.fma.f16(half, half, half)
         declare <4 x float> @llvm.sqrt.v4f32(<4 x float>)
+        declare float @llvm.sin.f32(float)
+        declare half  @llvm.sin.f16(half)
+        declare float @llvm.cos.f32(float)
+        declare half  @llvm.cos.f16(half)
         define void @f(float %x, half %h, <4 x float> %v) {
           %a = call float @llvm.sqrt.f32(float %x)
           %b = call afn float @llvm.sqrt.f32(float %x)
@@ -893,6 +897,12 @@ end
           %j = call float @llvm.fma.f32(float %x, float %x, float %x)
           %l = call half @llvm.fma.f16(half %h, half %h, half %h)
           %k = call <4 x float> @llvm.sqrt.v4f32(<4 x float> %v)
+          %m = call float @llvm.sin.f32(float %x)
+          %m2 = call afn float @llvm.sin.f32(float %x)
+          %m3 = call half @llvm.sin.f16(half %h)
+          %n = call float @llvm.cos.f32(float %x)
+          %n2 = call afn float @llvm.cos.f32(float %x)
+          %n3 = call afn half @llvm.cos.f16(half %h)
           ret void
         }
         """
@@ -917,6 +927,14 @@ end
         @test "air.fma.f32" in names
         @test "air.fma.f16" in names
         @test !("air.fast_fma.f32" in names)
+        # sin and cos (emitted by Enzyme's derivatives, not by Julia) follow the same rules
+        @test "air.sin.f32" in names
+        @test "air.fast_sin.f32" in names
+        @test "air.sin.f16" in names
+        @test "air.cos.f32" in names
+        @test "air.fast_cos.f32" in names
+        @test "air.cos.f16" in names
+        @test !("air.fast_cos.f16" in names)
         # no scalar llvm.* math intrinsics survive; the vector one is left (no air.<op>.v4f32)
         @test !any(n -> startswith(n, "llvm.") && !endswith(n, "v4f32"), names)
         @test "llvm.sqrt.v4f32" in names
@@ -939,6 +957,97 @@ end
         @test GPUCompiler.lower_math_intrinsics!(f)
         @test "air.fast_sqrt.f32" in called_names(f)
         @test (verify(mod); true)
+    end
+end
+
+@testset "integer power lowering" begin
+    # AIR has no integer power, so `llvm.powi` (as emitted for `@fastmath x^n`) is expanded
+    # into multiplies: unrolled for a constant exponent, and a loop over its bits otherwise.
+    mod = @eval module $(gensym())
+        pow_const(x) = @fastmath x^-5
+        pow_var(x, n) = @fastmath x^n
+        pow_vec(x, n) = ccall("llvm.powi.v2f32.i64", llvmcall, NTuple{2, VecElement{Float32}},
+                              (NTuple{2, VecElement{Float32}}, Int64), x, n)
+    end
+
+    # x^-5 = 1 / (x * (x^2)^2)
+    @test @filecheck begin
+        @check_label "define float @{{(julia|j)_pow_const_[0-9]+}}"
+        @check_not "@llvm.powi"
+        @check_count 3 "fmul float"
+        @check "fdiv float 1.000000e+00"
+        @check_not "fmul"
+        @check "ret float"
+        Metal.code_native(mod.pow_const, Tuple{Float32})
+    end
+
+    @test @filecheck begin
+        @check_label "define float @{{(julia|j)_pow_var_[0-9]+}}"
+        @check_not "@llvm.powi"
+        @check "phi float"
+        @check "fmul float"
+        @check "fdiv float 1.000000e+00"
+        @check_not "@{{(llvm|air)\\.[a-z_]*pow}}"
+        Metal.code_native(mod.pow_var, Tuple{Float32, Int32})
+    end
+
+    @test @filecheck begin
+        @check_label "define <2 x float> @{{(julia|j)_pow_vec_[0-9]+}}"
+        @check_not "@llvm.powi"
+        @check "phi <2 x float>"
+        @check "fmul <2 x float>"
+        @check "fdiv <2 x float>"
+        @check_not "@{{(llvm|air)\\.[a-z_]*pow}}"
+        Metal.code_native(mod.pow_vec, Tuple{NTuple{2, VecElement{Float32}}, Int64})
+    end
+end
+
+@testset "vector reduction lowering" begin
+    # AIR has no vector reductions: each is expanded into a chain of its scalar operation over the
+    # lanes, in lane order, and min/max into the scalar intrinsics, which are lowered to AIR.
+    km = @eval module $(gensym())
+        f() = return
+        prod4(v) = ccall("llvm.vector.reduce.mul.v4i64", llvmcall, Int64, (NTuple{4, VecElement{Int64}},), v)
+    end
+    job, _ = Metal.create_job(km.f, Tuple{})
+    ops = ["add", "mul", "and", "or", "xor", "smax", "smin", "umax", "umin", "fadd", "fmul", "fmax", "fmin"]
+    LLVM.version() >= v"17" && append!(ops, ["fmaximum", "fminimum"])
+    Context() do ctx
+        ir = IOBuffer()
+        for op in ops, n in (3, 4)
+            t, s = op[1] == 'f' ? ("float", "f32") : ("i32", "i32")
+            args = op in ("fadd", "fmul") ? "$t %s, <$n x $t> %v" : "<$n x $t> %v"
+            flags = op[1] == 'f' && n == 3 ? "nnan " : ""
+            println(ir, "declare $t @llvm.vector.reduce.$op.v$n$s($args)")
+            println(ir, "define $t @$op$n($args) {\n  %r = call $flags$t @llvm.vector.reduce.$op.v$n$s($args)\n  ret $t %r\n}")
+        end
+        println(ir, "declare i1 @llvm.vector.reduce.smax.v3i1(<3 x i1>)")
+        println(ir, "define i1 @smax_i1(<3 x i1> %v) {\n  %r = call i1 @llvm.vector.reduce.smax.v3i1(<3 x i1> %v)\n  ret i1 %r\n}")
+        mod = parse(LLVM.Module, String(take!(ir)))
+        insts(f) = [i for bb in blocks(f) for i in instructions(bb)]
+        callees(f) = [LLVM.name(called_operand(i)) for i in insts(f) if i isa LLVM.CallBase]
+        for f in functions(mod)
+            isdeclaration(f) && continue
+            GPUCompiler.lower_llvm_intrinsics!(job, f)
+            @test !any(startswith("llvm."), callees(f))
+        end
+        # the ordered reduction continues from its start value, with the call's fast-math flags
+        f = functions(mod)["fadd3"]
+        adds = filter(i -> i isa LLVM.FAddInst, insts(f))
+        @test length(adds) == 3
+        @test operands(first(adds))[1] == parameters(f)[1]
+        @test all(i -> LLVM.fast_math(i).nnan, adds)
+        @test "air.fmin.f32" in callees(functions(mod)["fmin4"])
+        @test isempty(callees(functions(mod)["smax_i1"]))  # `and` on i1 lanes
+        @test (verify(mod); true)
+    end
+
+    # end to end
+    @test @filecheck begin
+        @check_label "define i64 @{{(julia|j)_prod4_[0-9]+}}"
+        @check_not "@llvm.vector.reduce"
+        @check_count 3 "mul i64"
+        Metal.code_native(km.prod4, Tuple{NTuple{4, VecElement{Int64}}})
     end
 end
 
@@ -1320,6 +1429,82 @@ end
     @test !occursin(r"(load|store) atomic", air)
     @test occursin(r"load i64", air)
     @test occursin(r"store i64", air)
+end
+
+@testset "fence lowering" begin
+    orders = [("acquire", 2), ("release", 3), ("acq_rel", 4), ("seq_cst", 5)]
+    scopes = [("", 2), ("syncscope(\"singlethread\") ", 0),
+              ("syncscope(\"workgroup\") ", 2),
+              (raw"syncscope(\"fence acquire\22\5C\0A\") ", 2)]
+    metadata = ("", ", !dbg !3, !annotation !4")
+    fences_ir = join(["fence $scope$order$md" for (order, _) in orders
+                     for (scope, _) in scopes for md in metadata], "\n")
+    ir = """
+        define void @f() !dbg !2 {\n$fences_ir\nret void\n}
+        !llvm.dbg.cu = !{!0}
+        !llvm.module.flags = !{!5}
+        !0 = distinct !DICompileUnit(language: DW_LANG_C, file: !1, producer: "GPUCompiler", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
+        !1 = !DIFile(filename: "fence.jl", directory: "/")
+        !2 = distinct !DISubprogram(name: "f", scope: !1, file: !1, line: 1, type: !6, spFlags: DISPFlagDefinition, unit: !0)
+        !3 = !DILocation(line: 2, column: 1, scope: !2)
+        !4 = !{!"fence seq_cst"}
+        !5 = !{i32 2, !"Debug Info Version", i32 3}
+        !6 = !DISubroutineType(types: !7)
+        !7 = !{}
+        """
+    fence_job(metal) = let
+        source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"27", metal, air=v"2.9")
+        CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+    end
+    fences(mod) = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)
+                   if i isa LLVM.FenceInst]
+
+    @testset "Metal $metal, existing declaration: $declared" for
+            metal in (v"3.1", v"3.2", v"4.0", v"4.1"), declared in (false, true)
+        Context() do ctx
+            decl = declared ? "declare void @air.atomic.fence(i32, i32, i32)\n" : ""
+            mod = parse(LLVM.Module, decl * ir)
+            original = string(mod)
+            @test length(fences(mod)) == length(orders) * length(scopes) * length(metadata)
+            @test GPUCompiler.lower_fences!(fence_job(metal), mod) == (metal >= v"3.2")
+            @test (verify(mod); true)
+            if metal < v"3.2"
+                @test string(mod) == original
+            else
+                @test isempty(fences(mod))
+                calls = [m.match for m in eachmatch(r"call void @air.atomic.fence\([^\n]+\)", string(mod))]
+                expected = ["call void @air.atomic.fence(i32 3, i32 $(metal < v"4.1" ? 5 : order), i32 $scope)"
+                            for (_, order) in orders for (_, scope) in scopes for _ in metadata]
+                @test calls == expected
+                @test count("declare void @air.atomic.fence(", string(mod)) == 1
+            end
+            @test !GPUCompiler.lower_fences!(fence_job(metal), mod)
+        end
+    end
+
+    # end-to-end: Julia's `atomic_fence` intrinsic must not reach the AIR as a bare `fence`
+    # (Julia 1.14 added a syncscope argument to the intrinsic, JuliaLang/julia#60311)
+    function kernel(p::Core.LLVMPtr{Int,1})
+        Core.Intrinsics.atomic_pointerset(reinterpret(Ptr{Int}, p), 1, :monotonic)
+        @static if VERSION >= v"1.14.0-DEV.1371"
+            Core.Intrinsics.atomic_fence(:release, :system)
+        else
+            Core.Intrinsics.atomic_fence(:release)
+        end
+        return
+    end
+    source = methodinstance(typeof(kernel), Tuple{Core.LLVMPtr{Int,1}}, Base.get_world_counter())
+    target = MetalCompilerTarget(; macos=v"27", metal=v"4.1", air=v"2.9")
+    config = CompilerConfig(target, Metal.CompilerParams(); kernel=true)
+    job = CompilerJob(source, config)
+
+    llvm_ir = sprint(io->GPUCompiler.code_llvm(io, job; dump_module=true))
+    @test occursin("fence release", llvm_ir)
+
+    air = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+    @test !occursin(r"^\s*fence "m, air)
+    @test occursin("call void @air.atomic.fence(i32 3, i32 3, i32 2)", air)
 end
 
 # byval lowering must strip the (non-IPO-safe) Julia const-region metadata off loads derived

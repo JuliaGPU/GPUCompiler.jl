@@ -763,6 +763,56 @@ const HAS_LLVM_GET_CIS = (
     )
 )
 
+# Julia before 1.12 casts pointers into `jl_small_typeof` to the generic address space with a
+# `bitcast`: for constant references to small-tagged types in imaging mode, as used during
+# precompilation (fixed in 1.11 by JuliaLang/julia#51517), and when looking up the type of a
+# boxed value (fixed in 1.12). That's invalid IR on targets that put globals in another
+# address space, like SPIR-V, so turn those bitcasts into address space casts.
+function fix_small_typeof_casts!(mod::LLVM.Module)
+    haskey(globals(mod), "jl_small_typeof") || return false
+
+    function isaddrspacechange(val)
+        isa(val, LLVM.ConstantExpr) && opcode(val) == LLVM.API.LLVMBitCast ||
+            isa(val, LLVM.BitCastInst) || return false
+        src_typ = value_type(operands(val)[1])
+        dst_typ = value_type(val)
+        return isa(src_typ, LLVM.PointerType) && isa(dst_typ, LLVM.PointerType) &&
+               addrspace(src_typ) != addrspace(dst_typ)
+    end
+
+    # find the bad casts first, looking through the GEPs that index the table
+    casts = LLVM.Value[]
+    worklist = LLVM.Value[globals(mod)["jl_small_typeof"]]
+    while !isempty(worklist)
+        val = pop!(worklist)
+        for use in uses(val)
+            usr = user(use)
+            if isaddrspacechange(usr)
+                push!(casts, usr)
+            elseif isa(usr, LLVM.GetElementPtrInst) || isa(usr, LLVM.BitCastInst) ||
+                   isa(usr, LLVM.ConstantExpr) &&
+                   opcode(usr) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast)
+                push!(worklist, usr)
+            end
+        end
+    end
+
+    for cast in unique(casts)
+        src = operands(cast)[1]
+        typ = value_type(cast)
+        if isa(cast, LLVM.ConstantExpr)
+            replace_uses!(cast, const_addrspacecast(src, typ))
+        else
+            @dispose builder=IRBuilder() begin
+                position!(builder, cast)    # also picks up its debug location
+                replace_uses!(cast, addrspacecast!(builder, src, typ))
+            end
+            erase!(cast)
+        end
+    end
+    return !isempty(casts)
+end
+
 function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.source.def.primary_world > job.world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
@@ -865,6 +915,10 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     end
     if !(Sys.ARCH == :x86 || Sys.ARCH == :x86_64)
         cache_gbl = nothing
+    end
+
+    @static if VERSION < v"1.12-"
+        fix_small_typeof_casts!(llvm_mod)
     end
 
     # Since Julia 1.13, the caller is responsible for initializing global variables that

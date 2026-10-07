@@ -52,6 +52,26 @@ end
     end
 end
 
+using Logging
+
+safe_log() = GPUCompiler.@safe_debug "safe_log"
+
+@testset "safe logging" begin
+    # the compiler may run in an older world than the global logger's methods
+    # (e.g., when invoked through `invoke_in_world` to reuse precompiled code)
+    world = Base.get_world_counter()
+    @eval struct NewerLogger <: AbstractLogger end
+    @eval Logging.min_enabled_level(::NewerLogger) = Logging.Info
+    @eval Logging.shouldlog(::NewerLogger, args...) = true
+    @eval Logging.handle_message(::NewerLogger, args...; kwargs...) = nothing
+    old_logger = global_logger(NewerLogger())
+    try
+        @test Base.invoke_in_world(world, safe_log) === nothing
+    finally
+        global_logger(old_logger)
+    end
+end
+
 @testset "mangling" begin
     using demumble_jll
 
@@ -63,6 +83,10 @@ end
     # basic stuff
     @test mangle(identity) == "identity"
     @test mangle(identity, Nothing) == "identity()"
+
+    # `missing` as a type parameter: comparing against `Nothing` with `==` returns
+    # `missing` instead of `false`, which used to throw a `TypeError` in a boolean context.
+    @test mangle(identity, Val{missing}) == "identity(Val<missing>)"
 
     # primitive types
     @test mangle(identity, Int32) == "identity(Int32)"
@@ -93,6 +117,10 @@ end
     @test mangle(identity, Tuple{1, 2}, Tuple{}, Tuple) == "identity(Tuple<1, 2>, Tuple<>, Tuple)"
     @test mangle(identity, NTuple{2, Int}) == "identity(Tuple<Int64, Int64>)"
     @test mangle(identity, Tuple{Vararg{Int}}) == "identity(Tuple<>)"
+    # A `Vararg` whose length is still a `TypeVar`, which is what unwrapping a `UnionAll`
+    # leaves behind. It is the same type as the unbounded `Vararg` above, so it mangles alike.
+    @test mangle(identity, NTuple{N, Int} where {N}) == "identity(Tuple<>)"
+    @test mangle(identity, Val{NTuple{N, Int} where {N}}) == "identity(Val<Tuple<>>)"
 
     # many substitutions
     @test mangle(identity, Val{1}, Val{2}, Val{3}, Val{4}, Val{5}, Val{6}, Val{7}, Val{8},

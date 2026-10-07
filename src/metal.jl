@@ -506,6 +506,9 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # AIR does not support LLVM atomic load/store instructions (see `demote_unordered_atomics!`)
     demote_unordered_atomics!(mod)
 
+    # the macOS 27 back-end rejects bare LLVM fences (Metal.jl#968)
+    lower_fences!(job, mod)
+
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
     # force-inlines throwing functions into the kernel first so the rewrite is sound, then scrubs
@@ -540,21 +543,84 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         end
     end
 
-    # perform codegen passes that would normally run during machine code emission
-    if LLVM.has_oldpm()
-        # XXX: codegen passes don't seem available in the new pass manager yet
-        @dispose pm=ModulePassManager() begin
-            expand_reductions!(pm)
-            run!(pm, mod)
-        end
-    end
-
     # flatten chained byte GEPs that the AGX back-end miscompiles for 1-byte accesses on a
     # 2-threadgroup grid (see `merge_byte_gep_chains!`). run last, after the intrinsic-lowering
     # cleanup above, so the merged form is what reaches the AIR downgrader / back-end.
     merge_byte_gep_chains!(mod)
 
     return
+end
+
+# Before LLVM 18, `ordering(inst)` calls `LLVMGetOrdering`, which incorrectly casts fences
+# to AtomicRMWInst. Use the stable textual form on all versions to keep this workaround tested.
+function fence_ordering(inst::LLVM.FenceInst)
+    # Scope names escape embedded quotes as \22; metadata follows the ordering.
+    m = match(r"^\s*fence(?:\s+syncscope\(\"[^\"]*\"\))?\s+(acquire|release|acq_rel|seq_cst)\b",
+              string(inst))
+    m === nothing && error("Unexpected fence instruction: $inst")
+    return m.captures[1] == "acquire" ? LLVM.API.LLVMAtomicOrderingAcquire :
+           m.captures[1] == "release" ? LLVM.API.LLVMAtomicOrderingRelease :
+           m.captures[1] == "acq_rel" ? LLVM.API.LLVMAtomicOrderingAcquireRelease :
+                                        LLVM.API.LLVMAtomicOrderingSequentiallyConsistent
+end
+
+# Lower LLVM fences to air.atomic.fence(flags, order, scope), as MSL's atomic_thread_fence
+# does. Bare fences from Julia's atomic_fence crash the macOS 27 AGX back-end (Metal.jl#968).
+#
+# MSL memory_order values are acquire=2, release=3, acq_rel=4, seq_cst=5. Metal 3.2-4.0
+# only supports relaxed/seq_cst fences, so strengthen other orderings to seq_cst. Before
+# Metal 3.2 the intrinsic is unavailable; retain the bare fence. Such targets still
+# require a back-end that accepts bare fences.
+#
+# Cover device and threadgroup memory (mem_flags=1|2), the shared writable LLVM address spaces.
+# Use thread scope (0) for singlethread and device scope (2) otherwise. Metal has no
+# system-wide scope: this only synchronizes threads on the same device.
+function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::LLVM.Module)
+    metal = job.config.target.metal
+    metal >= v"3.2" || return false
+
+    worklist = LLVM.FenceInst[]
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        inst isa LLVM.FenceInst && push!(worklist, inst)
+    end
+    isempty(worklist) && return false
+
+    T_int32 = LLVM.Int32Type()
+    fence_ft = LLVM.FunctionType(LLVM.VoidType(), [T_int32, T_int32, T_int32])
+    fence_fn = if haskey(functions(mod), "air.atomic.fence")
+        functions(mod)["air.atomic.fence"]
+    else
+        LLVM.Function(mod, "air.atomic.fence", fence_ft)
+    end
+
+    for inst in worklist
+        order = if metal < v"4.1"
+            5   # seq_cst
+        else
+            ord = fence_ordering(inst)
+            if ord == LLVM.API.LLVMAtomicOrderingAcquire
+                2
+            elseif ord == LLVM.API.LLVMAtomicOrderingRelease
+                3
+            elseif ord == LLVM.API.LLVMAtomicOrderingAcquireRelease
+                4
+            else
+                5   # seq_cst (the only other ordering LLVM allows on a fence)
+            end
+        end
+        scope = syncscope(inst) == SyncScope("singlethread") ? 0 : 2
+        flags = 1 | 2   # device | threadgroup
+
+        @dispose builder=IRBuilder() begin
+            position!(builder, inst)
+            debuglocation!(builder, inst)
+            call!(builder, fence_ft, fence_fn,
+                  [ConstantInt(T_int32, flags), ConstantInt(T_int32, order),
+                   ConstantInt(T_int32, scope)])
+        end
+        erase!(inst)
+    end
+    return true
 end
 
 @unlocked function mcgen(job::CompilerJob{MetalCompilerTarget}, mod::LLVM.Module,
@@ -1541,6 +1607,82 @@ function scalarize_vector_minmax!(fun::LLVM.Function)
     return true
 end
 
+# AIR has no vector reductions either, and Apple's back-end rejects `llvm.vector.reduce.*` or
+# crashes its compiler service on it. Expand each reduction into a chain of its scalar operation
+# over the lanes, in lane order, as SelectionDAG does for targets without vector operations
+# (`TargetLowering::expandVecReduce` and `expandVecReduceSeq`): that is how the ordered
+# `fadd`/`fmul` reductions are defined, and a valid order for the others. LLVM's IR-level
+# `ExpandReductions` pass doesn't fit here: it leaves non-power-of-2 vectors and `fmin`/`fmax`
+# without `nnan` for SelectionDAG to handle, it turns `and`/`or` over `i1` lanes into an `iN`
+# bitcast that Apple's back-end rejects, and the new pass manager doesn't have it before LLVM 21.
+function expand_vector_reductions!(fun::LLVM.Function)
+    # llvm reduction => IRBuilder function, or the scalar intrinsic to chain
+    reductions = Dict{LLVM.Intrinsic,Any}(
+        LLVM.Intrinsic("llvm.vector.reduce.add")  => add!,
+        LLVM.Intrinsic("llvm.vector.reduce.mul")  => mul!,
+        LLVM.Intrinsic("llvm.vector.reduce.and")  => and!,
+        LLVM.Intrinsic("llvm.vector.reduce.or")   => or!,
+        LLVM.Intrinsic("llvm.vector.reduce.xor")  => xor!,
+        LLVM.Intrinsic("llvm.vector.reduce.fadd") => fadd!,
+        LLVM.Intrinsic("llvm.vector.reduce.fmul") => fmul!,
+        LLVM.Intrinsic("llvm.vector.reduce.smax") => "llvm.smax",
+        LLVM.Intrinsic("llvm.vector.reduce.smin") => "llvm.smin",
+        LLVM.Intrinsic("llvm.vector.reduce.umax") => "llvm.umax",
+        LLVM.Intrinsic("llvm.vector.reduce.umin") => "llvm.umin",
+        LLVM.Intrinsic("llvm.vector.reduce.fmax") => "llvm.maxnum",
+        LLVM.Intrinsic("llvm.vector.reduce.fmin") => "llvm.minnum",
+    )
+    if LLVM.version() >= v"17"
+        reductions[LLVM.Intrinsic("llvm.vector.reduce.fmaximum")] = "llvm.maximum"
+        reductions[LLVM.Intrinsic("llvm.vector.reduce.fminimum")] = "llvm.minimum"
+    end
+    # AIR has no integer min/max on `i1`, where they are logic operations (true is -1 when signed)
+    i1_minmax = Dict("llvm.smax" => and!, "llvm.smin" => or!,
+                     "llvm.umax" => or!,  "llvm.umin" => and!)
+
+    worklist = Tuple{LLVM.CallBase, Any}[]
+    for bb in blocks(fun), inst in instructions(bb)
+        inst isa LLVM.CallBase || continue
+        callee = called_operand(inst)
+        (callee isa LLVM.Function && LLVM.isintrinsic(callee)) || continue
+        op = get(reductions, LLVM.Intrinsic(callee), nothing)
+        op === nothing && continue
+        push!(worklist, (inst, op))
+    end
+    isempty(worklist) && return false
+
+    mod = LLVM.parent(fun)
+    for (call, op) in worklist
+        args = collect(LLVM.Value, arguments(call))
+        vec = last(args)                            # `fadd`/`fmul` take a start value first
+        elty = eltype(value_type(vec))
+        if op isa String && elty == LLVM.Int1Type()
+            op = i1_minmax[op]
+        elseif op isa String
+            f = LLVM.Function(mod, LLVM.Intrinsic(op), LLVMType[elty])
+            op = (builder, a, b) -> call!(builder, function_type(f), f, LLVM.Value[a, b])
+        end
+        # each step carries the reduction's fast-math flags, as in SelectionDAG; min/max rely
+        # on them to select the relaxed AIR builtins (see the minimum/maximum lowering)
+        fmf = elty isa LLVM.FloatingPointType ? LLVM.fast_math(call) : nothing
+        @dispose builder=IRBuilder() begin
+            position!(builder, call)
+            debuglocation!(builder, call)
+            res = length(args) == 2 ? args[1] : nothing
+            for i in 0:Int(length(value_type(vec)))-1
+                lane = extract_element!(builder, vec, ConstantInt(LLVM.Int32Type(), i))
+                res === nothing && (res = lane; continue)
+                res = op(builder, res, lane)
+                # (steps on constants fold to constants, which carry no flags)
+                fmf !== nothing && res isa LLVM.Instruction && LLVM.fast_math!(res; fmf...)
+            end
+            replace_uses!(call, res)
+            erase!(call)
+        end
+    end
+    return true
+end
+
 # floating-point math intrinsics that Julia emits as plain `llvm.*` and that Metal exposes as
 # AIR device functions. Each has a precise `air.<op>` for f16/f32; some additionally have a
 # relaxed, f32-only `air.fast_<op>` that we select when the call is `afn`-flagged — set per-op
@@ -1563,6 +1705,12 @@ function lower_math_intrinsics!(fun::LLVM.Function)
         LLVM.Intrinsic("llvm.ceil")  => ("air.ceil",  "air.fast_ceil"),
         LLVM.Intrinsic("llvm.trunc") => ("air.trunc", "air.fast_trunc"),
         LLVM.Intrinsic("llvm.rint")  => ("air.rint",  "air.fast_rint"),
+        # Julia doesn't emit these (Metal.jl calls `air.sin`/`air.cos` directly), but Enzyme's
+        # derivatives of those calls do, and Apple's back-end crashes on them. The f16 builtins
+        # are less accurate than rounding the f32 ones on some GPUs (M1), but match what Apple's
+        # frontend and Metal.jl use for half.
+        LLVM.Intrinsic("llvm.sin")   => ("air.sin",   "air.fast_sin"),
+        LLVM.Intrinsic("llvm.cos")   => ("air.cos",   "air.fast_cos"),
     )
 
     worklist = Tuple{LLVM.CallBase, String, Union{String,Nothing}}[]
@@ -1657,6 +1805,65 @@ function fuse_minmax3!(fun::LLVM.Function)
     return changed
 end
 
+# 1.0 of a floating-point type, splat across the lanes of a vector type
+fp_one(typ::LLVMType) = LLVM.Value(LLVM.API.LLVMConstReal(typ, 1.0))
+
+# `x^n` for a constant `n`, unrolled into multiplies like SelectionDAG's `ExpandPowI`
+function expand_powi!(builder::IRBuilder, x::LLVM.Value, n::Int)
+    m = unsigned(abs(n))    # also for `typemin(n)`, which `abs` returns as is
+    res = nothing           # 1.0, until the first set bit
+    sq = x                  # x^(2^i) for the current bit i
+    while m != 0
+        isodd(m) && (res = res === nothing ? sq : fmul!(builder, res, sq))
+        m >>= 1
+        m != 0 && (sq = fmul!(builder, sq, sq))
+    end
+    res = something(res, fp_one(value_type(x)))
+    return n < 0 ? fdiv!(builder, fp_one(value_type(x)), res) : res
+end
+
+# `x^n` for any other `n`, as a loop over the exponent's bits like compiler-rt's `__powisf2`
+function build_powi!(mod::LLVM.Module, fn::String, typ::LLVMType, ntyp::LLVMType)
+    f = LLVM.Function(mod, fn, LLVM.FunctionType(typ, LLVMType[typ, ntyp]))
+    linkage!(f, LLVM.API.LLVMInternalLinkage)
+    push!(function_attributes(f), EnumAttribute("alwaysinline"))
+    x, n = parameters(f)
+    one = fp_one(typ)
+    zero = LLVM.ConstantInt(ntyp, 0)
+
+    bb_entry = BasicBlock(f, "entry")
+    bb_loop = BasicBlock(f, "loop")
+    bb_done = BasicBlock(f, "done")
+    @dispose builder=IRBuilder() begin
+        position!(builder, bb_entry)
+        br!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, n, zero), bb_done, bb_loop)
+
+        # multiply the squares selected by the bits of `n`, least significant first. like
+        # `__powisf2`, shift the signed `n` by halving it (rounding towards zero), so as not
+        # to take `abs(n)`, which InstCombine would turn into an `llvm.abs` after that has
+        # already been lowered.
+        position!(builder, bb_loop)
+        acc = phi!(builder, typ, "acc")
+        sq = phi!(builder, typ, "sq")
+        rest = phi!(builder, ntyp, "rest")
+        bit = trunc!(builder, rest, LLVM.Int1Type())
+        acc′ = select!(builder, bit, fmul!(builder, acc, sq), acc)
+        sq′ = fmul!(builder, sq, sq)
+        rest′ = sdiv!(builder, rest, LLVM.ConstantInt(ntyp, 2))
+        br!(builder, icmp!(builder, LLVM.API.LLVMIntEQ, rest′, zero), bb_done, bb_loop)
+        append!(incoming(acc), [(one, bb_entry), (acc′, bb_loop)])
+        append!(incoming(sq), [(x, bb_entry), (sq′, bb_loop)])
+        append!(incoming(rest), [(n, bb_entry), (rest′, bb_loop)])
+
+        position!(builder, bb_done)
+        pow = phi!(builder, typ, "pow")
+        append!(incoming(pow), [(one, bb_entry), (acc′, bb_loop)])
+        negative = icmp!(builder, LLVM.API.LLVMIntSLT, n, zero)
+        ret!(builder, select!(builder, negative, fdiv!(builder, one, pow), pow))
+    end
+    return f
+end
+
 # replace LLVM intrinsics with AIR equivalents
 function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Function)
     isdeclaration(fun) && return false
@@ -1664,8 +1871,10 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
     mod = LLVM.parent(fun)
     changed = false
 
-    # AIR lacks vector min/max intrinsics; scalarize so the per-call lowering below applies.
+    # AIR lacks vector min/max intrinsics and vector reductions; scalarize them so the per-call
+    # lowering below applies.
     changed |= scalarize_vector_minmax!(fun)
+    changed |= expand_vector_reductions!(fun)
 
     # lower the floating-point math intrinsics Julia emits (sqrt, fma, floor, ...) to their
     # AIR device functions, picking the relaxed `air.fast_*` variant for `afn`-flagged calls.
@@ -2060,6 +2269,42 @@ function lower_llvm_intrinsics!(@nospecialize(job::CompilerJob), fun::LLVM.Funct
                 new_value = call!(builder, op_ft, new_intr, call_args)
                 if promote_bf
                     new_value = fptrunc!(builder, new_value, typ)
+                end
+                replace_uses!(call, new_value)
+                erase!(call)
+                changed = true
+            end
+        end
+
+        # integer power, which AIR lacks (MSL has no `pown`, and `pow` is undefined for negative
+        # bases), by exponentiation by squaring as LLVM's back-ends expand it: a constant
+        # exponent is unrolled into multiplies, any other calls a loop over the exponent's bits.
+        # A negative exponent takes the reciprocal, and `x^0` is 1 (even for NaN). The exponent
+        # of a vector `powi` is a scalar.
+        if intr == LLVM.Intrinsic("llvm.powi")
+            x, n = arguments(call)
+
+            @dispose builder=IRBuilder() begin
+                position!(builder, call)
+                debuglocation!(builder, call)
+
+                new_value = if n isa LLVM.ConstantInt && width(value_type(n)) <= 64
+                    expand_powi!(builder, x, convert(Int, n))
+                else
+                    # the loop halves the exponent, which doesn't work for an `i1` (where 2
+                    # wraps to 0)
+                    if width(value_type(n)) < 32
+                        n = sext!(builder, n, LLVM.Int32Type())
+                    end
+
+                    # keep the mangled value type, e.g. llvm.powi.v2f32.i16 -> air.powi.v2f32.i32
+                    fn = "air.powi.$(split(LLVM.name(call_fun), '.')[3]).i$(width(value_type(n)))"
+                    new_intr = if haskey(functions(mod), fn)
+                        functions(mod)[fn]
+                    else
+                        build_powi!(mod, fn, value_type(x), value_type(n))
+                    end
+                    call!(builder, function_type(new_intr), new_intr, LLVM.Value[x, n])
                 end
                 replace_uses!(call, new_value)
                 erase!(call)
