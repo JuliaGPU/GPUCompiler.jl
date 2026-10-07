@@ -17,7 +17,37 @@ const SPIRV_Tools_jll =
 
 ## target
 
-export SPIRVCompilerTarget
+export SPIRVCompilerTarget, SPIRVAtomics
+
+# The atomic operations that the device, its driver and the SPIR-V toolchain run correctly
+# (not: that are native in hardware), for which `lower_atomics!` selects SPIR-V instructions.
+# Floating-point operations without such an instruction become compare-exchange loops, which
+# need integer atomics of the same width.
+#
+# There is nothing to enable native floating-point min/max
+# (SPV_EXT_shader_atomic_float_min_max): those may return either zero when comparing -0.0 and
+# +0.0, while LLVM's `atomicrmw fmin` and `fmax` order -0.0 before +0.0, and `atomicrmw` has
+# no fast-math flags to relax that. So these are compare-exchange loops too (on the containing
+# 32-bit word for half-precision numbers), which need `int64` for double-precision ones.
+#
+# Which synchronization scopes and memory orderings the device supports is not conveyed
+# either: front-ends must only use those their device supports (e.g., OpenCL 3.0 makes the
+# device scope optional, and the system scope needs fine-grained SVM atomics).
+Base.@kwdef struct SPIRVAtomics
+    # 64-bit integer atomics (cl_khr_int64_base_atomics and cl_khr_int64_extended_atomics).
+    # enabled by default, as GPUCompiler emitted them without checking before.
+    int64::Bool = true
+
+    # atomic addition and subtraction of half-, single- and double-precision floating-point
+    # numbers in global and local memory (SPV_EXT_shader_atomic_float_add and
+    # SPV_EXT_shader_atomic_float16_add, e.g. from cl_ext_float_atomics)
+    fadd_f16_global::Bool = false
+    fadd_f32_global::Bool = false
+    fadd_f64_global::Bool = false
+    fadd_f16_local::Bool = false
+    fadd_f32_local::Bool = false
+    fadd_f64_local::Bool = false
+end
 
 Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     version::Union{Nothing,VersionNumber} = nothing
@@ -27,6 +57,8 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     # `String` -- not a `Vector` -- so `jl_egal`-based owner/config lookups can match
     # structurally equivalent targets after package-image deserialization.
     extensions::String = ""
+    # the atomics the device supports; the extensions they need are added to `extensions`
+    atomics::SPIRVAtomics = SPIRVAtomics()
     supports_fp16::Bool = true
     supports_fp64::Bool = true
     supports_bfloat16::Bool = false
@@ -64,9 +96,48 @@ function runtime_cstring_type(job::CompilerJob{SPIRVCompilerTarget})
     end
 end
 
+# atomics and fences can be restricted to the memory their synchronization scope names, which
+# `lower_atomics!` passes to SPIR-V in their MemorySemantics
+syncscope_memory(@nospecialize(target::SPIRVCompilerTarget)) = true
+
 # OpenCL requires `fma` to be supported, and correctly rounded, so `fma` should use it rather
 # than Julia's Float64-based `fma_emulated` fallback (which fails without Float64 support).
 have_fma(@nospecialize(target::SPIRVCompilerTarget), T::Type) = true
+
+# the SPIR-V extensions that the atomic instructions the target supports need
+function spirv_atomic_extensions(atomics::SPIRVAtomics)
+    extensions = String[]
+    f16 = atomics.fadd_f16_global || atomics.fadd_f16_local
+    if f16 || atomics.fadd_f32_global || atomics.fadd_f32_local ||
+       atomics.fadd_f64_global || atomics.fadd_f64_local
+        push!(extensions, "SPV_EXT_shader_atomic_float_add")
+    end
+    # (the half-precision extension extends the first one)
+    f16 && push!(extensions, "SPV_EXT_shader_atomic_float16_add")
+    return extensions
+end
+
+# The `--spirv-ext` specifier to compile with: the target's, with the extensions its atomics
+# need enabled. The back-ends only declare the extensions that the module uses.
+function spirv_extensions(target::SPIRVCompilerTarget)
+    spec = target.extensions
+    entries = filter(!isempty, strip.(split(spec, ',')))
+    for ext in spirv_atomic_extensions(target.atomics)
+        # the last entry that mentions the extension decides
+        enabled = nothing
+        for entry in entries
+            if entry[1] in ('+', '-') && (entry[2:end] == ext || entry[2:end] == "all")
+                enabled = entry[1] == '+'
+            end
+        end
+        if enabled === false
+            error("The SPIR-V extension $ext, which the atomics of the target need, is disabled by its extensions $(repr(spec))")
+        end
+        enabled === true && continue
+        spec = isempty(spec) ? "+$ext" : "$spec,+$ext"
+    end
+    return spec
+end
 
 llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
     "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1" :
@@ -74,6 +145,11 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 
 
 ## job
+
+# the `__spirv_*` builtins of SPIR-V instructions, e.g. the ones `lower_atomics!` selects,
+# which the back-ends translate (plain or Itanium-mangled)
+isintrinsic(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}), fn::String) =
+    occursin(r"^(_Z\d+)?__spirv_", fn)
 
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                         entry::LLVM.Function)
@@ -85,6 +161,9 @@ function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     if job.config.kernel
         entry.callconv = LLVM.CallConv.SPIRKERNEL
     end
+
+    # (fail early when the extensions conflict with the atomics)
+    spirv_extensions(job.config.target)
 
     return entry
 end
@@ -103,6 +182,19 @@ function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
         append!(errors, check_ir_values(mod, LLVM.BFloatType()))
     end
 
+    # atomics that `lower_atomics!` cannot lower
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        reason = if is_atomic_memop(inst)
+            action = spirv_atomic_action(job, inst)
+            action isa String ? action : nothing
+        elseif inst isa LLVM.FenceInst && spirv_syncscope(inst.syncscope.name) === nothing
+            "fence with synchronization scope $(repr(inst.syncscope.name))"
+        else
+            nothing
+        end
+        reason === nothing || push!(errors, (reason, backtrace(inst), string(inst)))
+    end
+
     return errors
 end
 
@@ -119,7 +211,11 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # `unordered` heap-reference accesses are (see `demote_unordered_atomics!`)
     demote_unordered_atomics!(mod)
 
-    # the SPIR-V back-ends lower `llvm.minimum`/`llvm.maximum` to NaN-ignoring `fmin`/`fmax`
+    # the SPIR-V back-ends mishandle atomics, so select the instructions for them here
+    lower_atomics!(job, mod)
+
+    # the SPIR-V back-ends lower the floating-point minimum and maximum intrinsics to OpenCL's
+    # `fmin`/`fmax`, which ignore NaNs and don't order signed zeros
     lower_minimum_maximum!(mod)
 
     # IGC drops fields when legalizing aggregates built by nested `insertvalue`s
@@ -221,7 +317,7 @@ end
         # options; unlike `llc`, it rejects unknown extensions instead of ignoring them.
         backend = ExternalBackend(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV")
         version = something(target.version, v"0.0")
-        extensions = target.extensions
+        extensions = spirv_extensions(target)
         GC.@preserve extensions begin
             options = Ref(SPIRVCompileOptions(Int === Int64, version.major, version.minor,
                                               Base.unsafe_convert(Cstring, extensions),
@@ -233,7 +329,7 @@ end
         # translate in-process through libllvm_spirv. like `llvm-spirv`, the translator
         # takes the triple from the module and rejects unknown extensions.
         version = something(target.version, v"0.0")
-        extensions = target.extensions
+        extensions = spirv_extensions(target)
         GC.@preserve extensions begin
             options = Ref(LLVMSPIRVTranslateOptions(version.major, version.minor,
                                                     Base.unsafe_convert(Cstring, extensions),
@@ -305,6 +401,419 @@ function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=fa
             highlight(io, asm, source_code(job.config.target))
         end
     end
+end
+
+
+## atomics
+
+# lowering of LLVM atomics
+#
+# Both SPIR-V back-ends mishandle plain LLVM atomics and fences: the LLVM back-end caches the
+# IDs of synchronization scopes across contexts, so later compilations get wrong scopes; both
+# emit fences that order no memory, and ordered atomics that only order the memory their
+# pointer points to; and the Khronos translator exits the process on operations it doesn't
+# support. So `lower_atomics!` does what `AtomicExpand` and instruction selection do on other
+# targets, and turns every atomic operation and fence into a call to the `__spirv_*` builtin
+# for its SPIR-V instruction, with constant Scope and MemorySemantics operands, which both
+# back-ends translate as they are:
+#
+# - atomics on the thread's own memory become plain accesses (`demote_private_atomic!`);
+# - operations SPIR-V cannot express are rewritten in terms of ones it can (see
+#   `spirv_atomic_action`): floating-point and pointer loads, stores and exchanges, and pointer
+#   compare-exchanges, are cast to integers, 8- and 16-bit operations become masked operations
+#   on the containing 32-bit word, and read-modify-write operations without an instruction
+#   the target supports become compare-exchange loops (using LLVM.jl's copies of
+#   `AtomicExpand`'s expansions);
+# - the remaining operations and fences are selected to `__spirv_*` calls (`select_atomic!`).
+#
+# `validate_ir` rejects the atomics that cannot be lowered, which `lower_atomics!` leaves
+# alone.
+
+# SPIR-V Scope operands
+const SPIRV_SCOPE_CROSS_DEVICE = 0
+const SPIRV_SCOPE_DEVICE = 1
+const SPIRV_SCOPE_WORKGROUP = 2
+const SPIRV_SCOPE_SUBGROUP = 3
+const SPIRV_SCOPE_INVOCATION = 4
+
+# MemorySemantics bits naming the memory an operation orders
+const SPIRV_SUBGROUP_MEMORY = 0x80
+const SPIRV_WORKGROUP_MEMORY = 0x100
+const SPIRV_CROSS_WORKGROUP_MEMORY = 0x200
+const SPIRV_IMAGE_MEMORY = 0x800
+
+# The SPIR-V Scope of a synchronization scope, spelled like for `llvm_syncscope`, and the
+# MemorySemantics bits for the memory it names (see `split_syncscope`; `nothing` for all
+# memory). The system scope, LLVM's default, is the cross-device one. Returns `nothing` for
+# other scopes, and for imageblock memory, which SPIR-V doesn't have, which `validate_ir`
+# rejects rather than guessing what they mean.
+function spirv_syncscope(name::String)
+    parts = split_syncscope(name)
+    parts === nothing && return nothing
+    base, memory = parts
+    scope = if base == "singlethread"
+        SPIRV_SCOPE_INVOCATION
+    elseif base == "subgroup"
+        SPIRV_SCOPE_SUBGROUP
+    elseif base == "workgroup"
+        SPIRV_SCOPE_WORKGROUP
+    elseif base == "device"
+        SPIRV_SCOPE_DEVICE
+    elseif base == "system" || base == ""
+        SPIRV_SCOPE_CROSS_DEVICE
+    else
+        return nothing
+    end
+    if memory !== nothing
+        memory & 0b1000 == 0 || return nothing
+        memory = (memory & 0b001 == 0 ? 0 : SPIRV_CROSS_WORKGROUP_MEMORY) |
+                 (memory & 0b010 == 0 ? 0 : SPIRV_WORKGROUP_MEMORY) |
+                 (memory & 0b100 == 0 ? 0 : SPIRV_IMAGE_MEMORY)
+    end
+    return (; scope, memory)
+end
+
+# read-modify-write operations SPIR-V has instructions for, and the names of their builtins.
+# floating-point addition needs an extension the device may not support (see `SPIRVAtomics`),
+# and subtraction is the addition of the negated value.
+const SPIRV_ATOMICRMW_OPS = let Op = LLVM.AtomicRMWBinOp
+    Dict(Op.Xchg => "Exchange", Op.Add => "IAdd", Op.Sub => "ISub", Op.And => "And",
+         Op.Or => "Or", Op.Xor => "Xor", Op.Max => "SMax", Op.Min => "SMin",
+         Op.UMax => "UMax", Op.UMin => "UMin", Op.FAdd => "FAddEXT", Op.FSub => "FAddEXT")
+end
+
+# read-modify-write operations we expand to compare-exchange loops, which `expand_to_cmpxchg!`
+# computes like LLVM does (operations the LLVM in use doesn't support can't occur in the IR).
+# that includes floating-point min/max, see `SPIRVAtomics`.
+const SPIRV_EXPANDABLE_ATOMICRMW_OPS = let Op = LLVM.AtomicRMWBinOp
+    (Op.Nand, Op.FMax, Op.FMin, Op.UIncWrap, Op.UDecWrap, Op.USubCond, Op.USubSat,
+     Op.FMaximum, Op.FMinimum, Op.FMaximumNum, Op.FMinimumNum)
+end
+
+# can the target atomically add floating-point numbers of type `T` in address space `as`?
+# (generic pointers can point to global and local memory)
+function spirv_fadd_supported(atomics::SPIRVAtomics, T::LLVMType, as::Integer)
+    global_, local_ = if T isa LLVM.HalfType
+        atomics.fadd_f16_global, atomics.fadd_f16_local
+    elseif T isa LLVM.FloatType
+        atomics.fadd_f32_global, atomics.fadd_f32_local
+    elseif T isa LLVM.DoubleType
+        atomics.fadd_f64_global, atomics.fadd_f64_local
+    else
+        false, false
+    end
+    return as == 1 ? global_ : as == 3 ? local_ : global_ && local_
+end
+
+# How to lower `inst`, an atomic memory operation, for the job's target. Like the rule tables
+# of LLVM's legalizers, the rules are tried in order and the first that applies decides. Returns
+# the action, or the reason why the operation cannot be lowered (which `validate_ir` reports):
+#
+# - `:demote`: an atomic on the thread's own memory, which becomes plain accesses;
+# - `:cast`: a floating-point or pointer load, store or exchange, or a pointer
+#   compare-exchange, which becomes an integer one (like `AtomicExpand` does for most
+#   targets), so that only the integer forms of these instructions are used;
+# - `:cmpxchg_loop`: a read-modify-write operation without a SPIR-V instruction the target
+#   supports, which becomes a compare-exchange loop (`AtomicExpand`'s `insertRMWCmpXchgLoop`);
+# - `:partword`: an 8- or 16-bit operation (other than a native half-precision addition),
+#   which becomes a masked operation on the containing 32-bit word (`AtomicExpand`'s
+#   `expandPartwordAtomicRMW` and `expandPartwordCmpXchg`, see `spirv_partword_storage`);
+# - `:select`: an operation SPIR-V can express, which becomes a `__spirv_Atomic*` call.
+#
+# Casts and loops need integer atomics of the same size, so 64-bit integer atomics for 64-bit
+# values.
+function spirv_atomic_action(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
+                             inst::LLVM.Instruction)
+    atomics = job.config.target.atomics
+    op = inst isa LLVM.AtomicRMWInst ? inst.binop : nothing
+    if op !== nothing && !haskey(SPIRV_ATOMICRMW_OPS, op) &&
+       !(op in SPIRV_EXPANDABLE_ATOMICRMW_OPS)
+        return "atomicrmw $(LLVM.irname(op)) operation"
+    end
+
+    is_thread_private(inst.pointer_operand) && return :demote
+
+    # (SPIR-V only has volatile atomics with the Vulkan memory model)
+    inst.volatile && return "volatile atomic operation"
+
+    as = inst.pointer_operand.value_type.addrspace
+    if !(as in (1, 3, 4))
+        return "atomic operation in address space $as (SPIR-V only supports atomics on global, local and generic memory)"
+    end
+
+    if spirv_syncscope(inst.syncscope.name) === nothing
+        return "atomic operation with synchronization scope $(repr(inst.syncscope.name))"
+    end
+
+    T = atomic_value_type(inst)
+    bits = atomic_bits(inst)
+    if bits === nothing || !(bits in (8, 16, 32, 64))
+        return "atomic operation on a $(string(T)) value"
+    end
+
+    if inst.alignment < bits ÷ 8
+        return "misaligned atomic operation"
+    end
+
+    Op = LLVM.AtomicRMWBinOp
+    action = if inst isa LLVM.AtomicCmpXchgInst
+        T isa LLVM.PointerType ? :cast : :select
+    elseif op === nothing || op == Op.Xchg
+        T isa LLVM.IntegerType ? :select : :cast
+    elseif op == Op.FAdd || op == Op.FSub
+        spirv_fadd_supported(atomics, T, as) ? :select : :cmpxchg_loop
+    elseif haskey(SPIRV_ATOMICRMW_OPS, op)
+        :select
+    else
+        :cmpxchg_loop
+    end
+
+    native = action === :select && T isa LLVM.FloatingPointType
+    if bits < 32 && !native
+        storage = spirv_partword_storage(inst.pointer_operand)
+        storage isa String && return storage
+        # (floating-point loads, stores and exchanges are cast to integers first)
+        return action === :cast ? :cast : :partword
+    end
+    if bits == 64 && !native && !atomics.int64
+        return "64-bit atomic operation (the target does not support 64-bit integer atomics)"
+    end
+
+    return action
+end
+
+# An 8- or 16-bit atomic operation is performed on the aligned 32-bit word containing the
+# value, which must be accessible. Returns the variables the operation may access, which need
+# padding for that (see `pad_variable!`), or why the word may not be accessible.
+#
+# For global memory passed to the kernel, GPUCompiler requires the word to be accessible: the
+# back-ends' allocators guarantee that by rounding buffer sizes up to 4 bytes, while buffers
+# from elsewhere (e.g., imported or host memory) and raw pointers are the caller's
+# responsibility. LLVM's partword lowering for AMDGPU and NVPTX makes the same assumption.
+# Variables in the module are only known to be accessible when they are internal, and can be
+# padded, so operations on other global or local memory variables (e.g., dynamically-sized
+# local memory), or on local memory of unknown origin (e.g., a pointer argument), also through
+# generic pointers, are rejected.
+function spirv_partword_storage(ptr::LLVM.Value)
+    variables = LLVM.GlobalVariable[]
+    seen = Set{LLVM.Value}()
+    worklist = LLVM.Value[ptr]
+    while !isempty(worklist)
+        val = pop!(worklist)
+        val in seen && continue
+        push!(seen, val)
+        as = val.value_type.addrspace
+        if val isa LLVM.GlobalVariable
+            if val.linkage in (LLVM.Linkage.Internal, LLVM.Linkage.Private) &&
+               val.initializer !== nothing
+                push!(variables, val)
+            else
+                memory = as == 3 ? "local memory" : "a global variable"
+                return "8- or 16-bit atomic operation on $memory of unknown size (SPIR-V performs it on the containing 32-bit word)"
+            end
+        elseif val isa Union{LLVM.GetElementPtrInst,LLVM.BitCastInst,LLVM.AddrSpaceCastInst} ||
+               (val isa LLVM.ConstantExpr &&
+                LLVM.opcode(val) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast,
+                                     LLVM.API.LLVMAddrSpaceCast))
+            push!(worklist, val.operands[1])
+        elseif val isa LLVM.PHIInst
+            append!(worklist, first.(val.incoming))
+        elseif val isa LLVM.SelectInst
+            push!(worklist, val.operands[2], val.operands[3])
+        elseif as == 1
+            # (global memory passed to the kernel is accessible by contract)
+            continue
+        else
+            return "8- or 16-bit atomic operation on local or generic memory of unknown origin (SPIR-V performs it on the containing 32-bit word, which must be accessible)"
+        end
+    end
+    return variables
+end
+
+# The SPIR-V Scope of an atomic operation or fence (see `spirv_syncscope`). Invocation is not
+# a valid scope for atomic operations in the OpenCL environment, so those that are not on the
+# thread's own memory (which are demoted) use the narrowest one that always is.
+function spirv_scope(inst::LLVM.Instruction)
+    scope = spirv_syncscope(inst.syncscope.name).scope
+    if scope == SPIRV_SCOPE_INVOCATION && !(inst isa LLVM.FenceInst)
+        return SPIRV_SCOPE_WORKGROUP
+    end
+    return scope
+end
+
+# The SPIR-V MemorySemantics of an atomic operation or fence with the given ordering. LLVM's
+# orderings order all memory, so unless the synchronization scope names the memory (see
+# `spirv_syncscope`), they order subgroup, workgroup and cross-workgroup memory, whatever
+# the pointer's address space, like DPC++ does for every atomic, also relaxed ones. Fences
+# also order image memory, like the Khronos translator's do.
+function spirv_semantics(inst::LLVM.Instruction, order::LLVM.AtomicOrdering.T)
+    memory = something(spirv_syncscope(inst.syncscope.name).memory,
+                       SPIRV_SUBGROUP_MEMORY | SPIRV_WORKGROUP_MEMORY |
+                       SPIRV_CROSS_WORKGROUP_MEMORY |
+                       (inst isa LLVM.FenceInst ? SPIRV_IMAGE_MEMORY : 0))
+    ordering = order == LLVM.AtomicOrdering.Acquire ? 0x2 :
+               order == LLVM.AtomicOrdering.Release ? 0x4 :
+               order == LLVM.AtomicOrdering.AcquireRelease ? 0x8 :
+               order == LLVM.AtomicOrdering.SequentiallyConsistent ? 0x10 : 0x0
+    return ordering | memory
+end
+
+# Itanium-mangled names of the types of `__spirv_*` builtin parameters, like Clang mangles
+# OpenCL C's (pointers to volatile values in an address space, scopes and semantics unsigned)
+function spirv_mangle(T::LLVMType, elty::Union{Nothing,LLVMType}=nothing)
+    if T isa LLVM.PointerType
+        return "PU3AS$(T.addrspace)V" * spirv_mangle(elty)
+    elseif T isa LLVM.IntegerType
+        return T.width == 32 ? "i" : "l"
+    elseif T isa LLVM.HalfType
+        return "Dh"
+    elseif T isa LLVM.FloatType
+        return "f"
+    else
+        return "d"
+    end
+end
+
+# Call the `__spirv_*` builtin `name`, which takes the operands `args`
+function call_spirv_builtin!(builder::IRBuilder, mod::LLVM.Module, name::String,
+                             T_ret::LLVMType, args::Vector{<:LLVM.Value}, mangled::String)
+    fn = "_Z$(length(name))$(name)$(mangled)"
+    ft = LLVM.FunctionType(T_ret, LLVMType[arg.value_type for arg in args])
+    f = declare!(mod, fn, ft) do
+        f = LLVM.Function(mod, fn, ft)
+        # (not `argmemonly` or `readonly`: they order other memory)
+        for attr in (:mustprogress, :nounwind, :willreturn)
+            push!(f.function_attributes, EnumAttribute(attr))
+        end
+        f
+    end
+    return call!(builder, ft, f, args)
+end
+
+# Replace an atomic operation or fence by the equivalent `__spirv_*` call.
+function select_atomic!(mod::LLVM.Module, inst::LLVM.Instruction)
+    T_i32 = LLVM.Int32Type()
+    scope = ConstantInt(T_i32, spirv_scope(inst))
+    semantics(order) = ConstantInt(T_i32, spirv_semantics(inst, order))
+
+    @dispose builder=IRBuilder() begin
+        position!(builder, LLVM.before(inst))
+        builder.debug_location = inst.debug_location
+        if inst isa LLVM.FenceInst
+            call_spirv_builtin!(builder, mod, "__spirv_MemoryBarrier", LLVM.VoidType(),
+                                [scope, semantics(inst.ordering)], "jj")
+            erase!(inst)
+            return
+        end
+
+        ptr = inst.pointer_operand
+        T = atomic_value_type(inst)
+        mangled = spirv_mangle(ptr.value_type, T) * "jj"
+        new = if inst isa LLVM.LoadInst
+            call_spirv_builtin!(builder, mod, "__spirv_AtomicLoad", T,
+                                [ptr, scope, semantics(inst.ordering)], mangled)
+        elseif inst isa LLVM.StoreInst
+            call_spirv_builtin!(builder, mod, "__spirv_AtomicStore", LLVM.VoidType(),
+                                [ptr, scope, semantics(inst.ordering), inst.value_operand],
+                                mangled * spirv_mangle(T))
+        elseif inst isa LLVM.AtomicRMWInst
+            val = inst.value_operand
+            if inst.binop == LLVM.AtomicRMWBinOp.FSub
+                val = fneg!(builder, val)
+            end
+            name = "__spirv_Atomic$(SPIRV_ATOMICRMW_OPS[inst.binop])"
+            call_spirv_builtin!(builder, mod, name, T,
+                                [ptr, scope, semantics(inst.ordering), val],
+                                mangled * spirv_mangle(T))
+        else
+            # SPIR-V requires the failure ordering to be no stronger than the success one,
+            # which LLVM doesn't, so strengthen the latter (like `AtomicExpand` does for
+            # targets with a single ordering). a weak compare-exchange may fail spuriously,
+            # so a strong one is fine too. derive the success flag from the old value.
+            cmp, desired = inst.compare_operand, inst.new_value_operand
+            old = call_spirv_builtin!(builder, mod, "__spirv_AtomicCompareExchange", T,
+                                      [ptr, scope, semantics(merged_ordering(inst)),
+                                       semantics(inst.failure_ordering), desired, cmp],
+                                      mangled * "j" * spirv_mangle(T)^2)
+            success = icmp!(builder, LLVM.IntPredicate.EQ, old, cmp)
+            res = insert_value!(builder, UndefValue(inst.value_type), old, 0)
+            insert_value!(builder, res, success, 1)
+        end
+        isempty(inst.uses) || replace_uses!(inst, new)
+    end
+    erase!(inst)
+    return
+end
+
+function lower_atomics!(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
+                        mod::LLVM.Module)
+    changed = false
+    @tracepoint "lower atomics" begin
+
+    # (the expansions split blocks, so collect the atomics first)
+    atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
+               if is_atomic_memop(inst)]
+
+    # pad the local memory that 8- and 16-bit atomics may access
+    variables = Set{LLVM.GlobalVariable}()
+    for inst in atomics
+        action = spirv_atomic_action(job, inst)
+        action === :partword || (action === :cast && atomic_bits(inst) < 32) || continue
+        union!(variables, spirv_partword_storage(inst.pointer_operand))
+    end
+    foreach(pad_variable!, variables)
+    changed |= !isempty(variables)
+    for inst in atomics
+        action = spirv_atomic_action(job, inst)
+        if action === :demote
+            demote_private_atomic!(inst)
+        elseif action === :cast && inst isa LLVM.AtomicCmpXchgInst
+            cast_cmpxchg_to_integer!(inst)
+        elseif action === :cast
+            inst = cast_atomic_to_integer!(inst)
+            if spirv_atomic_action(job, inst) === :partword
+                expand_partword_atomic!(inst, 4)
+            end
+        elseif action === :partword
+            expand_partword_atomic!(inst, 4)
+        elseif action === :cmpxchg_loop
+            expand_to_cmpxchg!(inst)
+        else
+            continue
+        end
+        changed = true
+    end
+
+    # select what is left, including the operations the expansions introduced
+    unsupported = IRError[]
+    for f in mod.functions, bb in f.blocks, inst in collect(bb.instructions)
+        if is_atomic_memop(inst)
+            action = spirv_atomic_action(job, inst)
+        elseif inst isa LLVM.FenceInst
+            action = spirv_syncscope(inst.syncscope.name) === nothing ?
+                     "fence with synchronization scope $(repr(inst.syncscope.name))" : :select
+        else
+            continue
+        end
+        if action === :select
+            select_atomic!(mod, inst)
+            changed = true
+        elseif action isa String
+            push!(unsupported, (action, backtrace(inst), string(inst)))
+        else
+            error("Atomic operation was not legalized ($action): $inst")
+        end
+    end
+
+    # `validate_ir` rejects the unsupported atomics left in the module, but validation can be
+    # disabled (e.g., for reflection). Rather than having the back-ends miscompile them, or
+    # the Khronos translator exit, fail here.
+    if !isempty(unsupported) && !job.config.validate
+        throw(InvalidIRError(job, unsupported))
+    end
+
+    end
+    return changed
 end
 
 
@@ -381,23 +890,39 @@ function flatten_insertvalue!(builder::IRBuilder, agg::LLVM.Value, val::LLVM.Val
     return insert_value!(builder, agg, val, idx)
 end
 
-# expand `llvm.minimum` and `llvm.maximum`, which Julia uses for `min` and `max` of
-# floating-point numbers. these return NaN when either operand is NaN, and order -0.0 before
-# +0.0, but both SPIR-V back-ends translate them to OpenCL's `fmin` and `fmax`, which return
-# the other operand when one is NaN, and may return either zero. so use `llvm.minnum` and
-# `llvm.maxnum` (which translate to the same `fmin` and `fmax`) and fix up those cases,
-# unless the call's fast-math flags say they don't occur.
+# expand the floating-point minimum and maximum intrinsics, which both SPIR-V back-ends
+# translate to OpenCL's `fmin` and `fmax`. those return the other operand when one is a
+# (quiet) NaN, like `llvm.minnum` and `llvm.maxnum`, but may return either zero when comparing
+# -0.0 and +0.0, so lower every family to `llvm.minnum` and `llvm.maxnum` and fix up what
+# differs, unless the call's fast-math flags say it doesn't occur:
+#
+# - `llvm.minimum`/`llvm.maximum` (Julia's `min` and `max` of floating-point numbers) return
+#   NaN when either operand is NaN, and order -0.0 before +0.0;
+# - `llvm.minnum`/`llvm.maxnum` order -0.0 before +0.0 (as LLVM specifies them since 22);
+# - `llvm.minimumnum`/`llvm.maximumnum` return the other operand for any NaN, including a
+#   signaling one (for which `fmin` may return NaN), and order -0.0 before +0.0.
+#
+# the `llvm.minnum`/`llvm.maxnum` calls this introduces are marked `nsz` when the signs of
+# zeros are fixed up separately, so running this again doesn't change them.
 function lower_minimum_maximum!(mod::LLVM.Module)
     changed = false
     @tracepoint "lower minimum/maximum" begin
 
-    for f in collect(mod.functions)
+    calls = Tuple{LLVM.CallInst,Bool,Symbol}[]
+    for f in mod.functions
         isdeclaration(f) || continue
-        fn = f.name
-        is_minimum = startswith(fn, "llvm.minimum.")
-        is_minimum || startswith(fn, "llvm.maximum.") || continue
+        m = match(r"^llvm\.(min|max)(imum|num|imumnum)\.", f.name)
+        m === nothing && continue
+        is_min = m[1] == "min"
+        nans = m[2] == "imum" ? :propagate : m[2] == "num" ? :quiet : :ignore
+        for use in f.uses
+            call = use.user
+            call isa LLVM.CallInst && push!(calls, (call, is_min, nans))
+        end
+    end
 
-        typ = f.function_type.return_type
+    for (call, is_min, nans) in calls
+        typ = call.value_type
         eltyp = typ isa LLVM.VectorType ? typ.element_type : typ
         bits = if eltyp isa LLVM.HalfType
             16
@@ -412,48 +937,83 @@ function lower_minimum_maximum!(mod::LLVM.Module)
         if typ isa LLVM.VectorType
             ityp = LLVM.VectorType(ityp, typ.length)
         end
-        num = LLVM.Function(mod, LLVM.Intrinsic(is_minimum ? "llvm.minnum" : "llvm.maxnum"),
+
+        x, y = call.arguments
+        flags = NamedTuple(call.fast_math)
+        fix_zeros = !flags.nsz
+        fix_nans = nans !== :quiet && !flags.nnan
+        nans === :quiet && !fix_zeros && continue
+
+        num = LLVM.Function(mod, LLVM.Intrinsic(is_min ? "llvm.minnum" : "llvm.maxnum"),
                             LLVMType[typ])
+        @dispose builder=IRBuilder() begin
+            position!(builder, LLVM.before(call))
+            builder.debug_location = call.debug_location
 
-        for use in collect(f.uses)
-            call = use.user
-            call isa LLVM.CallInst || continue
-            x, y = call.arguments
-            flags = NamedTuple(call.fast_math)
-            @dispose builder=IRBuilder() begin
-                position!(builder, LLVM.before(call))
-                builder.debug_location = call.debug_location
+            res = call!(builder, num.function_type, num, LLVM.Value[x, y])
+            res.fast_math = flags
+            fix_zeros && (res.fast_math.nsz = true)
 
-                res = call!(builder, num.function_type, num, LLVM.Value[x, y])
-                res.fast_math = flags
-
-                # if both operands are zero, combine their sign bits
-                if !flags.nsz
-                    zero = LLVM.null(typ)
-                    both_zero = and!(builder, fcmp!(builder, LLVM.RealPredicate.OEQ, x, zero),
-                                              fcmp!(builder, LLVM.RealPredicate.OEQ, y, zero))
-                    xi = bitcast!(builder, x, ityp)
-                    yi = bitcast!(builder, y, ityp)
-                    zi = is_minimum ? or!(builder, xi, yi) : and!(builder, xi, yi)
-                    res = select!(builder, both_zero, bitcast!(builder, zi, typ), res)
-                end
-
-                # if either operand is NaN, return a NaN
-                if !flags.nnan
-                    either_nan = fcmp!(builder, LLVM.RealPredicate.UNO, x, y)
-                    res = select!(builder, either_nan, fadd!(builder, x, y), res)
-                end
-
-                replace_uses!(call, res)
-                erase!(call)
+            # if both operands are zero, combine their sign bits
+            if fix_zeros
+                zero = LLVM.null(typ)
+                both_zero = and!(builder, fcmp!(builder, LLVM.RealPredicate.OEQ, x, zero),
+                                          fcmp!(builder, LLVM.RealPredicate.OEQ, y, zero))
+                xi = bitcast!(builder, x, ityp)
+                yi = bitcast!(builder, y, ityp)
+                zi = is_min ? or!(builder, xi, yi) : and!(builder, xi, yi)
+                res = select!(builder, both_zero, bitcast!(builder, zi, typ), res)
             end
-            changed = true
+
+            if fix_nans && nans === :propagate
+                # if either operand is NaN, return a NaN
+                either_nan = fcmp!(builder, LLVM.RealPredicate.UNO, x, y)
+                res = select!(builder, either_nan, fadd!(builder, x, y), res)
+            elseif fix_nans
+                # if one operand is NaN, return the other one
+                res = select!(builder, fcmp!(builder, LLVM.RealPredicate.UNO, y, y), x, res)
+                res = select!(builder, fcmp!(builder, LLVM.RealPredicate.UNO, x, x), y, res)
+            end
+
+            replace_uses!(call, res)
+            erase!(call)
         end
-        isempty(f.uses) && erase!(f)
+        changed = true
+    end
+
+    for f in collect(mod.functions)
+        isdeclaration(f) && isempty(f.uses) || continue
+        occursin(r"^llvm\.(min|max)imum(num)?\.", f.name) && erase!(f)
     end
 
     end
     return changed
+end
+
+# Align a global or local memory variable to 4 bytes, and pad it to a multiple of 4 bytes, so
+# that the 32-bit word containing any of its 8- or 16-bit values is part of it. Only internal
+# definitions can be padded: the size of others is up to the host or the runtime. Returns the
+# padded variable.
+function pad_variable!(gv::LLVM.GlobalVariable)
+    gv.alignment = max(gv.alignment, 4)
+    T = gv.global_value_type
+    padding = -Int(LLVM.abi_size(LLVM.parent(gv).datalayout, T)) & 3
+    padding == 0 && return gv
+
+    mod = LLVM.parent(gv)
+    T_pad = LLVM.ArrayType(LLVM.Int8Type(), padding)
+    T_padded = LLVM.StructType([T, T_pad])
+    new = GlobalVariable(mod, T_padded, "", gv.value_type.addrspace)
+    new.initializer = ConstantStruct(T_padded, [gv.initializer, null(T_pad)])
+    new.linkage = gv.linkage
+    new.alignment = gv.alignment
+    new.constant = gv.constant
+    new.unnamed_addr = gv.unnamed_addr
+    name = gv.name
+    replace_uses!(gv, const_bitcast(new, gv.value_type))
+    erase!(gv)
+    new.name = name
+    return new
 end
 
 # convert alloca [N x i128] to alloca [N x <2 x i64>]

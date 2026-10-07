@@ -830,46 +830,6 @@ end
 const EXPANDABLE_ATOMICRMW_OPS =
     filter(op -> !haskey(AIR_ATOMICRMW_OPS, op), instances(LLVM.AtomicRMWBinOp.T))
 
-function atomic_bits(T::LLVMType)
-    T isa LLVM.IntegerType && return Int(T.width)
-    T isa LLVM.HalfType && return 16
-    T isa LLVM.BFloatType && return 16
-    T isa LLVM.FloatType && return 32
-    T isa LLVM.DoubleType && return 64
-    T isa LLVM.PointerType && return 64
-    return nothing
-end
-
-# Does `ptr` point to the thread's own stack, i.e., is every object it can be derived from an
-# `alloca`? That is the case for atomics on objects that Julia's `AllocOpt` moved to the stack,
-# e.g., a non-escaping mutable struct with `@atomic` fields (GPUCompiler.jl#934). Metal cannot
-# express those (MSL only has atomics on device and threadgroup memory), but they don't need
-# to be atomic: no other thread can access a thread's stack, even when it has a pointer to it
-# (thread memory is private to every thread), so plain accesses behave the same. Anything this
-# cannot trace back to an `alloca`, e.g., a function argument or a loaded pointer, is not
-# known to be private.
-function is_thread_private(ptr::LLVM.Value)
-    seen = Set{LLVM.Value}()
-    worklist = LLVM.Value[ptr]
-    while !isempty(worklist)
-        val = pop!(worklist)
-        val in seen && continue
-        push!(seen, val)
-        if val isa LLVM.AllocaInst
-            continue
-        elseif val isa LLVM.GetElementPtrInst || val isa LLVM.BitCastInst
-            push!(worklist, val.operands[1])
-        elseif val isa LLVM.PHIInst
-            append!(worklist, first.(val.incoming))
-        elseif val isa LLVM.SelectInst
-            push!(worklist, val.operands[2], val.operands[3])
-        else
-            return false
-        end
-    end
-    return true
-end
-
 # How to lower `inst`, an atomic memory operation, for the job's target. Like the rule tables
 # of LLVM's legalizers, the rules are tried in order and the first that applies decides. Returns
 # the action, or the reason why the operation cannot be lowered (which `validate_ir` reports):
@@ -898,7 +858,7 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
     end
 
     T = atomic_value_type(inst)
-    bits = atomic_bits(T)
+    bits = atomic_bits(inst)
     if bits === nothing || !(bits in (8, 16, 32, 64))
         return "atomic operation on a $(string(T)) value"
     end
@@ -937,20 +897,6 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
     return :select
 end
 
-# Replace an atomic operation on the thread's own memory (see `is_thread_private`) by plain
-# accesses. Its ordering and scope don't matter either: no other thread can observe the memory
-# it accesses, so it cannot synchronize with any.
-function demote_private_atomic!(inst::LLVM.Instruction)
-    if inst isa LLVM.LoadInst || inst isa LLVM.StoreInst
-        # (a plain access has the default, system scope)
-        inst.syncscope = SyncScope("system")
-        inst.ordering = LLVM.AtomicOrdering.NotAtomic
-    else
-        lower_atomic!(inst)
-    end
-    return
-end
-
 # The ordering to lower an atomic operation with: without ordered atomics (MSL < 4.1), the
 # fences `insert_atomic_fences!` added provide the ordering, and the operation is relaxed.
 lowered_ordering(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
@@ -979,48 +925,12 @@ expand_to_cmpxchg_loop!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
                         inst::LLVM.AtomicRMWInst) =
     expand_to_cmpxchg!(lower_ordering!(job, inst))
 
-# 8- and 16-bit atomics as masked operations on the containing 32-bit word, like
-# `AtomicExpand` does. Like `AtomicExpand`, this assumes that the whole word can be accessed:
-# true for device buffers, which Metal allocates in pages, and for threadgroup arrays, which
-# Metal.jl aligns and pads to 4 bytes.
-function expand_partword_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                                 inst::LLVM.Instruction)
-    lower_ordering!(job, inst)
-    if inst isa LLVM.LoadInst
-        # a word-sized load, shifted
-        @dispose builder=IRBuilder() begin
-            position!(builder, LLVM.before(inst))
-            mask = partword_mask!(builder, inst.value_type, inst.pointer_operand;
-                                  align=inst.alignment, word_size=4)
-            word = load!(builder, mask.word_type, mask.aligned_addr)
-            word.alignment = mask.aligned_addr_alignment
-            word.ordering = inst.ordering
-            word.syncscope = inst.syncscope
-            word.volatile = inst.volatile
-            copy_atomic_metadata!(word, inst)
-            replace_uses!(inst, extract_masked_value!(builder, word, mask))
-        end
-        erase!(inst)
-        return
-    elseif inst isa LLVM.StoreInst
-        # an exchange whose result is unused (`AtomicExpand`'s `expandAtomicStoreToXChg`),
-        # which needs at least a monotonic ordering
-        order = inst.ordering == LLVM.AtomicOrdering.Unordered ?
-                LLVM.AtomicOrdering.Monotonic : inst.ordering
-        rmw = @dispose builder=IRBuilder() begin
-            position!(builder, LLVM.before(inst))
-            atomic_rmw!(builder, LLVM.AtomicRMWBinOp.Xchg, inst.pointer_operand,
-                        inst.value_operand, order, inst.syncscope)
-        end
-        rmw.alignment = inst.alignment
-        rmw.volatile = inst.volatile
-        copy_atomic_metadata!(rmw, inst)
-        erase!(inst)
-        inst = rmw
-    end
-    expand_partword!(inst, 4)
-    return
-end
+# 8- and 16-bit atomics as masked operations on the containing 32-bit word. This assumes that
+# the whole word can be accessed: true for device buffers, which Metal allocates in pages, and
+# for threadgroup arrays, which Metal.jl aligns and pads to 4 bytes.
+expand_partword_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                        inst::LLVM.Instruction) =
+    expand_partword_atomic!(lower_ordering!(job, inst), 4)
 
 # On targets without ordered atomics (MSL < 4.1), bracket the operation with fences
 # (`AtomicExpand`'s `bracketInstWithFences` with the default `emitLeadingFence` and
