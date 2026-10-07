@@ -566,7 +566,7 @@ end
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType;
                             post_optimization::Bool=false)
     source_sig = job.source.specTypes
-    source_types = [source_sig.parameters...]
+    source_types = collect(Any, source_sig.parameters)
 
     source_argnames = Base.method_argnames(job.source.def)
     while length(source_argnames) < length(source_types)
