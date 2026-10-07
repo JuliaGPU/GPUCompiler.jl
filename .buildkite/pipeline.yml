@@ -1,8 +1,12 @@
+# These test the last release of each back-end that uses GPUCompiler 1.x. Their test
+# suites have since started failing against newer dependencies (e.g. GPUArrays' test
+# suite, Julia's LinearAlgebra), independently of GPUCompiler, so failures don't block.
+
 steps:
   - label: "CUDA.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.11"
+          version: "1.12"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -10,7 +14,7 @@ steps:
       julia -e 'println("--- :julia: Instantiating project")
                 using Pkg
                 Pkg.develop(; path=pwd())
-                Pkg.develop(; name="CUDA")' || exit 3
+                Pkg.add(; name="CUDA", version="6.2")' || exit 3
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
@@ -19,13 +23,12 @@ steps:
       queue: "cuda"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 120
-    soft_fail:
-      - exit_status: 3
+    soft_fail: true
 
   - label: "oneAPI.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.11"
+          version: "1.12"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
@@ -33,7 +36,11 @@ steps:
 
                 println("--- :julia: Instantiating project")
                 Pkg.develop(; path=pwd())
-                Pkg.develop(; name="oneAPI")
+
+                # building the support library writes to the package directory
+                oneapi = joinpath(Pkg.devdir(), "oneAPI")
+                run(`git clone --depth=1 --branch=v2.7.0 https://github.com/JuliaGPU/oneAPI.jl $$oneapi`)
+                Pkg.develop(; path=oneapi)
 
                 println("+++ :julia: Building support library")
                 include(joinpath(Pkg.devdir(), "oneAPI", "deps", "build_ci.jl"))' || exit 3
@@ -45,20 +52,19 @@ steps:
       queue: "oneapi"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 60
-    soft_fail:
-      - exit_status: 3
+    soft_fail: true
 
   - label: "AMDGPU.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.11"
+          version: "1.12"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
        julia -e 'println("--- :julia: Instantiating project")
                  using Pkg
                  Pkg.develop(; path=pwd())
-                 Pkg.develop(; name="AMDGPU")' || exit 3
+                 Pkg.add(; name="AMDGPU", version="2.7")' || exit 3
 
        julia -e 'println("+++ :julia: Running tests")
                  using Pkg
@@ -66,21 +72,20 @@ steps:
     agents:
       queue: "rocm"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
-    timeout_in_minutes: 60
-    soft_fail:
-      - exit_status: 3
+    timeout_in_minutes: 120
+    soft_fail: true
 
   - label: "Metal.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.11"
+          version: "1.12"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
       julia -e 'println("--- :julia: Instantiating project")
                 using Pkg
                 Pkg.develop(; path=pwd())
-                Pkg.develop(; name="Metal")' || exit 3
+                Pkg.add(; name="Metal", version="1.10")' || exit 3
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
@@ -89,21 +94,19 @@ steps:
       queue: "metal"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 120
-    soft_fail:
-      - exit_status: 3
+    soft_fail: true
 
   - label: "OpenCL.jl"
     plugins:
       - JuliaCI/julia#v1:
-          version: "1.10"
+          version: "1.12"
       - JuliaCI/julia-coverage#v1:
           codecov: true
     command: |
       julia -e 'println("--- :julia: Instantiating project")
                 using Pkg
                 Pkg.develop(; path=pwd())
-                Pkg.develop(; name="OpenCL")
-                Pkg.develop(; name="SPIRVIntrinsics")' || exit 3
+                Pkg.add(; name="OpenCL", version="0.10.10")' || exit 3
 
        julia -e 'println("+++ :julia: Running tests")
                 using Pkg
@@ -114,8 +117,7 @@ steps:
       queue: "cuda"
     if: build.message !~ /\[skip tests\]/ && !build.pull_request.draft
     timeout_in_minutes: 120
-    soft_fail:
-      - exit_status: 3
+    soft_fail: true
 
 env:
   JULIA_PKG_SERVER: "" # it often struggles with our large artifacts

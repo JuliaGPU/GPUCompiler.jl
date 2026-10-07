@@ -133,7 +133,8 @@ end
 
     # and at the SPIR-V level, no `OpUnreachable` (UB if reached) should survive.
     @test @filecheck begin
-        @check "%_Z6kernel4Bool = OpFunction %void None"
+        @check "OpEntryPoint Kernel %[[KERNEL:[^ ]+]] \"_Z6kernel4Bool\""
+        @check "%[[KERNEL]] = OpFunction %void None"
         @check_not "OpUnreachable"
         SPIRV.code_native(mod.kernel, Tuple{Bool}; backend, kernel=true)
     end

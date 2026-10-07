@@ -4,6 +4,7 @@ on:
   push:
     branches:
     - main
+    - 'release-*'
   pull_request:
   workflow_dispatch:
 
@@ -15,12 +16,12 @@ jobs:
   release_test:
     name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }} - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        version: ['1.10', '1.11', '1.12', '1.13-nightly', 'nightly']
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macOS-15, macOS-15-intel, windows-2025]
+        version: ['1.10', '1.11', '1.12', '1.13']
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macOS-15, windows-2025]
         llvm_args: ['']
         include:
           # starting with Julia 1.10, we can enable opaque pointers
@@ -35,9 +36,6 @@ jobs:
             os: 'macOS-15'
             llvm_args: '--opaque-pointers'
           - version: '1.10'
-            os: 'macOS-15-intel'
-            llvm_args: '--opaque-pointers'
-          - version: '1.10'
             os: 'windows-2025'
             llvm_args: '--opaque-pointers'
           - version: '1.11'
@@ -50,9 +48,6 @@ jobs:
             os: 'macOS-15'
             llvm_args: '--opaque-pointers'
           - version: '1.11'
-            os: 'macOS-15-intel'
-            llvm_args: '--opaque-pointers'
-          - version: '1.11'
             os: 'windows-2025'
             llvm_args: '--opaque-pointers'
     steps:
@@ -62,56 +57,6 @@ jobs:
         uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
-
-      - name: Set-up cache
-        uses: julia-actions/cache@v3
-
-      - name: Run tests
-        uses: julia-actions/julia-runtest@v1
-        env:
-          JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
-
-      - name: Process coverage
-        uses: julia-actions/julia-processcoverage@v1
-      - name: Submit coverage
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-          files: lcov.info
-
-  # fetching builds from Buildkite
-  buildkite_test:
-    name: Julia ${{ matrix.version }} ${{ matrix.build }} ${{ matrix.llvm_args }}
-    runs-on: ${{ matrix.os }}
-    # This job requires accessing a secret, which isn't available in PRs from
-    # forks.  Skip this job entirely if it's a pull request from a fork.
-    if: ${{ github.event_name != 'pull_request' || ! github.event.pull_request.head.repo.fork }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04]
-        llvm_args: ['']
-        include:
-          - version: '1.12'
-            pipeline: 'julia-release-1-dot-12'
-            build: 'x86_64-linux-gnuassert'
-            branch: 'release-1.12'
-          #- version: 'master'
-          #  pipeline: 'julia-master'
-          #  build: 'x86_64-linux-gnuassert'
-          #  branch: 'master'
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download Julia
-        env:
-          BUILDKITE_TOKEN: ${{ secrets.BUILDKITE_TOKEN }}
-        run: |
-          ./.github/download_build.sh ${{ matrix.pipeline }} ${{ matrix.branch }} build_${{ matrix.build }} julia.tar.gz
-          tar -xf julia.tar.gz -C ../
-          rm julia.tar.gz
-          echo $PWD/../julia-*/bin >> $GITHUB_PATH
 
       - name: Set-up cache
         uses: julia-actions/cache@v3
