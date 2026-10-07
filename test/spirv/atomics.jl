@@ -105,7 +105,8 @@ end
             "volatile atomic operation"]
         @test any(startswith(reason), atomics_errors(body))
     end
-    if LLVM.version() >= v"17"
+    # (vector operands of floating-point atomicrmw are only accepted since LLVM 19)
+    if LLVM.version() >= v"19"
         @test atomics_errors("%r = atomicrmw fadd ptr addrspace(1) %g, <2 x float> zeroinitializer monotonic, align 8") ==
               ["atomic operation on a <2 x float> value"]
     end
