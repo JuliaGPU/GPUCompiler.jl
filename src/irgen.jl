@@ -190,6 +190,10 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
         "jl_eof_error"                  => "EOF error",
     ]
 
+    # Julia's codegen replaces an `llvmcall` of an intrinsic it doesn't know (e.g. one
+    # removed from LLVM) by a run-time `jl_error`. report those at compile time instead.
+    errors = IRError[]
+
     for f in functions(mod)
         fn = LLVM.name(f)
         for (throw_fn, name) in throw_functions
@@ -197,6 +201,9 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
 
             for use in uses(f)
                 call = user(use)::LLVM.CallInst
+                if is_unknown_intrinsic_error(call)
+                    push!(errors, (UNKNOWN_INTRINSIC, backtrace(call), nothing))
+                end
 
                 # replace the throw with a PTX-compatible exception
                 @dispose builder=IRBuilder() begin
@@ -232,6 +239,7 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
      end
 
     end
+    isempty(errors) || throw(InvalidIRError(job, errors))
     return changed
 end
 
@@ -356,6 +364,29 @@ function inline_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::
     end
     end
 
+    return changed
+end
+
+# demote unordered atomic loads and stores to plain ones
+#
+# Julia marks accesses to heap references `unordered` so that a read racing with the GC, or
+# with another thread's write, cannot observe a torn pointer. There is no device GC and no
+# such race for GPUCompiler to protect against, so the ordering carries no meaning here, but
+# not every back-end can express it: SPIR-V's OpAtomicLoad/OpAtomicStore only take scalar
+# integer or floating-point operands, so the Khronos translator turns an `unordered` load of a
+# pointer into an invalid pointer-typed atomic that consumers reject (Intel's compiler fails
+# with an undefined `__spirv_AtomicLoad(long**, int, int)`), and AIR has no atomic load or
+# store instructions at all. Run after optimization, where dropping the ordering cannot
+# enable new transformations; stronger orderings are left intact.
+function demote_unordered_atomics!(mod::LLVM.Module)
+    changed = false
+    for f in functions(mod), bb in blocks(f), inst in instructions(bb)
+        (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) || continue
+        is_atomic(inst) || continue
+        ordering(inst) == LLVM.API.LLVMAtomicOrderingUnordered || continue
+        ordering!(inst, LLVM.API.LLVMAtomicOrderingNotAtomic)
+        changed = true
+    end
     return changed
 end
 

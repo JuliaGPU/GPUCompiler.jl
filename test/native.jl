@@ -362,6 +362,25 @@ end
     end
 end
 
+@testset "atomic field modifications" begin
+    # from Julia 1.13, `@atomic x.f += 1` is a call to the `julia.atomicmodify`
+    # pseudo-intrinsic, which has to be expanded (JuliaLang/julia#57010)
+    mod = @eval module $(gensym())
+        mutable struct Counter
+            @atomic n::Int
+        end
+        function increment(c::Counter)
+            @atomic c.n += 1
+            return
+        end
+    end
+
+    @test @filecheck implicit_check_not=["julia.atomicmodify"] begin
+        @check "{{atomicrmw add|cmpxchg}}"
+        Native.code_llvm(mod.increment, Tuple{mod.Counter})
+    end
+end
+
 @testset "tracked pointers" begin
     mod = @eval module $(gensym())
         function kernel(a)
@@ -619,6 +638,19 @@ end
          occursin(GPUCompiler.DYNAMIC_CALL, msg)) &&
         occursin("[1] println", msg) &&
         occursin("[2] foobar", msg)
+    end
+end
+
+@testset "unknown intrinsics" begin
+    # Julia's codegen lowers these to a run-time error, which we report at compile time
+    mod = @eval module $(gensym())
+        kernel() = (ccall("llvm.nonexistent.intrinsic", llvmcall, Cvoid, ()); return)
+    end
+
+    @test_throws_message(InvalidIRError,
+                         Native.code_execution(mod.kernel, Tuple{})) do msg
+        occursin(GPUCompiler.UNKNOWN_INTRINSIC, msg) &&
+        occursin(r"\[\d+\] kernel", msg)
     end
 end
 
