@@ -114,6 +114,10 @@ function finish_ir!(
             end
         end
     end
+
+    # after optimization, which can change address spaces, and also without validation
+    expand_atomics!(job, mod)
+
     return entry
 end
 
@@ -243,8 +247,139 @@ const AMDGPUObjectFile = Cint(1)
     return String(code)
 end
 
+# the version of the LLVM that generates code for the target, which can differ from the one
+# GPUCompiler runs in. only the release matters, so JLL rebuilds are ignored.
+function backend_llvm_version(target::GCNCompilerTarget)
+    target.backend === :external || return LLVM.version()
+    jll = get(Base.loaded_modules, getfield(AMDGPU_LLVM_Backend_jll, :pkg), nothing)
+    # (without the back-end, `mcgen` reports a clearer error)
+    jll === nothing && return LLVM.version()
+    version = pkgversion(jll)
+    return VersionNumber(version.major, version.minor, version.patch)
+end
+
+
+## validation
+
+# Atomic operations and fences come from many front-ends (AMDGPU.jl's atomic functions,
+# UnsafeAtomics and Atomix, Enzyme, Julia's atomic intrinsics), so they are validated here,
+# on the IR, rather than in any of them. The AMDGPU back-end does not reject everything the
+# target cannot run: Julia's LLVM emits calls to libatomic for oversized or misaligned
+# atomics, which only fail when loading the code object, some atomics abort instruction
+# selection, and the errors it does report don't point at the Julia code.
+# Validation runs after `lower_syncscopes!`, so the scopes are the ones AMDGPU knows.
+function validate_ir(job::CompilerJob{GCNCompilerTarget}, mod::LLVM.Module)
+    errors = IRError[]
+    dl = mod.datalayout
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        reason = if is_atomic_memop(inst)
+            gcn_atomic_error(job, dl, inst)
+        elseif inst isa LLVM.FenceInst
+            gcn_syncscope_error(job.config.target, inst, "fence")
+        else
+            nothing
+        end
+        reason === nothing || push!(errors, (reason, backtrace(inst), string(inst)))
+    end
+    return errors
+end
+
+# the synchronization scopes of AMDGPU, as `lower_syncscopes!` leaves them, and their
+# variants that only order the address space of the operation (`one-as`)
+const GCN_SYNCSCOPES = ("singlethread", "wavefront", "workgroup", "agent", "system",
+                        "singlethread-one-as", "wavefront-one-as", "workgroup-one-as",
+                        "agent-one-as", "one-as")
+
+function gcn_syncscope_error(target::GCNCompilerTarget, inst::LLVM.Instruction,
+                             what="atomic operation")
+    name = inst.syncscope.name
+    name in GCN_SYNCSCOPES && return nothing
+    # (a cluster is the agent on targets without workgroup clusters)
+    name in ("cluster", "cluster-one-as") && backend_llvm_version(target) >= v"22" &&
+        return nothing
+    return "$what with synchronization scope $(repr(name))"
+end
+
+# Why the target cannot run the atomic memory operation `inst`, or `nothing` if it can.
+# Operations without an instruction (e.g. 8- and 16-bit ones, or ones on private memory)
+# are fine: the back-end expands them.
+function gcn_atomic_error(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                          dl::LLVM.DataLayout, inst::LLVM.Instruction)
+    reason = gcn_syncscope_error(job.config.target, inst)
+    reason === nothing || return reason
+
+    # (constant memory isn't writable, and the region (GDS) and buffer resource address
+    # spaces abort instruction selection)
+    as = inst.pointer_operand.value_type.addrspace
+    if !(as in (0, 1, 3, 5, 7))
+        return "atomic operation in address space $as (GCN only supports atomics on flat, global, local, private and buffer memory)"
+    end
+
+    # (this includes packed floating-point values, which some targets support natively)
+    bits = Int(LLVM.bit_size(dl, atomic_value_type(inst)))
+    if bits > 64
+        return "$bits-bit atomic operation (GCN supports atomics of at most 64 bits)"
+    end
+    if inst.alignment < bits ÷ 8
+        return "atomic operation with alignment $(inst.alignment) (requires at least $(bits ÷ 8)-byte alignment)"
+    end
+
+    return nothing
+end
+
 
 ## LLVM passes
+
+# Expand atomic read-modify-writes that the back-end cannot compile to compare-exchange
+# loops. These work around bugs in the back-end, and should be revisited when updating it.
+function expand_atomics!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
+                         mod::LLVM.Module)
+    target = job.config.target
+    version = backend_llvm_version(target)
+    # (expansion changes the control flow, so collect the instructions first)
+    insts = LLVM.AtomicRMWInst[]
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        if inst isa LLVM.AtomicRMWInst && needs_cmpxchg_expansion(target, version, inst)
+            push!(insts, inst)
+        end
+    end
+    foreach(expand_to_cmpxchg!, insts)
+    return !isempty(insts)
+end
+
+# the operations AMDGPUAtomicOptimizer combines across a wavefront
+const OPTIMIZED_ATOMICRMW_OPS = let Op = LLVM.AtomicRMWBinOp
+    (Op.Add, Op.Sub, Op.And, Op.Or, Op.Xor, Op.Min, Op.Max, Op.UMin, Op.UMax)
+end
+
+function needs_cmpxchg_expansion(target::GCNCompilerTarget, version::VersionNumber,
+                                 inst::LLVM.AtomicRMWInst)
+    as = inst.pointer_operand.value_type.addrspace
+    T = inst.value_operand.value_type
+
+    # LLVM 22 selects 32-bit `usub_sat` on gfx10.3 and later, but lacks the pattern for
+    # flat memory, and for local memory before gfx12, failing with "Cannot select"
+    # (llvm/llvm-project#229442). Expand it on flat memory on every target, where LLVM
+    # otherwise expands it depending on the scope and metadata. AMDGPU_LLVM_Backend_jll
+    # carries the fix since 23.1.3, so only Julia's own LLVM needs this.
+    if target.backend === :inprocess && version >= v"22" &&
+       inst.binop == LLVM.AtomicRMWBinOp.USubSat && T isa LLVM.IntegerType && T.width == 32
+        as == 0 && return true
+        as == 3 && occursin(r"^gfx(103\d|11\d\d|10-3-generic|11(-\d+)?-generic)$",
+                            target.dev_isa) && return true
+    end
+
+    # Before LLVM 21, the atomic optimizer broadcasts the result of 8- and 16-bit operations
+    # on uniform addresses with an illegal `readfirstlane`, crashing the back-end
+    # (llvm/llvm-project#128388). Expand the operations it optimizes when their result is
+    # used, without trying to predict whether the address is uniform.
+    if version < v"21" && T isa LLVM.IntegerType && T.width in (8, 16) && as in (0, 1, 3) &&
+       inst.binop in OPTIMIZED_ATOMICRMW_OPS && !isempty(inst.uses)
+        return true
+    end
+
+    return false
+end
 
 function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
