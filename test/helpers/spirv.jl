@@ -154,6 +154,8 @@ function lower_atomics(body; globals="", kwargs...)
         finally
             locked && ccall(:jl_typeinf_lock_end, Cvoid, ())
         end
+        # (the disassembler writes CRLF line endings on Windows)
+        asm = replace(asm, "\r\n" => "\n")
         constants = Dict{String,String}()
         for m in eachmatch(r"^\s*(%\S+) = OpConstant %u?(?:int|long) (\d+)$"m, asm)
             constants[m[1]] = m[2]
