@@ -538,7 +538,7 @@ end
                 ret void
             }""")
         GPUCompiler.prepare_execution!(job, mod)
-        @test haskey(functions(mod), "jl_get_pgcstack_resolved")
+        @test haskey(mod.functions, "jl_get_pgcstack_resolved")
     end
 end
 

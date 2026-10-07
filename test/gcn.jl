@@ -169,16 +169,16 @@ end
         ir, meta = GPUCompiler.compile(:llvm, job)
 
         entry = meta.entry
-        ft = function_type(entry)
-        params = parameters(ft)
+        ft = entry.function_type
+        params = ft.parameters
 
         # the struct byref param should be ptr addrspace(4)
-        has_as4 = any(p -> p isa LLVM.PointerType && addrspace(p) == 4, params)
+        has_as4 = any(p -> p isa LLVM.PointerType && p.addrspace == 4, params)
         @test has_as4
 
         # non-struct params (double, and i64/ptr for Ptr{Float64}) should NOT
         # be in addrspace(4). Ptr{Float64} is i64 on Julia ≤1.11, ptr on 1.12+.
-        non_byref = filter(p -> !(p isa LLVM.PointerType && addrspace(p) == 4), params)
+        non_byref = filter(p -> !(p isa LLVM.PointerType && p.addrspace == 4), params)
         @test !isempty(non_byref)  # double (and i64 or ptr) params
 
         # byref attribute must be present

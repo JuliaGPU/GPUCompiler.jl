@@ -184,9 +184,9 @@ end
     @dispose ctx=Context() begin
         mod = parse(LLVM.Module, ir)
         GPUCompiler.merge_byte_gep_chains!(mod)
-        f = functions(mod)["k"]
-        ngep = sum(bb -> count(i -> i isa LLVM.GetElementPtrInst, collect(instructions(bb))),
-                   collect(blocks(f)))
+        f = mod.functions["k"]
+        ngep = sum(bb -> count(i -> i isa LLVM.GetElementPtrInst, collect(bb.instructions)),
+                   collect(f.blocks))
         @test ngep == 1
     end
 end
@@ -405,16 +405,16 @@ end
         f = LLVM.Function(mod, "f", LLVM.FunctionType(T_void, [T_p1]))
         @dispose builder=IRBuilder() begin
             entry = BasicBlock(f, "entry")
-            position!(builder, entry)
-            p0 = addrspacecast!(builder, parameters(f)[1], T_p0)
+            position!(builder, LLVM.at_end(entry))
+            p0 = addrspacecast!(builder, f.parameters[1], T_p0)
             sel = select!(builder, ConstantInt(T_i1, 1), p0, null(T_p0))
             cmp = icmp!(builder, LLVM.API.LLVMIntEQ, sel, null(T_p0))
             ok = BasicBlock(f, "ok")
             fail = BasicBlock(f, "fail")
             br!(builder, cmp, fail, ok)
-            position!(builder, ok)
+            position!(builder, LLVM.at_end(ok))
             ret!(builder)
-            position!(builder, fail)
+            position!(builder, LLVM.at_end(fail))
             ret!(builder)
         end
 
@@ -444,58 +444,58 @@ end
         i8 = LLVM.Int8Type()
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[asptr(0)])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        linkage!(callee, callee_linkage)
+        callee.linkage = callee_linkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(callee, "entry"))
-            v = load!(builder, i8, parameters(callee)[1])
+            position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
+            v = load!(builder, i8, callee.parameters[1])
             if recursive
                 # a (would-be infinite) self-call passing a constant global, only to
                 # exercise the recursion path; not meant to run.
                 g = GlobalVariable(mod, i8, "gself", caller_src_as[1])
-                initializer!(g, ConstantInt(i8, 7)); constant!(g, true)
+                g.initializer = ConstantInt(i8, 7); g.constant = true
                 call!(builder, callee_ft, callee, [const_addrspacecast(g, asptr(0))])
             end
             ret!(builder, v)
         end
         for (n, as) in enumerate(caller_src_as)
             g = GlobalVariable(mod, i8, "g$n", as)
-            initializer!(g, ConstantInt(i8, n)); constant!(g, true)
+            g.initializer = ConstantInt(i8, n); g.constant = true
             caller = LLVM.Function(mod, "caller$n", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-            linkage!(caller, LLVM.API.LLVMInternalLinkage)
+            caller.linkage = LLVM.API.LLVMInternalLinkage
             @dispose builder=IRBuilder() begin
-                position!(builder, BasicBlock(caller, "entry"))
+                position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
                 ret!(builder, call!(builder, callee_ft, callee,
                                     [const_addrspacecast(g, asptr(0))]))
             end
         end
         if address_taken
             # a non-call use of the callee: stash its address in a global
-            initializer!(GlobalVariable(mod, value_type(callee), "fp"), callee)
+            GlobalVariable(mod, callee.value_type, "fp").initializer = callee
         end
         return mod
     end
 
-    callee_param_as(mod) = addrspace(parameters(function_type(functions(mod)["callee"]))[1])
+    callee_param_as(mod) = mod.functions["callee"].function_type.parameters[1].addrspace
     function calls_to(mod, fname)
-        f = functions(mod)[fname]
-        [inst for g in functions(mod) for bb in blocks(g) for inst in instructions(bb)
-              if inst isa LLVM.CallInst && called_operand(inst) == f]
+        f = mod.functions[fname]
+        [inst for g in mod.functions for bb in g.blocks for inst in bb.instructions
+              if inst isa LLVM.CallInst && inst.called_operand == f]
     end
 
     # all callers agree -> the parameter is narrowed; attributes survive; IR stays valid
     Context() do ctx
         mod = narrowing_module([2, 2])
-        callee = functions(mod)["callee"]
-        push!(parameter_attributes(callee, 1), EnumAttribute("nonnull", 0))
-        push!(function_attributes(callee), EnumAttribute("nounwind", 0))
+        callee = mod.functions["callee"]
+        push!(callee.parameter_attributes[1], EnumAttribute("nonnull", 0))
+        push!(callee.function_attributes, EnumAttribute("nounwind", 0))
 
         @test GPUCompiler.propagate_argument_address_spaces!(mod)
         @test callee_param_as(mod) == 2
-        @test all(c -> addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "callee"))
+        @test all(c -> c.arguments[1].value_type.addrspace == 2, calls_to(mod, "callee"))
 
-        callee = functions(mod)["callee"]
-        @test kind(EnumAttribute("nonnull", 0)) in kind.(collect(parameter_attributes(callee, 1)))
-        @test kind(EnumAttribute("nounwind", 0)) in kind.(collect(function_attributes(callee)))
+        callee = mod.functions["callee"]
+        @test EnumAttribute("nonnull", 0).kind in [a.kind for a in callee.parameter_attributes[1]]
+        @test EnumAttribute("nounwind", 0).kind in [a.kind for a in callee.function_attributes]
         @test (verify(mod); true)
     end
 
@@ -527,7 +527,7 @@ end
         @test GPUCompiler.propagate_argument_address_spaces!(mod)
         @test callee_param_as(mod) == 2
         @test length(calls_to(mod, "callee")) == 2
-        @test all(c -> addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "callee"))
+        @test all(c -> c.arguments[1].value_type.addrspace == 2, calls_to(mod, "callee"))
         @test (verify(mod); true)
     end
 
@@ -538,16 +538,16 @@ end
         i8 = LLVM.Int8Type()
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[asptr(0)])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        linkage!(callee, LLVM.API.LLVMInternalLinkage)
+        callee.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(callee, "entry"))
-            ret!(builder, load!(builder, i8, parameters(callee)[1]))
+            position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
+            ret!(builder, load!(builder, i8, callee.parameters[1]))
         end
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[asptr(1)]))
-        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        caller.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(caller, "entry"))
-            gen = addrspacecast!(builder, parameters(caller)[1], asptr(0))
+            position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
+            gen = addrspacecast!(builder, caller.parameters[1], asptr(0))
             ret!(builder, call!(builder, callee_ft, callee, [gen]))
         end
 
@@ -570,19 +570,19 @@ end
         mod = LLVM.Module("test")
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        linkage!(callee, LLVM.API.LLVMInternalLinkage)
+        callee.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(callee, "entry"))
-            p = inttoptr!(builder, parameters(callee)[1], asptr(0))
+            position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
+            p = inttoptr!(builder, callee.parameters[1], asptr(0))
             ret!(builder, load!(builder, i8, p))
         end
         for n in 1:2
             g = GlobalVariable(mod, i8, "g$n", 2)
-            initializer!(g, ConstantInt(i8, n)); constant!(g, true)
+            g.initializer = ConstantInt(i8, n); g.constant = true
             caller = LLVM.Function(mod, "caller$n", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-            linkage!(caller, LLVM.API.LLVMInternalLinkage)
+            caller.linkage = LLVM.API.LLVMInternalLinkage
             @dispose builder=IRBuilder() begin
-                position!(builder, BasicBlock(caller, "entry"))
+                position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
                 arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
                 ret!(builder, call!(builder, callee_ft, callee, [arg]))
             end
@@ -590,13 +590,13 @@ end
 
         if ptr_args_lowered_to_int
             @test GPUCompiler.propagate_argument_address_spaces!(mod)
-            param = parameters(function_type(functions(mod)["callee"]))[1]
-            @test param isa LLVM.PointerType && addrspace(param) == 2
-            @test all(c -> value_type(arguments(c)[1]) isa LLVM.PointerType &&
-                           addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "callee"))
+            param = mod.functions["callee"].function_type.parameters[1]
+            @test param isa LLVM.PointerType && param.addrspace == 2
+            @test all(c -> c.arguments[1].value_type isa LLVM.PointerType &&
+                           c.arguments[1].value_type.addrspace == 2, calls_to(mod, "callee"))
         else
             @test !GPUCompiler.propagate_argument_address_spaces!(mod)
-            @test parameters(function_type(functions(mod)["callee"]))[1] == i64
+            @test mod.functions["callee"].function_type.parameters[1] == i64
         end
         @test (verify(mod); true)
     end
@@ -613,22 +613,22 @@ end
         mod = LLVM.Module("test")
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        linkage!(callee, LLVM.API.LLVMInternalLinkage)
-        push!(parameter_attributes(callee, 1), EnumAttribute("zeroext", 0))
+        callee.linkage = LLVM.API.LLVMInternalLinkage
+        push!(callee.parameter_attributes[1], EnumAttribute("zeroext", 0))
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(callee, "entry"))
-            p = inttoptr!(builder, parameters(callee)[1], asptr(0))
+            position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
+            p = inttoptr!(builder, callee.parameters[1], asptr(0))
             ret!(builder, load!(builder, i8, p))
         end
         g = GlobalVariable(mod, i8, "g", 2)
-        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        g.initializer = ConstantInt(i8, 1); g.constant = true
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        caller.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(caller, "entry"))
+            position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
             cs = call!(builder, callee_ft, callee, [arg])
-            push!(argument_attributes(cs, 1), EnumAttribute("zeroext", 0))
+            push!(cs.argument_attributes[1], EnumAttribute("zeroext", 0))
             ret!(builder, cs)
         end
         @test (verify(mod); true)  # `zeroext` on the i64 boundary is valid pre-narrowing
@@ -636,11 +636,11 @@ end
         if ptr_args_lowered_to_int
             @test GPUCompiler.propagate_argument_address_spaces!(mod)
             # the retargeted pointer must not keep the integer's `zeroext`, on either side
-            callee = functions(mod)["callee"]
-            @test !(kind(EnumAttribute("zeroext", 0)) in
-                    kind.(collect(parameter_attributes(callee, 1))))
-            @test all(c -> !(kind(EnumAttribute("zeroext", 0)) in
-                             kind.(collect(argument_attributes(c, 1)))), calls_to(mod, "callee"))
+            callee = mod.functions["callee"]
+            @test !(EnumAttribute("zeroext", 0).kind in
+                    [a.kind for a in callee.parameter_attributes[1]])
+            @test all(c -> !(EnumAttribute("zeroext", 0).kind in
+                             [a.kind for a in c.argument_attributes[1]]), calls_to(mod, "callee"))
         else
             @test !GPUCompiler.propagate_argument_address_spaces!(mod)
         end
@@ -656,27 +656,27 @@ end
         mod = LLVM.Module("test")
         callee_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
         callee = LLVM.Function(mod, "callee", callee_ft)
-        linkage!(callee, LLVM.API.LLVMInternalLinkage)
+        callee.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(callee, "entry"))
-            p = inttoptr!(builder, parameters(callee)[1], asptr(0))
+            position!(builder, LLVM.at_end(BasicBlock(callee, "entry")))
+            p = inttoptr!(builder, callee.parameters[1], asptr(0))
             v = load!(builder, i8, p)
             # a second, non-`inttoptr` use of the integer parameter
-            extra = trunc!(builder, add!(builder, parameters(callee)[1], parameters(callee)[1]), i8)
+            extra = trunc!(builder, add!(builder, callee.parameters[1], callee.parameters[1]), i8)
             ret!(builder, add!(builder, v, extra))
         end
         g = GlobalVariable(mod, i8, "g", 2)
-        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        g.initializer = ConstantInt(i8, 1); g.constant = true
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        caller.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(caller, "entry"))
+            position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
             ret!(builder, call!(builder, callee_ft, callee, [arg]))
         end
 
         @test !GPUCompiler.propagate_argument_address_spaces!(mod)
-        @test parameters(function_type(functions(mod)["callee"]))[1] == i64
+        @test mod.functions["callee"].function_type.parameters[1] == i64
     end
 
     # a two-level delegation chain (caller -> mid -> leaf) needs the fixpoint: one sweep
@@ -686,31 +686,31 @@ end
         mod = LLVM.Module("test")
         i8 = LLVM.Int8Type()
         ft = LLVM.FunctionType(i8, LLVM.LLVMType[asptr(0)])
-        param_as(name) = addrspace(parameters(function_type(functions(mod)[name]))[1])
+        param_as(name) = mod.functions[name].function_type.parameters[1].addrspace
 
         # leaf: loads through its generic pointer parameter
         leaf = LLVM.Function(mod, "leaf", ft)
-        linkage!(leaf, LLVM.API.LLVMInternalLinkage)
+        leaf.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(leaf, "entry"))
-            ret!(builder, load!(builder, i8, parameters(leaf)[1]))
+            position!(builder, LLVM.at_end(BasicBlock(leaf, "entry")))
+            ret!(builder, load!(builder, i8, leaf.parameters[1]))
         end
 
         # mid: forwards its generic pointer parameter to leaf
         mid = LLVM.Function(mod, "mid", ft)
-        linkage!(mid, LLVM.API.LLVMInternalLinkage)
+        mid.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(mid, "entry"))
-            ret!(builder, call!(builder, ft, leaf, [parameters(mid)[1]]))
+            position!(builder, LLVM.at_end(BasicBlock(mid, "entry")))
+            ret!(builder, call!(builder, ft, leaf, [mid.parameters[1]]))
         end
 
         # caller: passes a constant global (AS 2) cast to generic into mid
         g = GlobalVariable(mod, i8, "g", 2)
-        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        g.initializer = ConstantInt(i8, 1); g.constant = true
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        caller.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(caller, "entry"))
+            position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             ret!(builder, call!(builder, ft, mid, [const_addrspacecast(g, asptr(0))]))
         end
 
@@ -739,32 +739,32 @@ end
         i64 = LLVM.Int64Type()
         mod = LLVM.Module("test")
         int_ft = LLVM.FunctionType(i8, LLVM.LLVMType[i64])
-        param_ty(name) = parameters(function_type(functions(mod)[name]))[1]
+        param_ty(name) = mod.functions[name].function_type.parameters[1]
 
         # leaf: inttoptrs its integer parameter and loads through it
         leaf = LLVM.Function(mod, "leaf", int_ft)
-        linkage!(leaf, LLVM.API.LLVMInternalLinkage)
+        leaf.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(leaf, "entry"))
-            p = inttoptr!(builder, parameters(leaf)[1], asptr(0))
+            position!(builder, LLVM.at_end(BasicBlock(leaf, "entry")))
+            p = inttoptr!(builder, leaf.parameters[1], asptr(0))
             ret!(builder, load!(builder, i8, p))
         end
 
         # mid: forwards its integer parameter on to leaf (no inttoptr of its own)
         mid = LLVM.Function(mod, "mid", int_ft)
-        linkage!(mid, LLVM.API.LLVMInternalLinkage)
+        mid.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(mid, "entry"))
-            ret!(builder, call!(builder, int_ft, leaf, [parameters(mid)[1]]))
+            position!(builder, LLVM.at_end(BasicBlock(mid, "entry")))
+            ret!(builder, call!(builder, int_ft, leaf, [mid.parameters[1]]))
         end
 
         # caller: passes a constant global (AS 2) as ptrtoint(addrspacecast(... -> generic))
         g = GlobalVariable(mod, i8, "g", 2)
-        initializer!(g, ConstantInt(i8, 1)); constant!(g, true)
+        g.initializer = ConstantInt(i8, 1); g.constant = true
         caller = LLVM.Function(mod, "caller", LLVM.FunctionType(i8, LLVM.LLVMType[]))
-        linkage!(caller, LLVM.API.LLVMInternalLinkage)
+        caller.linkage = LLVM.API.LLVMInternalLinkage
         @dispose builder=IRBuilder() begin
-            position!(builder, BasicBlock(caller, "entry"))
+            position!(builder, LLVM.at_end(BasicBlock(caller, "entry")))
             arg = const_ptrtoint(const_addrspacecast(g, asptr(0)), i64)
             ret!(builder, call!(builder, int_ft, mid, [arg]))
         end
@@ -773,16 +773,16 @@ end
             # Phase 1: a single sweep de-integerizes only the forwarding `mid` (to a generic
             # pointer); the fixpoint is needed before `leaf` is exposed
             @test GPUCompiler.convert_intptr_args_once!(mod)
-            @test param_ty("mid") isa LLVM.PointerType && addrspace(param_ty("mid")) == 0
+            @test param_ty("mid") isa LLVM.PointerType && param_ty("mid").addrspace == 0
             @test param_ty("leaf") == i64
 
             # the full pass de-integerizes the rest (Phase 1) and narrows everything to the
             # global's space (Phase 2)
             @test GPUCompiler.propagate_argument_address_spaces!(mod)
-            @test param_ty("leaf") isa LLVM.PointerType && addrspace(param_ty("leaf")) == 2
+            @test param_ty("leaf") isa LLVM.PointerType && param_ty("leaf").addrspace == 2
             # callers end up passing the bare global, not a ptrtoint(addrspacecast(...))
-            @test all(c -> value_type(arguments(c)[1]) isa LLVM.PointerType &&
-                           addrspace(value_type(arguments(c)[1])) == 2, calls_to(mod, "mid"))
+            @test all(c -> c.arguments[1].value_type isa LLVM.PointerType &&
+                           c.arguments[1].value_type.addrspace == 2, calls_to(mod, "mid"))
         else
             # shim off once `Ptr` is a pointer (>= 1.12.0-DEV.225): both stay integers, nothing narrows
             @test !GPUCompiler.propagate_argument_address_spaces!(mod)
@@ -798,10 +798,10 @@ end
     # which LLVM's vectorizers can widen to vector form. Lowering a vector intrinsic directly
     # would emit a nonexistent air.fmin.v4f32-style call (minnum/maxnum) or hit an unsupported-
     # type error (minimum/maximum), so we scalarize into element-wise scalar intrinsic calls.
-    is_vec_minmax(i) = i isa LLVM.CallBase && value_type(i) isa LLVM.VectorType &&
-        called_operand(i) isa LLVM.Function &&
-        LLVM.isintrinsic(called_operand(i)) &&
-        LLVM.Intrinsic(called_operand(i)) in
+    is_vec_minmax(i) = i isa LLVM.CallBase && i.value_type isa LLVM.VectorType &&
+        i.called_operand isa LLVM.Function &&
+        LLVM.isintrinsic(i.called_operand) &&
+        LLVM.Intrinsic(i.called_operand) in
             LLVM.Intrinsic.(["llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum"])
 
     Context() do ctx
@@ -818,8 +818,8 @@ end
         }
         """
         mod = parse(LLVM.Module, ir)
-        f = functions(mod)["f"]
-        insts() = [i for bb in blocks(f) for i in instructions(bb)]
+        f = mod.functions["f"]
+        insts() = [i for bb in f.blocks for i in bb.instructions]
 
         # precondition: a vector minimum (width 4) and a vector maxnum (width 2)
         @test count(is_vec_minmax, insts()) == 2
@@ -829,12 +829,12 @@ end
         # no vector min/max calls survive; each is replaced by per-lane scalar intrinsic calls
         @test count(is_vec_minmax, insts()) == 0
         scalar_calls = filter(insts()) do i
-            i isa LLVM.CallBase && value_type(i) == LLVM.FloatType() &&
-                called_operand(i) isa LLVM.Function &&
-                LLVM.isintrinsic(called_operand(i))
+            i isa LLVM.CallBase && i.value_type == LLVM.FloatType() &&
+                i.called_operand isa LLVM.Function &&
+                LLVM.isintrinsic(i.called_operand)
         end
         @test length(scalar_calls) == 6   # 4 from the v4f32 + 2 from the v2f32
-        @test Set(LLVM.name(called_operand(c)) for c in scalar_calls) ==
+        @test Set(c.called_operand.name for c in scalar_calls) ==
             Set(["llvm.minimum.f32", "llvm.maxnum.f32"])
         @test (verify(mod); true)
     end
@@ -849,7 +849,7 @@ end
         }
         """
         mod = parse(LLVM.Module, ir)
-        @test !GPUCompiler.scalarize_vector_minmax!(functions(mod)["g"])
+        @test !GPUCompiler.scalarize_vector_minmax!(mod.functions["g"])
         @test (verify(mod); true)
     end
 end
@@ -862,10 +862,10 @@ end
     # via llvm.rint (Julia lowers round-to-even to it).
     function called_names(f)
         names = String[]
-        for bb in blocks(f), i in instructions(bb)
+        for bb in f.blocks, i in bb.instructions
             i isa LLVM.CallBase || continue
-            c = called_operand(i)
-            c isa LLVM.Function && push!(names, LLVM.name(c))
+            c = i.called_operand
+            c isa LLVM.Function && push!(names, c.name)
         end
         names
     end
@@ -907,7 +907,7 @@ end
         }
         """
         mod = parse(LLVM.Module, ir)
-        f = functions(mod)["f"]
+        f = mod.functions["f"]
         @test GPUCompiler.lower_math_intrinsics!(f)
         names = called_names(f)
 
@@ -953,7 +953,7 @@ end
         """
         mod = parse(LLVM.Module, ir)
         GPUCompiler.apply_fastmath!(mod)
-        f = functions(mod)["f"]
+        f = mod.functions["f"]
         @test GPUCompiler.lower_math_intrinsics!(f)
         @test "air.fast_sqrt.f32" in called_names(f)
         @test (verify(mod); true)
@@ -1024,21 +1024,21 @@ end
         println(ir, "declare i1 @llvm.vector.reduce.smax.v3i1(<3 x i1>)")
         println(ir, "define i1 @smax_i1(<3 x i1> %v) {\n  %r = call i1 @llvm.vector.reduce.smax.v3i1(<3 x i1> %v)\n  ret i1 %r\n}")
         mod = parse(LLVM.Module, String(take!(ir)))
-        insts(f) = [i for bb in blocks(f) for i in instructions(bb)]
-        callees(f) = [LLVM.name(called_operand(i)) for i in insts(f) if i isa LLVM.CallBase]
-        for f in functions(mod)
+        insts(f) = [i for bb in f.blocks for i in bb.instructions]
+        callees(f) = [i.called_operand.name for i in insts(f) if i isa LLVM.CallBase]
+        for f in mod.functions
             isdeclaration(f) && continue
             GPUCompiler.lower_llvm_intrinsics!(job, f)
             @test !any(startswith("llvm."), callees(f))
         end
         # the ordered reduction continues from its start value, with the call's fast-math flags
-        f = functions(mod)["fadd3"]
+        f = mod.functions["fadd3"]
         adds = filter(i -> i isa LLVM.FAddInst, insts(f))
         @test length(adds) == 3
-        @test operands(first(adds))[1] == parameters(f)[1]
-        @test all(i -> LLVM.fast_math(i).nnan, adds)
-        @test "air.fmin.f32" in callees(functions(mod)["fmin4"])
-        @test isempty(callees(functions(mod)["smax_i1"]))  # `and` on i1 lanes
+        @test first(first(adds).operands) == first(f.parameters)
+        @test all(i -> i.fast_math.nnan, adds)
+        @test "air.fmin.f32" in callees(mod.functions["fmin4"])
+        @test isempty(callees(mod.functions["smax_i1"]))  # `and` on i1 lanes
         @test (verify(mod); true)
     end
 
@@ -1086,14 +1086,14 @@ end
         }
         """
         mod = parse(LLVM.Module, ir)
-        f = functions(mod)["f"]
+        f = mod.functions["f"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
 
         sigs = Dict{String,String}()
-        for bb in blocks(f), i in instructions(bb)
+        for bb in f.blocks, i in bb.instructions
             i isa LLVM.CallBase || continue
-            c = called_operand(i)
-            c isa LLVM.Function && (sigs[LLVM.name(c)] = string(LLVM.function_type(c)))
+            c = i.called_operand
+            c isa LLVM.Function && (sigs[c.name] = string(c.function_type))
         end
         # abs drops the i1 poison operand
         @test haskey(sigs, "air.abs.s.i32") && sigs["air.abs.s.i32"] == "i32 (i32)"
@@ -1145,10 +1145,10 @@ end
                       ret i1 %r
                     }"""
                 mod = parse(LLVM.Module, ir)
-                f = functions(mod)["f"]
+                f = mod.functions["f"]
                 GPUCompiler.lower_llvm_intrinsics!(job, f)
-                ret = only(filter(i -> i isa LLVM.RetInst, collect(instructions(entry(f)))))
-                @test convert(Bool, operands(ret)[1]) == (mask & (1 << fpclass(x)) != 0)
+                ret = only(filter(i -> i isa LLVM.RetInst, collect(f.entry.instructions)))
+                @test convert(Bool, first(ret.operands)) == (mask & (1 << fpclass(x)) != 0)
             end
         end
     end
@@ -1162,8 +1162,8 @@ end
         f() = return
     end
     job, _ = Metal.create_job(km.f, Tuple{})
-    names(f) = [LLVM.name(called_operand(i)) for bb in blocks(f) for i in instructions(bb)
-                if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
+    names(f) = [i.called_operand.name for bb in f.blocks for i in bb.instructions
+                if i isa LLVM.CallBase && i.called_operand isa LLVM.Function]
 
     Context() do ctx
         ir = """
@@ -1176,7 +1176,7 @@ end
           ret void
         }
         """
-        mod = parse(LLVM.Module, ir); f = functions(mod)["f"]
+        mod = parse(LLVM.Module, ir); f = mod.functions["f"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
         ns = names(f)
         @test "air.minimum.f32" in ns          # precise: NaN-propagating wrapper
@@ -1197,12 +1197,12 @@ end
         f() = return
     end
     job, _ = Metal.create_job(km.f, Tuple{})
-    names(f) = [LLVM.name(called_operand(i)) for bb in blocks(f) for i in instructions(bb)
-                if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
-    air_calls(f) = [i for bb in blocks(f) for i in instructions(bb)
-                    if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function &&
-                       startswith(LLVM.name(called_operand(i)), "air.")]
-    has(f, T) = any(i -> i isa T, (i for bb in blocks(f) for i in instructions(bb)))
+    names(f) = [i.called_operand.name for bb in f.blocks for i in bb.instructions
+                if i isa LLVM.CallBase && i.called_operand isa LLVM.Function]
+    air_calls(f) = [i for bb in f.blocks for i in bb.instructions
+                    if i isa LLVM.CallBase && i.called_operand isa LLVM.Function &&
+                       startswith(i.called_operand.name, "air.")]
+    has(f, T) = any(i -> i isa T, (i for bb in f.blocks for i in bb.instructions))
 
     # the value intrinsics (fabs/minnum/maxnum) map to air.*.f32 around fpext/fptrunc
     Context() do ctx
@@ -1217,7 +1217,7 @@ end
           ret bfloat %z
         }
         """
-        mod = parse(LLVM.Module, ir); f = functions(mod)["f"]
+        mod = parse(LLVM.Module, ir); f = mod.functions["f"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
         ns = names(f)
         @test "air.fabs.f32" in ns
@@ -1225,7 +1225,7 @@ end
         @test "air.fmax.f32" in ns
         @test !any(startswith(n, "llvm.") for n in ns)
         # the AIR calls operate on float; the bfloat lives only in the fpext/fptrunc bridges
-        @test all(c -> value_type(c) == LLVM.FloatType(), air_calls(f))
+        @test all(c -> c.value_type == LLVM.FloatType(), air_calls(f))
         @test has(f, LLVM.FPExtInst) && has(f, LLVM.FPTruncInst)
         @test (verify(mod); true)
     end
@@ -1242,13 +1242,13 @@ end
           ret bfloat %z
         }
         """
-        mod = parse(LLVM.Module, ir); f = functions(mod)["g"]
+        mod = parse(LLVM.Module, ir); f = mod.functions["g"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
         ns = names(f)
         @test "air.minimum.f32" in ns
         @test "air.maximum.f32" in ns
         @test !("air.minimum.f16" in ns)
-        @test all(c -> value_type(c) == LLVM.FloatType(), air_calls(f))
+        @test all(c -> c.value_type == LLVM.FloatType(), air_calls(f))
         @test has(f, LLVM.FPExtInst) && has(f, LLVM.FPTruncInst)
         @test (verify(mod); true)
     end
@@ -1262,7 +1262,7 @@ end
           ret bfloat %y
         }
         """
-        mod = parse(LLVM.Module, ir); f = functions(mod)["h"]
+        mod = parse(LLVM.Module, ir); f = mod.functions["h"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
         @test "air.fast_fmin.f32" in names(f)
         @test (verify(mod); true)
@@ -1273,8 +1273,8 @@ end
     # chained integer min/max (e.g. min(a,b,c) reduced to nested 2-arg calls) is fused to AGX's
     # 3-way air.{min,max}3 builtin, but only when the inner result feeds just the outer and both
     # are the same builtin.
-    names(f) = [LLVM.name(called_operand(i)) for bb in blocks(f) for i in instructions(bb)
-                if i isa LLVM.CallBase && called_operand(i) isa LLVM.Function]
+    names(f) = [i.called_operand.name for bb in f.blocks for i in bb.instructions
+                if i isa LLVM.CallBase && i.called_operand isa LLVM.Function]
     Context() do ctx
         ir = """
         declare i32 @air.min.s.i32(i32, i32)
@@ -1302,14 +1302,14 @@ end
         }
         """
         mod = parse(LLVM.Module, ir)
-        @test GPUCompiler.fuse_minmax3!(functions(mod)["fold"])
-        @test names(functions(mod)["fold"]) == ["air.min3.s.i32"]
-        @test GPUCompiler.fuse_minmax3!(functions(mod)["fold_arg2"])
-        @test names(functions(mod)["fold_arg2"]) == ["air.max3.u.i32"]
+        @test GPUCompiler.fuse_minmax3!(mod.functions["fold"])
+        @test names(mod.functions["fold"]) == ["air.min3.s.i32"]
+        @test GPUCompiler.fuse_minmax3!(mod.functions["fold_arg2"])
+        @test names(mod.functions["fold_arg2"]) == ["air.max3.u.i32"]
         # inner feeds a store too -> not fused
-        @test !GPUCompiler.fuse_minmax3!(functions(mod)["multiuse"])
+        @test !GPUCompiler.fuse_minmax3!(mod.functions["multiuse"])
         # min of a max -> not the same builtin, not fused
-        @test !GPUCompiler.fuse_minmax3!(functions(mod)["mixed"])
+        @test !GPUCompiler.fuse_minmax3!(mod.functions["mixed"])
         @test (verify(mod); true)
     end
 end
@@ -1324,7 +1324,7 @@ end
     # back-end intact. (The typed-pointer syntax below parses to opaque pointers too, so this
     # covers both pointer regimes.)
     is_aggregate_load(i) = i isa LLVM.LoadInst &&
-        (value_type(i) isa LLVM.StructType || value_type(i) isa LLVM.ArrayType)
+        (i.value_type isa LLVM.StructType || i.value_type isa LLVM.ArrayType)
 
     # a multiply-used load, with both a top-level (`,0`) and a nested (`,2,0`) index
     Context() do ctx
@@ -1340,7 +1340,7 @@ end
         }
         """
         mod = parse(LLVM.Module, ir)
-        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
+        insts() = [i for f in mod.functions for bb in f.blocks for i in bb.instructions]
 
         # precondition: exactly one aggregate-typed load (used by the two extractvalues)
         @test count(is_aggregate_load, insts()) == 1
@@ -1352,9 +1352,9 @@ end
         @test !any(i -> i isa LLVM.ExtractValueInst, insts())
         loads = filter(i -> i isa LLVM.LoadInst, insts())
         @test length(loads) == 2
-        @test Set(string(value_type(l)) for l in loads) == Set(["i64", "float"])
+        @test Set(string(l.value_type) for l in loads) == Set(["i64", "float"])
         # each field load is fed by an inbounds GEP off the original pointer
-        @test all(l -> operands(l)[1] isa LLVM.GetElementPtrInst, loads)
+        @test all(l -> l.operands[1] isa LLVM.GetElementPtrInst, loads)
         @test (verify(mod); true)
     end
 
@@ -1371,7 +1371,7 @@ end
         }
         """
         mod = parse(LLVM.Module, ir)
-        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
+        insts() = [i for f in mod.functions for bb in f.blocks for i in bb.instructions]
         @test !GPUCompiler.split_aggregate_loads!(mod)
         @test count(is_aggregate_load, insts()) == 1
         @test (verify(mod); true)
@@ -1393,14 +1393,14 @@ end
         }
         """
         mod = parse(LLVM.Module, ir)
-        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
+        insts() = [i for f in mod.functions for bb in f.blocks for i in bb.instructions]
         memops() = filter(i -> i isa LLVM.LoadInst || i isa LLVM.StoreInst, insts())
 
-        @test count(is_atomic, memops()) == 4
+        @test count(isatomic, memops()) == 4
         @test GPUCompiler.demote_unordered_atomics!(mod)
-        atomics = filter(is_atomic, memops())
+        atomics = filter(isatomic, memops())
         @test length(atomics) == 2
-        @test all(i -> ordering(i) != LLVM.API.LLVMAtomicOrderingUnordered, atomics)
+        @test all(i -> i.ordering != LLVM.API.LLVMAtomicOrderingUnordered, atomics)
         @test !occursin("unordered", string(mod))
         @test (verify(mod); true)
         # idempotent
@@ -1457,7 +1457,7 @@ end
         target = MetalCompilerTarget(; macos=v"27", metal, air=v"2.9")
         CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
     end
-    fences(mod) = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)
+    fences(mod) = [i for f in mod.functions for bb in f.blocks for i in bb.instructions
                    if i isa LLVM.FenceInst]
 
     @testset "Metal $metal, existing declaration: $declared" for
@@ -1532,22 +1532,22 @@ end
         !8 = !{!"jnoalias_stack", !6}
         """
         mod = parse(LLVM.Module, ir)
-        insts() = [i for f in functions(mod) for bb in blocks(f) for i in instructions(bb)]
-        load(name) = only(i for i in insts() if i isa LLVM.LoadInst && LLVM.name(i) == name)
+        insts() = [i for f in mod.functions for bb in f.blocks for i in bb.instructions]
+        load(name) = only(i for i in insts() if i isa LLVM.LoadInst && i.name == name)
 
-        f = only(functions(mod))
+        f = only(mod.functions)
         arg_load = load("arg.load")
         other_load = load("other.load")
         stripped_metadata = (LLVM.MD_invariant_load, LLVM.MD_tbaa,
                              LLVM.MD_alias_scope, LLVM.MD_noalias)
 
-        @test all(kind -> haskey(metadata(arg_load), kind), stripped_metadata)
+        @test all(kind -> haskey(arg_load.metadata, kind), stripped_metadata)
 
         # strip uses derived from the first argument only
-        GPUCompiler.strip_julia_const_region_metadata_from_derived_uses!(parameters(f)[1])
+        GPUCompiler.strip_julia_const_region_metadata_from_derived_uses!(f.parameters[1])
 
-        @test all(kind -> !haskey(metadata(arg_load), kind), stripped_metadata)
-        @test all(kind -> haskey(metadata(other_load), kind), stripped_metadata)
+        @test all(kind -> !haskey(arg_load.metadata, kind), stripped_metadata)
+        @test all(kind -> haskey(other_load.metadata, kind), stripped_metadata)
         @test (verify(mod); true)
     end
 end

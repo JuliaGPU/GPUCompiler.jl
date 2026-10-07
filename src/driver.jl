@@ -154,32 +154,22 @@ end
 # `ccall("extern deferred_codegen", ...)`. Called from __init__.
 #
 # On 1.11+ this is needed due to a Julia bug that drops the pointer when code-coverage is
-# enabled. On 1.14+ (JuliaLang/julia#60988), `JITDylib(jljit)` returns a fresh private
-# dylib that JD does not search; instead, register the symbol in the `JuliaGlobals` JD,
-# which JD links to with `MatchExportedSymbolsOnly`.
+# enabled. On 1.14+ (JuliaLang/julia#60988), there is no shared external JITDylib anymore;
+# instead, register the symbol in the `JuliaGlobals` JD, which JD links to with
+# `MatchExportedSymbolsOnly`.
 function register_deferred_codegen()
     @dispose jljit=JuliaOJIT() begin
         jd = @static if VERSION >= v"1.14.0-DEV.2171"
-            es = ExecutionSession(jljit)
-            something(LLVM.lookup_dylib(es, "JuliaGlobals"))
+            es = jljit.execution_session
+            something(lookup_dylib(es, "JuliaGlobals"))
         else
-            JITDylib(jljit)
+            jljit.external_dylib
         end
 
-        address = LLVM.API.LLVMOrcJITTargetAddress(
-            reinterpret(UInt, @cfunction(deferred_codegen, Ptr{Cvoid}, (Ptr{Cvoid},))))
-        flags = LLVM.API.LLVMJITSymbolFlags(
-            LLVM.API.LLVMJITSymbolGenericFlagsExported, 0)
+        address = @cfunction(deferred_codegen, Ptr{Cvoid}, (Ptr{Cvoid},))
         name = mangle(jljit, "deferred_codegen")
-        symbol = LLVM.API.LLVMJITEvaluatedSymbol(address, flags)
-        map = if LLVM.version() >= v"15"
-            LLVM.API.LLVMOrcCSymbolMapPair(name, symbol)
-        else
-            LLVM.API.LLVMJITCSymbolMapPair(name, symbol)
-        end
-
-        mu = LLVM.absolute_symbols(Ref(map))
-        LLVM.define(jd, mu)
+        mu = absolute_symbols(name => address)
+        define!(jd, mu)
         addr = lookup(jljit, jd, "deferred_codegen")
         @assert addr != C_NULL "Failed to register deferred_codegen"
     end
@@ -197,11 +187,11 @@ const __llvm_initialized = Ref(false)
     end
 
     if !__llvm_initialized[]
-        InitializeAllTargets()
-        InitializeAllTargetInfos()
-        InitializeAllAsmPrinters()
-        InitializeAllAsmParsers()
-        InitializeAllTargetMCs()
+        LLVM.InitializeAllTargets()
+        LLVM.InitializeAllTargetInfos()
+        LLVM.InitializeAllAsmPrinters()
+        LLVM.InitializeAllAsmParsers()
+        LLVM.InitializeAllTargetMCs()
         __llvm_initialized[] = true
     end
 
@@ -212,7 +202,7 @@ const __llvm_initialized = Ref(false)
         else
             entry_fn = compiled[job.source].func
         end
-        entry = functions(ir)[entry_fn]
+        entry = ir.functions[entry_fn]
     end
 
     # finalize the current module. this needs to happen before linking deferred modules,
@@ -221,10 +211,10 @@ const __llvm_initialized = Ref(false)
 
     # deferred code generation
     has_deferred_jobs = job.config.toplevel && !job.config.only_entry &&
-                        haskey(functions(ir), "deferred_codegen")
+                        haskey(ir.functions, "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
     if has_deferred_jobs
-        dyn_marker = functions(ir)["deferred_codegen"]
+        dyn_marker = ir.functions["deferred_codegen"]
 
         # iterative compilation (non-recursive)
         changed = true
@@ -234,10 +224,10 @@ const __llvm_initialized = Ref(false)
             # find deferred compiler
             # TODO: recover this information earlier, from the Julia IR
             worklist = Dict{CompilerJob, Vector{LLVM.CallInst}}()
-            for use in uses(dyn_marker)
+            for use in dyn_marker.uses
                 # decode the call
-                call = user(use)::LLVM.CallInst
-                id = convert(Int, first(operands(call)))
+                call = use.user::LLVM.CallInst
+                id = convert(Int, first(call.operands))
 
                 global deferred_codegen_jobs
                 dyn_val = deferred_codegen_jobs[id]
@@ -269,23 +259,23 @@ const __llvm_initialized = Ref(false)
                     # We are potentially calling into a sibling compiler (Enzyme)
                     # which was loaded in a newer world.
                     dyn_ir, dyn_meta = @invokelatest deferred_codegen(dyn_job, job)
-                    dyn_entry_fn = LLVM.name(dyn_meta.entry)
+                    dyn_entry_fn = dyn_meta.entry.name
                     merge!(compiled, dyn_meta.compiled)
                     if haskey(dyn_meta, :gv_to_value)
                         merge!(gv_to_value, dyn_meta.gv_to_value)
                     end
-                    @assert context(dyn_ir) == context(ir)
+                    @assert dyn_ir.context == ir.context
                     link!(ir, dyn_ir)
                     changed = true
                     dyn_entry_fn
                 end
-                dyn_entry = functions(ir)[dyn_entry_fn]
+                dyn_entry = ir.functions[dyn_entry_fn]
 
                 # insert a pointer to the function everywhere the entry is used
                 T_ptr = convert(LLVMType, Ptr{Cvoid})
                 for call in worklist[dyn_job]
                     @dispose builder=IRBuilder() begin
-                        position!(builder, call)
+                        position!(builder, LLVM.before(call))
                         fptr = if LLVM.version() >= v"17"
                             T_ptr = LLVM.PointerType()
                             bitcast!(builder, dyn_entry, T_ptr)
@@ -302,8 +292,8 @@ const __llvm_initialized = Ref(false)
             end
 
             # minimal optimization to convert the inttoptr/call into a direct call
-            @dispose pb=NewPMPassBuilder() begin
-                add!(pb, NewPMFunctionPassManager()) do fpm
+            @dispose pb=PassBuilder() begin
+                add!(pb, FunctionPassManager()) do fpm
                     add!(fpm, instcombine_pass(job))
                 end
                 run!(pb, ir, llvm_machine(job.config.target))
@@ -311,7 +301,7 @@ const __llvm_initialized = Ref(false)
         end
 
         # all deferred compilations should have been resolved
-        @compiler_assert isempty(uses(dyn_marker)) job
+        @compiler_assert isempty(dyn_marker.uses) job
         erase!(dyn_marker)
     end
 
@@ -333,7 +323,7 @@ const __llvm_initialized = Ref(false)
                         "and link it with `LLVM.link!(mod, lib; only_needed=true)` — " *
                         "the linker will then materialize only the referenced symbols.",
                         :link_libraries!)
-                    undefined_fns = [LLVM.name(f) for f in functions(ir)
+                    undefined_fns = [f.name for f in ir.functions
                                      if isdeclaration(f) && !LLVM.isintrinsic(f)]
                     link_libraries!(job, ir, undefined_fns)
                 else
@@ -359,20 +349,12 @@ const __llvm_initialized = Ref(false)
             # global variables. this makes sure that the optimizer can, e.g.,
             # rewrite function signatures.
             preserved_gvs = collect(values(jobs))
-            for gvar in globals(ir)
-                if linkage(gvar) == LLVM.API.LLVMExternalLinkage
-                    push!(preserved_gvs, LLVM.name(gvar))
+            for gvar in ir.globals
+                if gvar.linkage == LLVM.API.LLVMExternalLinkage
+                    push!(preserved_gvs, gvar.name)
                 end
             end
-            if LLVM.version() >= v"17"
-                run!(InternalizePass(; preserved_gvs), ir,
-                     llvm_machine(job.config.target))
-            else
-                @dispose pm=ModulePassManager() begin
-                    internalize!(pm, preserved_gvs)
-                    run!(pm, ir)
-                end
-            end
+            run!(InternalizePass(; preserved_gvs), ir, llvm_machine(job.config.target))
 
             finish_linked_module!(job, ir)
 
@@ -384,12 +366,12 @@ const __llvm_initialized = Ref(false)
                     # which also need to happen _after_ regular optimization.
                     # XXX: make these part of the optimizer pipeline?
                     if has_deferred_jobs
-                        @dispose pb=NewPMPassBuilder() begin
-                            add!(pb, NewPMFunctionPassManager()) do fpm
+                        @dispose pb=PassBuilder() begin
+                            add!(pb, FunctionPassManager()) do fpm
                                 add!(fpm, instcombine_pass(job))
                             end
                             add!(pb, AlwaysInlinerPass())
-                            add!(pb, NewPMFunctionPassManager()) do fpm
+                            add!(pb, FunctionPassManager()) do fpm
                                 add!(fpm, SROAPass())
                                 add!(fpm, GVNPass())
                             end
@@ -402,7 +384,7 @@ const __llvm_initialized = Ref(false)
 
             if job.config.cleanup
                 @tracepoint "clean-up" begin
-                    @dispose pb=NewPMPassBuilder() begin
+                    @dispose pb=PassBuilder() begin
                         add!(pb, RecomputeGlobalsAAPass())
                         add!(pb, GlobalOptPass())
                         add!(pb, GlobalDCEPass())
@@ -414,7 +396,7 @@ const __llvm_initialized = Ref(false)
             end
 
             # optimization may have replaced functions, so look the entry point up again
-            entry = functions(ir)[entry_fn]
+            entry = ir.functions[entry_fn]
 
             # finish the module
             #
@@ -424,7 +406,7 @@ const __llvm_initialized = Ref(false)
             entry = finish_ir!(job, ir, entry)
             for (job′, fn′) in jobs
                 job′ == job && continue
-                finish_ir!(job′, ir, functions(ir)[fn′])
+                finish_ir!(job′, ir, ir.functions[fn′])
             end
         end
 
@@ -432,7 +414,7 @@ const __llvm_initialized = Ref(false)
         # NOTE: we can't do this before optimization, because the definitions of called
         #       functions may affect optimization.
         if job.config.only_entry
-            for f in functions(ir)
+            for f in ir.functions
                 f == entry && continue
                 isdeclaration(f) && continue
                 LLVM.isintrinsic(f) && continue

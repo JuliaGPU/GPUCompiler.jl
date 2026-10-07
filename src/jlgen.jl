@@ -769,42 +769,42 @@ const HAS_LLVM_GET_CIS = (
 # boxed value (fixed in 1.12). That's invalid IR on targets that put globals in another
 # address space, like SPIR-V, so turn those bitcasts into address space casts.
 function fix_small_typeof_casts!(mod::LLVM.Module)
-    haskey(globals(mod), "jl_small_typeof") || return false
+    haskey(mod.globals, "jl_small_typeof") || return false
 
     function isaddrspacechange(val)
-        isa(val, LLVM.ConstantExpr) && opcode(val) == LLVM.API.LLVMBitCast ||
+        isa(val, LLVM.ConstantExpr) && val.opcode == LLVM.API.LLVMBitCast ||
             isa(val, LLVM.BitCastInst) || return false
-        src_typ = value_type(operands(val)[1])
-        dst_typ = value_type(val)
+        src_typ = first(val.operands).value_type
+        dst_typ = val.value_type
         return isa(src_typ, LLVM.PointerType) && isa(dst_typ, LLVM.PointerType) &&
-               addrspace(src_typ) != addrspace(dst_typ)
+               src_typ.addrspace != dst_typ.addrspace
     end
 
     # find the bad casts first, looking through the GEPs that index the table
     casts = LLVM.Value[]
-    worklist = LLVM.Value[globals(mod)["jl_small_typeof"]]
+    worklist = LLVM.Value[mod.globals["jl_small_typeof"]]
     while !isempty(worklist)
         val = pop!(worklist)
-        for use in uses(val)
-            usr = user(use)
+        for use in val.uses
+            usr = use.user
             if isaddrspacechange(usr)
                 push!(casts, usr)
             elseif isa(usr, LLVM.GetElementPtrInst) || isa(usr, LLVM.BitCastInst) ||
                    isa(usr, LLVM.ConstantExpr) &&
-                   opcode(usr) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast)
+                   usr.opcode in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast)
                 push!(worklist, usr)
             end
         end
     end
 
     for cast in unique(casts)
-        src = operands(cast)[1]
-        typ = value_type(cast)
+        src = first(cast.operands)
+        typ = cast.value_type
         if isa(cast, LLVM.ConstantExpr)
             replace_uses!(cast, const_addrspacecast(src, typ))
         else
             @dispose builder=IRBuilder() begin
-                position!(builder, cast)    # also picks up its debug location
+                position!(builder, LLVM.before(cast))    # also picks up its debug location
                 replace_uses!(cast, addrspacecast!(builder, src, typ))
             end
             erase!(cast)
@@ -869,13 +869,13 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # create and configure the module
         ts_mod = ThreadSafeModule("start")
         ts_mod() do mod
-            triple!(mod, llvm_triple(job.config.target))
+            mod.triple = llvm_triple(job.config.target)
             if julia_datalayout(job.config.target) !== nothing
-                datalayout!(mod, julia_datalayout(job.config.target))
+                mod.datalayout = julia_datalayout(job.config.target)
             end
-            flags(mod)["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+            mod.flags["Dwarf Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
                 Metadata(ConstantInt(dwarf_version(job.config.target)))
-            flags(mod)["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
+            mod.flags["Debug Info Version", LLVM.API.LLVMModuleFlagBehaviorWarning] =
                 Metadata(ConstantInt(DEBUG_METADATA_VERSION()))
         end
 
@@ -907,7 +907,9 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         # XXX: this is wrong; we can't expose the underlying LLVM module, but should
         #      instead always go through the callback in order to unlock it properly.
         #      rework this once we depend on Julia 1.9 or later.
-        llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref)
+        # the module is owned by `native_code`: wrap it as borrowed, so that LLVM.jl doesn't
+        # consider it ours to dispose of (which would also be reported as a leak by memcheck)
+        llvm_ts_mod = LLVM.ThreadSafeModule(llvm_mod_ref; borrowed=true)
         llvm_mod = nothing
         llvm_ts_mod() do mod
             llvm_mod = mod
@@ -974,36 +976,36 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # On certain version of Julia we have no reliable way to match the `gvs` to their initializers `inits`.
     if gvs === nothing
         # global variables here properly.
-        for gv in globals(llvm_mod)
-            if !haskey(metadata(gv), "julia.constgv")
+        for gv in llvm_mod.globals
+            if !haskey(gv.metadata, "julia.constgv")
                 continue
             end
-            gv_to_value[LLVM.name(gv)] = C_NULL
-            val = initializer(gv)
+            gv_to_value[gv.name] = C_NULL
+            val = gv.initializer
             if val === nothing
                 continue
             end
             while isa(val, LLVM.ConstantExpr)
-                if in(opcode(val), (LLVM.API.LLVMBitCast, LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMIntToPtr))
-                    val = operands(val)[1]
+                if in(val.opcode, (LLVM.API.LLVMBitCast, LLVM.API.LLVMPtrToInt, LLVM.API.LLVMAddrSpaceCast, LLVM.API.LLVMIntToPtr))
+                    val = val.operands[1]
                     continue
                 end
                 break
             end
             if isa(val, LLVM.ConstantInt)
-                gv_to_value[LLVM.name(gv)] = reinterpret(Ptr{Cvoid}, convert(UInt, val))
+                gv_to_value[gv.name] = reinterpret(Ptr{Cvoid}, convert(UInt, val))
             end
         end
     else
         @assert inits !== nothing
         for (gv_ref, init) in zip(gvs, inits)
             gv = GlobalVariable(gv_ref)
-            gv_to_value[LLVM.name(gv)] = init
+            gv_to_value[gv.name] = init
             # set the initializer
             # TODO(vc): To enable full relocation we should actually strip out the initializers here.
-            if LLVM.isnull(initializer(gv))
-                val = const_inttoptr(ConstantInt(Int64(init)), value_type(initializer(gv)))
-                initializer!(gv, val)
+            if LLVM.isnull(gv.initializer)
+                val = const_inttoptr(ConstantInt(Int64(init)), gv.initializer.value_type)
+                gv.initializer = val
             end
         end
     end
@@ -1115,7 +1117,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             llvm_func_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
                                   (Ptr{Cvoid}, UInt32), native_code, llvm_func_idx[]-1)
             @assert llvm_func_ref != C_NULL
-            LLVM.name(LLVM.Function(llvm_func_ref))
+            LLVM.Function(llvm_func_ref).name
         else
             nothing
         end
@@ -1124,7 +1126,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             llvm_specfunc_ref = ccall(:jl_get_llvm_function, LLVM.API.LLVMValueRef,
                                       (Ptr{Cvoid}, UInt32), native_code, llvm_specfunc_idx[]-1)
             @assert llvm_specfunc_ref != C_NULL
-            LLVM.name(LLVM.Function(llvm_specfunc_ref))
+            LLVM.Function(llvm_specfunc_ref).name
         else
             nothing
         end

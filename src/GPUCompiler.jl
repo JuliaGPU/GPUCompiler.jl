@@ -1,6 +1,6 @@
 module GPUCompiler
 
-using LLVM
+using LLVM, LLVM.IR, LLVM.Build, LLVM.Passes, LLVM.ORC
 using LLVM.Interop
 
 
