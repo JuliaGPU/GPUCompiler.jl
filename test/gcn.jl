@@ -123,8 +123,14 @@ end
         source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
         target = GCNCompilerTarget(; dev_isa="gfx90a", backend)
         job = CompilerJob(source, CompilerConfig(target, GCN.CompilerParams(); kernel=true))
-        datalayout = @dispose dl=GPUCompiler.llvm_datalayout(target) begin
-            string(dl)
+        # (a string for the external back-end)
+        dl = GPUCompiler.llvm_datalayout(target)
+        datalayout = if dl isa LLVM.DataLayout
+            @dispose dl=dl begin
+                string(dl)
+            end
+        else
+            dl
         end
         Context(; opaque_pointers=true) do ctx
             mod = parse(LLVM.Module, """
