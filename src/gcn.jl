@@ -56,9 +56,7 @@ end
 function llvm_datalayout(target::GCNCompilerTarget)
     dl = @invoke llvm_datalayout(target::AbstractCompilerTarget)
     (dl === nothing || target.backend !== :external) && return dl
-    @dispose dl=dl begin
-        string(dl) * "-i128:$(8 * Base.datatype_alignment(Int128))"
-    end
+    dl * "-i128:$(8 * Base.datatype_alignment(Int128))"
 end
 
 
@@ -137,19 +135,25 @@ function finish_ir!(
     return entry
 end
 
-# Fold comparisons of a stack object's address against null. Julia 1.10 represents phis of
-# immutables kept in memory as phis of pointers, with null for undefined incoming values, and
-# guards their loads with `ptr == null ? undef : load(ptr)`. Elsewhere, LLVM folds these checks
-# once the phi reduces to an alloca, but AMDGPU allocates in the private address space, where
-# null is a valid address: the check survives, and the stack object at offset 0 reads as null,
-# i.e. as `undef`. No stack object Julia allocates is at null, so fold them all.
+# Fold comparisons of a stack object's address against null. When an immutable kept in memory
+# flows into a phi, Julia guards its load with a null check, `ptr == null ? undef : load(ptr)`.
+# Elsewhere, LLVM folds these checks once the pointer is known to be an alloca, but not in
+# AMDGPU's private address space:
+# - Julia 1.10 and 1.11 before 1.11.8 compare against the private null, i.e. address 0, where
+#   the first stack object lives. The check holds, and the value reads as `undef`.
+# - Later versions compare against the generic null cast to private (JuliaLang/julia#58837),
+#   which AMDGPU lowers to -1. The check is correct, but it keeps the stack object alive.
+# No stack object Julia allocates is meant to be null, so fold both forms.
 function fold_alloca_null_checks!(mod::LLVM.Module)
+    isnull_or_cast(val) = isnull(val) ||
+        val isa LLVM.ConstantExpr && val.opcode == LLVM.Opcode.AddrSpaceCast &&
+        isnull(val.operands[1])
     worklist = LLVM.ICmpInst[]
     for f in mod.functions, bb in f.blocks, inst in bb.instructions
         inst isa LLVM.ICmpInst || continue
         inst.predicate in (LLVM.IntPredicate.EQ, LLVM.IntPredicate.NE) || continue
         lhs, rhs = inst.operands
-        ptr = isnull(rhs) ? lhs : isnull(lhs) ? rhs : continue
+        ptr = isnull_or_cast(rhs) ? lhs : isnull_or_cast(lhs) ? rhs : continue
         ptr.value_type isa LLVM.PointerType || continue
         # (in-bounds offsets from a stack object do not reach null either)
         while true

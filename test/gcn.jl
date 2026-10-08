@@ -57,8 +57,9 @@ end
 end
 
 @testset "stack objects are not null" begin
-    # Julia 1.10 keeps `acc` in a stack slot and guards its loads with a null check, which
-    # holds for the slot at private address 0
+    # Julia keeps `acc` in a stack slot and guards its loads with null checks, which only
+    # optimize away once folded; on Julia 1.10, the checks hold for the slot at private
+    # address 0
     mod = @eval module $(gensym())
         function kernel(dst::Ptr{ComplexF64}, src::Ptr{ComplexF64}, init::ComplexF64,
                         len::Int, i::Int)
@@ -83,7 +84,7 @@ end
 
     @test @filecheck begin
         @check_label "define amdgpu_kernel void @_Z6kernel"
-        @check_not "icmp {{(eq|ne)}} {{.*}}addrspace(5){{.*}}, null"
+        @check_not "alloca"
         GCN.code_llvm(mod.kernel, Tuple{Ptr{ComplexF64}, Ptr{ComplexF64}, ComplexF64, Int, Int};
                       kernel=true)
     end
@@ -123,15 +124,7 @@ end
         source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
         target = GCNCompilerTarget(; dev_isa="gfx90a", backend)
         job = CompilerJob(source, CompilerConfig(target, GCN.CompilerParams(); kernel=true))
-        # (a string for the external back-end)
-        dl = GPUCompiler.llvm_datalayout(target)
-        datalayout = if dl isa LLVM.DataLayout
-            @dispose dl=dl begin
-                string(dl)
-            end
-        else
-            dl
-        end
+        datalayout = GPUCompiler.llvm_datalayout(target)
         Context(; opaque_pointers=true) do ctx
             mod = parse(LLVM.Module, """
                 target datalayout = "$datalayout"
