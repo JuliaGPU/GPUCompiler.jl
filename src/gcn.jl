@@ -56,9 +56,7 @@ end
 function llvm_datalayout(target::GCNCompilerTarget)
     dl = @invoke llvm_datalayout(target::AbstractCompilerTarget)
     (dl === nothing || target.backend !== :external) && return dl
-    @dispose dl=dl begin
-        string(dl) * "-i128:$(8 * Base.datatype_alignment(Int128))"
-    end
+    dl * "-i128:$(8 * Base.datatype_alignment(Int128))"
 end
 
 

@@ -46,9 +46,12 @@ function with_llvm_machine(f, @nospecialize(target::AbstractCompilerTarget))
     end
 end
 
-# the target's datalayout: a `DataLayout` the caller owns, a string, or `nothing`
+# the target's datalayout as a string, or `nothing`
 llvm_datalayout(target::AbstractCompilerTarget) = with_llvm_machine(target) do tm
-    tm === nothing ? nothing : LLVM.DataLayout(tm)
+    tm === nothing && return nothing
+    LLVM.DataLayout(tm) do dl
+        string(dl)
+    end
 end
 
 # a custom `TargetTransformInfo` for targets that don't have (or can't rely on) a
@@ -60,14 +63,7 @@ llvm_targetinfo(@nospecialize(target::AbstractCompilerTarget)) = nothing
 function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     dl = llvm_datalayout(target)
     dl === nothing && return nothing
-    str = if dl isa LLVM.DataLayout
-        @dispose dl=dl begin
-            string(dl)
-        end
-    else
-        string(dl)
-    end
-    LLVM.DataLayout(str * "-ni:10:11:12:13")
+    LLVM.DataLayout(dl * "-ni:10:11:12:13")
 end
 
 have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false
