@@ -85,6 +85,7 @@ have_fma(@nospecialize(target::GCNCompilerTarget), T::Type) = true
 function finish_module!(@nospecialize(job::CompilerJob{GCNCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     lower_throw_extra!(job, mod)
+    fold_alloca_null_checks!(mod)
 
     if job.config.kernel
         # calling convention
@@ -108,6 +109,9 @@ function finish_ir!(
         @nospecialize(job::CompilerJob{GCNCompilerTarget}), mod::LLVM.Module,
         entry::LLVM.Function
     )
+    # (optimization can reduce a phi of an alloca and null to the alloca, exposing more)
+    fold_alloca_null_checks!(mod)
+
     if job.config.kernel
         entry = add_kernarg_address_spaces!(job, mod, entry)
 
@@ -131,6 +135,37 @@ function finish_ir!(
     expand_atomics!(job, mod)
 
     return entry
+end
+
+# Fold comparisons of a stack object's address against null. Julia 1.10 represents phis of
+# immutables kept in memory as phis of pointers, with null for undefined incoming values, and
+# guards their loads with `ptr == null ? undef : load(ptr)`. Elsewhere, LLVM folds these checks
+# once the phi reduces to an alloca, but AMDGPU allocates in the private address space, where
+# null is a valid address: the check survives, and the stack object at offset 0 reads as null,
+# i.e. as `undef`. No stack object Julia allocates is at null, so fold them all.
+function fold_alloca_null_checks!(mod::LLVM.Module)
+    worklist = LLVM.ICmpInst[]
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        inst isa LLVM.ICmpInst || continue
+        inst.predicate in (LLVM.IntPredicate.EQ, LLVM.IntPredicate.NE) || continue
+        lhs, rhs = inst.operands
+        ptr = isnull(rhs) ? lhs : isnull(lhs) ? rhs : continue
+        ptr.value_type isa LLVM.PointerType || continue
+        # (in-bounds offsets from a stack object do not reach null either)
+        while true
+            ptr = strip_pointer_casts(ptr)
+            ptr isa LLVM.GetElementPtrInst && ptr.inbounds || break
+            ptr = ptr.operands[1]
+        end
+        ptr isa LLVM.AllocaInst && push!(worklist, inst)
+    end
+
+    for inst in worklist
+        is_ne = inst.predicate == LLVM.IntPredicate.NE
+        replace_uses!(inst, ConstantInt(LLVM.Int1Type(), Int(is_ne)))
+        erase!(inst)
+    end
+    return !isempty(worklist)
 end
 
 # Rewrite byref kernel parameters from flat (addrspace 0) to constant (addrspace 4).

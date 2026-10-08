@@ -56,6 +56,39 @@ end
     end
 end
 
+@testset "stack objects are not null" begin
+    # Julia 1.10 keeps `acc` in a stack slot and guards its loads with a null check, which
+    # holds for the slot at private address 0
+    mod = @eval module $(gensym())
+        function kernel(dst::Ptr{ComplexF64}, src::Ptr{ComplexF64}, init::ComplexF64,
+                        len::Int, i::Int)
+            acc = init
+            j = 0
+            while j + 128 <= len
+                for s in 0:3
+                    acc += unsafe_load(src, j + 32s + i + 1)
+                end
+                j += 128
+            end
+            if j < len
+                for s in 0:3
+                    k = j + 32s + i
+                    k < len && (acc += unsafe_load(src, k + 1))
+                end
+            end
+            unsafe_store!(dst, acc)
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check_label "define amdgpu_kernel void @_Z6kernel"
+        @check_not "icmp {{(eq|ne)}} {{.*}}addrspace(5){{.*}}, null"
+        GCN.code_llvm(mod.kernel, Tuple{Ptr{ComplexF64}, Ptr{ComplexF64}, ComplexF64, Int, Int};
+                      kernel=true)
+    end
+end
+
 @testset "synchronization scopes" begin
     # front-ends spell scopes like LLVM's SPIR-V back-end; they're renamed for the target
     mod = @eval module $(gensym())
@@ -90,8 +123,14 @@ end
         source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
         target = GCNCompilerTarget(; dev_isa="gfx90a", backend)
         job = CompilerJob(source, CompilerConfig(target, GCN.CompilerParams(); kernel=true))
-        datalayout = @dispose dl=GPUCompiler.llvm_datalayout(target) begin
-            string(dl)
+        # (a string for the external back-end)
+        dl = GPUCompiler.llvm_datalayout(target)
+        datalayout = if dl isa LLVM.DataLayout
+            @dispose dl=dl begin
+                string(dl)
+            end
+        else
+            dl
         end
         Context(; opaque_pointers=true) do ctx
             mod = parse(LLVM.Module, """
