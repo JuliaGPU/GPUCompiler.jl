@@ -57,8 +57,9 @@ end
 end
 
 @testset "stack objects are not null" begin
-    # Julia 1.10 keeps `acc` in a stack slot and guards its loads with a null check, which
-    # holds for the slot at private address 0
+    # Julia keeps `acc` in a stack slot and guards its loads with null checks, which only
+    # optimize away once folded; on Julia 1.10, the checks hold for the slot at private
+    # address 0
     mod = @eval module $(gensym())
         function kernel(dst::Ptr{ComplexF64}, src::Ptr{ComplexF64}, init::ComplexF64,
                         len::Int, i::Int)
@@ -83,7 +84,7 @@ end
 
     @test @filecheck begin
         @check_label "define amdgpu_kernel void @_Z6kernel"
-        @check_not "icmp {{(eq|ne)}} {{.*}}addrspace(5){{.*}}, null"
+        @check_not "alloca"
         GCN.code_llvm(mod.kernel, Tuple{Ptr{ComplexF64}, Ptr{ComplexF64}, ComplexF64, Int, Int};
                       kernel=true)
     end
