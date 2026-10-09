@@ -112,6 +112,48 @@ end
     #      or just defer to execution testing in Metal.jl?
 end
 
+@testset "work-group size" begin
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+
+    @test @filecheck begin
+        @check_not "work-group-size"
+        @check_not "air.max_work_group_size"
+        Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
+    end
+
+    # maxthreads only sets the maximum
+    @test @filecheck begin
+        @check "\"max-work-group-size\"=\"42\""
+        @check_not "\"work-group-size\""
+        @check "!{!\"air.max_work_group_size\", i32 42}"
+        Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, maxthreads=42)
+    end
+
+    # minthreads requires an exact size, and implies the maximum
+    @test @filecheck begin
+        @check "\"max-work-group-size\"=\"42\""
+        @check "\"work-group-size\"=\"42,1,1\""
+        @check "!{!\"air.max_work_group_size\", i32 42}"
+        Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, minthreads=42)
+    end
+
+    # partial tuples are padded
+    @test @filecheck begin
+        @check "\"max-work-group-size\"=\"32\""
+        @check "\"work-group-size\"=\"4,8,1\""
+        @check "!{!\"air.max_work_group_size\", i32 32}"
+        Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true, minthreads=(4,8))
+    end
+
+    # the attributes only apply to kernels
+    @test @filecheck begin
+        @check_not "work-group-size"
+        Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, minthreads=42)
+    end
+end
+
 @testset "input arguments" begin
     mod = @eval module $(gensym())
         function kernel(ptr)

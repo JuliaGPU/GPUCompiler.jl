@@ -58,10 +58,10 @@ end
 code_native_table(@nospecialize(func), @nospecialize(types); kwargs...) =
     code_native_table(stdout, func, types; kwargs...)
 
-function create_job(@nospecialize(func), @nospecialize(types); kwargs...)
+function create_job(@nospecialize(func), @nospecialize(types); minthreads=nothing, maxthreads=nothing, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0", minthreads, maxthreads)
     params = CompilerParams()
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
