@@ -379,7 +379,7 @@ const __llvm_initialized = Ref(false)
 
             if job.config.optimize
                 @tracepoint "optimization" begin
-                    optimize!(job, ir, relocations; job.config.opt_level)
+                    optimize!(job, ir, relocations; job.config.opt_level, entry=entry_fn)
 
                     # deferred codegen has some special optimization requirements,
                     # which also need to happen _after_ regular optimization.
