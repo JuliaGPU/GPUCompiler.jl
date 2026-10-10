@@ -630,7 +630,8 @@ end
 
 # Julia's runtime symbol lookup passes the library-handle global directly to
 # jl_load_and_lookup, whose third parameter is a generic pointer. On targets with a
-# nonzero global address space (e.g. GCN), that produces invalid IR before optimization.
+# nonzero global address space (e.g. GCN or SPIR-V), that produces invalid IR before optimization.
+# TODO: version-gate once JuliaLang/julia#63715 lands in 1.14 and is backported to 1.13.
 function fix_runtime_lookup_casts!(mod::LLVM.Module)
     changed = false
     for name in ("jl_load_and_lookup", "ijl_load_and_lookup")
