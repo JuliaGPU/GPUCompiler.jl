@@ -250,6 +250,60 @@ end
     end
 end
 
+@testset "argument alias scopes" begin
+    mod = @eval module $(gensym())
+        struct Buffer
+            ptr::Core.LLVMPtr{Float32,1}
+            len::Int
+        end
+        function kernel(y::Buffer, x::Buffer)
+            unsafe_store!(y.ptr, 1f0)
+            v = unsafe_load(x.ptr)
+            unsafe_store!(y.ptr, v + 1f0)
+            return
+        end
+    end
+    tt = Tuple{mod.Buffer, mod.Buffer}
+
+    # without alias information, the load of `x` may observe the first store to `y`
+    @test @filecheck begin
+        @check "store float 1.000000e+00"
+        @check "load float"
+        @check_not "!alias.scope"
+        PTX.code_llvm(mod.kernel, tt; kernel=true, raw=true)
+    end
+
+    # with `y` and `x` in different classes, the first store is dead
+    disjoint = [(2, 0, 1), (3, 0, 2)]
+    @test @filecheck begin
+        @check_not "store float 1.000000e+00"
+        @check "load float{{.*}} !alias.scope [[X:![0-9]+]], !noalias [[Y:![0-9]+]]"
+        @check_not "!invariant.load"
+        @check "store float{{.*}} !alias.scope [[Y]], !noalias [[X]]"
+        PTX.code_llvm(mod.kernel, tt; kernel=true, raw=true, alias_classes=disjoint)
+    end
+
+    # arguments in the same class get no information
+    @test @filecheck begin
+        @check "store float 1.000000e+00"
+        @check_not "!alias.scope"
+        PTX.code_llvm(mod.kernel, tt; kernel=true, raw=true,
+                      alias_classes=[(2, 0, 1), (3, 0, 1)])
+    end
+
+    # `x` is never written, so its loads are invariant and become non-coherent
+    @test @filecheck begin
+        @check "load float{{.*}} !invariant.load"
+        PTX.code_llvm(mod.kernel, tt; kernel=true, raw=true, alias_classes=disjoint,
+                      invariant_loads=true)
+    end
+    @test @filecheck begin
+        @check "ld.global.nc"
+        PTX.code_native(mod.kernel, tt; kernel=true, alias_classes=disjoint,
+                        invariant_loads=true)
+    end
+end
+
 @testset "calling convention" begin
     @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true) do
         @check_not "ptx_kernel"

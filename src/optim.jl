@@ -50,7 +50,7 @@ function aggressiveinstcombine_pass(@nospecialize(job::CompilerJob))
 end
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                   relocs::Relocations; opt_level=2)
+                   relocs::Relocations; opt_level=2, entry::Union{Nothing,String}=nothing)
     with_llvm_machine(job.config.target) do tm
         tti = llvm_targetinfo(job.config.target)
 
@@ -66,9 +66,10 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             register!(pb, AddKernelStatePass(job))
             register!(pb, LowerKernelStatePass(job))
             register!(pb, CleanupKernelStatePass(job))
+            entry === nothing || register!(pb, ArgumentAliasScopesPass(job, entry))
 
             add!(pb, ModulePassManager()) do mpm
-                buildNewPMPipeline!(mpm, job, opt_level)
+                buildNewPMPipeline!(mpm, job, opt_level; entry)
             end
             run!(pb, mod, tm)
         end
@@ -78,10 +79,16 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     return
 end
 
-function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
+function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level;
+                             entry::Union{Nothing,String}=nothing)
     buildEarlySimplificationPipeline(mpm, job, opt_level)
     add!(mpm, AlwaysInlinerPass())
     buildEarlyOptimizerPipeline(mpm, job, opt_level)
+    # once inlining and SROA have exposed which argument every access is derived from,
+    # and before the loop and scalar optimizations that benefit from knowing
+    if entry !== nothing && opt_level >= 2
+        add!(mpm, ArgumentAliasScopesPass(job, entry))
+    end
     add!(mpm, FunctionPassManager()) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
