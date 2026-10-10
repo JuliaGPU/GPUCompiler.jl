@@ -628,6 +628,29 @@ function fix_small_typeof_casts!(mod::LLVM.Module)
     return !isempty(casts)
 end
 
+# Julia's runtime symbol lookup passes the library-handle global directly to
+# jl_load_and_lookup, whose third parameter is a generic pointer. On targets with a
+# nonzero global address space (e.g. GCN or SPIR-V), that produces invalid IR before optimization.
+# TODO: version-gate once JuliaLang/julia#63715 lands in 1.14 and is backported to 1.13.
+function fix_runtime_lookup_casts!(mod::LLVM.Module)
+    changed = false
+    for name in ("jl_load_and_lookup", "ijl_load_and_lookup")
+        haskey(mod.functions, name) || continue
+        fn = mod.functions[name]
+        typ = fn.function_type.parameters[3]
+        for user in fn.users
+            user isa LLVM.CallInst || continue
+            user.called_operand == fn || continue
+            arg = user.arguments[3]
+            arg.value_type == typ && continue
+            arg isa LLVM.GlobalVariable || continue
+            user.arguments[3] = const_addrspacecast(arg, typ)
+            changed = true
+        end
+    end
+    return changed
+end
+
 function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.source.def.primary_world > job.world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
@@ -786,6 +809,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     @static if VERSION < v"1.12-"
         fix_small_typeof_casts!(llvm_mod)
     end
+
+    fix_runtime_lookup_casts!(llvm_mod)
 
     # Since Julia 1.13, the caller is responsible for initializing global variables that
     # point to global values or bindings with their address in memory. Similarly on earlier
