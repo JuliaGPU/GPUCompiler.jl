@@ -1440,7 +1440,10 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
                                        f::LLVM.Function)
     ft = f.function_type
 
-    # find the byref parameters
+    # find the byref parameters that still lack an address space. those that already have
+    # one (scalars `pass_by_reference!` turned into device pointers) need no rewriting, and
+    # replacing them with a generic stack slot would break users that require the device
+    # address space, e.g., a phi merging them with other device pointers.
     byref = falses(length(ft.parameters))
     # ... and among those, the boxed ones: an argument that survived `check_invocation`
     # despite not being a bitstype has no fields, so it can only be used by identity (an
@@ -1455,7 +1458,8 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
         param = ft.parameters[arg.idx]
         identity_word[arg.idx] = arg.cc == MUT_REF && param isa LLVM.PointerType &&
                                  param.addrspace == 0
-        byref[arg.idx] = arg.cc == BITS_REF || arg.cc == KERNEL_STATE ||
+        byref[arg.idx] = (arg.cc == BITS_REF || arg.cc == KERNEL_STATE) &&
+                         param isa LLVM.PointerType && param.addrspace == 0 ||
                          identity_word[arg.idx]
     end
 
@@ -1537,6 +1541,14 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
 
         # fall through
         br!(builder, new_f.blocks[2])
+    end
+
+    # parameters that were mapped through unchanged keep the `noalias` that
+    # `pass_by_reference!` added for the optimizer (copied ones lose it when cloning). Apple's
+    # AIR loader turns `noalias` kernel parameters into alias scopes, and crashes on modules
+    # that also carry Julia's alias scope metadata, so drop it now that optimization is done.
+    for i in 1:length(new_f.parameters)
+        delete!(new_f.parameter_attributes[i], :noalias)
     end
 
     # remove the old function
@@ -2171,7 +2183,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(md, Metadata(ConstantInt(Int32(1))))
 
         # only pointer-to-data arguments are written through; by-reference values (kernel
-        # state, bitstype objects) are read into a stack slot and never written back.
+        # state, bitstype objects) are only ever read.
         if arg.cc == BITS_VALUE && (arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
             push!(md, MDString("air.read_write"))
         else

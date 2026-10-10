@@ -42,6 +42,33 @@ end
     end
 end
 
+@testset "byref primitives merged with device pointers" begin
+    # `neutral` is a device pointer during optimization, which can merge the two loads into
+    # a load from a phi of device pointers (JuliaGPU/GPUCompiler.jl#1004)
+    mod = @eval module $(gensym())
+        function kernel(out, x, neutral, n, i)
+            v = i <= n ? (i > 64 ? throw(BoundsError()) : unsafe_load(x, i)) : neutral
+            n > 256 && return
+            unsafe_store!(out, v, i)
+            return
+        end
+    end
+
+    ir = sprint() do io
+        Metal.code_llvm(io, mod.kernel,
+                        Tuple{Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}, Int32, Int32, Int};
+                        dump_module=true, kernel=true)
+    end
+    @test Context() do ctx
+        verify(parse(LLVM.Module, ir))
+        true
+    end
+
+    # `neutral` is now mapped through, but must not keep its `noalias`: Apple's back-end
+    # crashes on `noalias` kernel parameters in modules with Julia's alias scopes
+    @test !occursin(r"noalias[^\n]*%\"neutral::Int32\"", ir)
+end
+
 @testset "versioned triple" begin
     # Apple encodes the AIR version in the triple's architecture as air64_v<major><minor>;
     # tools derive the expected AIR version from it. Old toolchains used the plain air64.
