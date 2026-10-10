@@ -41,6 +41,25 @@ end
 
 @testset "IR" begin
 
+@testset "runtime symbol lookup" begin
+    # A libjulia ccall emits a lookup through jl_libjulia_internal_handle. Its global
+    # lives in AS1 on GCN, while jl_load_and_lookup takes a generic pointer.
+    mod = @eval module $(gensym())
+        alloc_string(n::UInt) = ccall(:jl_alloc_string, Any, (Csize_t,), n)
+    end
+    job, _ = GCN.create_job(mod.alloc_string, Tuple{UInt})
+    # Enter through the driver to initialize LLVM's target machinery.
+    GPUCompiler.code_llvm(devnull, job; optimize=false)
+    JuliaContext() do ctx
+        ir, _, _ = GPUCompiler.compile_method_instance(job)
+        try
+            @test LLVM.verification_error(ir) === nothing
+        finally
+            LLVM.dispose(ir)
+        end
+    end
+end
+
 @testset "fma" begin
     # `fma` uses the hardware instruction, not the Float64-based `fma_emulated`
     mod = @eval module $(gensym())
