@@ -306,6 +306,67 @@ end
     end
 end
 
+@testset "float controls" begin
+    # with SPV_KHR_float_controls2, `contract` operations are decorated `AllowContract`. the
+    # LLVM back-end also gives every kernel floating-point defaults, which need the extension,
+    # so this checks that kernels without `contract` operations still validate.
+    mod = @eval module $(gensym())
+        function contract(p::Ptr{Float32}, x::Float32, y::Float32)
+            unsafe_store!(p, muladd(x, y, unsafe_load(p)))
+            return
+        end
+        function strict(p::Ptr{Float64}, x::Float64)
+            unsafe_store!(p, 2 * x)
+            return
+        end
+        function integer(p::Ptr{Int32}, x::Int32)
+            unsafe_store!(p, 2 * x)
+            return
+        end
+        # (a floating-point type only in the signature)
+        function signature(p::Ptr{Int32}, x::Float32)
+            unsafe_store!(p, Int32(1))
+            return
+        end
+        function vector(p::Ptr{Int32}, x::NTuple{4, VecElement{Float32}})
+            unsafe_store!(p, Int32(1))
+            return
+        end
+    end
+    extensions = "+SPV_KHR_float_controls2"
+
+    @test @filecheck begin
+        @check "OpExtension \"SPV_KHR_float_controls2\""
+        @check "FPFastMathMode AllowContract"
+        SPIRV.code_native(mod.contract, Tuple{Ptr{Float32}, Float32, Float32}; backend,
+                          kernel=true, extensions)
+    end
+    @test @filecheck begin
+        @check "OpEntryPoint Kernel"
+        @check_not "AllowContract"
+        SPIRV.code_native(mod.strict, Tuple{Ptr{Float64}, Float64}; backend, kernel=true,
+                          extensions)
+    end
+    @test @filecheck begin
+        @check "OpEntryPoint Kernel"
+        @check_not "AllowContract"
+        SPIRV.code_native(mod.integer, Tuple{Ptr{Int32}, Int32}; backend, kernel=true,
+                          extensions)
+    end
+    @test @filecheck begin
+        @check "OpEntryPoint Kernel"
+        @check_not "AllowContract"
+        SPIRV.code_native(mod.signature, Tuple{Ptr{Int32}, Float32}; backend, kernel=true,
+                          extensions)
+    end
+    @test @filecheck begin
+        @check "OpEntryPoint Kernel"
+        @check_not "AllowContract"
+        SPIRV.code_native(mod.vector, Tuple{Ptr{Int32}, NTuple{4, VecElement{Float32}}};
+                          backend, kernel=true, extensions)
+    end
+end
+
 @testset "nested insertvalue" begin
     # Intel's graphics compiler drops fields when legalizing aggregates built by nested
     # `insertvalue`s, so these are flattened for that driver (JuliaGPU/OpenCL.jl#502)
