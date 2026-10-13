@@ -2796,6 +2796,61 @@ end
     @test occursin("call void @air.atomic.fence(i32 3, i32 3, i32 2)", air)
 end
 
+@testset "floating-point atomics on Apple10" begin
+    # the macOS 26 compiler for Apple10 GPUs crashes on a floating-point add or subtract on
+    # device memory that a release fence precedes, like the fences that implement ordered
+    # operations below MSL 4.1, so those become compare-exchange loops there (see
+    # `metal_atomic_action`)
+    ir(op, order; fence="") = """
+        define void @f(float addrspace(1)* %p, float %v) {
+          $fence
+          %old = atomicrmw $op float addrspace(1)* %p, float %v $order, align 4
+          ret void
+        }
+        """
+    function lower(macos, metal, apple_family, fastmath, ir)
+        Context() do ctx
+            mod = parse(LLVM.Module, ir)
+            source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+            air = metal >= v"4.1" ? v"2.9" : v"2.8"
+            target = MetalCompilerTarget(; macos, metal, air, apple_family, fastmath)
+            job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+            @test GPUCompiler.lower_atomics!(job, mod)
+            @test (verify(mod); true)
+            string(mod)
+        end
+    end
+    native(op) = "@air.atomic.global.$(op == "fadd" ? "add" : "sub").f32("
+    cas = "@air.atomic.global.cmpxchg.weak.i32("
+
+    @testset "$op $order" for op in ("fadd", "fsub"),
+                              order in ("monotonic", "acquire", "release", "acq_rel", "seq_cst")
+        # Apple10 and unknown GPUs on macOS 26: compare-exchange loops, whatever the ordering
+        # (a fence from elsewhere may precede a relaxed operation)
+        for apple_family in (10, nothing)
+            air = lower(v"26", v"4.0", apple_family, false, ir(op, order))
+            @test !occursin(native(op), air)
+            @test occursin(cas, air)
+        end
+        # other GPUs, fast math, and the macOS 27 compiler (also when it compiles for an older
+        # MSL, with fences) keep the native operation
+        for (macos, metal, apple_family, fastmath) in ((v"26", v"4.0", 9, false),
+                                                       (v"26", v"4.0", 10, true),
+                                                       (v"27", v"4.1", 10, false),
+                                                       (v"27", v"4.0", 10, false))
+            air = lower(macos, metal, apple_family, fastmath, ir(op, order))
+            @test occursin(native(op), air)
+            @test !occursin(cas, air)
+        end
+    end
+
+    # the fence that triggers the crash can precede a relaxed operation
+    air = lower(v"26", v"4.0", 10, false, ir("fadd", "monotonic"; fence="fence release"))
+    @test occursin("fence release", air)   # `lower_fences!` turns it into a call later
+    @test occursin(cas, air)
+    @test !occursin(native("fadd"), air)
+end
+
 # byval lowering must strip the (non-IPO-safe) Julia const-region metadata off loads derived
 # from the materialized argument; check the helper walks gep/addrspacecast chains and removes it.
 @testset "const-region metadata stripping for materialized args" begin

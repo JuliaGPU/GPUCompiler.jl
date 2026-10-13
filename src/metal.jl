@@ -57,6 +57,11 @@ Base.@kwdef struct MetalCompilerTarget <: AbstractCompilerTarget
     # intrinsic lowering reads to pick the relaxed `air.fast_*` device functions over the
     # precise `air.*` ones (e.g. `air.fast_sqrt` instead of `air.sqrt`).
     fastmath::Bool = Base.JLOptions().fast_math == 1
+
+    # the GPU's Apple family, as the `n` in `MTLGPUFamilyApple<n>` (M1 = 7, M5 = 10), like the
+    # PTX target's compute capability. Only used to work around back-end bugs of specific GPUs
+    # (see `metal_atomic_action`); when unknown, those workarounds apply.
+    apple_family::Union{Nothing,Int} = nothing
 end
 
 # for backwards compatibility
@@ -68,6 +73,7 @@ function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.air, h)
     h = hash(target.metal, h)
     h = hash(target.fastmath, h)
+    h = hash(target.apple_family, h)
 end
 
 # the canonical text representation is AIR assembly, i.e. LLVM 14 era textual IR
@@ -892,6 +898,19 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
     if op in EXPANDABLE_ATOMICRMW_OPS ||
        (op in (LLVM.AtomicRMWBinOp.FAdd, LLVM.AtomicRMWBinOp.FSub) && as == 3 &&
         target.metal < v"4.1")
+        return :cmpxchg_loop
+    end
+    # The macOS 26 compiler for Apple10 GPUs (the M5) crashes on a floating-point add or
+    # subtract on device memory when a release fence precedes it without another atomic
+    # operation in between, if fast math is disabled ("cannot select:
+    # intrinsic(@llvm.agx3.disable.smashing.float)"; Apple's own compiler reproduces it with
+    # `-fno-fast-math`). Below MSL 4.1 ordered operations get such fences, and the fence can
+    # also be the trailing one of a previous operation or come from user code, so expand all
+    # these operations into compare-exchange loops (about 2x slower on an M1). The compiler
+    # ships with the OS, so the deployment target identifies it: the macOS 27 compiler is
+    # fixed. Later families are included as a precaution.
+    if op in (LLVM.AtomicRMWBinOp.FAdd, LLVM.AtomicRMWBinOp.FSub) && target.macos < v"27" &&
+       !target.fastmath && (target.apple_family === nothing || target.apple_family >= 10)
         return :cmpxchg_loop
     end
     return :select
