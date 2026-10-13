@@ -3097,7 +3097,6 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
                 end
                 push!(fn_attrs, EnumAttribute(name))
             end
-            changed = true
         end
 
         function add_param_attributes(idx, names...)
@@ -3111,7 +3110,6 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
                     push!(param_attrs, EnumAttribute(name))
                 end
             end
-            changed = true
         end
 
         # synchronization
@@ -3142,7 +3140,10 @@ function annotate_air_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
         elseif match(r"air.(simd|quad)_(ballot|all|vote_all|any|vote_any|shuffle|shuffle_xor|shuffle_down|\
             shuffle_up|shuffle_and_fill_down|shuffle_and_fill_up)", fn) !== nothing
             add_fn_attributes("convergent", "mustprogress", "nounwind", "willreturn")
+        else
+            continue
         end
+        changed = true
     end
 
     return changed
