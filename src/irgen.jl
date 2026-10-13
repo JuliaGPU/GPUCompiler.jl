@@ -977,9 +977,10 @@ function (self::AddKernelState)(mod::LLVM.Module)
 
                     # forward the state argument
                     position!(builder, LLVM.before(val))
-                    state = call!(builder, state_intr_ft, state_intr, Value[], "state")
+                    state_arg = call!(builder, state_intr_ft, state_intr, Value[], "state")
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, ft, f, [state, val.arguments...], val.operand_bundles)
+                        call!(builder, ft, f, [state_arg, val.arguments...],
+                              val.operand_bundles)
                     else
                         # TODO: invoke and callbr
                         error("Rewrite of $(typeof(val))-based calls is not implemented: $val")

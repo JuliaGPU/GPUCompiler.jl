@@ -272,7 +272,8 @@ const __llvm_initialized = Ref(false)
             # compile and link
             for dyn_job in keys(worklist)
                 # cached compilation
-                dyn_entry_fn = get!(jobs, dyn_job) do
+                dyn_entry_fn = get(jobs, dyn_job, nothing)
+                if dyn_entry_fn === nothing
                     # We are potentially calling into a sibling compiler (Enzyme)
                     # which was loaded in a newer world.
                     dyn_ir, dyn_meta = @invokelatest deferred_codegen(dyn_job, job)
@@ -281,8 +282,8 @@ const __llvm_initialized = Ref(false)
                     @assert dyn_ir.context == ir.context
                     link_relocatable!(ir, relocations, dyn_ir,
                                       dyn_meta.relocations)
+                    jobs[dyn_job] = dyn_entry_fn
                     changed = true
-                    dyn_entry_fn
                 end
                 dyn_entry = ir.functions[dyn_entry_fn]
 
