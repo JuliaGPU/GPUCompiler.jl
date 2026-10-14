@@ -495,3 +495,30 @@ else
     # declarations the relocation machinery collects. Only 1.11+ emits those declarations.
     VERSION >= v"1.11-" && HAS_LLVM_GVS_GLOBALS
 end
+
+
+# Metadata that describes a loaded pointer, and so does not apply to a loaded word.
+const PointerLoadMetadataKinds =
+    (MD_nonnull, MD_dereferenceable, MD_dereferenceable_or_null, MD_align)
+
+# Replace a pointer-typed `load` by a load of the `T_word` integer holding the pointer's bits,
+# converted back with `inttoptr`. Alignment, volatility, atomic ordering and the metadata that
+# applies to integers carry over.
+function load_pointer_as_word!(builder::IRBuilder, load::LLVM.LoadInst, T_word::LLVMType)
+    position!(builder, LLVM.before(load))
+    ptr = load.pointer_operand
+    if supports_typed_pointers(context())
+        ptr = bitcast!(builder, ptr, LLVM.PointerType(T_word, ptr.value_type.addrspace))
+    end
+    word = load!(builder, T_word, ptr; align=load.alignment, volatile=load.volatile)
+    if isatomic(load)
+        word.ordering = load.ordering
+        word.syncscope = load.syncscope
+    end
+    for (kind, md) in load.metadata
+        kind in PointerLoadMetadataKinds || (word.metadata[kind] = md)
+    end
+    replace_uses!(load, inttoptr!(builder, word, load.value_type))
+    erase!(load)
+    return word
+end

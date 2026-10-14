@@ -958,10 +958,6 @@ function check_relocation_slot_uses!(mod::LLVM.Module, slots::Vector{LLVM.Global
     return loads
 end
 
-# Metadata that describes a loaded pointer, and so does not apply to a loaded word.
-const PointerLoadMetadataKinds =
-    (MD_nonnull, MD_dereferenceable, MD_dereferenceable_or_null, MD_align)
-
 # Load the slots' values as the words the table holds. A pointer-typed load would read a
 # host address as a pointer into the target's default address space, which on Metal is
 # thread memory, and shader validation does not preserve such a value's bits. Converting
@@ -971,18 +967,7 @@ function load_relocation_words!(loads::Vector{LLVM.LoadInst}, T_word::LLVMType)
     @dispose builder=IRBuilder() begin
         for load in loads
             load.value_type isa LLVM.PointerType || continue
-            position!(builder, LLVM.before(load))
-            word = load!(builder, T_word, load.pointer_operand;
-                         align=load.alignment, volatile=load.volatile)
-            if isatomic(load)
-                word.ordering = load.ordering
-                word.syncscope = load.syncscope
-            end
-            for (kind, md) in load.metadata
-                kind in PointerLoadMetadataKinds || (word.metadata[kind] = md)
-            end
-            replace_uses!(load, inttoptr!(builder, word, load.value_type))
-            erase!(load)
+            load_pointer_as_word!(builder, load, T_word)
         end
     end
     return
