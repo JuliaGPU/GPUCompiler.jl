@@ -713,6 +713,25 @@ end
     @test occursin("!\"air.read\"", sym_arg)
 end
 
+@testset "thread pointers loaded from device memory" begin
+    # The AGX back-end truncates a thread (AS 0) pointer that is loaded from another address
+    # space to 32 bits, breaking e.g. the identity of a `Symbol` stored in an array
+    # (Metal.jl#1017). Such pointers are loaded as words instead.
+    mod = @eval module $(gensym())
+        function kernel(out, ptrs)
+            unsafe_store!(out, unsafe_load(ptrs, 1) === unsafe_load(ptrs, 2) ? 1 : 2)
+            return
+        end
+    end
+    tt = (Core.LLVMPtr{Int,1}, Core.LLVMPtr{Ptr{Cvoid},1})
+
+    air = sprint(io -> Metal.code_native(io, mod.kernel, tt; kernel=true))
+    @test !occursin(r"load (ptr|i8\*), ", air)
+    if VERSION >= v"1.12.0-DEV.225"     # older Julia passes `Ptr` as an integer
+        @test count("inttoptr i64", air) == 2
+    end
+end
+
 @testset "boxed constant classification" begin
     JuliaContext() do ctx
         mod = LLVM.Module("boxed-constant-classification")

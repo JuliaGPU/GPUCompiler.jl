@@ -740,6 +740,27 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # cleanup above, so the merged form is what reaches the AIR downgrader / back-end.
     merge_byte_gep_chains!(mod)
 
+    # run last too, as InstCombine would turn the word loads back into pointer loads
+    load_thread_pointers_as_words!(mod)
+
+    return
+end
+
+# The AGX back-end keeps only the low 32 bits of a thread (AS 0) pointer that is loaded from
+# another address space. That breaks the host addresses Julia keeps by reference, e.g. of a
+# `Symbol` stored in an array (Metal.jl#1017), so load such pointers as words; pointers made
+# with `inttoptr` keep all their bits.
+function load_thread_pointers_as_words!(mod::LLVM.Module)
+    T_word = LLVM.IntType(64)
+    @dispose builder=IRBuilder() begin
+        for f in mod.functions, bb in f.blocks, inst in collect(bb.instructions)
+            inst isa LLVM.LoadInst || continue
+            T = inst.value_type
+            T isa LLVM.PointerType && T.addrspace == 0 || continue
+            inst.pointer_operand.value_type.addrspace == 0 && continue
+            load_pointer_as_word!(builder, inst, T_word)
+        end
+    end
     return
 end
 
