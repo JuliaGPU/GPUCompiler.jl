@@ -22,6 +22,39 @@
     end
 end
 
+@testset "byref aggregates read in place" begin
+    # A byref argument that is only read from is accessed in device memory. A copy on the
+    # stack would survive here because of the dynamic index, which the AGX back-end can
+    # miscompile (Metal.jl#1018).
+    mod = @eval module $(gensym())
+        function kernel(out, t, i)
+            unsafe_store!(out, @inbounds t[i])
+            return
+        end
+    end
+    tt = (Core.LLVMPtr{Float32,1}, NTuple{8,Float32}, Int)
+    air = sprint(io -> Metal.code_native(io, mod.kernel, tt; kernel=true))
+    @test !occursin("alloca", air)
+    @test !occursin("addrspacecast", air)
+end
+
+@testset "byref aggregates passed along" begin
+    # When the argument also flows into a call that is passed stack memory elsewhere, its
+    # address cannot be inferred to be in device memory, so it is still copied to the stack.
+    mod = @eval module $(gensym())
+        @noinline get(t, i) = @inbounds t[i]
+        function kernel(out, t, i)
+            local_t = ntuple(j -> Float32(i * j), Val(8))
+            unsafe_store!(out, get(t, i) + get(local_t, i))
+            return
+        end
+    end
+    tt = (Core.LLVMPtr{Float32,1}, NTuple{8,Float32}, Int)
+    air = sprint(io -> Metal.code_native(io, mod.kernel, tt; kernel=true))
+    @test !occursin("addrspacecast", air)
+    @test count("alloca [8 x float]", air) == 2  # the argument's copy and `local_t`
+end
+
 @testset "byref primitives" begin
     mod = @eval module $(gensym())
         kernel(x) = return
@@ -711,6 +744,25 @@ end
     @test occursin("!\"air.arg_type_align_size\", i32 $(sizeof(UInt))", sym_arg)
     # read-only: unlike a data pointer, the slot is never written back through
     @test occursin("!\"air.read\"", sym_arg)
+end
+
+@testset "thread pointers loaded from device memory" begin
+    # The AGX back-end truncates a thread (AS 0) pointer that is loaded from another address
+    # space to 32 bits, breaking e.g. the identity of a `Symbol` stored in an array
+    # (Metal.jl#1017). Such pointers are loaded as words instead.
+    mod = @eval module $(gensym())
+        function kernel(out, ptrs)
+            unsafe_store!(out, unsafe_load(ptrs, 1) === unsafe_load(ptrs, 2) ? 1 : 2)
+            return
+        end
+    end
+    tt = (Core.LLVMPtr{Int,1}, Core.LLVMPtr{Ptr{Cvoid},1})
+
+    air = sprint(io -> Metal.code_native(io, mod.kernel, tt; kernel=true))
+    @test !occursin(r"load (ptr|i8\*), ", air)
+    if VERSION >= v"1.12.0-DEV.225"     # older Julia passes `Ptr` as an integer
+        @test count("inttoptr i64", air) == 2
+    end
 end
 
 @testset "boxed constant classification" begin
