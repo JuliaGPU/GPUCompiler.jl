@@ -1539,8 +1539,10 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
     # we cannot simply remap the function arguments, because that will not propagate the
     # address space changes across, e.g, bitcasts (the dest would still be in AS 0).
     # using a type remapper on the other hand changes too much, including unrelated insts.
-    # so instead, we load the arguments in stack slots and dereference them so that we can
-    # keep on using the original IR that assumed pointers without address spaces
+    # so instead, arguments that are only read from are cast back to AS 0 for the address-
+    # space inference in `finish_ir!` to undo, while others are copied to a stack slot. that
+    # copy is a last resort: when it survives optimization, e.g. because of dynamic indexing,
+    # the AGX back-end can miscompile the kernel (Metal.jl#1018).
     new_args = LLVM.Value[]
     @dispose builder=IRBuilder() begin
         entry = BasicBlock(new_f, "conversion")
@@ -1558,12 +1560,16 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
                 end
                 push!(new_args, inttoptr!(builder, load!(builder, T_word, slot), param))
             elseif byref[i]
-                # load the argument in a stack slot
-                llvm_typ = convert(LLVMType, args[i].typ)
-                val = load!(builder, llvm_typ, new_f.parameters[i])
-                ptr = alloca!(builder, llvm_typ)
-                store!(builder, val, ptr)
-                push!(new_args, ptr)
+                if only_loaded_from(f.parameters[i])
+                    push!(new_args, addrspacecast!(builder, new_f.parameters[i], param))
+                else
+                    # load the argument in a stack slot
+                    llvm_typ = convert(LLVMType, args[i].typ)
+                    val = load!(builder, llvm_typ, new_f.parameters[i])
+                    ptr = alloca!(builder, llvm_typ)
+                    store!(builder, val, ptr)
+                    push!(new_args, ptr)
+                end
             else
                 push!(new_args, new_f.parameters[i])
             end
@@ -1609,6 +1615,20 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
     end
 
     return new_f
+end
+
+# whether `ptr` is only used as the address of plain loads, directly or through GEPs and
+# bitcasts, all of which address-space inference can move to another address space
+function only_loaded_from(ptr::LLVM.Value)
+    for use in ptr.uses
+        u = LLVM.user(use)
+        if u isa LLVM.GetElementPtrInst || u isa LLVM.BitCastInst
+            only_loaded_from(u) || return false
+        elseif !(u isa LLVM.LoadInst) || u.volatile || isatomic(u)
+            return false
+        end
+    end
+    return true
 end
 
 # update address spaces of constant global objects
