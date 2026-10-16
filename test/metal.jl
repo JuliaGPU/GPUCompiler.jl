@@ -201,6 +201,67 @@ end
     @test GPUCompiler.msl_type_name(Val{Union{alpha.Alpha,zeta.Zeta}}) == "Val_Union_Alpha_Zeta"
 end
 
+@testset "argument layouts" begin
+    # what MSL emits for `constant T&` arguments: the size of the referenced value, and the
+    # layout of structs (nested structs inline, homogeneous tuples as arrays)
+    mod = @eval module $(gensym())
+        struct Inner
+            x::Float32
+            y::Int16
+        end
+        struct Outer
+            a::Int8
+            inner::Inner
+            inners::NTuple{2,Inner}
+            nothing::Nothing
+            v::NTuple{2,VecElement{Float32}}
+            p::Core.LLVMPtr{Float32,1}
+        end
+        kernel(scalar, ptr, outer, inner_ptr) = return
+    end
+    tt = (Float32, Core.LLVMPtr{Float32,1}, mod.Outer, Core.LLVMPtr{mod.Inner,1})
+    air = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; dump_module=true, kernel=true))
+
+    # the operands of the argument metadata node of `name`, and of metadata node `ref`
+    node(ref) = match(Regex("^$ref = !\\{(.*)\\}\$", "m"), air).captures[1]
+    arg(name) = only(filter(l -> occursin("!\"air.arg_name\", !\"$name\"", l), split(air, '\n')))
+    struct_info(name) = node(match(r"!\"air.struct_type_info\", (![0-9]+)", arg(name)).captures[1])
+
+    @test occursin("!\"air.buffer\", !\"air.buffer_size\", i32 4, !\"air.location_index\"", arg("scalar"))
+    @test !occursin("air.buffer_size", arg("ptr"))
+    @test !occursin("air.struct_type_info", arg("scalar"))
+    @test occursin("!\"air.buffer_size\", i32 $(sizeof(mod.Outer))", arg("outer"))
+
+    inner = "i32 0, i32 4, i32 0, !\"float\", !\"x\", i32 4, i32 2, i32 0, !\"short\", !\"y\""
+    outer = struct_info("outer")
+    @test occursin(r"^i32 0, i32 1, i32 0, !\"char\", !\"a\", "
+                   * r"!\"air.struct_type_info\", ![0-9]+, i32 4, i32 8, i32 0, !\"Inner\", !\"inner\", "
+                   * r"!\"air.struct_type_info\", ![0-9]+, i32 12, i32 8, i32 2, !\"Inner\", !\"inners\", "
+                   * r"i32 32, i32 8, i32 0, !\"float2\", !\"v\", "
+                   * r"i32 40, i32 8, i32 0, !\"ulong\", !\"p\"$", outer)
+    for m in eachmatch(r"!\"air.struct_type_info\", (![0-9]+)", outer)
+        @test node(m.captures[1]) == inner
+    end
+
+    # MSL describes the struct a `device T*` points to as well, without a buffer size
+    @test struct_info("inner_ptr") == inner
+    @test !occursin("air.buffer_size", arg("inner_ptr"))
+
+    # a pointer may point to data that isn't stored inline, which has no layout to describe
+    mod = @eval module $(gensym())
+        struct Boxed
+            x::Real
+        end
+        mutable struct Node
+            next::Node
+        end
+        kernel(a, b) = return
+    end
+    tt = (Core.LLVMPtr{mod.Boxed,1}, Core.LLVMPtr{mod.Node,1})
+    air = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; dump_module=true, kernel=true))
+    @test !occursin("air.struct_type_info", air)
+end
+
 @testset "input arguments" begin
     mod = @eval module $(gensym())
         function kernel(ptr)

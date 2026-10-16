@@ -2231,6 +2231,9 @@ function msl_builtin_name(@nospecialize(T))
     name === nothing || return name
     T isa DataType || return nothing
     T <: VecElement && return msl_scalar_name(T.parameters[1])
+    # a pointer stored in a buffer is a plain address word to Metal (MSL only has pointer
+    # members in argument buffers, which we don't use); `float*` would reflect as `float`
+    (T <: Ptr || T <: Core.LLVMPtr) && return "ulong"
     # LLVM vectors, i.e., MSL's `floatN` and friends
     if T <: Tuple && 2 <= length(T.parameters) <= 4 && allequal(T.parameters)
         elt = T.parameters[1]
@@ -2270,6 +2273,41 @@ function julia_type_words(@nospecialize(x))
     end
 end
 
+# The layout of a struct argument as `air.struct_type_info` describes it: per field its offset,
+# size, number of array elements (0 when not an array), type name and field name. A field that
+# is itself a struct, or an array of structs, is preceded by the layout of that struct, tagged
+# `air.struct_type_info`. Returns `nothing` for types without fields to describe.
+function msl_struct_type_info(@nospecialize(T))
+    # only inline data has a layout to describe (a pointer argument may point to anything)
+    T isa DataType && isbitstype(T) && msl_builtin_name(T) === nothing || return nothing
+    info = Metadata[]
+    for i in 1:fieldcount(T)
+        FT = fieldtype(T, i)
+        # inline unions have no MSL equivalent; ghost fields take no space
+        FT isa DataType && sizeof(FT) > 0 || continue
+
+        # homogeneous tuples are laid out like MSL arrays
+        elt, count = FT, 0
+        if FT <: Tuple && !isempty(FT.parameters) && allequal(FT.parameters) &&
+           msl_builtin_name(FT) === nothing
+            elt, count = FT.parameters[1], length(FT.parameters)
+        end
+
+        nested = msl_struct_type_info(elt)
+        if nested !== nothing
+            push!(info, MDString("air.struct_type_info"))
+            push!(info, nested)
+        end
+        push!(info, Metadata(ConstantInt(Int32(fieldoffset(T, i)))))
+        push!(info, Metadata(ConstantInt(Int32(sizeof(elt)))))
+        push!(info, Metadata(ConstantInt(Int32(count))))
+        push!(info, MDString(msl_type_name(elt)))
+        push!(info, MDString(string(fieldname(T, i))))
+    end
+    isempty(info) && return nothing
+    return MDNode(info)
+end
+
 function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 entry::LLVM.Function)
     entry_ft = entry.function_type
@@ -2302,22 +2340,9 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
 
         push!(md, MDString("air.buffer"))
 
-        push!(md, MDString("air.location_index"))
-        push!(md, Metadata(ConstantInt(Int32(i-1))))
-
-        # XXX: unknown
-        push!(md, Metadata(ConstantInt(Int32(1))))
-
-        # only pointer-to-data arguments are written through; by-reference values (kernel
-        # state, bitstype objects) are only ever read.
-        if arg.cc == BITS_VALUE && (arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
-            push!(md, MDString("air.read_write"))
-        else
-            push!(md, MDString("air.read"))
-        end
-
-        push!(md, MDString("air.address_space"))
-        push!(md, Metadata(ConstantInt(Int32(entry_ft.parameters[arg.idx].addrspace))))
+        # pointers to data are bound to buffers of any size; everything else is passed by
+        # reference, as MSL does for `constant T&`
+        by_reference = !(arg.cc == BITS_VALUE && (arg.typ <: Ptr || arg.typ <: Core.LLVMPtr))
 
         # A fieldless boxed argument (e.g. an interned `Symbol`) is passed as its bare address
         # word, so describe that word: its Julia type has no size to report.
@@ -2327,6 +2352,30 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
             arg.typ.parameters[1]
         else
             arg.typ
+        end
+
+        if by_reference
+            push!(md, MDString("air.buffer_size"))
+            push!(md, Metadata(ConstantInt(Int32(sizeof(arg_type)))))
+        end
+
+        push!(md, MDString("air.location_index"))
+        push!(md, Metadata(ConstantInt(Int32(i-1))))
+
+        # XXX: unknown
+        push!(md, Metadata(ConstantInt(Int32(1))))
+
+        # only pointer-to-data arguments are written through; by-reference values (kernel
+        # state, bitstype objects) are only ever read.
+        push!(md, MDString(by_reference ? "air.read" : "air.read_write"))
+
+        push!(md, MDString("air.address_space"))
+        push!(md, Metadata(ConstantInt(Int32(entry_ft.parameters[arg.idx].addrspace))))
+
+        struct_info = msl_struct_type_info(arg_type)
+        if struct_info !== nothing
+            push!(md, MDString("air.struct_type_info"))
+            push!(md, struct_info)
         end
 
         push!(md, MDString("air.arg_type_size"))
