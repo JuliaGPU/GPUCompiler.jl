@@ -174,6 +174,104 @@ end
     @test PTX.code_execution(mod.kernel, Tuple{Int32}; cap=v"5.2") isa Tuple
 end
 
+@testset "atomics on generic pointers" begin
+    # atomics on generic pointers that may point to the stack check whether they do
+    mod = @eval module $(gensym())
+        rmw(p, v) = Base.llvmcall("""
+            %p = inttoptr i64 %0 to i32*
+            %old = atomicrmw add i32* %p, i32 %1 syncscope("block") monotonic, align 4
+            ret i32 %old""", Int32, Tuple{Ptr{Int32}, Int32}, p, v)
+        cmpxchg(p, v) = Base.llvmcall("""
+            %p = inttoptr i64 %0 to i32*
+            %r = cmpxchg weak volatile i32* %p, i32 1, i32 %1 seq_cst acquire, align 4
+            %old = extractvalue { i32, i1 } %r, 0
+            ret i32 %old""", Int32, Tuple{Ptr{Int32}, Int32}, p, v)
+        load_store(p, v) = Base.llvmcall("""
+            %p = inttoptr i64 %0 to i32*
+            store atomic i32 %1, i32* %p release, align 4
+            %old = load atomic i32, i32* %p monotonic, align 4
+            ret i32 %old""", Int32, Tuple{Ptr{Int32}, Int32}, p, v)
+        unordered(p) = Base.llvmcall("""
+            %p = inttoptr i64 %0 to i32*
+            %old = load atomic i32, i32* %p unordered, align 4
+            ret i32 %old""", Int32, Tuple{Ptr{Int32}}, p)
+        global_cast(p, v) = Base.llvmcall("""
+            %p = bitcast i8 addrspace(1)* %0 to i32 addrspace(1)*
+            %g = addrspacecast i32 addrspace(1)* %p to i32*
+            %old = atomicrmw add i32* %g, i32 %1 monotonic, align 4
+            ret i32 %old""", Int32, Tuple{Core.LLVMPtr{Int32,1}, Int32}, p, v)
+    end
+
+    for optimize in (true, false)
+        # the original operation for other memory, plain accesses for local memory
+        @test @filecheck begin
+            @check "call i1 @llvm.nvvm.isspacep.local"
+            @check "[[OLD:%[^ ]+]] = load i32,"
+            @check "[[NEW:%[^ ]+]] = add i32 [[OLD]]"
+            @check "store i32 [[NEW]]"
+            @check "atomicrmw add {{.*}} syncscope(\"block\") monotonic, align 4{{.*}}, !noalias.addrspace"
+            @check "phi i32 [ [[OLD]]"
+            @check_not "atomicrmw"
+            PTX.code_llvm(mod.rmw, Tuple{Ptr{Int32}, Int32}; optimize, raw=true)
+        end
+        @test @filecheck begin
+            @check "call i1 @llvm.nvvm.isspacep.local"
+            @check "load volatile i32"
+            @check "store volatile i32"
+            @check "cmpxchg weak volatile {{.*}} seq_cst acquire, align 4{{.*}}, !noalias.addrspace"
+            PTX.code_llvm(mod.cmpxchg, Tuple{Ptr{Int32}, Int32}; optimize, raw=true)
+        end
+        @test @filecheck begin
+            @check "call i1 @llvm.nvvm.isspacep.local"
+            @check "store atomic i32 {{.*}} release, align 4{{.*}}, !noalias.addrspace"
+            @check "call i1 @llvm.nvvm.isspacep.local"
+            @check "load atomic i32{{.*}} monotonic, align 4{{.*}}, !noalias.addrspace"
+            PTX.code_llvm(mod.load_store, Tuple{Ptr{Int32}, Int32}; optimize, raw=true)
+        end
+    end
+
+    # not for Julia's unordered heap-reference accesses, or pointers to other memory
+    @test @filecheck begin
+        @check_not "isspacep"
+        @check "load atomic i32{{.*}} unordered"
+        PTX.code_llvm(mod.unordered, Tuple{Ptr{Int32}})
+    end
+    @test @filecheck begin
+        @check_not "isspacep"
+        @check "atomicrmw add"
+        PTX.code_llvm(mod.global_cast, Tuple{Core.LLVMPtr{Int32,1}, Int32})
+    end
+
+    # checked atomics aren't checked again, and the checks are inlined
+    Context() do ctx
+        ir = parse(LLVM.Module, """
+            define i32 @f(i32* %p, i32 %v) {
+              %old = atomicrmw add i32* %p, i32 %v monotonic, align 4
+              ret i32 %old
+            }""")
+        @test GPUCompiler.lower_local_atomics!(ir)
+        @test !GPUCompiler.lower_local_atomics!(ir)
+        @test [LLVM.name(f) for f in ir.functions] == ["f", "llvm.nvvm.isspacep.local"]
+    end
+    # neither are ones whose `!noalias.addrspace` otherwise rules out local memory
+    Context() do ctx
+        for (ranges, checked) in (("i32 5, i32 6", false), ("i32 0, i32 -1", false),
+                                  ("i32 7, i32 6", false), ("i32 3, i32 4", true))
+            ir = parse(LLVM.Module, """
+                define void @f(i32* %p) {
+                  %old = atomicrmw add i32* %p, i32 1 monotonic, align 4, !noalias.addrspace !0
+                  ret void
+                }
+                !0 = !{$ranges}""")
+            @test GPUCompiler.lower_local_atomics!(ir) == checked
+        end
+    end
+
+    asm = sprint(io->PTX.code_native(io, mod.cmpxchg, Tuple{Ptr{Int32}, Int32}))
+    @test occursin("isspacep.local", asm)
+    @test occursin("atom.acquire.sys.cas.b32", asm)
+end
+
 @testset "kernel state survives a runtime rebuild" begin
     # Clearing the runtime cache forces the library link inside `emit_llvm` to rebuild
     # the runtime (nested compilation); the kernel must still get its state argument
