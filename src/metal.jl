@@ -2525,7 +2525,38 @@ function add_module_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     # set sdk version
     mod.sdk_version = job.config.target.macos
 
+    # name the kernel's source file, as Apple's front-end does, also in the debug info, where
+    # Julia only records a placeholder for the compile unit
+    file = kernel_source_file(job)
+    if file !== nothing && !haskey(mod.metadata, "air.source_file_name")
+        push!(get!(mod.metadata, "air.source_file_name").operands, MDNode([MDString(file)]))
+
+        if haskey(mod.metadata, "llvm.dbg.cu")
+            difile = LLVM.DIBuilder(mod) do builder
+                LLVM.file!(builder, basename(file), dirname(file))
+            end
+            for cu in mod.metadata["llvm.dbg.cu"].operands
+                cu_file = LLVM.file(cu)
+                cu_file === nothing && continue
+                if LLVM.filename(cu_file) == "julia" && LLVM.directory(cu_file) == "."
+                    # the file is the compile unit's first operand
+                    cu.operands[1] = difile
+                end
+            end
+        end
+    end
+
     return
+end
+
+# the absolute path of the file defining the kernel, if it is a file
+function kernel_source_file(@nospecialize(job::CompilerJob))
+    method = job.source.def
+    method isa Method && method.line > 0 || return nothing
+    file, _ = Base.functionloc(method)
+    # pseudo-files like `REPL[1]`, or `none` for `julia -e`, don't resolve to a file
+    file !== nothing && isfile(file) || return nothing
+    return abspath(file)
 end
 
 

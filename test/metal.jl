@@ -129,6 +129,37 @@ end
     end
 end
 
+@testset "source file" begin
+    # like Apple's front-end, name the kernel's source file, also in the debug info
+    mod = @eval module $(gensym())
+        function kernel(ptr)
+            unsafe_store!(ptr, 42f0)
+            return
+        end
+    end
+
+    tt = Tuple{Core.LLVMPtr{Float32,1}}
+    air = sprint(io -> Metal.code_native(io, mod.kernel, tt; kernel=true, debug_level=1, raw=true))
+    @test occursin(r"!air.source_file_name = !\{(![0-9]+)\}", air)
+    ref = match(r"!air.source_file_name = !\{(![0-9]+)\}", air).captures[1]
+    # (only checking the file name, as LLVM escapes Windows path separators)
+    @test occursin(Regex("$ref = !\\{!\"[^\"]+$(basename(@__FILE__))\"\\}"), air)
+    @test occursin(Regex("!DIFile\\(filename: \"$(basename(@__FILE__))\", directory: \"[^\"]+\"\\)"), air)
+    @test !occursin("!DIFile(filename: \"julia\"", air)
+
+    # kernels defined at the REPL or with `julia -e` have no file to record
+    for file in (Symbol("REPL[1]"), :none)
+        mod = @eval module $(gensym()) end
+        body = Expr(:block, LineNumberNode(1, file), :(unsafe_store!(ptr, 42f0)), nothing)
+        kernel = Core.eval(mod, Expr(:function, :(kernel(ptr)), body))
+        @test first(methods(kernel)).file == file
+        air = sprint(io -> Metal.code_native(io, kernel, tt; kernel=true, debug_level=1, raw=true))
+        @test !occursin("air.source_file_name", air)
+        @test !occursin(abspath(string(file)), air)
+        @test occursin("!DIFile(filename: \"julia\", directory: \".\")", air)
+    end
+end
+
 @testset "compile options" begin
     # Apple's frontend emits an air.compile_options named metadata node. denorms and
     # framebuffer fetch match its defaults; fast math tracks the target's `fastmath`.
