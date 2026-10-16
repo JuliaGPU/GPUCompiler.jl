@@ -303,6 +303,14 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 end
 
+function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module,
+                    entry::LLVM.Function)
+    # PTX has no atomics on the stack, and NVPTX doesn't legalize them
+    lower_local_atomics!(mod)
+
+    return entry
+end
+
 # mirrors `NVPTXCompileOptions` from libnvptx.h
 struct NVPTXCompileOptions
     cpu::Cstring
@@ -452,6 +460,41 @@ function nvptx_atomic_error(inst::LLVM.Instruction)
         return "sequentially-consistent 128-bit atomic load or store (not supported by the NVPTX back-end)"
     end
     return nothing
+end
+
+
+## atomics on local memory
+
+# PTX only has atomic instructions, and atomic (relaxed, acquire or release) loads and
+# stores, for global and shared memory, and for generic addresses of those. On the stack
+# (local memory) they are undefined: Pascal GPUs fail with CUDA_ERROR_INVALID_ADDRESS_SPACE,
+# which leaves the context unusable, and ptxas rejects the `atom.local` that NVPTX selects
+# for a `cmpxchg` on an `alloca`. NVPTX only demotes `atomicrmw` on pointers it knows to be
+# local, and only when optimizing.
+#
+# Atomics on the stack are common nonetheless, e.g., on objects that Julia's `AllocOpt`
+# moved there. Since no other thread can access a thread's stack, `lower_local_atomics!`
+# replaces them by plain accesses.
+
+# Is `ptr` known to point to the thread's own memory?
+ptx_thread_private(ptr::LLVM.Value) =
+    ptr.value_type.addrspace == #=local=# 5 || is_thread_private(ptr)
+
+function lower_local_atomics!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "lower local atomics" begin
+
+    atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
+               if is_atomic_memop(inst)]
+    for inst in atomics
+        if ptx_thread_private(inst.pointer_operand)
+            demote_private_atomic!(inst)
+            changed = true
+        end
+    end
+
+    end
+    return changed
 end
 
 

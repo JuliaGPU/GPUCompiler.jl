@@ -125,6 +125,55 @@ end
           hash(PTXCompilerTarget(cap=v"6.1", system_atomics=false))
 end
 
+@testset "atomics on the stack" begin
+    # atomics on the thread's own memory become plain accesses
+    # (typed-pointer IR, which also parses with opaque pointers)
+    mod = @eval module $(gensym())
+        rmw(v) = Base.llvmcall("""
+            %a = alloca i32, align 4
+            store i32 1, i32* %a, align 4
+            %old = atomicrmw add i32* %a, i32 %0 monotonic, align 4
+            ret i32 %old""", Int32, Tuple{Int32}, v)
+        cmpxchg(v) = Base.llvmcall("""
+            %a = alloca i32, align 4
+            store i32 1, i32* %a, align 4
+            %r = cmpxchg volatile i32* %a, i32 1, i32 %0 seq_cst seq_cst, align 4
+            %old = extractvalue { i32, i1 } %r, 0
+            ret i32 %old""", Int32, Tuple{Int32}, v)
+        load_store(v) = Base.llvmcall("""
+            %a = alloca i32, align 4
+            %g = addrspacecast i32* %a to i32 addrspace(5)*
+            store atomic i32 %0, i32 addrspace(5)* %g release, align 4
+            %old = load atomic i32, i32* %a acquire, align 4
+            ret i32 %old""", Int32, Tuple{Int32}, v)
+        local_arg(p, v) = Base.llvmcall("""
+            %p = bitcast i8 addrspace(5)* %0 to i32 addrspace(5)*
+            %old = atomicrmw xchg i32 addrspace(5)* %p, i32 %1 seq_cst, align 4
+            ret i32 %old""", Int32, Tuple{Core.LLVMPtr{Int32,5}, Int32}, p, v)
+        kernel(v) = (rmw(v); nothing)
+    end
+    for (f, types) in ((mod.rmw, Tuple{Int32}), (mod.cmpxchg, Tuple{Int32}),
+                       (mod.load_store, Tuple{Int32}),
+                       (mod.local_arg, Tuple{Core.LLVMPtr{Int32,5}, Int32}))
+        for optimize in (true, false)
+            ir = sprint(io->PTX.code_llvm(io, f, types; optimize))
+            @test !occursin(r"atomicrmw |cmpxchg |load atomic |store atomic ", ir)
+        end
+        # NVPTX selects an `atom.local` for `cmpxchg`, which ptxas rejects
+        asm = sprint(io->PTX.code_native(io, f, types))
+        @test !occursin(r"\batom\.|\.(relaxed|acquire|release)\.", asm)
+    end
+    # the volatile `cmpxchg` keeps its volatile accesses
+    @test @filecheck begin
+        @check "load volatile i32"
+        @check "store volatile i32"
+        PTX.code_llvm(mod.cmpxchg, Tuple{Int32})
+    end
+
+    # they aren't validated either, as they don't need atomic instructions
+    @test PTX.code_execution(mod.kernel, Tuple{Int32}; cap=v"5.2") isa Tuple
+end
+
 @testset "kernel state survives a runtime rebuild" begin
     # Clearing the runtime cache forces the library link inside `emit_llvm` to rebuild
     # the runtime (nested compilation); the kernel must still get its state argument
