@@ -2204,6 +2204,72 @@ end
 #
 # module metadata is used to identify buffers that are passed as kernel arguments.
 
+# The Metal runtime parses `air.arg_type_name` as an MSL type name to report an argument's
+# data type in pipeline reflection, so spell the types MSL knows the way MSL does. Other types
+# get an identifier derived from the Julia type, as MSL would name a user struct.
+const msl_scalar_names = Dict{Type,String}(
+    Bool    => "bool",
+    Int8    => "char",  UInt8  => "uchar",
+    Int16   => "short", UInt16 => "ushort",
+    Int32   => "int",   UInt32 => "uint",
+    Int64   => "long",  UInt64 => "ulong",
+    Float16 => "half",  Float32 => "float",
+)
+
+function msl_scalar_name(@nospecialize(T))
+    name = get(msl_scalar_names, T, nothing)
+    name === nothing || return name
+    # Core.BFloat16 on Julia 1.11+, BFloat16s.BFloat16 before that
+    T isa DataType && isprimitivetype(T) && nameof(T) === :BFloat16 && sizeof(T) == 2 &&
+        return "bfloat"
+    return nothing
+end
+
+# the name of a scalar or vector type MSL knows, or `nothing`
+function msl_builtin_name(@nospecialize(T))
+    name = msl_scalar_name(T)
+    name === nothing || return name
+    T isa DataType || return nothing
+    T <: VecElement && return msl_scalar_name(T.parameters[1])
+    # LLVM vectors, i.e., MSL's `floatN` and friends
+    if T <: Tuple && 2 <= length(T.parameters) <= 4 && allequal(T.parameters)
+        elt = T.parameters[1]
+        if elt isa DataType && elt <: VecElement
+            name = msl_scalar_name(elt.parameters[1])
+            name === nothing || return name * string(length(T.parameters))
+        end
+    end
+    return nothing
+end
+
+msl_type_name(@nospecialize(T)) = something(msl_builtin_name(T), msl_identifier(T))
+
+# an identifier derived from a Julia type, independent of how the type would be printed
+# (which depends on the bindings visible from `Main`)
+function msl_identifier(@nospecialize(T))
+    str = String(strip(replace(julia_type_words(T), r"[^A-Za-z0-9_]+" => "_"), '_'))
+    return isempty(str) || isdigit(str[1]) ? "_" * str : str
+end
+function julia_type_words(@nospecialize(x))
+    if x isa DataType
+        join([String(nameof(x)); map(julia_type_words, x.parameters)], "_")
+    elseif x isa Union
+        # (sorted, as Julia orders union members by module name, which can be generated)
+        join(["Union"; sort!(map(julia_type_words, Base.uniontypes(x)))], "_")
+    elseif x isa UnionAll
+        julia_type_words(Base.unwrap_unionall(x))
+    elseif x isa TypeVar
+        String(x.name)
+    elseif x isa Tuple
+        join(map(julia_type_words, x), "_")
+    elseif x isa Union{Number,Symbol,AbstractChar,AbstractString}
+        string(x)
+    else
+        # other values may print with module qualifiers
+        julia_type_words(typeof(x))
+    end
+end
+
 function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                 entry::LLVM.Function)
     entry_ft = entry.function_type
@@ -2269,8 +2335,15 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(md, MDString("air.arg_type_align_size"))
         push!(md, Metadata(ConstantInt(Int32(Base.datatype_alignment(arg_type)))))
 
+        # like MSL, name the pointee type for pointer arguments
+        type_name = if arg.cc == BITS_VALUE && (arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
+            pointee = arg.typ.parameters[1]
+            pointee === Nothing ? "void" : msl_type_name(pointee)
+        else
+            msl_type_name(arg.typ)
+        end
         push!(md, MDString("air.arg_type_name"))
-        push!(md, MDString(repr(arg.typ)))
+        push!(md, MDString(type_name))
 
         push!(md, MDString("air.arg_name"))
         push!(md, MDString(String(arg.name)))

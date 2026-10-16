@@ -172,6 +172,35 @@ end
     #      or just defer to execution testing in Metal.jl?
 end
 
+@testset "argument type names" begin
+    # the Metal runtime derives the reflected data type of an argument from its MSL type name
+    mod = @eval module $(gensym())
+        struct Params{T,N}
+            scale::T
+            shift::NTuple{N,T}
+        end
+        kernel(args...) = return
+    end
+    tt = (Float32, UInt16, Bool, Float16, Int64, Core.LLVMPtr{Float32,1},
+          Core.LLVMPtr{Nothing,1}, NTuple{4,VecElement{Float32}}, mod.Params{Float32,2},
+          Tuple{Int,Float32})
+    air = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; dump_module=true, kernel=true))
+    type_names = map(eachmatch(r"!\"air.arg_type_name\", !\"([^\"]+)\"", air)) do m
+        m.captures[1]
+    end
+    @test type_names == ["float", "ushort", "bool", "half", "long", "float", "void",
+                         "float4", "Params_Float32_2", "Tuple_Int64_Float32"]
+
+    # identifiers don't depend on how types print, which changes with the bindings in `Main`
+    @test GPUCompiler.msl_type_name(Some{Union{Nothing,mod.Params{Float32,2}}}) ==
+          "Some_Union_Nothing_Params_Float32_2"
+    @test GPUCompiler.msl_type_name(Val{Tuple{mod.Params}}) == "Val_Tuple_Params_T_N"
+    zeta = @eval module $(gensym()) struct Zeta end end
+    alpha = @eval module $(gensym()) struct Alpha end end
+    @test GPUCompiler.msl_type_name(Val{Union{zeta.Zeta,alpha.Alpha}}) == "Val_Union_Alpha_Zeta"
+    @test GPUCompiler.msl_type_name(Val{Union{alpha.Alpha,zeta.Zeta}}) == "Val_Union_Alpha_Zeta"
+end
+
 @testset "input arguments" begin
     mod = @eval module $(gensym())
         function kernel(ptr)
