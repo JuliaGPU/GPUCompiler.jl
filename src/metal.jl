@@ -2414,6 +2414,9 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(arg_info, MDString("air.arg_type_name" ))
         push!(arg_info, MDString(argument_type_name(intr_arg.value_type)))
 
+        push!(arg_info, MDString("air.arg_name"))
+        push!(arg_info, MDString(intr_fn))
+
         arg_info = MDNode(arg_info)
         push!(arg_infos, arg_info)
 

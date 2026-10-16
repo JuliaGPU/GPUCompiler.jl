@@ -287,6 +287,11 @@ end
         @check_not "call i32 @julia.air.thread_position_in_threadgroup.i32"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true)
     end
+
+    @test @filecheck begin
+        @check "!{i32 1, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"thread_position_in_threadgroup\"}"
+        Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; dump_module=true, kernel=true)
+    end
 end
 
 @testset "byte GEP coalescing" begin
