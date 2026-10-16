@@ -1426,6 +1426,12 @@ end
     # bitcode is reproducible across sessions
     normalize_julia_symbol_names!(mod)
 
+    # Julia's kernel marker has no meaning in AIR, where `air.kernel` takes its place. (the
+    # C API cannot erase named metadata, so an empty node remains)
+    if haskey(mod.metadata, "julia.kernel")
+        empty!(mod.metadata["julia.kernel"].operands)
+    end
+
     if !isavailable(LLVMDowngrader_jll)
         error("Metal machine-code generation requires the LLVMDowngrader_jll package, which should be installed and loaded first.")
     end

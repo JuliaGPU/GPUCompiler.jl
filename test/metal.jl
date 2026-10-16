@@ -160,6 +160,24 @@ end
     end
 end
 
+@testset "kernel marker" begin
+    # Julia's kernel marker is replaced by `air.kernel`, and should not reach AIR
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+
+    @test @filecheck begin
+        @check "!julia.kernel = !{!{{[0-9]+}}}"
+        Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
+    end
+
+    @test @filecheck begin
+        @check_not "!julia.kernel = !{!"
+        @check "!air.kernel = !{!{{[0-9]+}}}"
+        Metal.code_native(mod.kernel, Tuple{}; dump_module=true, kernel=true)
+    end
+end
+
 @testset "compile options" begin
     # Apple's frontend emits an air.compile_options named metadata node. denorms and
     # framebuffer fetch match its defaults; fast math tracks the target's `fastmath`.
