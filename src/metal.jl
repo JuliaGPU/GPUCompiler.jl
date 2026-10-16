@@ -735,6 +735,19 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         end
     end
 
+    # expand multiplications with overflow check only after that cleanup, as InstCombine would
+    # turn the expansion back into the intrinsic when the product is also checked by division
+    expanded = false
+    for f in mod.functions
+        expanded |= expand_mul_with_overflow!(f)
+    end
+    if expanded
+        @dispose pb=PassBuilder() begin
+            add!(pb, StripDeadPrototypesPass())
+            run!(pb, mod)
+        end
+    end
+
     # flatten chained byte GEPs that the AGX back-end miscompiles for 1-byte accesses on a
     # 2-threadgroup grid (see `merge_byte_gep_chains!`). run last, after the intrinsic-lowering
     # cleanup above, so the merged form is what reaches the AIR downgrader / back-end.
@@ -2992,6 +3005,36 @@ function build_powi!(mod::LLVM.Module, fn::String, typ::LLVMType, ntyp::LLVMType
         ret!(builder, select!(builder, negative, fdiv!(builder, one, pow), pow))
     end
     return f
+end
+
+# 64-bit multiplication with overflow check, which Apple's back-end fails to select (even the
+# `llvm.smul.with.overflow.i64` that its own frontend emits for `__builtin_mul_overflow`),
+# crashing the compiler service (Metal.jl#570). The product overflows if its high half, from
+# `air.mul_hi`, isn't the sign extension (when signed) or zero (when unsigned) of the low half.
+# The operands are frozen, as an `undef` one could otherwise take different values in both.
+function expand_mul_with_overflow!(fun::LLVM.Function)
+    smul, umul = LLVM.Intrinsic.(("llvm.smul.with.overflow", "llvm.umul.with.overflow"))
+    return lower_intrinsic_calls!(fun) do builder, call, intr
+        intr == smul || intr == umul || return nothing
+        signed = intr == smul
+        typ = call.value_type.elements[1]
+        elty = typ isa LLVM.VectorType ? typ.element_type : typ
+        elty.width == 64 || return nothing
+
+        x, y = (LLVM.freeze!(builder, arg) for arg in call.arguments)
+        lo = mul!(builder, x, y)
+        hi = call_declared!(builder, "air.mul_hi.$(signed ? "s" : "u").$(type_suffix(typ))",
+                            typ, LLVM.Value[x, y])
+        ext = if signed
+            shift = LLVM.ConstantInt(elty, 63)
+            ashr!(builder, lo, typ isa LLVM.VectorType ? const_splat(typ, shift) : shift)
+        else
+            LLVM.null(typ)
+        end
+        overflow = icmp!(builder, LLVM.IntPredicate.NE, hi, ext)
+        res = insert_value!(builder, LLVM.PoisonValue(call.value_type), lo, 0)
+        insert_value!(builder, res, overflow, 1)
+    end
 end
 
 function build_minimum_maximum!(mod::LLVM.Module, fn::String, op_ft::LLVM.FunctionType,

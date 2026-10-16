@@ -1582,6 +1582,91 @@ end
     end
 end
 
+@testset "multiplication with overflow lowering" begin
+    # Apple's back-end can't select 64-bit `llvm.{s,u}mul.with.overflow` (Metal.jl#570), so
+    # those check the high half of the product from `air.mul_hi` instead
+    mod = @eval module $(gensym())
+        mulo(x, y) = Base.Checked.mul_with_overflow(x, y)
+        const V = NTuple{2, VecElement{Int64}}
+        mulo_vec(x::V, y::V) = Base.llvmcall(("""
+            declare {<2 x i64>, <2 x i1>} @llvm.smul.with.overflow.v2i64(<2 x i64>, <2 x i64>)
+            define <2 x i64> @entry(<2 x i64> %x, <2 x i64> %y) {
+              %r = call {<2 x i64>, <2 x i1>} @llvm.smul.with.overflow.v2i64(<2 x i64> %x, <2 x i64> %y)
+              %v = extractvalue {<2 x i64>, <2 x i1>} %r, 0
+              %o = extractvalue {<2 x i64>, <2 x i1>} %r, 1
+              %z = select <2 x i1> %o, <2 x i64> zeroinitializer, <2 x i64> %v
+              ret <2 x i64> %z
+            }""", "entry"), V, Tuple{V, V}, x, y)
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_mulo_[0-9]+}}"
+        @check_not "mul.with.overflow"
+        @check "mul i64"
+        @check "@air.mul_hi.s.i64"
+        @check "ashr i64 {{.*}}, 63"
+        Metal.code_native(mod.mulo, Tuple{Int64, Int64})
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_mulo_[0-9]+}}"
+        @check_not "mul.with.overflow"
+        @check "mul i64"
+        @check "@air.mul_hi.u.i64"
+        @check_not "ashr"
+        Metal.code_native(mod.mulo, Tuple{UInt64, UInt64})
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_mulo_vec_[0-9]+}}"
+        @check_not "mul.with.overflow"
+        @check "@air.mul_hi.s.v2i64"
+        Metal.code_native(mod.mulo_vec, Tuple{mod.V, mod.V})
+    end
+
+    # the expansion must survive the cleanup after lowering, whose InstCombine recognizes a
+    # division-based overflow check of a plain `mul` and would turn it back into the intrinsic.
+    # an `undef` operand is frozen, so that both halves of the product see the same value.
+    Context() do ctx
+        ir = parse(LLVM.Module, """
+            declare {i64, i1} @llvm.umul.with.overflow.i64(i64, i64)
+            declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)
+            define i1 @div_check(i64 %x, i64 %y) {
+              %r = call {i64, i1} @llvm.umul.with.overflow.i64(i64 %x, i64 %y)
+              %lo = extractvalue {i64, i1} %r, 0
+              %o = extractvalue {i64, i1} %r, 1
+              %q = udiv i64 %lo, %x
+              %c = icmp ne i64 %q, %y
+              %res = or i1 %c, %o
+              ret i1 %res
+            }
+            define i1 @undef_operand() {
+              %r = call {i64, i1} @llvm.smul.with.overflow.i64(i64 undef, i64 1)
+              %o = extractvalue {i64, i1} %r, 1
+              ret i1 %o
+            }""")
+        job, _ = Metal.create_job(identity, Tuple{Nothing})
+        GPUCompiler.lower_air!(job, ir)
+        @test (verify(ir); true)
+        @test @filecheck begin
+            @check_not "mul.with.overflow"
+            @check_label "define i1 @div_check"
+            @check "@air.mul_hi.u.i64"
+            @check_label "define i1 @undef_operand"
+            @check "freeze i64 undef"
+            string(ir)
+        end
+    end
+
+    # narrower multiplications are supported by the back-end
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_mulo_[0-9]+}}"
+        @check "@llvm.smul.with.overflow.i32"
+        @check_not "@air.mul_hi"
+        Metal.code_native(mod.mulo, Tuple{Int32, Int32})
+    end
+end
+
 @testset "vector reduction lowering" begin
     # AIR has no vector reductions: each is expanded into a chain of its scalar operation over the
     # lanes, in lane order, and min/max into the scalar intrinsics, which are lowered to AIR.
