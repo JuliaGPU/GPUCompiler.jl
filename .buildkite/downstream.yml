@@ -20,7 +20,7 @@ steps:
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("CUDA"; coverage=true)'
+                Pkg.test("CUDA"; coverage="@" * pwd())'
     agents:
       queue: "cuda"
     env:
@@ -62,7 +62,7 @@ steps:
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("oneAPI"; coverage=true)'
+                Pkg.test("oneAPI"; coverage="@" * pwd())'
     agents:
       queue: "oneapi"
     if_changed:
@@ -91,7 +91,7 @@ steps:
 
        julia -e 'println("+++ :julia: Running tests")
                  using Pkg
-                 Pkg.test("AMDGPU"; coverage=true)'
+                 Pkg.test("AMDGPU"; coverage="@" * pwd())'
     agents:
       queue: "rocm"
     if_changed:
@@ -131,7 +131,7 @@ steps:
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("Metal"; coverage=true)'
+                Pkg.test("Metal"; coverage="@" * pwd())'
     agents:
       queue: "metal"
     if_changed:
@@ -161,7 +161,7 @@ steps:
 
        julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("OpenCL"; coverage=true)'
+                Pkg.test("OpenCL"; coverage="@" * pwd())'
     agents:
       queue: "cuda"
     if_changed:
