@@ -13,7 +13,7 @@ steps:
 
       julia -e 'println("+++ :julia: Running tests")
                 using Pkg
-                Pkg.test("Enzyme"; coverage=true, julia_args=`--depwarn=no`)'
+                Pkg.test("Enzyme"; coverage="@" * pwd(), julia_args=`--depwarn=no`)'
     agents:
       queue: "juliaecosystem"
       os: "linux"
