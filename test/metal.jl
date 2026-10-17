@@ -3221,6 +3221,100 @@ end
     @test occursin("call void @air.atomic.fence(i32 3, i32 3, i32 2)", air)
 end
 
+@testset "barrier lowering" begin
+    # MSL's barriers as Apple's front-end emits them, before and after AIR 2.9
+    ir(arity) = """
+        declare void @air.wg.barrier($(join(fill("i32", arity), ", "))) #0
+        declare void @air.simdgroup.barrier($(join(fill("i32", arity), ", "))) #0
+        define void @f() {
+          call void @air.wg.barrier(i32 2, $(arity == 3 ? "i32 2, " : "")i32 1)
+          call void @air.simdgroup.barrier(i32 1, $(arity == 3 ? "i32 4, " : "")i32 4)
+          ret void
+        }
+        attributes #0 = { convergent nounwind }
+        """
+    barrier_job(metal, air) = let
+        source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"27", metal, air)
+        CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+    end
+
+    @testset "Metal $metal, AIR $air, $arity operands" for
+            (metal, air) in ((v"3.2", v"2.7"), (v"4.0", v"2.8"), (v"4.0", v"2.9"), (v"4.1", v"2.9")),
+            arity in (2, 3)
+        Context() do ctx
+            mod = parse(LLVM.Module, ir(arity))
+            job = barrier_job(metal, air)
+            GPUCompiler.legalize_barrier_abi!(job, mod)
+            @test (verify(mod); true)
+            str = string(mod)
+            calls = [m.match for m in eachmatch(r"call void @air\.[a-z.]+\([^\n]+\)", str)]
+            if air >= v"2.9"
+                # an order the front-end chose is kept from MSL 4.1 on
+                wg, simd = metal >= v"4.1" && arity == 3 ? (2, 4) : (5, 5)
+                @test calls == ["call void @air.wg.barrier(i32 2, i32 $wg, i32 1)",
+                                "call void @air.simdgroup.barrier(i32 1, i32 $simd, i32 4)"]
+                @test occursin(r"declare void @air.wg.barrier\(i32, i32, i32\) #0", str)
+            else
+                @test calls == ["call void @air.wg.barrier(i32 2, i32 1)",
+                                "call void @air.simdgroup.barrier(i32 1, i32 4)"]
+                @test occursin(r"declare void @air.wg.barrier\(i32, i32\) #0", str)
+            end
+            @test occursin(r"attributes #0 = \{ convergent nounwind \}", str)
+            @test count("declare void @air.", str) == 2
+        end
+    end
+
+    # end-to-end, with the form Metal.jl emits, and checked by Apple's tools when available
+    function kernel(p::Core.LLVMPtr{Float32,1})
+        unsafe_store!(p, 1f0)
+        ccall("extern air.wg.barrier", llvmcall, Cvoid, (UInt32, UInt32), 2, 1)
+        unsafe_store!(p, 2f0)
+        return
+    end
+    function plain_kernel(p::Core.LLVMPtr{Float32,1})
+        unsafe_store!(p, 1f0)
+        return
+    end
+    metal_opt = something(Sys.which("metal-opt"),
+                          Some(try readchomp(pipeline(`xcrun --find metal-opt`; stderr=devnull))
+                               catch; nothing end))
+    function metal_opt_accepts(job; verbose=true)
+        obj = JuliaContext() do _
+            first(GPUCompiler.compile(:obj, job))
+        end
+        mktemp() do path, io
+            write(io, obj)
+            close(io)
+            log = IOBuffer()
+            ok = success(pipeline(`$metal_opt $path -o /dev/null`; stdout=log, stderr=log))
+            ok || !verbose || print(String(take!(log)))
+            ok
+        end
+    end
+    @testset "AIR $air" for (metal, air, macos) in ((v"4.0", v"2.8", v"26"),
+                                                    (v"4.1", v"2.9", v"27"))
+        kernel_job(f) = let
+            source = methodinstance(typeof(f), Tuple{Core.LLVMPtr{Float32,1}},
+                                    Base.get_world_counter())
+            target = MetalCompilerTarget(; macos, metal, air)
+            CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        end
+        job = kernel_job(kernel)
+
+        asm = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+        @test occursin(air >= v"2.9" ? "call void @air.wg.barrier(i32 2, i32 5, i32 1)" :
+                                        "call void @air.wg.barrier(i32 2, i32 1)", asm)
+
+        # (an older toolchain may not know the target's AIR version at all)
+        if metal_opt === nothing || !metal_opt_accepts(kernel_job(plain_kernel); verbose=false)
+            @test_skip false
+        else
+            @test metal_opt_accepts(job)
+        end
+    end
+end
+
 @testset "floating-point atomics on Apple10" begin
     # the macOS 26 compiler for Apple10 GPUs crashes on a floating-point add or subtract on
     # device memory that a release fence precedes, like the fences that implement ordered

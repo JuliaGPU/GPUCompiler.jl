@@ -729,6 +729,8 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # the macOS 27 back-end rejects bare LLVM fences (Metal.jl#968)
     lower_fences!(job, mod)
 
+    legalize_barrier_abi!(job, mod)
+
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
     # force-inlines throwing functions into the kernel first so the rewrite is sound, then scrubs
@@ -1341,6 +1343,53 @@ function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod
         erase!(inst)
     end
     return true
+end
+
+# Rewrite the `air.wg.barrier` and `air.simdgroup.barrier` calls front-ends emit, in either
+# form, into the form of the target: AIR 2.9 added a memory order operand between the memory
+# flags and the scope, and Apple's tools reject the form of the other AIR versions. Barriers
+# are sequentially consistent before MSL 4.1, so other orders are strengthened then.
+function legalize_barrier_abi!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                               mod::LLVM.Module)
+    target = job.config.target
+    T_int32 = LLVM.Int32Type()
+    seq_cst = ConstantInt(T_int32, 5)
+    changed = false
+    for fn in ("air.wg.barrier", "air.simdgroup.barrier")
+        haskey(mod.functions, fn) || continue
+        f = mod.functions[fn]
+        calls = [u::LLVM.CallInst for u in f.users]
+        nparams = length(f.function_type.parameters)
+        if target.air >= v"2.9" && nparams == 3
+            target.metal >= v"4.1" && continue
+            for call in calls
+                call.operands[2] = seq_cst
+            end
+            changed |= !isempty(calls)
+            continue
+        elseif target.air < v"2.9" && nparams == 2
+            continue
+        end
+
+        new_ft = LLVM.FunctionType(LLVM.VoidType(),
+                                   fill(T_int32, target.air >= v"2.9" ? 3 : 2))
+        f.name = ""
+        new_f = LLVM.Function(mod, fn, new_ft)
+        append!(new_f.function_attributes, f.function_attributes)
+        for call in calls
+            flags, scope = call.arguments[1], call.arguments[end]
+            args = target.air >= v"2.9" ? [flags, seq_cst, scope] : [flags, scope]
+            @dispose builder=IRBuilder() begin
+                position!(builder, LLVM.before(call))
+                builder.debug_location = call.debug_location
+                call!(builder, new_ft, new_f, args)
+            end
+            erase!(call)
+        end
+        erase!(f)
+        changed = true
+    end
+    return changed
 end
 
 # Julia names each generated LLVM function `julia_<name>_<counter>`, where the counter is
