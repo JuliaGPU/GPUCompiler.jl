@@ -28,7 +28,15 @@ export methodinstance, generic_methodinstance
 
     @inline function signature_type_by_tt(ft::Type, tt::Type)
         u = Base.unwrap_unionall(tt)::DataType
-        return Base.rewrap_unionall(Tuple{dispatch_key(ft), map(dispatch_key, u.parameters)...}, tt)
+        # `methodinstance` calls this on every kernel launch, so for constant `ft` and `tt`
+        # this needs to fold to a constant, which `map` over the parameters prevents by
+        # allocating a `Vector`. Without `Type{...}` elements, plain splatting is cheapest.
+        sig = if Base.isType(ft) || any(Base.isType, u.parameters)
+            Tuple{dispatch_key(ft), (dispatch_key(p) for p in u.parameters)...}
+        else
+            Tuple{ft, u.parameters...}
+        end
+        return Base.rewrap_unionall(sig, tt)
     end
 else
     @inline function signature_type_by_tt(ft::Type, tt::Type)
