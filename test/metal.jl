@@ -129,6 +129,55 @@ end
     end
 end
 
+@testset "source file" begin
+    # like Apple's front-end, name the kernel's source file, also in the debug info
+    mod = @eval module $(gensym())
+        function kernel(ptr)
+            unsafe_store!(ptr, 42f0)
+            return
+        end
+    end
+
+    tt = Tuple{Core.LLVMPtr{Float32,1}}
+    air = sprint(io -> Metal.code_native(io, mod.kernel, tt; kernel=true, debug_level=1, raw=true))
+    @test occursin(r"!air.source_file_name = !\{(![0-9]+)\}", air)
+    ref = match(r"!air.source_file_name = !\{(![0-9]+)\}", air).captures[1]
+    # (only checking the file name, as LLVM escapes Windows path separators)
+    @test occursin(Regex("$ref = !\\{!\"[^\"]+$(basename(@__FILE__))\"\\}"), air)
+    @test occursin(Regex("!DIFile\\(filename: \"$(basename(@__FILE__))\", directory: \"[^\"]+\"\\)"), air)
+    @test !occursin("!DIFile(filename: \"julia\"", air)
+
+    # kernels defined at the REPL or with `julia -e` have no file to record
+    for file in (Symbol("REPL[1]"), :none)
+        mod = @eval module $(gensym()) end
+        body = Expr(:block, LineNumberNode(1, file), :(unsafe_store!(ptr, 42f0)), nothing)
+        kernel = Core.eval(mod, Expr(:function, :(kernel(ptr)), body))
+        @test first(methods(kernel)).file == file
+        air = sprint(io -> Metal.code_native(io, kernel, tt; kernel=true, debug_level=1, raw=true))
+        @test !occursin("air.source_file_name", air)
+        @test !occursin(abspath(string(file)), air)
+        @test occursin("!DIFile(filename: \"julia\", directory: \".\")", air)
+    end
+end
+
+@testset "kernel marker" begin
+    # Julia's kernel marker is replaced by `air.kernel`, and should not reach AIR
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+
+    @test @filecheck begin
+        @check "!julia.kernel = !{!{{[0-9]+}}}"
+        Metal.code_llvm(mod.kernel, Tuple{}; dump_module=true, kernel=true)
+    end
+
+    @test @filecheck begin
+        @check_not "!julia.kernel = !{!"
+        @check "!air.kernel = !{!{{[0-9]+}}}"
+        Metal.code_native(mod.kernel, Tuple{}; dump_module=true, kernel=true)
+    end
+end
+
 @testset "compile options" begin
     # Apple's frontend emits an air.compile_options named metadata node. denorms and
     # framebuffer fetch match its defaults; fast math tracks the target's `fastmath`.
@@ -172,6 +221,96 @@ end
     #      or just defer to execution testing in Metal.jl?
 end
 
+@testset "argument type names" begin
+    # the Metal runtime derives the reflected data type of an argument from its MSL type name
+    mod = @eval module $(gensym())
+        struct Params{T,N}
+            scale::T
+            shift::NTuple{N,T}
+        end
+        kernel(args...) = return
+    end
+    tt = (Float32, UInt16, Bool, Float16, Int64, Core.LLVMPtr{Float32,1},
+          Core.LLVMPtr{Nothing,1}, NTuple{4,VecElement{Float32}}, mod.Params{Float32,2},
+          Tuple{Int,Float32})
+    air = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; dump_module=true, kernel=true))
+    type_names = map(eachmatch(r"!\"air.arg_type_name\", !\"([^\"]+)\"", air)) do m
+        m.captures[1]
+    end
+    @test type_names == ["float", "ushort", "bool", "half", "long", "float", "void",
+                         "float4", "Params_Float32_2", "Tuple_Int64_Float32"]
+
+    # identifiers don't depend on how types print, which changes with the bindings in `Main`
+    @test GPUCompiler.msl_type_name(Some{Union{Nothing,mod.Params{Float32,2}}}) ==
+          "Some_Union_Nothing_Params_Float32_2"
+    @test GPUCompiler.msl_type_name(Val{Tuple{mod.Params}}) == "Val_Tuple_Params_T_N"
+    zeta = @eval module $(gensym()) struct Zeta end end
+    alpha = @eval module $(gensym()) struct Alpha end end
+    @test GPUCompiler.msl_type_name(Val{Union{zeta.Zeta,alpha.Alpha}}) == "Val_Union_Alpha_Zeta"
+    @test GPUCompiler.msl_type_name(Val{Union{alpha.Alpha,zeta.Zeta}}) == "Val_Union_Alpha_Zeta"
+end
+
+@testset "argument layouts" begin
+    # what MSL emits for `constant T&` arguments: the size of the referenced value, and the
+    # layout of structs (nested structs inline, homogeneous tuples as arrays)
+    mod = @eval module $(gensym())
+        struct Inner
+            x::Float32
+            y::Int16
+        end
+        struct Outer
+            a::Int8
+            inner::Inner
+            inners::NTuple{2,Inner}
+            nothing::Nothing
+            v::NTuple{2,VecElement{Float32}}
+            p::Core.LLVMPtr{Float32,1}
+        end
+        kernel(scalar, ptr, outer, inner_ptr) = return
+    end
+    tt = (Float32, Core.LLVMPtr{Float32,1}, mod.Outer, Core.LLVMPtr{mod.Inner,1})
+    air = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; dump_module=true, kernel=true))
+
+    # the operands of the argument metadata node of `name`, and of metadata node `ref`
+    node(ref) = match(Regex("^$ref = !\\{(.*)\\}\$", "m"), air).captures[1]
+    arg(name) = only(filter(l -> occursin("!\"air.arg_name\", !\"$name\"", l), split(air, '\n')))
+    struct_info(name) = node(match(r"!\"air.struct_type_info\", (![0-9]+)", arg(name)).captures[1])
+
+    @test occursin("!\"air.buffer\", !\"air.buffer_size\", i32 4, !\"air.location_index\"", arg("scalar"))
+    @test !occursin("air.buffer_size", arg("ptr"))
+    @test !occursin("air.struct_type_info", arg("scalar"))
+    @test occursin("!\"air.buffer_size\", i32 $(sizeof(mod.Outer))", arg("outer"))
+
+    inner = "i32 0, i32 4, i32 0, !\"float\", !\"x\", i32 4, i32 2, i32 0, !\"short\", !\"y\""
+    outer = struct_info("outer")
+    @test occursin(r"^i32 0, i32 1, i32 0, !\"char\", !\"a\", "
+                   * r"!\"air.struct_type_info\", ![0-9]+, i32 4, i32 8, i32 0, !\"Inner\", !\"inner\", "
+                   * r"!\"air.struct_type_info\", ![0-9]+, i32 12, i32 8, i32 2, !\"Inner\", !\"inners\", "
+                   * r"i32 32, i32 8, i32 0, !\"float2\", !\"v\", "
+                   * r"i32 40, i32 8, i32 0, !\"ulong\", !\"p\"$", outer)
+    for m in eachmatch(r"!\"air.struct_type_info\", (![0-9]+)", outer)
+        @test node(m.captures[1]) == inner
+    end
+
+    # MSL describes the struct a `device T*` points to as well, without a buffer size
+    @test struct_info("inner_ptr") == inner
+    @test !occursin("air.buffer_size", arg("inner_ptr"))
+
+    # a pointer may point to data that isn't stored inline, which has no layout to describe
+    mod = @eval module $(gensym())
+        struct Boxed
+            x::Real
+        end
+        mutable struct Node
+            next::Node
+        end
+        kernel(a, b) = return
+    end
+    tt = (Core.LLVMPtr{mod.Boxed,1}, Core.LLVMPtr{mod.Node,1})
+    air = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; dump_module=true, kernel=true))
+    @test !occursin("air.struct_type_info", air)
+end
+
 @testset "input arguments" begin
     mod = @eval module $(gensym())
         function kernel(ptr)
@@ -196,6 +335,11 @@ end
         @check_same cond=opaque_ptrs "(ptr addrspace(1) %{{.+}}, i32 %thread_position_in_threadgroup)"
         @check_not "call i32 @julia.air.thread_position_in_threadgroup.i32"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true)
+    end
+
+    @test @filecheck begin
+        @check "!{i32 1, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"thread_position_in_threadgroup\"}"
+        Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; dump_module=true, kernel=true)
     end
 end
 
