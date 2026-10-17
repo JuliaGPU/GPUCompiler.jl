@@ -62,6 +62,11 @@ Base.@kwdef struct MetalCompilerTarget <: AbstractCompilerTarget
     # PTX target's compute capability. Only used to work around back-end bugs of specific GPUs
     # (see `metal_atomic_action`); when unknown, those workarounds apply.
     apple_family::Union{Nothing,Int} = nothing
+
+    # optional threadgroup size properties, matching the MSL `required_threads_per_threadgroup`
+    # (here called `minthreads`, as for PTX) and `max_total_threads_per_threadgroup` attributes
+    minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
+    maxthreads::Union{Nothing,Int} = nothing
 end
 
 # for backwards compatibility
@@ -74,6 +79,13 @@ function Base.hash(target::MetalCompilerTarget, h::UInt)
     h = hash(target.metal, h)
     h = hash(target.fastmath, h)
     h = hash(target.apple_family, h)
+    h = hash(target.minthreads, h)
+    h = hash(target.maxthreads, h)
+end
+
+# like the MSL front-end, a required threadgroup size also determines the maximum
+function max_work_group_size(target::MetalCompilerTarget)
+    target.minthreads === nothing ? target.maxthreads : prod(target.minthreads)
 end
 
 # the canonical text representation is AIR assembly, i.e. LLVM 14 era textual IR
@@ -369,6 +381,19 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{MetalCompilerTarge
     # are not inlined, so the runtime functions linked later can still be.
     for f in mod.functions
         isdeclaration(f) || push!(f.function_attributes, StringAttribute("no-builtins"))
+    end
+
+    target = job.config.target
+    maxthreads = max_work_group_size(target)
+    for f in kernels(mod)
+        if maxthreads !== nothing
+            push!(f.function_attributes,
+                  StringAttribute("max-work-group-size", string(maxthreads)))
+        end
+        if target.minthreads !== nothing
+            bounds = ntuple(i -> i <= length(target.minthreads) ? target.minthreads[i] : 1, 3)
+            push!(f.function_attributes, StringAttribute("work-group-size", join(bounds, ",")))
+        end
     end
 
     for f in kernels(mod)
@@ -2448,7 +2473,16 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
     stage_infos = Metadata[]
     stage_infos = MDNode(stage_infos)
 
-    kernel_md = MDNode([entry, stage_infos, arg_infos])
+    kernel_md = Metadata[entry, stage_infos, arg_infos]
+
+    ## threadgroup size
+    maxthreads = max_work_group_size(job.config.target)
+    if maxthreads !== nothing
+        push!(kernel_md, MDNode([MDString("air.max_work_group_size"),
+                                 Metadata(ConstantInt(Int32(maxthreads)))]))
+    end
+
+    kernel_md = MDNode(kernel_md)
     push!(get!(mod.metadata, "air.kernel").operands, kernel_md)
 
     return
