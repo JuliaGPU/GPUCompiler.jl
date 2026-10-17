@@ -344,6 +344,22 @@ end
     @test Base.isdispatchtuple(mi.specTypes)
 end
 
+# on 1.10, `methodinstance` is the generic, allocating lookup
+VERSION >= v"1.11.0-DEV.1552" && @testset "method instance lookups don't allocate" begin
+    # back-ends look up the method instance on every kernel launch
+    mod = @eval module $(gensym())
+        import GPUCompiler
+        kernel(args...) = nothing
+        lookup() = GPUCompiler.methodinstance(typeof(kernel),
+                                              $(Tuple{Vector{Int}, ntuple(_ -> Int, 40)...}))
+        lookup_type() = GPUCompiler.methodinstance(typeof(kernel), Tuple{Type{Int}, Int})
+    end
+    mod.lookup()
+    @test (@allocated mod.lookup()) == 0
+    mod.lookup_type()
+    @test (@allocated mod.lookup_type()) == 0
+end
+
 @testset "compilation" begin
     @testset "callable structs" begin
         mod = @eval module $(gensym())
