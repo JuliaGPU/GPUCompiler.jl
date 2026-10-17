@@ -244,53 +244,6 @@ end
 
 end
 
-@testset "min and max" begin
-    # Julia's `min` and `max` propagate NaNs and order -0.0 before +0.0, which the `fmin` and
-    # `fmax` the SPIR-V back-ends translate `llvm.minimum` and `llvm.maximum` to don't do
-    # (call the intrinsics directly: on Julia 1.10 and 1.11, `min` and `max` only use them
-    #  on aarch64 hosts)
-    mod = @eval module $(gensym())
-        const V = NTuple{4, VecElement{Float32}}
-        smin(x, y) = ccall("llvm.minimum.f32", llvmcall, Float32, (Float32, Float32), x, y)
-        smax(x, y) = ccall("llvm.maximum.f32", llvmcall, Float32, (Float32, Float32), x, y)
-        vmin(x, y) = ccall("llvm.minimum.v4f32", llvmcall, V, (V, V), x, y)
-        function kernel(p::Ptr{Float32}, q::Ptr{V}, x::Float32, y::Float32, v::V, w::V)
-            unsafe_store!(p, smin(x, y), 1)
-            unsafe_store!(p, smax(x, y), 2)
-            unsafe_store!(q, vmin(v, w))
-            return
-        end
-        fast_kernel(p::Ptr{Float32}, x::Float32, y::Float32) =
-            (unsafe_store!(p, Base.FastMath.min_fast(x, y)); return)
-    end
-    V = mod.V
-
-    @test @filecheck begin
-        @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
-        @check "call nsz float @llvm.minnum.f32"
-        @check "fcmp uno float"
-        @check "call nsz float @llvm.maxnum.f32"
-        @check "fcmp uno float"
-        @check "call nsz <4 x float> @llvm.minnum.v4f32"
-        @check "fcmp uno <4 x float>"
-        @check_not "llvm.minimum"
-        @check_not "llvm.maximum"
-        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Float32}, Ptr{V}, Float32, Float32, V, V}; backend)
-    end
-
-    # with fast-math flags, NaNs and signed zeros don't need to be handled
-    # (Julia 1.12+ implements `min_fast` using `llvm.minimum`)
-    if VERSION >= v"1.12"
-        @test @filecheck begin
-            @check_label "define {{.*}} @{{(julia|j)_fast_kernel_[0-9]+}}"
-            @check "call fast float @llvm.minnum.f32"
-            @check_not "fcmp"
-            @check_not "select"
-            SPIRV.code_llvm(mod.fast_kernel, Tuple{Ptr{Float32}, Float32, Float32}; backend)
-        end
-    end
-end
-
 @testset "fma" begin
     # `fma` uses the hardware instruction, not the Float64-based `fma_emulated`
     mod = @eval module $(gensym())
@@ -367,19 +320,53 @@ end
 end
 
 @testset "min and max" begin
+    # Julia's `min` and `max` propagate NaNs and order -0.0 before +0.0, which OpenCL's `fmin`
+    # and `fmax` don't do, so the back-ends expand `llvm.minimum` and `llvm.maximum` around
+    # them, fixing up the sign of zeros with `copysign` and returning NaN for unordered operands
+    # (call the intrinsics directly: on Julia 1.10 and 1.11, `min` and `max` only use them
+    #  on aarch64 hosts)
     mod = @eval module $(gensym())
+        const V = NTuple{4, VecElement{Float32}}
         smin(x, y) = ccall("llvm.minimum.f32", llvmcall, Float32, (Float32, Float32), x, y)
-        function kernel(p::Ptr{Float32}, x::Float32, y::Float32)
-            unsafe_store!(p, smin(x, y))
+        smax(x, y) = ccall("llvm.maximum.f32", llvmcall, Float32, (Float32, Float32), x, y)
+        vmin(x, y) = ccall("llvm.minimum.v4f32", llvmcall, V, (V, V), x, y)
+        function kernel(p::Ptr{Float32}, q::Ptr{V}, x::Float32, y::Float32, v::V, w::V)
+            unsafe_store!(p, smin(x, y), 1)
+            unsafe_store!(p, smax(x, y), 2)
+            unsafe_store!(q, vmin(v, w))
             return
         end
+        fast_kernel(p::Ptr{Float32}, x::Float32, y::Float32) =
+            (unsafe_store!(p, Base.FastMath.min_fast(x, y)); return)
     end
+    V = mod.V
 
     @test @filecheck begin
-        @check "OpEntryPoint Kernel %[[KERNEL:[^ ]+]]"
+        @check "OpEntryPoint Kernel"
         @check "OpExtInst %float %{{[0-9]+}} fmin"
-        @check "OpUnordered"
-        SPIRV.code_native(mod.kernel, Tuple{Ptr{Float32}, Float32, Float32}; backend, kernel=true)
+        @check "OpExtInst %float %{{[0-9]+}} copysign"
+        @check "OpUnordered %bool"
+        @check "OpExtInst %float %{{[0-9]+}} fmax"
+        @check "OpExtInst %float %{{[0-9]+}} copysign"
+        @check "OpUnordered %bool"
+        @check "OpExtInst %v4float %{{[0-9]+}} fmin"
+        @check "OpExtInst %v4float %{{[0-9]+}} copysign"
+        @check "OpUnordered %v4bool"
+        SPIRV.code_native(mod.kernel, Tuple{Ptr{Float32}, Ptr{V}, Float32, Float32, V, V};
+                          backend, kernel=true)
+    end
+
+    # with fast-math flags, NaNs and signed zeros don't need to be handled
+    # (Julia 1.12+ implements `min_fast` using `llvm.minimum`)
+    if VERSION >= v"1.12"
+        @test @filecheck begin
+            @check "OpEntryPoint Kernel"
+            @check "OpExtInst %float %{{[0-9]+}} fmin"
+            @check_not "copysign"
+            @check_not "OpUnordered"
+            SPIRV.code_native(mod.fast_kernel, Tuple{Ptr{Float32}, Float32, Float32};
+                              backend, kernel=true)
+        end
     end
 end
 
@@ -675,10 +662,9 @@ end
 
     snan = reinterpret(Float32, 0x7f800001)
     values = Float32[0, -0.0, 1, -1, Inf, NaN, snan]
-    # Julia's `min` and `max` propagate NaNs and order -0.0 before +0.0
+    # Julia's `min` and `max` order -0.0 before +0.0
     isnum(x) = !isnan(x)
-    families = [("minimum", min, :propagate), ("maximum", max, :propagate),
-                ("minnum", min, :quiet), ("maxnum", max, :quiet)]
+    families = [("minnum", min, :quiet), ("maxnum", max, :quiet)]
     if LLVM.version() >= v"19"
         append!(families, [("minimumnum", min, :number), ("maximumnum", max, :number)])
     end
@@ -690,7 +676,7 @@ end
                 res = f(x, y)
                 signaling = x === snan || y === snan
                 if isnan(x) || isnan(y)
-                    if nans === :propagate || (isnan(x) && isnan(y))
+                    if isnan(x) && isnan(y)
                         @test isnan(res)
                     elseif nans === :quiet && signaling
                         # (`llvm.minnum` may return NaN for a signaling NaN)
@@ -710,6 +696,9 @@ end
         @test occursin("bitcast", lower(intr, "nnan"))
     end
     @test !occursin("fcmp", lower("minnum", "nsz"))
+
+    # the back-ends expand `llvm.minimum` and `llvm.maximum` themselves
+    @test occursin("call float @llvm.minimum.f32", lower("minimum"))
 end
 
 @testset "local memory padding" begin
