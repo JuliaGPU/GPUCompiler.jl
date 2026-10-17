@@ -102,6 +102,100 @@ end
     @test !occursin(r"noalias[^\n]*%\"neutral::Int32\"", ir)
 end
 
+@testset "byref parameter attributes" begin
+    # by-reference parameters are read-only and as large as the argument, as for MSL's
+    # `constant T&` arguments (without `noalias`, see above)
+    mod = @eval module $(gensym())
+        struct Params
+            a::Float32
+            b::Int32
+            c::NTuple{2,Float32}
+        end
+        @noinline get(t, i) = @inbounds t[i]
+        function kernel(out, n, p, t, u, sym, i)
+            if i <= n
+                local_t = ntuple(j -> Float32(i * j), Val(8))
+                unsafe_store!(out, p.a + p.c[2] + (@inbounds t[i]) + get(u, i) +
+                                   get(local_t, i) + (sym === :byref_attribute_probe))
+            end
+            return
+        end
+    end
+    tt = (Core.LLVMPtr{Float32,1}, Int32, mod.Params, NTuple{8,Float32}, NTuple{8,Float32},
+          Symbol, Int)
+
+    # (by position, as older Julia versions do not name the parameters)
+    function kernel_parameter_attributes(ir)
+        Context() do ctx
+            m = parse(LLVM.Module, ir)
+            f = only(filter(f -> startswith(f.name, "_Z6kernel"), collect(m.functions)))
+            [Dict(LLVM.kind(attr) => LLVM.value(attr)
+                  for attr in collect(f.parameter_attributes[i]) if attr isa EnumAttribute)
+             for i in 1:length(f.parameters)]
+        end
+    end
+    attrs = kernel_parameter_attributes(sprint() do io
+        Metal.code_llvm(io, mod.kernel, tt; kernel=true, dump_module=true)
+    end)
+    # (`u` is copied to the stack, as `get` is also passed stack memory)
+    sizes = [nothing, 4, 16, 32, 32, sizeof(UInt), sizeof(Int)]
+    @test length(attrs) == length(sizes)
+    for (param, size) in zip(attrs, sizes)
+        @test get(param, :dereferenceable, nothing) == size
+        # device pointers have no known extent and may be written through
+        @test haskey(param, :readonly) == (size !== nothing)
+        @test !haskey(param, :noalias)
+    end
+
+    # the kernel state, too
+    job, _ = Metal.create_table_job(mod.kernel, tt; kernel=true)
+    attrs = kernel_parameter_attributes(sprint() do io
+        GPUCompiler.code_llvm(io, job; dump_module=true)
+    end)
+    @test get(attrs[1], :dereferenceable, nothing) == sizeof(Metal.TableKernelState)
+    @test haskey(attrs[1], :readonly)
+    @test !haskey(attrs[1], :noalias)
+end
+
+@testset "byref parameters written through" begin
+    # parameters are only marked read-only when that is evident from the IR
+    Context(; opaque_pointers=true) do ctx
+        mod = parse(LLVM.Module, """
+            declare void @g(ptr addrspace(1))
+            declare void @llvm.memcpy.p1.p1.i64(ptr addrspace(1), ptr addrspace(1), i64, i1)
+            define void @f(ptr addrspace(1) %p, ptr addrspace(1) %q, i1 %c,
+                           ptr addrspace(1) %volatile, ptr addrspace(1) %call,
+                           ptr addrspace(1) %int, ptr addrspace(1) %memcpy,
+                           ptr addrspace(1) %rmw, ptr addrspace(1) %loop) {
+            entry:
+              %r = select i1 %c, ptr addrspace(1) %p, ptr addrspace(1) %q
+              %g = getelementptr i8, ptr addrspace(1) %r, i64 4
+              %v = load i32, ptr addrspace(1) %g
+              store i32 %v, ptr addrspace(1) %q
+              %w = load volatile i32, ptr addrspace(1) %volatile
+              call void @g(ptr addrspace(1) %call)
+              %i = ptrtoint ptr addrspace(1) %int to i64
+              call void @llvm.memcpy.p1.p1.i64(ptr addrspace(1) %q, ptr addrspace(1) %memcpy, i64 4, i1 false)
+              %x = atomicrmw add ptr addrspace(1) %rmw, i32 1 monotonic
+              br label %header
+            header:
+              %l = phi ptr addrspace(1) [ %loop, %entry ], [ %next, %header ]
+              %y = load i32, ptr addrspace(1) %l
+              %next = getelementptr i32, ptr addrspace(1) %l, i64 1
+              br i1 %c, label %header, label %exit
+            exit:
+              ret void
+            }
+            """)
+        f = mod.functions["f"]
+        read_only = Dict(LLVM.name(p) => GPUCompiler.only_read_through(p) for p in f.parameters
+                         if p.value_type isa LLVM.PointerType)
+        @test read_only == Dict("p" => true, "q" => false, "volatile" => false,
+                                "call" => false, "int" => false, "memcpy" => false,
+                                "rmw" => false, "loop" => true)
+    end
+end
+
 @testset "versioned triple" begin
     # Apple encodes the AIR version in the triple's architecture as air64_v<major><minor>;
     # tools derive the expected AIR version from it. Old toolchains used the plain air64.

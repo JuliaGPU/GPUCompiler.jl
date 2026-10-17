@@ -698,6 +698,8 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
             run!(pb, mod)
         end
 
+        add_byref_parameter_attributes!(job, entry)
+
         add_argument_metadata!(job, mod, entry)
 
         add_module_metadata!(job, mod)
@@ -1669,6 +1671,45 @@ function only_loaded_from(ptr::LLVM.Value)
         if u isa LLVM.GetElementPtrInst || u isa LLVM.BitCastInst
             only_loaded_from(u) || return false
         elseif !(u isa LLVM.LoadInst) || u.volatile || isatomic(u)
+            return false
+        end
+    end
+    return true
+end
+
+# By-reference parameters point to a copy of the argument that the host binds, and that the
+# kernel only reads (`air.read`). Say so with the attributes Apple's front-end puts on MSL's
+# `constant T&` arguments, which the cloning in `add_parameter_address_spaces!` drops from
+# Julia's. Not `noalias`, see there.
+function add_byref_parameter_attributes!(@nospecialize(job::CompilerJob), f::LLVM.Function)
+    args = classify_arguments(job, f.function_type; post_optimization=job.config.optimize)
+    for arg in args
+        arg.idx === nothing && continue
+        param = f.parameters[arg.idx]
+        param.value_type isa LLVM.PointerType || continue
+        # pointer arguments point to device memory of unknown extent
+        arg.cc == BITS_VALUE && (arg.typ <: Ptr || arg.typ <: Core.LLVMPtr) && continue
+
+        # the host binds the argument's bytes (`air.arg_type_size`); a fieldless boxed
+        # argument is bound as its address word
+        T = arg.cc == MUT_REF ? UInt : arg.typ
+        attrs = f.parameter_attributes[arg.idx]
+        push!(attrs, EnumAttribute("dereferenceable", sizeof(T)))
+        only_read_through(param) && push!(attrs, EnumAttribute("readonly"))
+    end
+    return
+end
+
+# whether memory is only read through `ptr` and the pointers derived from it
+function only_read_through(ptr::LLVM.Value, seen=Set{LLVM.Value}())
+    ptr in seen && return true
+    push!(seen, ptr)
+    for use in ptr.uses
+        u = LLVM.user(use)
+        if u isa Union{LLVM.GetElementPtrInst, LLVM.BitCastInst, LLVM.AddrSpaceCastInst,
+                       LLVM.PHIInst, LLVM.SelectInst}
+            only_read_through(u, seen) || return false
+        elseif !(u isa LLVM.LoadInst) || u.volatile
             return false
         end
     end
