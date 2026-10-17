@@ -303,6 +303,14 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
     end
 end
 
+function finish_ir!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module,
+                    entry::LLVM.Function)
+    # PTX has no atomics on the stack, and NVPTX doesn't legalize them
+    lower_local_atomics!(mod)
+
+    return entry
+end
+
 # mirrors `NVPTXCompileOptions` from libnvptx.h
 struct NVPTXCompileOptions
     cpu::Cstring
@@ -452,6 +460,178 @@ function nvptx_atomic_error(inst::LLVM.Instruction)
         return "sequentially-consistent 128-bit atomic load or store (not supported by the NVPTX back-end)"
     end
     return nothing
+end
+
+
+## atomics on local memory
+
+# PTX only has atomic instructions, and atomic (relaxed, acquire or release) loads and
+# stores, for global and shared memory, and for generic addresses of those. On the stack
+# (local memory) they are undefined: Pascal GPUs fail with CUDA_ERROR_INVALID_ADDRESS_SPACE,
+# which leaves the context unusable, and ptxas rejects the `atom.local` that NVPTX selects
+# for a `cmpxchg` on an `alloca`. NVPTX only demotes `atomicrmw` on pointers it knows to be
+# local, and only when optimizing.
+#
+# Atomics on the stack are common nonetheless, e.g., on objects that Julia's `AllocOpt`
+# moved there, or in code from Enzyme, which accumulates into the shadow of an argument with
+# an atomic when it cannot see where the argument points, e.g., to a stack slot of the
+# caller (Enzyme.jl#428). Since no other thread can access a thread's stack, plain accesses
+# behave the same, so `lower_local_atomics!`, like NVIDIA's libcu++:
+# - replaces atomics on the thread's own memory by plain accesses;
+# - checks at run time whether an atomic on a generic pointer that may point to the stack
+#   does, and then performs the plain accesses instead (see `guard_local_atomic!`).
+#
+# `unordered` loads and stores aren't checked: Julia uses them for every access to a heap
+# reference, and NVPTX only lowers them to instructions that local memory doesn't support
+# (`ld.relaxed` and `st.relaxed`) from sm_70 on, which hasn't been seen to fail.
+
+# Is `ptr` known to point to the thread's own memory?
+ptx_thread_private(ptr::LLVM.Value) =
+    ptr.value_type.addrspace == #=local=# 5 || is_thread_private(ptr)
+
+# Can `ptr` point to local memory? Generic pointers can, unless every object they can be
+# derived from is in another address space.
+function ptx_may_be_local(ptr::LLVM.Value)
+    seen = Set{LLVM.Value}()
+    worklist = LLVM.Value[ptr]
+    while !isempty(worklist)
+        val = pop!(worklist)
+        val in seen && continue
+        push!(seen, val)
+        as = val.value_type.addrspace
+        if as == #=local=# 5
+            return true
+        elseif as != #=generic=# 0 || val isa LLVM.GlobalVariable
+            continue
+        elseif val isa LLVM.GetElementPtrInst || val isa LLVM.BitCastInst ||
+               val isa LLVM.AddrSpaceCastInst
+            push!(worklist, val.operands[1])
+        elseif val isa LLVM.ConstantExpr &&
+               LLVM.opcode(val) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast,
+                               LLVM.API.LLVMAddrSpaceCast)
+            push!(worklist, val.operands[1])
+        elseif val isa LLVM.PHIInst
+            append!(worklist, first.(val.incoming))
+        elseif val isa LLVM.SelectInst
+            push!(worklist, val.operands[2], val.operands[3])
+        else
+            return true
+        end
+    end
+    return false
+end
+
+# Does the `!noalias.addrspace` metadata of `inst` rule out that it accesses local memory?
+# `guard_local_atomic!` adds it to the atomic it keeps for other memory.
+function excludes_local(inst::LLVM.Instruction)
+    haskey(inst.metadata, "noalias.addrspace") || return false
+    md = inst.metadata["noalias.addrspace"]
+    bounds = [convert(Int, Value(op)) % UInt32 for op in md.operands]
+    # (pairs of half-open ranges, which can wrap around)
+    return any(1:2:length(bounds)) do i
+        lo, hi = bounds[i], bounds[i+1]
+        lo <= hi ? lo <= 5 < hi : (5 >= lo || 5 < hi)
+    end
+end
+
+# Replace the atomic memory operation `inst` by a call to a function that checks whether
+# its pointer points to local memory, and then performs it with plain accesses, or atomically
+# otherwise. The function is meant to be inlined (it is `alwaysinline`).
+function guard_local_atomic!(inst::LLVM.Instruction)
+    mod = LLVM.parent(LLVM.parent(LLVM.parent(inst)))
+    args = collect(inst.operands)
+    T = inst.value_type
+    ft = LLVM.FunctionType(T, [arg.value_type for arg in args])
+    f = LLVM.Function(mod, "gpucompiler.local_atomic", ft)
+    f.linkage = LLVM.Linkage.Internal
+    push!(f.function_attributes, EnumAttribute(:alwaysinline))
+
+    # the operation, on the arguments of the function. the clones would refer to the debug
+    # info of the caller, so they get the location of the call when inlined instead.
+    local_atomic, other_atomic = copy(inst), copy(inst)
+    for clone in (local_atomic, other_atomic)
+        clone.debug_location = nothing
+        for (i, param) in enumerate(f.parameters)
+            clone.operands[i] = param
+        end
+    end
+    other_atomic.metadata["noalias.addrspace"] =
+        MDNode([Metadata(ConstantInt(Int32(5))), Metadata(ConstantInt(Int32(6)))])
+
+    isspacep = LLVM.Function(mod, LLVM.Intrinsic("llvm.nvvm.isspacep.local"))
+    isspacep_ft = isspacep.function_type
+    @dispose builder=IRBuilder() begin
+        entry = BasicBlock(f, "entry")
+        local_block = BasicBlock(f, "local")
+        other_block = BasicBlock(f, "other")
+        exit = BasicBlock(f, "exit")
+
+        position!(builder, LLVM.at_end(entry))
+        # (the intrinsic takes an `i8*` with typed pointers)
+        ptr = f.parameters[inst isa LLVM.StoreInst ? 2 : 1]
+        T_ptr = only(isspacep_ft.parameters)
+        ptr = ptr.value_type == T_ptr ? ptr : bitcast!(builder, ptr, T_ptr)
+        is_local = call!(builder, isspacep_ft, isspacep, [ptr])
+        br!(builder, is_local, local_block, other_block)
+
+        for (block, atomic) in ((local_block, local_atomic), (other_block, other_atomic))
+            position!(builder, LLVM.at_end(block))
+            LLVM.API.LLVMInsertIntoBuilder(builder, atomic)
+            br!(builder, exit)
+        end
+
+        position!(builder, LLVM.at_end(exit))
+        if T isa LLVM.VoidType
+            ret!(builder)
+        else
+            result = phi!(builder, T)
+            append!(result.incoming, [(local_atomic, local_block), (other_atomic, other_block)])
+            ret!(builder, result)
+        end
+    end
+    # (after building the users of its result, which lowering replaces)
+    demote_private_atomic!(local_atomic)
+
+    @dispose builder=IRBuilder() begin
+        position!(builder, LLVM.before(inst))
+        call = call!(builder, ft, f, args)
+        call.debug_location = inst.debug_location
+        T isa LLVM.VoidType || replace_uses!(inst, call)
+    end
+    erase!(inst)
+    return
+end
+
+function lower_local_atomics!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "lower local atomics" begin
+
+    atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
+               if is_atomic_memop(inst)]
+    guarded = false
+    for inst in atomics
+        if ptx_thread_private(inst.pointer_operand)
+            demote_private_atomic!(inst)
+            changed = true
+        elseif (inst isa LLVM.LoadInst || inst isa LLVM.StoreInst) &&
+               inst.ordering == LLVM.AtomicOrdering.Unordered
+            continue
+        elseif ptx_may_be_local(inst.pointer_operand) && !excludes_local(inst)
+            guard_local_atomic!(inst)
+            changed = guarded = true
+        end
+    end
+
+    # inline the checks (the pass removes the functions)
+    if guarded
+        @dispose pb=PassBuilder() begin
+            add!(pb, AlwaysInlinerPass())
+            run!(pb, mod)
+        end
+    end
+
+    end
+    return changed
 end
 
 
