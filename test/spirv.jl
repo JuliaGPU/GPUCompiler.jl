@@ -306,6 +306,68 @@ end
     end
 end
 
+@testset "contraction" begin
+    # SPIR-V can't carry the `contract` flag, so on a device with an FMA, multiplications and
+    # additions that may be contracted are fused into `llvm.fmuladd` (OpenCL's `fma`)
+    mod = @eval module $(gensym())
+        const V = NTuple{4, VecElement{Float32}}
+        vmuladd(x, y, z) = Base.llvmcall("""
+            %m = fmul contract <4 x float> %0, %1
+            %r = fadd contract <4 x float> %m, %2
+            ret <4 x float> %r""", V, Tuple{V, V, V}, x, y, z)
+        function kernel(p::Ptr{Float32}, q::Ptr{V}, x::Float32, y::Float32, z::Float32, v::V)
+            unsafe_store!(p, muladd(x, y, z), 1)
+            unsafe_store!(p, muladd(y, z, -x), 2)    # y*z - x
+            unsafe_store!(p, muladd(-z, x, y), 3)    # y - z*x
+            unsafe_store!(q, vmuladd(v, v, v))
+            return
+        end
+        # without `contract`, or with `reassoc`, which the driver can contract itself
+        plain_kernel(p::Ptr{Float32}, x::Float32, y::Float32, z::Float32) =
+            (unsafe_store!(p, x * y + z); return)
+        # a product that is also used elsewhere is computed once
+        function shared_kernel(p::Ptr{Float32}, x::Float32, y::Float32, z::Float32)
+            unsafe_store!(p, muladd(x, y, z), 1)
+            unsafe_store!(p, muladd(x, y, -z), 2)
+            return
+        end
+        fast_kernel(p::Ptr{Float32}, x::Float32, y::Float32, z::Float32) =
+            (unsafe_store!(p, @fastmath x * y + z); return)
+    end
+    V = mod.V
+    tt = Tuple{Ptr{Float32}, Ptr{V}, Float32, Float32, Float32, V}
+    stt = Tuple{Ptr{Float32}, Float32, Float32, Float32}
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+        @check "call contract float @llvm.fmuladd.f32(float %{{.+}}, float %{{.+}}, float %{{.+}})"
+        @check "fneg float"
+        @check "call contract float @llvm.fmuladd.f32"
+        @check "fneg float"
+        @check "call contract float @llvm.fmuladd.f32"
+        @check "call contract <4 x float> @llvm.fmuladd.v4f32"
+        @check_not "= fmul"
+        SPIRV.code_llvm(mod.kernel, tt; backend, fma=true)
+    end
+
+    # not without an FMA
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_kernel_[0-9]+}}"
+        @check "fmul contract float"
+        @check_not "@llvm.fmuladd"
+        SPIRV.code_llvm(mod.kernel, tt; backend)
+    end
+
+    for kernel in (mod.plain_kernel, mod.fast_kernel, mod.shared_kernel)
+        @test @filecheck begin
+            @check_label "define {{.*}} @{{(julia|j)_(fast|plain|shared)_kernel_[0-9]+}}"
+            @check "= fmul"
+            @check_not "@llvm.fmuladd"
+            SPIRV.code_llvm(kernel, stt; backend, fma=true)
+        end
+    end
+end
+
 @testset "nested insertvalue" begin
     # Intel's graphics compiler drops fields when legalizing aggregates built by nested
     # `insertvalue`s, so these are flattened for that driver (JuliaGPU/OpenCL.jl#502)
