@@ -1955,6 +1955,71 @@ end
     end
 end
 
+if LLVM.version() >= v"19"
+@testset "three-way comparison lowering" begin
+    # AIR has no `llvm.{s,u}cmp`, which InstCombine forms from Julia's integer `cmp`
+    mod = @eval module $(gensym())
+        three_way(x, y) = cmp(x, y)
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_three_way_[0-9]+}}"
+        @check_not "@llvm.scmp"
+        @check "icmp sgt i32"
+        @check "icmp slt i32"
+        @check "sub i64"
+        Metal.code_native(mod.three_way, Tuple{Int32, Int32})
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_three_way_[0-9]+}}"
+        @check_not "@llvm.ucmp"
+        @check "icmp ugt i64"
+        @check "icmp ult i64"
+        Metal.code_native(mod.three_way, Tuple{UInt64, UInt64})
+    end
+
+    # the expansion must survive the cleanup after lowering, whose InstCombine would turn it
+    # back into the intrinsic. an `undef` operand is frozen, so that both comparisons see the
+    # same value.
+    Context() do ctx
+        ir = parse(LLVM.Module, """
+            declare i64 @llvm.scmp.i64.i32(i32, i32)
+            declare <2 x i8> @llvm.ucmp.v2i8.v2i32(<2 x i32>, <2 x i32>)
+            define i64 @scalar(i32 %x, i32 %y) {
+              %r = call i64 @llvm.scmp.i64.i32(i32 %x, i32 %y)
+              ret i64 %r
+            }
+            define <2 x i8> @vector(<2 x i32> %x, <2 x i32> %y) {
+              %r = call <2 x i8> @llvm.ucmp.v2i8.v2i32(<2 x i32> %x, <2 x i32> %y)
+              ret <2 x i8> %r
+            }
+            define i64 @undef_operand(i32 %y) {
+              %x = or i32 undef, 1
+              %r = call i64 @llvm.scmp.i64.i32(i32 %x, i32 %y)
+              ret i64 %r
+            }""")
+        job, _ = Metal.create_job(identity, Tuple{Nothing})
+        GPUCompiler.lower_air!(job, ir)
+        @test (verify(ir); true)
+        @test @filecheck begin
+            @check_not "cmp."
+            @check_label "define i64 @scalar"
+            @check "icmp sgt i32"
+            @check "icmp slt i32"
+            @check_label "define <2 x i8> @vector"
+            @check "icmp ugt <2 x i32>"
+            @check "icmp ult <2 x i32>"
+            @check "sub <2 x i8>"
+            @check_label "define i64 @undef_operand"
+            @check "freeze i32"
+            @check "icmp sgt i32"
+            string(ir)
+        end
+    end
+end
+end
+
 @testset "vector reduction lowering" begin
     # AIR has no vector reductions: each is expanded into a chain of its scalar operation over the
     # lanes, in lane order, and min/max into the scalar intrinsics, which are lowered to AIR.

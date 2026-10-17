@@ -764,11 +764,13 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         end
     end
 
-    # expand multiplications with overflow check only after that cleanup, as InstCombine would
-    # turn the expansion back into the intrinsic when the product is also checked by division
+    # expand these intrinsics only after that cleanup, as InstCombine would turn the expansions
+    # back into the intrinsics: multiplications with overflow check when the product is also
+    # checked by division, and three-way comparisons always
     expanded = false
     for f in mod.functions
         expanded |= expand_mul_with_overflow!(f)
+        expanded |= expand_three_way_compare!(f)
     end
     if expanded
         @dispose pb=PassBuilder() begin
@@ -3320,6 +3322,23 @@ function expand_mul_with_overflow!(fun::LLVM.Function)
         overflow = icmp!(builder, LLVM.IntPredicate.NE, hi, ext)
         res = insert_value!(builder, LLVM.PoisonValue(call.value_type), lo, 0)
         insert_value!(builder, res, overflow, 1)
+    end
+end
+
+# Three-way comparisons (LLVM 19+), which InstCombine forms from the `ifelse` chain of Julia's
+# integer `cmp` and which AIR has no counterpart for. Expanded the way LLVM's GlobalISel
+# legalizes them, as the difference of the zero-extended greater-than and less-than results.
+# The operands are frozen, as a partially `undef` one could otherwise compare as both.
+function expand_three_way_compare!(fun::LLVM.Function)
+    scmp, ucmp = tryparse.(LLVM.Intrinsic, ("llvm.scmp", "llvm.ucmp"))
+    scmp === nothing && return false
+    return lower_intrinsic_calls!(fun) do builder, call, intr
+        intr == scmp || intr == ucmp || return nothing
+        signed = intr == scmp
+        x, y = (LLVM.freeze!(builder, arg) for arg in call.arguments)
+        gt = icmp!(builder, signed ? LLVM.IntPredicate.SGT : LLVM.IntPredicate.UGT, x, y)
+        lt = icmp!(builder, signed ? LLVM.IntPredicate.SLT : LLVM.IntPredicate.ULT, x, y)
+        sub!(builder, zext!(builder, gt, call.value_type), zext!(builder, lt, call.value_type))
     end
 end
 
