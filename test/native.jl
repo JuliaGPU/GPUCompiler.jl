@@ -1015,6 +1015,23 @@ end
     end
 end
 
+@static if VERSION >= v"1.14.0-DEV.2872"
+@testset "cancellation points" begin
+    # from Julia 1.14, `@cancel_check` emits a `julia.cancellation_point()` call, which
+    # has to be lowered to a `setjmp` into the task (JuliaLang/julia#62604)
+    mod = @eval module $(gensym())
+        f(x) = (Base.@cancel_check; x + 1)
+    end
+
+    @testset "$julia_passes" for julia_passes in (:cpp, :ports)
+        @test @filecheck implicit_check_not=["julia.cancellation_point"] begin
+            @check "setjmp"
+            Native.code_llvm(mod.f, Tuple{Int}; julia_passes, dump_module=true)
+        end
+    end
+end
+end
+
 @testset "tracked pointers" begin
     mod = @eval module $(gensym())
         function kernel(a)
