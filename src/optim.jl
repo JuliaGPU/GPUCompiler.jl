@@ -111,6 +111,13 @@ const AggressiveSimplifyCFGOptions =
        #sink_common_insts=true
     )
 
+# Build a SimplifyCFG pass with `options`, letting `optimization_options(job).switch_to_lookup`
+# disable the conversion of switches to lookup tables.
+function simplifycfg_pass(@nospecialize(job::CompilerJob), options)
+    switch_to_lookup = get(optimization_options(job), :switch_to_lookup, true)
+    SimplifyCFGPass(; options..., switch_to_lookup)
+end
+
 function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if should_verify()
         add!(mpm, FunctionPassManager()) do fpm
@@ -133,7 +140,7 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
         # DCE must come before simplifycfg: codegen can generate unused
         # statements that would otherwise alter how simplifycfg optimizes the CFG.
         add!(fpm, DCEPass())
-        add!(fpm, SimplifyCFGPass(; BasicSimplifyCFGOptions...))
+        add!(fpm, simplifycfg_pass(job, BasicSimplifyCFGOptions))
         if opt_level >= 1
             add!(fpm, SROAPass())
             add!(fpm, EarlyCSEPass())
@@ -216,7 +223,7 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
     if opt_level >= 2
         add!(fpm, IRCEPass())
     end
-    add!(fpm, SimplifyCFGPass(; BasicSimplifyCFGOptions...))
+    add!(fpm, simplifycfg_pass(job, BasicSimplifyCFGOptions))
     add!(fpm, instcombine_pass(job))
     add!(fpm, LoopPassManager()) do lpm
         if opt_level >= 2
@@ -268,16 +275,16 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
         if LLVM.version() >= v"17"
             add!(fpm, PeepholeCallbacks(; opt_level))
         end
-        add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
+        add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
         add!(fpm, AllocOptPass())
         add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
             add!(lpm, LICMPass())
             add!(lpm, JuliaLICMPass())
         end
-        add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
+        add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
         add!(fpm, instcombine_pass(job))
     elseif opt_level >= 1
-        add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
+        add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
     end
     if LLVM.version() >= v"17"
         add!(fpm, ScalarOptimizerLateCallbacks(; opt_level))
@@ -294,7 +301,7 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, InjectTLIMappings())
     add!(fpm, LoopVectorizePass())
     add!(fpm, LoopLoadEliminationPass())
-    add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
+    add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
     add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
         add!(lpm, LICMPass())
     end
@@ -394,7 +401,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     if opt_level >= 1
         add!(mpm, FunctionPassManager()) do fpm
             add!(fpm, instcombine_pass(job))
-            add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
+            add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
             # raise the alignment of memory accesses to what can be proven, e.g., from the
             # alignment of a shared memory global. back-ends only look at the alignment of
             # each access, e.g., to vectorize them. Julia's own pipeline does the same since
