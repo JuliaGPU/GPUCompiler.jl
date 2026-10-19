@@ -368,6 +368,12 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         if uses_julia_runtime(job) && VERSION < v"1.13.0-DEV.36"
             add!(fpm, julia_pass(job, :LowerExcHandlersPass))
         end
+        # lower the cancellation points of `Base.@cancel_check` to `setjmp`s into the task,
+        # before GC lowering (JuliaLang/julia#62604). Only Julia's runtime can deliver a
+        # cancellation.
+        if uses_julia_runtime(job) && VERSION >= v"1.14.0-DEV.2872"
+            add!(fpm, julia_pass(job, :CancellationLoweringPass))
+        end
         add!(fpm, julia_pass(job, :GCInvariantVerifierPass))
         add!(fpm, julia_pass(job, :LateLowerGCPass))
         # FinalLowerGCPass moved from a module pass to a function pass in

@@ -21,13 +21,17 @@ end
     @test string(GPUCompiler.julia_pass(cpp, :AllocOptPass)) == "AllocOpt"
     @test GPUCompiler.julia_pass(ports, :AllocOptPass) == "jl-alloc-opt"
     @test_throws "Unknown Julia pass" GPUCompiler.julia_pass(ports, :NoSuchPass)
+    @test_throws "Unknown Julia pass" GPUCompiler.julia_pass(cpp, :NoSuchPass)
+    # passes that LLVM.jl has no constructor for, by their pipeline name
+    @test GPUCompiler.julia_pass(cpp, :CancellationLoweringPass) == "CancellationLowering"
 
     # every one of Julia's passes in the pipeline has a port
     @test GPUCompiler.julia_pass(ports, :JuliaLICMPass) == "jl-licm"
     @test GPUCompiler.julia_pass(ports, :FinalLowerGCPass) == "jl-final-lower-gc"
     @test GPUCompiler.julia_pass(ports, :LowerPTLSPass) == "jl-lower-ptls"
     @test GPUCompiler.julia_pass(ports, :RemoveJuliaAddrspacesPass) == "jl-remove-addrspaces"
-    @test length(GPUCompiler.pass_ports[].names) == 14
+    @test GPUCompiler.julia_pass(ports, :CancellationLoweringPass) == "jl-cancellation-lowering"
+    @test length(GPUCompiler.pass_ports[].names) == 15
 end
 
 @testset "requirements" begin
@@ -206,6 +210,7 @@ end
     ran = passes_run(:ports, Corpus.alloc, (Ptr{Int}, Int); backend=Native, kernel=false)
     @test "jl-final-lower-gc" in ran
     @test "jl-lower-ptls" in ran
+    @test ("jl-cancellation-lowering" in ran) == (VERSION >= v"1.14.0-DEV.2872")
 end
 
 # Compiling with both providers in opaque-pointer contexts, so that the comparison is

@@ -60,7 +60,8 @@ context_opaque_pointers(julia_passes::Symbol) = julia_passes === :ports ? true :
 
 The Julia pass `name` (the name of its constructor in `LLVM.Interop`, e.g.
 `:AllocOptPass`) for use in the optimization pipeline of `job`: Julia's C++ pass, or its
-port in JuliaIR.jl if `job.config.julia_passes == :ports`.
+port in JuliaIR.jl if `job.config.julia_passes == :ports`. Passes that `LLVM.Interop` has
+no constructor for are named as if it had one, e.g. `:CancellationLoweringPass`.
 """
 function julia_pass(@nospecialize(job::CompilerJob), name::Symbol)
     if job.config.julia_passes === :ports
@@ -68,8 +69,16 @@ function julia_pass(@nospecialize(job::CompilerJob), name::Symbol)
         haskey(ports.names, name) || error("Unknown Julia pass $name")
         return ports.names[name]
     end
-    return getfield(LLVM.Interop, name)()
+    isdefined(LLVM.Interop, name) && return getfield(LLVM.Interop, name)()
+    haskey(CPP_PASS_NAMES, name) || error("Unknown Julia pass $name")
+    return CPP_PASS_NAMES[name]
 end
+
+# Julia's passes that `LLVM.Interop` has no constructor for: their names in the pipelines
+# of Julia's code generator, which registers them with every `PassBuilder`.
+const CPP_PASS_NAMES = Dict{Symbol,String}(
+    :CancellationLoweringPass => "CancellationLowering",
+)
 
 # make the ports usable by name in the pipeline of `pb`
 function register_julia_passes!(pb::PassBuilder, @nospecialize(job::CompilerJob))
