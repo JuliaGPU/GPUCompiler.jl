@@ -346,6 +346,19 @@ end
     @test Base.isdispatchtuple(mi.specTypes)
 end
 
+@testset "argument classification checks the arity" begin
+    # e.g. codegen passing a `Type{T}` argument that the signature does not key as
+    # `Core.TypeEgal`, which `classify_arguments` treats as a ghost
+    job, _ = Native.create_job(identity, (Int,))
+    JuliaContext() do ctx
+        ft = LLVM.FunctionType(LLVM.VoidType(), [LLVM.Int64Type(), LLVM.Int64Type()])
+        @test_throws "the function generated for it has 2 parameters" GPUCompiler.classify_arguments(job, ft)
+        ft = LLVM.FunctionType(LLVM.VoidType(), [LLVM.Int64Type()])
+        args = GPUCompiler.classify_arguments(job, ft)
+        @test [arg.idx for arg in args] == [nothing, 1]
+    end
+end
+
 # on 1.10, `methodinstance` is the generic, allocating lookup
 VERSION >= v"1.11.0-DEV.1552" && @testset "method instance lookups don't allocate" begin
     # back-ends look up the method instance on every kernel launch
