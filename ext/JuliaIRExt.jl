@@ -6,9 +6,11 @@ import GPUCompiler
 import JuliaIR
 
 # The port of each of Julia's passes in GPUCompiler's pipeline, by the name of the
-# `LLVM.Interop` constructor of the C++ pass.
+# `LLVM.Interop` constructor of the C++ pass (or the name it would have, see
+# `GPUCompiler.CPP_PASS_NAMES`).
 const PORTS = Dict{Symbol,String}(
     :AllocOptPass                 => "jl-alloc-opt",
+    :CancellationLoweringPass     => "jl-cancellation-lowering",
     :CombineMulAddPass            => "jl-combine-muladd",
     :DemoteFloat16Pass            => "jl-demote-float16",
     :ExpandAtomicModifyPass       => "jl-expand-atomic-modify",
