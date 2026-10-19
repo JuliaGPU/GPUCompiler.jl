@@ -8,10 +8,10 @@ JULIA_PASSES in (:cpp, :ports) ||
 
 # The ports of Julia's passes, supplied by the JuliaIRExt extension: a function registering
 # them with a `PassBuilder`, and the pipeline name of the port of each of Julia's passes by
-# the name of the `LLVM.Interop` constructor of the C++ pass (`nothing` if not ported).
+# the name of the `LLVM.Interop` constructor of the C++ pass.
 struct PassPorts
     register!::Function
-    names::Dict{Symbol,Union{Nothing,String}}
+    names::Dict{Symbol,String}
 end
 const pass_ports = Ref{Union{Nothing,PassPorts}}(nothing)
 
@@ -61,16 +61,12 @@ context_opaque_pointers(julia_passes::Symbol) = julia_passes === :ports ? true :
 The Julia pass `name` (the name of its constructor in `LLVM.Interop`, e.g.
 `:AllocOptPass`) for use in the optimization pipeline of `job`: Julia's C++ pass, or its
 port in JuliaIR.jl if `job.config.julia_passes == :ports`.
-
-Passes that JuliaIR.jl does not port yet run as the C++ pass in either mode; the
-JuliaIRExt extension lists them.
 """
 function julia_pass(@nospecialize(job::CompilerJob), name::Symbol)
     if job.config.julia_passes === :ports
         ports = pass_ports[]::PassPorts
         haskey(ports.names, name) || error("Unknown Julia pass $name")
-        port = ports.names[name]
-        port === nothing || return port
+        return ports.names[name]
     end
     return getfield(LLVM.Interop, name)()
 end

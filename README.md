@@ -73,8 +73,6 @@ The ports require JuliaIR.jl to be loaded. When the preference selects them, loa
 GPUCompiler also loads JuliaIR.jl if the active environment provides it; otherwise, load it
 with `using JuliaIR`. They also require opaque pointers: on Julia 1.10 and 1.11, contexts
 created by `JuliaContext()` use them when the preference selects the ports, and other
-contexts must be created with `JuliaContext(; opaque_pointers=true)`. Passes that JuliaIR.jl
-does not port yet run as Julia's C++ pass in both modes; the JuliaIR.jl extension
-(`ext/JuliaIRExt.jl`) lists them.
+contexts must be created with `JuliaContext(; opaque_pointers=true)`.
 
 To run the test suite with the ports, set the preference in `test/LocalPreferences.toml`.
