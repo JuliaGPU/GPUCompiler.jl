@@ -39,6 +39,10 @@ import REPL
             _, meta = GPUCompiler.compile(:asm, job)
             dispose(meta.ir)
         end
+
+        # helpers for back-ends' launch macros, which are expanded in the user's session
+        split_kwargs((:(a = 1), :(b = 2)), [:a], [:c])
+        assign_args!(quote end, Any[:x, :(y...)])
     end
 
     # reset state that was initialized during precompilation

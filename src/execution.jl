@@ -10,6 +10,8 @@ export split_kwargs, assign_args!
 # intended for use in macros; the resulting groups can be used in expressions.
 # can be used at run time, but not in performance critical code.
 function split_kwargs(kwargs, kw_groups...)
+    # called by launch macros with differently shaped arguments, so don't compile it for each
+    @nospecialize
     kwarg_groups = ntuple(_->[], length(kw_groups) + 1)
     for kwarg in kwargs
         # decode
