@@ -216,8 +216,12 @@ function differential_cases()
     cases = Any[]
     backends = Any[("PTX", PTX, (;)), ("SPIR-V", SPIRV, (; backend=:llvm)),
                    ("Metal", Metal, (;)), ("native", Native, (;)), ("BPF", BPF, (;))]
-    # see runtests.jl
-    LLVM.is_asserts() || push!(backends, ("GCN", GCN, (;)))
+    # see runtests.jl. the GCN datalayout comes from the in-process AMDGPU target, which
+    # Julia's LLVM lacks on macOS; without it, allocas stay in addrspace(0), which LLVM 23's
+    # verifier rejects for amdgcn.
+    if !LLVM.is_asserts() && :AMDGPU in LLVM.backends()
+        push!(backends, ("GCN", GCN, (;)))
+    end
     for (name, backend, kwargs) in backends,
         (f, tt) in [Corpus.KERNELS; Corpus.DEVICE_KERNELS], kernel in (false, true)
         # Metal kernels can't take host pointers
