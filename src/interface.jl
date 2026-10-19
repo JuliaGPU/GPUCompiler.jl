@@ -321,6 +321,8 @@ uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 #   for `InstCombinePass`, retaining only the simplification subset of the peephole
 #   transforms (useful e.g. for downstream rewriters like Enzyme that get confused by
 #   InstCombine's more aggressive rewrites).
+# - `switch_to_lookup::Bool = true`: when `false`, SimplifyCFG does not turn switches into
+#   lookup tables or bitmaps, which can introduce integer types of arbitrary width.
 #
 # Returning a `NamedTuple` keeps this single extension point lightweight: downstream
 # users add new keys without GPUCompiler having to grow an interface method per option.
