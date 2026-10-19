@@ -3,7 +3,7 @@
 # mode in a separate process, because code coverage disables package images, and with them
 # imaging mode during precompilation.
 script = """
-    using GPUCompiler, LLVM, LLVM.IR
+    using GPUCompiler, LLVM, LLVM.IR, JuliaIR
     include($(repr(joinpath(@__DIR__, "..", "helpers", "runtime.jl"))))
     include($(repr(joinpath(@__DIR__, "..", "helpers", "spirv.jl"))))
 
