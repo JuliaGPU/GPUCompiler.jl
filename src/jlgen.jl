@@ -862,12 +862,13 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     # Map global variables to their rooted Julia values without embedding addresses in IR.
     gv_to_value = Dict{String, Ptr{Cvoid}}()
     if gvs === nothing
-        # Without a reliable GV table, recover addresses from existing initializers.
+        # Without a reliable GV table, recover addresses from existing initializers. Julia
+        # before 1.10.11 leaves them null when generating output (e.g. during precompilation)
+        # and offers no way to look up their values, so those globals stay null (see #753).
         for gv in llvm_mod.globals
             if !haskey(gv.metadata, "julia.constgv")
                 continue
             end
-            gv_to_value[gv.name] = C_NULL
             val = gv.initializer
             if val === nothing
                 continue
