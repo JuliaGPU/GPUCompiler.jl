@@ -19,8 +19,14 @@ function check_julia_passes(@nospecialize(job::CompilerJob))
     job.config.julia_passes === :ports || return
     pass_ports[] === nothing &&
         error("julia_passes=:ports requires JuliaIR.jl to be loaded (`using JuliaIR`)")
+    supports_typed_pointers(context()) &&
+        error("julia_passes=:ports requires a context with opaque pointers; create it with `JuliaContext(; opaque_pointers=true)`")
     return
 end
+
+# The `opaque_pointers` argument for contexts to compile in with `julia_passes`: the ports
+# only support opaque pointers, which Julia 1.10 and 1.11 do not use by default.
+context_opaque_pointers(julia_passes::Symbol) = julia_passes === :ports ? true : nothing
 
 """
     julia_pass(job, name::Symbol)

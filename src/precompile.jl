@@ -32,10 +32,12 @@ import REPL
         params = precompile_module.DummyCompilerParams()
         # XXX: on Windows, compiling the GPU runtime leaks GPU code in the native cache,
         #      so prevent building the runtime library (see JuliaGPU/GPUCompiler.jl#601)
-        config = CompilerConfig(target, params; libraries=false)
+        # JuliaIR.jl is not loaded here, so precompile the C++ passes even if the
+        # `julia_passes` preference selects the ports
+        config = CompilerConfig(target, params; libraries=false, julia_passes=:cpp)
         job = CompilerJob(source, config)
 
-        JuliaContext() do ctx
+        JuliaContext(; opaque_pointers=nothing) do ctx
             _, meta = GPUCompiler.compile(:asm, job)
             dispose(meta.ir)
         end
