@@ -65,15 +65,17 @@ end
 # Packages that do not depend on JuliaIR.jl may compile code while precompiling, e.g., in
 # their workload, in a process without it.
 VERSION >= v"1.11" && precompile_test_harness("precompilation without JuliaIR.jl") do load_path
-    create_standalone(load_path, "NativeCompiler", "native.jl")
+    # not named like the package of test/native/precompile.jl, which a worker may have
+    # loaded already, so that the cache of the workload would not match it
+    create_standalone(load_path, "PortsCompiler", "native.jl")
     write(joinpath(load_path, "PortsWorkload.jl"), :(
         module PortsWorkload
-        import NativeCompiler
-        using NativeCompiler.GPUCompiler
+        import PortsCompiler
+        using PortsCompiler.GPUCompiler
 
         kernel(x) = x + 1
         const julia_passes = let
-            job, _ = NativeCompiler.Native.create_job(kernel, (Int,))
+            job, _ = PortsCompiler.Native.create_job(kernel, (Int,))
             JuliaContext() do ctx
                 GPUCompiler.compile(:llvm, job)
             end
