@@ -17,7 +17,9 @@ filter!(file -> !occursin("Kaleidoscope", file), files)
 cd(dir) do
     examples = relpath.(files, Ref(dir))
     @testset for example in examples
-        cmd = `$(Base.julia_cmd()) --project=$(Base.active_project())`
+        # with JuliaIR.jl loaded, for when the preference selects the ports of Julia's passes
+        cmd = `$(Base.julia_cmd()) --project=$(Base.active_project())
+                -e 'using JuliaIR; include(popfirst!(ARGS))'`
         @test success(pipeline(`$cmd $example`, stderr=stderr))
     end
 end
