@@ -787,6 +787,47 @@ end
     end
 end
 
+@testset "kernel constants" begin
+    # constants that are only reachable through their host address are rejected
+    mod = @eval module $(gensym())
+        const ref = Ref(42)
+        const vec = [1, 2, 3]
+        const pairs = ((:a, 1), (:b, 2), (:c, 3))
+        const fmt = (UInt8('%'), UInt8('d'), UInt8(0))
+        read_ref(p::Ptr{Int}) = (unsafe_store!(p, ref[]); return)
+        print_ref() = (ccall("extern vprintf", llvmcall, Cint, (Any, Any), fmt, ref); return)
+        read_vec(p::Ptr{Int}, i::Int) = (unsafe_store!(p, @inbounds vec[i]); return)
+        read_pairs(p::Ptr{Int}, i::Int) = (unsafe_store!(p, @inbounds pairs[i][2]); return)
+    end
+    # Julia 1.10 embeds the addresses itself, without relocation records to check
+    cases = ((mod.read_ref, Tuple{Ptr{Int}}, Base.RefValue{Int}),
+             (mod.read_vec, Tuple{Ptr{Int},Int}, Vector{Int}),
+             (mod.read_pairs, Tuple{Ptr{Int},Int}, typeof(mod.pairs)),
+             (mod.print_ref, Tuple{}, Base.RefValue{Int}))
+    VERSION >= v"1.11" && for (f, types, T) in cases
+        # relocations are checked before being resolved, so keep them symbolic
+        @test_throws_message(InvalidIRError,
+                             PTX.code_execution(f, types; patch=true)) do msg
+            occursin("unsupported $(GPUCompiler.UNSUPPORTED_CONSTANT) (of type $T)", msg) &&
+            occursin(r"\[\d+\] (read|print)_", msg)
+        end
+    end
+
+    # Symbols and types are compared and passed along
+    mod = @eval module $(gensym())
+        compare_symbol(p::Ptr{Int}, s::Symbol) = (unsafe_store!(p, s === :b); return)
+        @noinline produce(cond::Bool, value::Int32) = cond ? value : 1.5
+        function check_type(p::Ptr{Float64}, cond::Bool, value::Int32)
+            x = produce(cond, value)
+            x isa Float64 && unsafe_store!(p, x)
+            return
+        end
+    end
+    @test PTX.code_execution(mod.compare_symbol, Tuple{Ptr{Int},Symbol}; patch=true) !== nothing
+    @test PTX.code_execution(mod.check_type, Tuple{Ptr{Float64},Bool,Int32};
+                             patch=true) !== nothing
+end
+
 @testset "atomic validation" begin
     # atomics in Julia code are reported with the frame that performs them.
     # emit the atomic directly, as Julia's own intrinsics lower to a CAS loop calling `+`
