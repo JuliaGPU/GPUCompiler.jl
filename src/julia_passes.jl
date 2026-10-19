@@ -27,6 +27,21 @@ function default_julia_passes()
     return JULIA_PASSES
 end
 
+const JULIAIR = Base.PkgId(Base.UUID("3913dba9-7ba9-44aa-bf76-1cfa3b3073b1"), "JuliaIR")
+
+# When the preference selects the ports, load JuliaIR.jl if the environment provides it,
+# so that code using GPUCompiler through other packages (e.g. their test suites) gets the
+# ports without loading JuliaIR.jl itself. Its extension then registers the ports, once
+# GPUCompiler has finished loading.
+function load_julia_passes()
+    JULIA_PASSES === :ports || return
+    ccall(:jl_generating_output, Cint, ()) == 1 && return
+    haskey(Base.loaded_modules, JULIAIR) && return
+    Base.locate_package(JULIAIR) === nothing && return
+    Base.require(JULIAIR)
+    return
+end
+
 function check_julia_passes(@nospecialize(job::CompilerJob))
     job.config.julia_passes === :ports || return
     pass_ports[] === nothing &&
