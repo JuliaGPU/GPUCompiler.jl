@@ -623,6 +623,31 @@ end
     end
 end
 
+@testset "native integer widths" begin
+    # without native integer widths in the datalayout, InstCombine narrows this switch to
+    # an i2, which the Khronos translator does not support
+    mod = @eval module $(gensym())
+        function kernel(out, x)
+            v = unsafe_load(x) & 3
+            if v == 1
+                unsafe_store!(out, 10)
+            elseif v == 2
+                unsafe_store!(out, 20)
+            elseif v == 3
+                unsafe_store!(out, 30)
+            end
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6kernel"
+        @check_not "{{[^0-9A-Za-z_]i2[^0-9]}}"
+        @check "switch i64"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Int64}, Ptr{Int64}}; backend, kernel=true)
+    end
+end
+
 @testset "no switch lookup tables" begin
     # SimplifyCFG would turn these into an odd-width bitmap and a lookup table once the
     # datalayout declares native integer widths
