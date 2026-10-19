@@ -51,3 +51,28 @@ last commit of a pull request:
 Back-ends are named `cuda`, `amdgpu`, `metal`, `oneapi` and `opencl` (all lowercase), or by
 their target: `ptx` for CUDA.jl, `gcn` for AMDGPU.jl, and `spirv` for both oneAPI.jl and
 OpenCL.jl.
+
+
+## Julia's LLVM passes
+
+GPUCompiler's optimization pipeline includes several of the LLVM passes of Julia's code
+generator, e.g., to lower GC intrinsics or to optimize allocations. These normally come from
+Julia's C++ implementation, but can also be taken from [JuliaIR.jl](https://github.com/JuliaLLVM/JuliaIR.jl),
+which ports them to Julia. This is selected per compilation with the `julia_passes` keyword
+argument of `CompilerConfig` (`:cpp` or `:ports`), whose default comes from a preference:
+
+```julia
+using Preferences, GPUCompiler
+set_preferences!(GPUCompiler, "julia_passes" => "ports")
+```
+
+The preference takes effect after restarting Julia. While precompiling packages that do not
+load JuliaIR.jl, configurations keep using the C++ passes.
+
+The ports require JuliaIR.jl to be loaded (`using JuliaIR`), and opaque pointers: on Julia
+1.10 and 1.11, contexts created by `JuliaContext()` use them when the preference selects the
+ports, and other contexts must be created with `JuliaContext(; opaque_pointers=true)`. Passes
+that JuliaIR.jl does not port yet run as Julia's C++ pass in both modes; the JuliaIR.jl
+extension (`ext/JuliaIRExt.jl`) lists them.
+
+To run the test suite with the ports, set the preference in `test/LocalPreferences.toml`.
