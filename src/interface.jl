@@ -213,7 +213,8 @@ struct CompilerConfig{T,P}
                             always_inline=false, opt_level=2,
                             debug_level=Base.JLOptions().debug_level, optimize=toplevel,
                             libraries=toplevel, cleanup=toplevel, validate=toplevel,
-                            strip=false, julia_passes=JULIA_PASSES, only_entry=false)
+                            strip=false, julia_passes=default_julia_passes(),
+                            only_entry=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end

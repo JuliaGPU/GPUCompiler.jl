@@ -53,6 +53,32 @@ end
     @test occursin("define", sprint(io -> GPUCompiler.code_llvm(io, job)))
 end
 
+# Packages that do not depend on JuliaIR.jl may compile code while precompiling, e.g., in
+# their workload, in a process without it.
+VERSION >= v"1.11" && precompile_test_harness("precompilation without JuliaIR.jl") do load_path
+    create_standalone(load_path, "NativeCompiler", "native.jl")
+    write(joinpath(load_path, "PortsWorkload.jl"), :(
+        module PortsWorkload
+        import NativeCompiler
+        using NativeCompiler.GPUCompiler
+
+        kernel(x) = x + 1
+        const julia_passes = let
+            job, _ = NativeCompiler.Native.create_job(kernel, (Int,))
+            JuliaContext() do ctx
+                GPUCompiler.compile(:llvm, job)
+            end
+            job.config.julia_passes
+        end
+        end) |> string)
+    Base.compilecache(Base.PkgId("PortsWorkload"))
+
+    # such compilations use the C++ passes; that is part of their configuration, so
+    # results cached for them are not used for configurations with the ports
+    mod = Base.require(Base.PkgId("PortsWorkload"))
+    @test Base.invokelatest(getglobal, mod, :julia_passes) === :cpp
+end
+
 ## differential: the C++ passes and the ports give the same IR
 
 # Two compilations differ in the counters codegen appends to the names of functions (and
