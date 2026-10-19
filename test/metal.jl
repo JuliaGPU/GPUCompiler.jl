@@ -92,7 +92,7 @@ end
                         Tuple{Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}, Int32, Int32, Int};
                         dump_module=true, kernel=true)
     end
-    @test Context() do ctx
+    @test JuliaContext() do ctx
         verify(parse(LLVM.Module, ir))
         true
     end
@@ -126,7 +126,7 @@ end
 
     # (by position, as older Julia versions do not name the parameters)
     function kernel_parameter_attributes(ir)
-        Context() do ctx
+        JuliaContext() do ctx
             m = parse(LLVM.Module, ir)
             f = only(filter(f -> startswith(f.name, "_Z6kernel"), collect(m.functions)))
             [Dict(LLVM.kind(attr) => LLVM.value(attr)
@@ -529,7 +529,7 @@ end
       ret void
     }
     """
-    @dispose ctx=Context() begin
+    JuliaContext() do ctx
         mod = parse(LLVM.Module, ir)
         GPUCompiler.merge_byte_gep_chains!(mod)
         f = mod.functions["k"]
@@ -3184,7 +3184,10 @@ end
         source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Float32,1}, Float32},
                                 Base.get_world_counter())
         target = MetalCompilerTarget(; macos=v"15", metal=v"3.2", air=v"2.7")
-        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        # JuliaIR.jl's `AllocOpt` uses the escape analysis of 1.13 on every version, which
+        # removes the object altogether, so test the lowering with Julia's C++ passes
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true,
+                                                 julia_passes=:cpp))
         @test @filecheck begin
             @check "alloca"
             @check "cmpxchg"
