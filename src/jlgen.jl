@@ -105,10 +105,17 @@ end
     sig = signature_type_by_tt(ft, tt)
     @assert Base.isdispatchtuple(sig)   # JuliaLang/julia#52233
 
+    mi = method_lookup_by_tt(sig, world, #=method_table=# nothing)
+    mi === nothing && throw(MethodError(ft, tt, world))
+    return mi
+end
+
+@inline function method_lookup_by_tt(@nospecialize(sig::Type), world::Integer,
+                                     mt::Union{Nothing,Core.MethodTable})
     mi = ccall(:jl_method_lookup_by_tt, Any,
                (Any, Csize_t, Any),
-               sig, world, #=method_table=# nothing)
-    mi === nothing && throw(MethodError(ft, tt, world))
+               sig, world, mt)
+    mi === nothing && return nothing
     mi = mi::MethodInstance
 
     # `jl_method_lookup_by_tt` and `jl_method_lookup` can return a unspecialized mi
@@ -123,6 +130,61 @@ end
 # but it was unreachable: the (ft::Type, tt::Type) method above it always won dispatch.)
 else
 const methodinstance = generic_methodinstance
+end
+
+# `jl_method_lookup_by_tt` supports overlay tables since JuliaLang/julia#60718
+const HAS_OVERLAY_LOOKUP_BY_TT = v"1.11.9" <= VERSION < v"1.12-" ||
+                                 v"1.12.5" <= VERSION < v"1.13-" ||
+                                 VERSION >= v"1.13.0-beta2"
+
+"""
+    methodinstance(job::CompilerJob)
+
+Look up the method instance that `job` should compile: the one for the signature of
+`job.source` in the method tables of the job (see [`method_table_view`](@ref)). This
+differs from `job.source` when those tables contain an overlay method for the function
+itself, which `methodinstance(ft, tt)` does not know about. Back-ends that support such
+overlays should construct their jobs as follows:
+
+```julia
+job = CompilerJob(methodinstance(ft, tt), config)
+job = CompilerJob(job; source=methodinstance(job))
+```
+"""
+# specialized on the job type, as back-ends call this on every kernel launch
+function methodinstance(job::CompilerJob)
+    sig = dispatch_signature(job.source.specTypes)
+    mtv = method_table_view(job)
+    @static if HAS_OVERLAY_LOOKUP_BY_TT
+        tables = overlay_tables(mtv)
+        if tables !== nothing
+            for mt in tables
+                mi = method_lookup_by_tt(sig, job.world, mt)
+                mi === nothing || return mi
+            end
+            mi = method_lookup_by_tt(sig, job.world, nothing)
+            mi === nothing && throw(signature_method_error(sig, job.world))
+            return mi
+        end
+    end
+    match = first(CC.findsup(sig, mtv))
+    match === nothing && throw(signature_method_error(sig, job.world))
+    return CC.specialize_method(match)::MethodInstance
+end
+
+@static if isdefined(Core, :TypeEgal)
+    function dispatch_signature(@nospecialize(sig::Type))
+        u = Base.unwrap_unionall(sig)::DataType
+        any(Base.isType, u.parameters) || return sig
+        return Base.rewrap_unionall(Tuple{(dispatch_key(p) for p in u.parameters)...}, sig)
+    end
+else
+    dispatch_signature(@nospecialize(sig::Type)) = sig
+end
+
+function signature_method_error(@nospecialize(sig::Type), world::Integer)
+    params = (Base.unwrap_unionall(sig)::DataType).parameters
+    return MethodError(params[1], Tuple{params[2:end]...}, world)
 end
 
 

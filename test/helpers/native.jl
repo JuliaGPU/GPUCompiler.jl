@@ -83,7 +83,8 @@ function create_job(@nospecialize(func), @nospecialize(types);
     target = NativeCompilerTarget(;jlruntime)
     params = CompilerParams(entry_safepoint, method_table, relocations)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
-    CompilerJob(source, config), kwargs
+    job = CompilerJob(source, config)
+    CompilerJob(job; source=methodinstance(job)), kwargs
 end
 
 # Add an object to a fresh ORC JIT and supply its relocation words, the loader in miniature.
