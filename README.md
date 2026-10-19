@@ -69,10 +69,12 @@ set_preferences!(GPUCompiler, "julia_passes" => "ports")
 The preference takes effect after restarting Julia. While precompiling packages that do not
 load JuliaIR.jl, configurations keep using the C++ passes.
 
-The ports require JuliaIR.jl to be loaded (`using JuliaIR`), and opaque pointers: on Julia
-1.10 and 1.11, contexts created by `JuliaContext()` use them when the preference selects the
-ports, and other contexts must be created with `JuliaContext(; opaque_pointers=true)`. Passes
-that JuliaIR.jl does not port yet run as Julia's C++ pass in both modes; the JuliaIR.jl
-extension (`ext/JuliaIRExt.jl`) lists them.
+The ports require JuliaIR.jl to be loaded. When the preference selects them, loading
+GPUCompiler also loads JuliaIR.jl if the active environment provides it; otherwise, load it
+with `using JuliaIR`. They also require opaque pointers: on Julia 1.10 and 1.11, contexts
+created by `JuliaContext()` use them when the preference selects the ports, and other
+contexts must be created with `JuliaContext(; opaque_pointers=true)`. Passes that JuliaIR.jl
+does not port yet run as Julia's C++ pass in both modes; the JuliaIR.jl extension
+(`ext/JuliaIRExt.jl`) lists them.
 
 To run the test suite with the ports, set the preference in `test/LocalPreferences.toml`.

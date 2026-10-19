@@ -53,6 +53,14 @@ end
     @test occursin("define", sprint(io -> GPUCompiler.code_llvm(io, job)))
 end
 
+@testset "loading" begin
+    # with the preference selecting the ports, loading GPUCompiler loads JuliaIR.jl from
+    # the environment, and the extension registers the ports
+    code = "import GPUCompiler; print(GPUCompiler.pass_ports[] !== nothing)"
+    out = read(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`, String)
+    @test out == string(GPUCompiler.JULIA_PASSES === :ports)
+end
+
 # Packages that do not depend on JuliaIR.jl may compile code while precompiling, e.g., in
 # their workload, in a process without it.
 VERSION >= v"1.11" && precompile_test_harness("precompilation without JuliaIR.jl") do load_path
