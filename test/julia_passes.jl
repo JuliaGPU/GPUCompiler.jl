@@ -22,11 +22,12 @@ end
     @test GPUCompiler.julia_pass(ports, :AllocOptPass) == "jl-alloc-opt"
     @test_throws "Unknown Julia pass" GPUCompiler.julia_pass(ports, :NoSuchPass)
 
-    # the passes JuliaIR.jl does not port yet, which run as the C++ pass in either mode
-    names = GPUCompiler.pass_ports[].names
-    @test sort([name for (name, port) in names if port === nothing]) ==
-          [:FinalLowerGCPass, :JuliaLICMPass, :LowerPTLSPass, :RemoveJuliaAddrspacesPass]
-    @test string(GPUCompiler.julia_pass(ports, :JuliaLICMPass)) == "JuliaLICM"
+    # every one of Julia's passes in the pipeline has a port
+    @test GPUCompiler.julia_pass(ports, :JuliaLICMPass) == "jl-licm"
+    @test GPUCompiler.julia_pass(ports, :FinalLowerGCPass) == "jl-final-lower-gc"
+    @test GPUCompiler.julia_pass(ports, :LowerPTLSPass) == "jl-lower-ptls"
+    @test GPUCompiler.julia_pass(ports, :RemoveJuliaAddrspacesPass) == "jl-remove-addrspaces"
+    @test length(GPUCompiler.pass_ports[].names) == 14
 end
 
 @testset "requirements" begin
@@ -176,12 +177,12 @@ end
 
 @testset "ports run" begin
     # JuliaIR.jl records every pass it runs in its ledger
-    function passes_run(julia_passes, f, tt)
+    function passes_run(julia_passes, f, tt; backend=PTX, kernel=true)
         ledger = tempname()
         old = JuliaIR.LEDGER[]
         try
             JuliaIR.LEDGER[] = ledger
-            compile_with(julia_passes, PTX, f, tt; kernel=true)
+            compile_with(julia_passes, backend, f, tt; kernel)
         finally
             JuliaIR.LEDGER[] = old
         end
@@ -193,11 +194,16 @@ end
     ran = union(passes_run(:ports, Corpus.simd, (Ptr{Float32}, Int)),
                 passes_run(:ports, Corpus.alloc, (Ptr{Int}, Int)))
     expected = ["jl-alloc-opt", "jl-demote-float16", "jl-gc-invariant-verifier",
-                "jl-late-lower-gc-frame", "jl-lower-simdloop", "jl-propagate-addrspaces",
-                "jl-remove-ni"]
+                "jl-late-lower-gc-frame", "jl-licm", "jl-lower-simdloop",
+                "jl-propagate-addrspaces", "jl-remove-addrspaces", "jl-remove-ni"]
     VERSION < v"1.12.0-DEV.1390" && push!(expected, "jl-combine-muladd")
     VERSION >= v"1.13.0-DEV.321" && push!(expected, "jl-expand-atomic-modify")
     @test sort!(collect(ran)) == sort!(expected)
+
+    # targets that use Julia's runtime also lower the GC frame and the GC stack getters
+    ran = passes_run(:ports, Corpus.alloc, (Ptr{Int}, Int); backend=Native, kernel=false)
+    @test "jl-final-lower-gc" in ran
+    @test "jl-lower-ptls" in ran
 end
 
 # Compiling with both providers in opaque-pointer contexts, so that the comparison is
