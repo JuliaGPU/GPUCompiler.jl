@@ -520,6 +520,17 @@ end
     end
 end
 
+@testset "dead relocation slot" begin
+    # The `InexactError` path references `:trunc`, but the slot's only remaining load is dead
+    # once the exception arguments are dropped; it must not be handed to the loader.
+    mod = @eval module $(gensym())
+        kernel(x::Int) = (Int16(x); return)
+    end
+    ptx = sprint(io->PTX.code_native(io, mod.kernel, Tuple{Int};
+                                     kernel=true, dump_module=true, patch=true))
+    @test !occursin("jl_sym_trunc", ptx)
+end
+
 @testset "child functions" begin
     # we often test using @noinline child functions, so test whether these survive
     # (despite not having side-effects)
