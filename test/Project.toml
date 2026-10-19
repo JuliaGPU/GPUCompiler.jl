@@ -6,6 +6,7 @@ FileCheck = "4e644321-382b-4b05-b0b6-5d23c3d944fb"
 GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
 Highlights = "eafb193a-b7ab-5a9e-9068-77385905fa72"
 InteractiveUtils = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+JuliaIR = "3913dba9-7ba9-44aa-bf76-1cfa3b3073b1"
 LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
 LLVMDowngrader_jll = "f52de702-fb25-5922-94ba-81dd59b07444"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
@@ -20,6 +21,9 @@ ScopedValues = "7e506255-f358-4e82-b7e4-beb19740aa63"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 demumble_jll = "1e29f10c-031c-5a83-9565-69cddfc27673"
+
+[sources]
+JuliaIR = {url = "https://github.com/JuliaLLVM/JuliaIR.jl", rev = "main"}
 
 [compat]
 Aqua = "0.8"
