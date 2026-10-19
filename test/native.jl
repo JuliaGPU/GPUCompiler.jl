@@ -2872,6 +2872,28 @@ end
     end
 end
 
+@testset "kernel overrides" begin
+    mod = @eval module $(gensym())
+        Base.Experimental.@MethodTable(method_table)
+
+        kernel() = 0
+        Base.Experimental.@overlay method_table kernel() = 1
+    end
+
+    # reflection shows the method instance that is compiled
+    job, _ = Native.create_job(mod.kernel, (); mod.method_table)
+    mi = generic_methodinstance(typeof(mod.kernel), Tuple{};
+                                method_table_view=GPUCompiler.method_table_view(job))
+    @test mi.def.external_mt === mod.method_table
+    job = CompilerJob(job; source=mi)
+    lowered = only(GPUCompiler.code_lowered(job))
+    @test lowered.code[end] == Core.ReturnNode(1)
+    src, rt = only(GPUCompiler.code_typed(job))
+    @test src.code[end] == Core.ReturnNode(1)
+    @test rt === Int
+    @test occursin("return 1", sprint(GPUCompiler.code_warntype, job))
+end
+
 @testset "runtime functions from overlay methods" begin
     # runtime library functions (`signal_exception`, `malloc`, ...) should be resolved
     # through the job's method table, so that back-ends can keep GPU-only code out of

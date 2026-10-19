@@ -201,30 +201,25 @@ function descend(@nospecialize(sig); kwargs...)
 end
 
 function code_lowered(@nospecialize(job::CompilerJob); kwargs...)
-    sig = job.source.specTypes  # XXX: can we just use the method instance?
-    code_lowered_by_type(sig; kwargs...)
+    code_lowered_by_mi(job.source; kwargs...)
 end
 
 function code_typed(@nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
-    sig = job.source.specTypes  # XXX: can we just use the method instance?
+    interp = get_interpreter(job)
     if interactive
-        interp = get_interpreter(job)
-        descend(sig; warntype=false, interp, kwargs...)
+        descend(job.source.specTypes; warntype=false, interp, kwargs...)
     else
-        interp = get_interpreter(job)
-        Base.code_typed_by_type(sig; interp, kwargs...)
+        code_typed_by_mi(job.source; interp, kwargs...)
     end
 end
 
 function code_warntype(io::IO, @nospecialize(job::CompilerJob); interactive::Bool=false, kwargs...)
-    sig = job.source.specTypes  # XXX: can we just use the method instance?
+    interp = get_interpreter(job)
     if interactive
         @assert io == stdout
-        interp = get_interpreter(job)
-        descend(sig; warntype=true, interp, kwargs...)
+        descend(job.source.specTypes; warntype=true, interp, kwargs...)
     else
-        interp = get_interpreter(job)
-        code_warntype_by_type(io, sig; interp, kwargs...)
+        code_warntype_by_mi(io, job.source; interp, kwargs...)
     end
 end
 code_warntype(@nospecialize(job::CompilerJob); kwargs...) = code_warntype(stdout, job; kwargs...)

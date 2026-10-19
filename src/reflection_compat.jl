@@ -3,35 +3,45 @@
 using InteractiveUtils: highlighting
 using Base: hasgenerator
 
-function method_instances(@nospecialize(tt::Type), world::UInt=Base.get_world_counter())
-    return map(Core.Compiler.specialize_method, method_matches(tt; world))
-end
-
-function code_lowered_by_type(@nospecialize(tt); generated::Bool=true, debuginfo::Symbol=:default)
-
+# like `Base.code_lowered`, but for a specific method instance
+function code_lowered_by_mi(mi::MethodInstance; generated::Bool=true,
+                            debuginfo::Symbol=:default)
     debuginfo = Base.IRShow.debuginfo(debuginfo)
     if debuginfo !== :source && debuginfo !== :none
         throw(ArgumentError("'debuginfo' must be either :source or :none"))
     end
-    return map(method_instances(tt)) do m
-        if generated && hasgenerator(m)
-            if Base.may_invoke_generator(m)
-                return ccall(:jl_code_for_staged, Any, (Any,), m)::CodeInfo
-            else
-                error("Could not expand generator for `@generated` method ", m, ". ",
-                      "This can happen if the provided argument types (", t, ") are ",
-                      "not leaf types, but the `generated` argument is `true`.")
-            end
+    if generated && hasgenerator(mi)
+        if Base.may_invoke_generator(mi)
+            return Any[ccall(:jl_code_for_staged, Any, (Any,), mi)::CodeInfo]
+        else
+            error("Could not expand generator for `@generated` method ", mi, ". ",
+                  "This can happen if the provided argument types (", mi.specTypes, ") are ",
+                  "not leaf types, but the `generated` argument is `true`.")
         end
-        code = Base.uncompressed_ir(m.def::Method)
-        debuginfo === :none && Base.remove_linenums!(code)
-        return code
     end
+    code = Base.uncompressed_ir(mi.def::Method)
+    debuginfo === :none && Base.remove_linenums!(code)
+    return Any[code]
 end
 
-function code_warntype_by_type(io::IO, @nospecialize(tt);
-                       debuginfo::Symbol=:default, optimize::Bool=false, kwargs...)
-    for (src, rettype) in Base.code_typed_by_type(tt; optimize, kwargs...)
+# like `Base.code_typed_by_type`, but for a specific method instance
+function code_typed_by_mi(mi::MethodInstance; interp::CC.AbstractInterpreter,
+                          optimize::Bool=true, debuginfo::Symbol=:default)
+    debuginfo = Base.IRShow.debuginfo(debuginfo)
+    if debuginfo !== :source && debuginfo !== :none
+        throw(ArgumentError("'debuginfo' must be either :source or :none"))
+    end
+    ret = CC.typeinf_code(interp, mi.def::Method, mi.specTypes, mi.sparam_vals, optimize)
+    # 1.10/1.11 return the code and its return type, later versions only the code
+    code, rt = ret isa Tuple ? ret : (ret, ret === nothing ? Any : ret.rettype)
+    code === nothing && return Any[mi.def => Any]
+    debuginfo === :none && Base.remove_linenums!(code)
+    return Any[code => rt]
+end
+
+function code_warntype_by_mi(io::IO, mi::MethodInstance;
+                             debuginfo::Symbol=:default, optimize::Bool=false, kwargs...)
+    for (src, rettype) in code_typed_by_mi(mi; optimize, kwargs...)
         if src isa Core.CodeInfo
             code_warntype(io, src, rettype; debuginfo)
         else
