@@ -85,7 +85,10 @@ end
 mutable struct RuntimeFunctionResults
     bitcode::Union{Nothing,Vector{UInt8}}
     relocations::Relocations
-    RuntimeFunctionResults() = new(nothing, Relocations())
+    # whether `bitcode` uses opaque pointers: on Julia 1.10 and 1.11, contexts can use
+    # either, and bitcode with opaque pointers can't be read in a typed context
+    opaque_pointers::Bool
+    RuntimeFunctionResults() = new(nothing, Relocations(), false)
 end
 
 # Compile a single runtime function and link it into `mod`. The renamed bitcode is
@@ -99,7 +102,8 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # Don't run a standalone inference walk on a miss: `compile_unhooked` below drives
     # inference itself.
     ci, res = runtime_function_results(rt_job)
-    if res !== nothing && res.bitcode !== nothing
+    opaque_pointers = !supports_typed_pointers(context())
+    if res !== nothing && res.bitcode !== nothing && res.opaque_pointers == opaque_pointers
         link_relocatable!(mod, relocs,
                           parse(LLVM.Module, res.bitcode),
                           res.relocations)
@@ -139,6 +143,7 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
         res === nothing && (res = runtime_results(RuntimeFunctionResults, ci, rt_job.config))
         res.bitcode = take!(io)
         res.relocations = meta.relocations
+        res.opaque_pointers = opaque_pointers
     end
 
     link_relocatable!(mod, relocs, new_mod, meta.relocations)
