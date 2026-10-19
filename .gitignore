@@ -2,3 +2,4 @@ test/Manifest.toml
 test/LocalPreferences.toml
 Manifest.toml
 Manifest-*.toml
+LLVM.jl/
