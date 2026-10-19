@@ -2908,6 +2908,29 @@ end
     end
 end
 
+@testset "reinterpret of tuples + overlay methods" begin
+    # Base's padding queries need to be evaluated at compile time (#712)
+    mod = @eval module $(gensym())
+        split(x) = reinterpret(NTuple{2,UInt32}, x)
+        join(x, y) = reinterpret(UInt64, (x, y))
+    end
+
+    @test @filecheck begin
+        @check_label "@julia_split"
+        @check_not "padding"
+        @check_not "apply_iterate"
+        @check "ret"
+        Native.code_llvm(mod.split, Tuple{UInt64}; debuginfo=:none)
+    end
+    @test @filecheck begin
+        @check_label "@julia_join"
+        @check_not "padding"
+        @check_not "apply_iterate"
+        @check "ret"
+        Native.code_llvm(mod.join, Tuple{UInt32, UInt32}; debuginfo=:none)
+    end
+end
+
 @testset "Mock Enzyme" begin
     function kernel(a)
         a[1] = a[1]^2

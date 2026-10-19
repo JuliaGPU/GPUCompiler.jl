@@ -304,9 +304,31 @@ CC.verbose_stmt_info(interp::GPUInterpreter) = false
 end
 CC.method_table(interp::GPUInterpreter) = interp.method_table_view
 
+# `Base.struct_subpadding`, which `reinterpret` branches on, is `:foldable`, but unresolved
+# calls in its body taint it as possibly reaching an overlay (JuliaLang/julia#49518). It
+# then isn't concretely evaluated for the device, and `reinterpret` of a tuple compiles to
+# run-time calls (#712). Treat it as a consistent overlay instead, which assumes back-ends
+# don't overlay the methods it calls with ones that compute something else.
+# JuliaLang/julia#62771 rewrote it to fold on its own.
+@static if VERSION < v"1.14.0-DEV.3035"
+    function ignore_overlay_taint(result::CC.MethodCallResult)
+        nonoverlayed = @static VERSION >= v"1.11-" ? CC.CONSISTENT_OVERLAY : true
+        effects = CC.Effects(result.effects; nonoverlayed)
+        fields = map(fieldnames(CC.MethodCallResult)) do name
+            name === :effects ? effects : getfield(result, name)
+        end
+        return CC.MethodCallResult(fields...)
+    end
+end
+
 # semi-concrete interepretation is broken with overlays (JuliaLang/julia#47349)
 function CC.concrete_eval_eligible(interp::GPUInterpreter,
     @nospecialize(f), result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
+    @static if VERSION < v"1.14.0-DEV.3035"
+        if f === Base.struct_subpadding && !CC.is_nonoverlayed(result.effects)
+            result = ignore_overlay_taint(result)
+        end
+    end
     ret = @invoke CC.concrete_eval_eligible(interp::CC.AbstractInterpreter,
         f::Any, result::CC.MethodCallResult, arginfo::CC.ArgInfo, sv::CC.InferenceState)
     if ret === :semi_concrete_eval
