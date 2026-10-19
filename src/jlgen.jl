@@ -159,8 +159,10 @@ function methodinstance(job::CompilerJob)
         tables = overlay_tables(mtv)
         if tables !== nothing
             for mt in tables
+                overlay_missed(sig, job.world, mt) && continue
                 mi = method_lookup_by_tt(sig, job.world, mt)
                 mi === nothing || return mi
+                overlay_missed!(sig, job.world, mt)
             end
             mi = method_lookup_by_tt(sig, job.world, nothing)
             mi === nothing && throw(signature_method_error(sig, job.world))
@@ -170,6 +172,53 @@ function methodinstance(job::CompilerJob)
     match = first(CC.findsup(sig, mtv))
     match === nothing && throw(signature_method_error(sig, job.world))
     return CC.specialize_method(match)::MethodInstance
+end
+
+# Julia does not cache failed lookups, which makes them several times slower than ones that
+# succeed. Kernels rarely have an overlay method, so remember the misses. A lookup always
+# has the same result in a given world, so a miss is valid in the world it happened in.
+struct OverlayMisses
+    world::UInt
+    tables::Vector{Core.MethodTable}    # not modified once published
+end
+mutable struct OverlayMissesRef
+    @atomic misses::OverlayMisses
+end
+mutable struct OverlayMissCache
+    # copied when adding a signature, so that lookups do not need to take the lock
+    @atomic entries::IdDict{Any,OverlayMissesRef}
+    const lock::ReentrantLock
+end
+const overlay_miss_cache = OverlayMissCache(IdDict{Any,OverlayMissesRef}(), ReentrantLock())
+
+function overlay_missed(@nospecialize(sig::Type), world::UInt, mt::Core.MethodTable)
+    ref = get(@atomic(:acquire, overlay_miss_cache.entries), sig, nothing)
+    ref === nothing && return false
+    misses = @atomic :acquire ref.misses
+    misses.world == world || return false
+    for table in misses.tables
+        table === mt && return true
+    end
+    return false
+end
+
+function overlay_missed!(@nospecialize(sig::Type), world::UInt, mt::Core.MethodTable)
+    # lookups in future worlds fail, but may not later
+    world <= Base.get_world_counter() || return
+    @lock overlay_miss_cache.lock begin
+        entries = @atomic :monotonic overlay_miss_cache.entries
+        ref = get(entries, sig, nothing)
+        if ref === nothing
+            entries = copy(entries)
+            entries[sig] = OverlayMissesRef(OverlayMisses(world, [mt]))
+            @atomic :release overlay_miss_cache.entries = entries
+        else
+            misses = ref.misses
+            tables = misses.world == world ? [misses.tables; mt] : [mt]
+            @atomic :release ref.misses = OverlayMisses(world, tables)
+        end
+    end
+    return
 end
 
 @static if isdefined(Core, :TypeEgal)
