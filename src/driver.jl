@@ -19,13 +19,13 @@ export JuliaContext
 # unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
 # this helper to a regular `Context()` call.
 #
-# By default, the context uses opaque pointers if the `julia_passes` preference selects the
-# ports of Julia's passes, which require them, and LLVM's default otherwise.
-function JuliaContext(; opaque_pointers=context_opaque_pointers(JULIA_PASSES))
+# By default, the context uses opaque pointers if configurations select the ports of Julia's
+# passes by default, which require them, and LLVM's default otherwise.
+function JuliaContext(; opaque_pointers=context_opaque_pointers(default_julia_passes()))
     # XXX: remove
     ThreadSafeContext(; opaque_pointers)
 end
-function JuliaContext(f; opaque_pointers=context_opaque_pointers(JULIA_PASSES))
+function JuliaContext(f; opaque_pointers=context_opaque_pointers(default_julia_passes()))
     ThreadSafeContext(; opaque_pointers) do ts_ctx
         # for now, also activate the underlying context
         # XXX: this is wrong; we can't expose the underlying LLVM context, but should

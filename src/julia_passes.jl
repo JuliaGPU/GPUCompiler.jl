@@ -15,6 +15,18 @@ struct PassPorts
 end
 const pass_ports = Ref{Union{Nothing,PassPorts}}(nothing)
 
+# The default of `CompilerConfig`'s `julia_passes`: the preference, except while
+# precompiling without JuliaIR.jl loaded, e.g., in the workload of a package that does not
+# depend on it. That uses the C++ passes; since the setting is part of the configuration,
+# what it caches is not used for configurations that select the ports.
+function default_julia_passes()
+    if JULIA_PASSES === :ports && pass_ports[] === nothing &&
+       ccall(:jl_generating_output, Cint, ()) == 1
+        return :cpp
+    end
+    return JULIA_PASSES
+end
+
 function check_julia_passes(@nospecialize(job::CompilerJob))
     job.config.julia_passes === :ports || return
     pass_ports[] === nothing &&
