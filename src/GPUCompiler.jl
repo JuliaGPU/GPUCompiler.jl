@@ -74,6 +74,7 @@ include("runtime.jl")
 
 # compiler implementation
 include("deprecated.jl")
+include("codegen_provider.jl")
 include("jlgen.jl")
 include("irgen.jl")
 include("determinism.jl")
@@ -104,6 +105,9 @@ function __init__()
         Tracy.@register_tracepoints()
     end
     register_deferred_codegen()
+
+    # last, as it loads other packages
+    load_codegen()
 end
 
 end # module

@@ -114,9 +114,12 @@ precompile_test_harness("Inference caching") do load_path
             NativeBackend.persistent_kernel, (Int,); relocations=:patch)
         persistent_res = GPUCompiler.cached_results(NativeBackend.Results, persistent_job)
         @test persistent_res !== nothing
-        if GPUCompiler.supports_relocatable_ir()
+        if GPUCompiler.supports_relocatable_ir() && GPUCompiler.CODEGEN === :julia
             @test persistent_res.artifact == "persistent"
         else
+            # (with the preference selecting JuliaCodegen.jl, which NativeBackend does not
+            # depend on, the precompiled job used Julia's code generator: another
+            # configuration, see `default_codegen`)
             @test persistent_res.artifact === nothing
         end
 

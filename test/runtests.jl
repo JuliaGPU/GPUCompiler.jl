@@ -1,12 +1,17 @@
 using ParallelTestRunner
 import GPUCompiler, LLVM
 using GPUCompiler, LLVM
+# JuliaCodegen.jl (Julia 1.12 and later), when the environment provides it: loading it
+# changes nothing unless it is selected (with the `codegen` preference, or per test)
+const HAVE_JULIACODEGEN = VERSION >= v"1.12" && Base.find_package("JuliaCodegen") !== nothing
+HAVE_JULIACODEGEN && @eval using JuliaCodegen
 using SPIRV_LLVM_Backend_jll, SPIRV_LLVM_Translator_jll, SPIRV_Tools_jll
 using NVPTX_LLVM_Backend_jll
 using AMDGPU_LLVM_Backend_jll
 
 const init_code = quote
     using GPUCompiler, LLVM, LLVM.IR, LLVM.Build, LLVM.Passes, LLVM.ORC
+    $(HAVE_JULIACODEGEN ? :(using JuliaCodegen) : nothing)
     using SPIRV_LLVM_Backend_jll, SPIRV_LLVM_Translator_jll, SPIRV_Tools_jll
     using LLVMDowngrader_jll
     using NVPTX_LLVM_Backend_jll
@@ -35,6 +40,10 @@ if filter_tests!(testsuite, args)
         delete!(testsuite, key)
     end
 
+    if !HAVE_JULIACODEGEN
+        @warn "JuliaCodegen.jl not available; skipping its tests"
+        delete!(testsuite, "juliacodegen")
+    end
     if LLVM.is_asserts()
         @warn "LLVM with assertions; skipping GCN tests"
         delete!(testsuite, "gcn")

@@ -690,6 +690,11 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
     end
 
+    # JuliaCodegen.jl generates the code from the same sources (see codegen_provider.jl)
+    if job.config.codegen === :juliacodegen
+        return emit_juliacodegen(job, codeinfo_pairs, root_ci)
+    end
+
     # create a callback to look-up function in our cache,
     # and keep track of the method instances we needed.
     method_instances = []

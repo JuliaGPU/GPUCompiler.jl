@@ -51,3 +51,27 @@ last commit of a pull request:
 Back-ends are named `cuda`, `amdgpu`, `metal`, `oneapi` and `opencl` (all lowercase), or by
 their target: `ptx` for CUDA.jl, `gcn` for AMDGPU.jl, and `spirv` for both oneAPI.jl and
 OpenCL.jl.
+
+
+## JuliaCodegen.jl (experimental)
+
+GPUCompiler lowers Julia IR to LLVM IR with Julia's own code generator. It can instead use
+[JuliaCodegen.jl](https://github.com/JuliaLLVM/JuliaCodegen.jl), a code generator written
+in Julia, on Julia 1.12 and later. This is selected per compilation with the `codegen`
+keyword argument of `CompilerConfig` (`:julia` or `:juliacodegen`), whose default comes
+from a preference:
+
+```julia
+using Preferences, GPUCompiler
+set_preferences!(GPUCompiler, "codegen" => "juliacodegen")
+```
+
+The preference takes effect after restarting Julia. While precompiling packages that do not
+load JuliaCodegen.jl, configurations keep using Julia's code generator.
+
+JuliaCodegen.jl must be loaded. When the preference selects it, loading GPUCompiler also
+loads JuliaCodegen.jl if the active environment provides it; otherwise, load it with
+`using JuliaCodegen`. Code it does not support yet calls native code, which validation
+reports on targets without Julia's runtime.
+
+To run the test suite with JuliaCodegen.jl, set the preference in `test/LocalPreferences.toml`.

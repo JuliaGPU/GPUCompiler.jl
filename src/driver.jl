@@ -104,6 +104,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
+    check_codegen(job)
 
     @tracepoint "Validation" begin
         check_method(job)   # not optional
