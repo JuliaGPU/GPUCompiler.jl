@@ -223,8 +223,9 @@ end
 
 # The ports require opaque pointers, so with them, Julia 1.10 and 1.11 generate code in
 # opaque-pointer contexts instead of typed ones. Judge that switch separately, with the C++
-# passes and down to machine code.
-@static if VERSION < v"1.12"
+# passes and down to machine code. Not when Julia itself uses opaque pointers
+# (`--opaque-pointers`), as its code generator then does not support typed contexts.
+@static if VERSION < v"1.12" && Context(LLVM.supports_typed_pointers)
 @testset "typed and opaque pointers" begin
     function asm_with(opaque_pointers, backend, f, tt; kwargs...)
         JuliaContext(; opaque_pointers) do ctx
