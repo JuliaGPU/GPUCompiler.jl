@@ -18,6 +18,10 @@ import REPL
             report_exception_frame(idx, func, file, line) = return
         end
 
+        struct BoundedLength
+            value::Int
+        end
+
         struct DummyCompilerParams <: AbstractCompilerParams end
         const DummyCompilerJob = CompilerJob{NativeCompilerTarget, DummyCompilerParams}
 
@@ -25,6 +29,12 @@ import REPL
     end
 
     kernel() = nothing
+    function indexing_kernel(ptr::Ptr{Int}, i::Int, n::precompile_module.BoundedLength)
+        if 1 <= i <= n.value
+            unsafe_store!(ptr, 0, i)
+        end
+        return
+    end
 
     @compile_workload begin
         source = methodinstance(typeof(kernel), Tuple{})
@@ -35,6 +45,16 @@ import REPL
         config = CompilerConfig(target, params; libraries=false)
         job = CompilerJob(source, config)
 
+        JuliaContext() do ctx
+            _, meta = GPUCompiler.compile(:asm, job)
+            dispose(meta.ir)
+        end
+
+        # Warm both argument-fact emission and the analysis-backed narrowing pass.
+        source = methodinstance(typeof(indexing_kernel), Tuple{Ptr{Int},Int,precompile_module.BoundedLength})
+        ranges = ((), (), (), ((:value,) => 0:typemax(Int32),))
+        config = CompilerConfig(target, params; libraries=false, argument_ranges=ranges)
+        job = CompilerJob(source, config)
         JuliaContext() do ctx
             _, meta = GPUCompiler.compile(:asm, job)
             dispose(meta.ir)
