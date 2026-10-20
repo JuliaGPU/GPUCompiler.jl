@@ -1,6 +1,6 @@
 # execution of the emulated binary64 routines through the native back-end's JIT
 
-using GPUCompiler.SoftFloat: softfloat_library
+using GPUCompiler.SoftFloat: softfloat_libraries
 using LLVM, Test
 
 module SoftFloatFixtures
@@ -19,7 +19,7 @@ end
 # the provider is only selected for the fixtures, not for any other native job
 GPUCompiler.device_libraries(job::Native.NativeCompilerJob) =
     job.config.params.softfloat ?
-    (GPUCompiler.runtime_library(TestRuntime), softfloat_library()) : ()
+    (GPUCompiler.runtime_library(TestRuntime), softfloat_libraries()...) : ()
 
 function GPUCompiler.lower_intrinsics!(job::Native.NativeCompilerJob, mod::LLVM.Module)
     job.config.params.softfloat && GPUCompiler.SoftFloat.legalize!(job, mod)
