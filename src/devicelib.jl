@@ -132,15 +132,17 @@ end
 
 ## Julia libraries
 
-# Julia library artifacts are cached per session.
+# Julia library artifacts are cached per session. Artifacts linked before optimization
+# keep the original ABI; those linked afterwards have been lowered by `lower_intrinsics!`.
 const device_libs = Dict{Any,RuntimeLibrary}()
 const device_libs_lock = ReentrantLock()
 
-@locked function load_julia_library(lib::DeviceLibrary, @nospecialize(job::CompilerJob))
+@locked function load_julia_library(lib::DeviceLibrary, @nospecialize(job::CompilerJob);
+                                    lowered::Bool)
     config = runtime_config(job)
     # a `Vector{Any}` key avoids compiling `Dict` methods for every library's tuple type
     key = Any[lib.name, lib.optimize, lib.always_inline, config,
-              !supports_typed_pointers(context()),
+              !supports_typed_pointers(context()), lowered,
               lib.optimize ? job.config.opt_level : 0]
     for method in lib.methods
         push!(key, method.def, method.return_type, method.types, method.name,
@@ -149,7 +151,7 @@ const device_libs_lock = ReentrantLock()
     cached = Base.@lock device_libs_lock begin
         cached = get(device_libs, key, nothing)
         if cached === nothing || !device_library_valid(cached, job, lib.methods)
-            cached = build_device_library(job, config, lib)
+            cached = build_device_library(job, config, lib; lowered)
             device_libs[key] = cached
         end
         cached
@@ -158,7 +160,7 @@ const device_libs_lock = ReentrantLock()
 end
 
 function build_device_library(@nospecialize(job::CompilerJob), config::CompilerConfig,
-                              lib::DeviceLibrary)
+                              lib::DeviceLibrary; lowered::Bool=false)
     @dispose mod=LLVM.Module(string(lib.name)) begin
         sources = MethodInstance[]
         instances = CodeInstance[]
@@ -176,6 +178,13 @@ function build_device_library(@nospecialize(job::CompilerJob), config::CompilerC
             optimize!(standalone, mod, relocs; opt_level=job.config.opt_level)
             prune_dead_relocations!(mod, relocs)
             validate_device_library(mod, relocs, lib)
+        end
+        if lowered
+            lower_intrinsics!(CompilerJob(first(sources), config, job.world), mod)
+            for method in lib.methods
+                haskey(mod.functions, method.llvm_name) ||
+                    error("Lowering library $(lib.name) removed export $(method.llvm_name)")
+            end
         end
         if lib.always_inline
             for method in lib.methods
@@ -303,10 +312,9 @@ function unexpose_definitions!(exposed::Vector{LLVM.Function})
 end
 
 # Import the definitions `mod` references from the job's device libraries, until no
-# library provides any remaining reference. Libraries are searched in order. Returns the
-# imported functions and aliases.
+# library provides any remaining reference. Libraries are searched in order.
 function link_device_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                relocs::Relocations)
+                                relocs::Relocations; lowered::Bool)
     libraries = selected_device_libraries(job)
     needed = needed_symbols!(job, mod)
     progress = true
@@ -316,7 +324,7 @@ function link_device_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
             names = intersect(needed, library_exports(lib))
             isempty(names) && continue
             library, library_relocs = if lib.bitcode === nothing
-                load_julia_library(lib, job)
+                load_julia_library(lib, job; lowered)
             else
                 parse(LLVM.Module, MemoryBuffer(library_bytes(lib)); lazy=true), Relocations()
             end
@@ -362,27 +370,39 @@ definitions(mod::LLVM.Module) =
 # along with the kernel.
 function link_device_libraries_early!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                       relocs::Relocations)
-    @tracepoint "device libraries" link_device_libraries!(job, mod, relocs)
+    @tracepoint "device libraries" link_device_libraries!(job, mod, relocs; lowered=false)
     @tracepoint "target libraries" link_libraries!(job, mod)
     return
 end
 
-# After optimization: import definitions for references introduced by lowering passes.
-# Definitions that are still around are reused (see `expose_definitions!`). Returns
-# whether anything was imported.
+# After optimization: lower what the target cannot select, and import definitions for the
+# references this introduces.
+function lower_and_link_device_libraries!(@nospecialize(job::CompilerJob),
+                                          mod::LLVM.Module, relocs::Relocations)
+    lower_intrinsics!(job, mod)
+    return link_device_libraries_late!(job, mod, relocs)
+end
+
+# Import definitions for references introduced after optimization. Definitions that are
+# still around are reused (see `expose_definitions!`). Returns whether anything was
+# imported.
 function link_device_libraries_late!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                                      relocs::Relocations)
     # compare by identity, as linking can rename existing definitions
     defined = Set(value.ref for value in definitions(mod))
-    link_device_libraries!(job, mod, relocs)
+    link_device_libraries!(job, mod, relocs; lowered=true)
     link_libraries!(job, mod)
-    imported = false
+    imported = String[]
     for value in definitions(mod)
         value.ref in defined && continue
         value.linkage = LLVM.Linkage.Internal
-        imported = true
+        push!(imported, LLVM.name(value))
     end
-    return imported
+    # repeat what imports before optimization went through
+    CPUFeatures(job)(mod)
+    lower_syncscopes!(job, mod)
+    isempty(imported) || finish_imports!(job, mod, imported)
+    return !isempty(imported)
 end
 
 @public DeviceLibrary, DeviceLibraryMethod, device_libraries, runtime_library

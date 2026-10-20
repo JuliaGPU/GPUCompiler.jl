@@ -412,6 +412,8 @@ const __llvm_initialized = Ref(false)
                         end
                     end
                 end
+            elseif job.config.libraries
+                lower_and_link_device_libraries!(job, ir, relocations)
             end
 
             # Device-library imports during optimization can add relocations.
