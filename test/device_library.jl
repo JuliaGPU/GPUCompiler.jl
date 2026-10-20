@@ -170,6 +170,49 @@ end
     end
 end
 
+@testset "typed pointer library ABI" begin
+    original = LibraryFixtures.selection[]
+    try
+        JuliaContext() do ctx
+            @test GPUCompiler.library_abi_compatible(LLVM.PointerType(LLVM.Int8Type()),
+                                                     LLVM.PointerType(LLVM.Int32Type()))
+            @test !GPUCompiler.library_abi_compatible(LLVM.PointerType(LLVM.Int8Type()),
+                                                      LLVM.PointerType(LLVM.Int8Type(), 5))
+            @test !GPUCompiler.library_abi_compatible(LLVM.Int32Type(), LLVM.FloatType())
+            @test !GPUCompiler.library_abi_compatible(
+                LLVM.FunctionType(LLVM.VoidType()),
+                LLVM.FunctionType(LLVM.VoidType(); vararg=true))
+            upstream = parse(LLVM.Module, """
+                declare i32 @downstream(i32*)
+                define i32 @test_export(i32 %value) {
+                    %pointer = alloca i32
+                    store i32 %value, i32* %pointer
+                    %result = call i32 @downstream(i32* %pointer)
+                    ret i32 %result
+                }
+                """)
+            downstream = parse(LLVM.Module, """
+                define i32 @downstream(i8* %pointer) {
+                    %typed = bitcast i8* %pointer to i32*
+                    %result = load i32, i32* %typed
+                    ret i32 %result
+                }
+                """)
+            bytes(mod) = (buffer = IOBuffer(); write(buffer, mod); take!(buffer))
+            LibraryFixtures.selection[] = (
+                GPUCompiler.DeviceLibrary(:caller; bitcode=bytes(upstream)),
+                GPUCompiler.DeviceLibrary(:callee; bitcode=bytes(downstream)))
+            dispose(upstream)
+            dispose(downstream)
+            text = LibraryFixtures.ir(LibraryFixtures.caller)
+            @test !occursin("declare i32 @downstream", text)
+            @test occursin("ret i32", text)
+        end
+    finally
+        LibraryFixtures.selection[] = original
+    end
+end
+
 @testset "bitcode replacement invalidates caches" begin
     original = LibraryFixtures.selection[]
     try

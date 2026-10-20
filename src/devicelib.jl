@@ -420,6 +420,22 @@ function validate_library_imports(job, library, mod, relocs, owners, index, lega
     end
 end
 
+library_abi_compatible(expected::LLVMType, actual::LLVMType) = expected == actual
+library_abi_compatible(expected::LLVM.PointerType, actual::LLVM.PointerType) =
+    expected.addrspace == actual.addrspace
+
+"""
+Compare library signatures without treating typed-pointer element types as ABI.
+Address spaces, return/argument representations, and variadic status must still match.
+"""
+function library_abi_compatible(expected::LLVM.FunctionType, actual::LLVM.FunctionType)
+    LLVM.isvararg(expected) == LLVM.isvararg(actual) &&
+        library_abi_compatible(expected.return_type, actual.return_type) &&
+        length(expected.parameters) == length(actual.parameters) &&
+        all(library_abi_compatible(expected_type, actual_type)
+            for (expected_type, actual_type) in zip(expected.parameters, actual.parameters))
+end
+
 function resolve_device_libraries!(@nospecialize(job::CompilerJob), mod, relocs;
                                    entry_name=nothing)
     job.config.libraries || return
@@ -462,7 +478,7 @@ function resolve_device_libraries!(@nospecialize(job::CompilerJob), mod, relocs;
                 expected === nothing && continue
                 definition === nothing &&
                     error("Library $(library.name) does not define advertised export $name")
-                expected.function_type == definition.function_type ||
+                library_abi_compatible(expected.function_type, definition.function_type) ||
                     error("Library $(library.name) has an incompatible ABI for $name")
             end
             append!(needed, [global_var.name for global_var in artifact.globals
