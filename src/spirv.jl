@@ -340,49 +340,34 @@ end
         error("Unsupported SPIR-V back-end $(repr(target.backend)); expected :llvm or :khronos.")
     end
 
-    # the SPIR-V tools work on files
-    translated = tempname(cleanup=false) * ".spv"
-    write(translated, spirv)
+    dump_output() = let path = tempname(cleanup=false) * ".spv"
+        write(path, spirv)
+        path
+    end
 
-    # validate
     if target.validate
-        try
-            run(`$(SPIRV_Tools_jll.spirv_val()) $translated`)
-        catch e
-            error("""Failed to validate generated SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(translated).""")
+        message = spirv_validate(spirv)
+        if message !== nothing
+            error("""Failed to validate generated SPIR-V: $message
+                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(dump_output()).""")
         end
     end
 
-    # optimize
     if target.optimize
-        optimized = tempname(cleanup=false) * ".spv"
-        try
-            run(```$(SPIRV_Tools_jll.spirv_opt()) -O --skip-validation
-                                                  $translated -o $optimized```)
-        catch
+        optimized = spirv_optimize(spirv)
+        if optimized === nothing
             error("""Failed to optimize generated SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(translated).""")
+                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(dump_output()).""")
         end
-        spirv = read(optimized)
-        rm(optimized)
+        spirv = optimized
     end
 
-    output = if format == LLVM.CodeGenFileType.Object
-        spirv
-    else
-        # disassemble
-        write(translated, spirv)
-        read(`$(SPIRV_Tools_jll.spirv_dis()) $translated`, String)
-    end
-    rm(translated)
-
-    return output
+    return format == LLVM.CodeGenFileType.Object ? spirv : spirv_disassemble(spirv)
 end
 
 source_code(target::SPIRVCompilerTarget) = "spirv"
 
-# reimplementation that uses `spirv-dis`, giving much more pleasant output
+# reimplementation that uses the SPIR-V disassembler, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
     obj = JuliaContext() do ctx
@@ -390,16 +375,112 @@ function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=fa
         dispose(meta.ir)
         obj
     end
-    mktemp() do input_path, input_io
-        write(input_io, obj)
-        flush(input_io)
+    highlight(io, spirv_disassemble(obj), source_code(job.config.target))
+end
 
-        disassembler = SPIRV_Tools_jll.spirv_dis()
-        mktemp() do output_path, output_io
-            run(`$disassembler $input_path -o $output_path`)
-            asm = read(output_io, String)
-            highlight(io, asm, source_code(job.config.target))
+
+## SPIR-V tools
+
+# validation, optimization and disassembly call into libSPIRV-Tools, configured like the
+# `spirv-val`, `spirv-opt -O --skip-validation` and `spirv-dis` tools. spawning those for
+# every compilation is slow, and on Julia 1.10 on macOS can hang (libuv/libuv#3893).
+
+# mirrors the C API in libspirv.h
+struct spv_binary_t
+    code::Ptr{UInt32}
+    wordCount::Csize_t
+end
+struct spv_text_t
+    str::Ptr{UInt8}
+    length::Csize_t
+end
+struct spv_position_t
+    line::Csize_t
+    column::Csize_t
+    index::Csize_t
+end
+struct spv_diagnostic_t
+    position::spv_position_t
+    error::Cstring
+    isTextSource::Bool
+end
+const SPV_SUCCESS = Cint(0)
+const SPV_ENV_UNIVERSAL_1_6 = Cint(24)    # the default target environment of the tools
+const SPV_BINARY_TO_TEXT_OPTION_INDENT = UInt32(1) << 3
+const SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES = UInt32(1) << 6
+
+spirv_words(spirv::Vector{UInt8}) = reinterpret(UInt32, spirv)
+
+# `dlopen` returns the handle of an already-loaded library, so these are only lookups
+spirv_tools(name::Symbol) = Libdl.dlsym(Libdl.dlopen(SPIRV_Tools_jll.libSPIRV_Tools), name)
+spirv_tools_opt(name::Symbol) = Libdl.dlsym(Libdl.dlopen(SPIRV_Tools_jll.libSPIRV_Tools_opt), name)
+
+function diagnostic_message(diagnostic::Ptr{spv_diagnostic_t}, status::Cint)
+    diagnostic == C_NULL && return "error $status"
+    message = unsafe_load(diagnostic).error
+    return message == C_NULL ? "error $status" : unsafe_string(message)
+end
+
+# returns `nothing` if the module is valid, or else the validator's message
+function spirv_validate(spirv::Vector{UInt8})
+    words = spirv_words(spirv)
+    context = @ccall $(spirv_tools(:spvContextCreate))(SPV_ENV_UNIVERSAL_1_6::Cint)::Ptr{Cvoid}
+    options = @ccall $(spirv_tools(:spvValidatorOptionsCreate))()::Ptr{Cvoid}
+    diagnostic = Ref{Ptr{spv_diagnostic_t}}(C_NULL)
+    try
+        binary = Ref(spv_binary_t(pointer(words), length(words)))
+        status = GC.@preserve spirv @ccall $(spirv_tools(:spvValidateWithOptions))(
+            context::Ptr{Cvoid}, options::Ptr{Cvoid}, binary::Ptr{spv_binary_t},
+            diagnostic::Ptr{Ptr{spv_diagnostic_t}})::Cint
+        return status == SPV_SUCCESS ? nothing : diagnostic_message(diagnostic[], status)
+    finally
+        @ccall $(spirv_tools(:spvDiagnosticDestroy))(diagnostic[]::Ptr{spv_diagnostic_t})::Cvoid
+        @ccall $(spirv_tools(:spvValidatorOptionsDestroy))(options::Ptr{Cvoid})::Cvoid
+        @ccall $(spirv_tools(:spvContextDestroy))(context::Ptr{Cvoid})::Cvoid
+    end
+end
+
+# returns the optimized module, or `nothing` if the optimizer failed
+function spirv_optimize(spirv::Vector{UInt8})
+    words = spirv_words(spirv)
+    optimizer = @ccall $(spirv_tools_opt(:spvOptimizerCreate))(SPV_ENV_UNIVERSAL_1_6::Cint)::Ptr{Cvoid}
+    @ccall $(spirv_tools_opt(:spvOptimizerRegisterPerformancePasses))(optimizer::Ptr{Cvoid})::Cvoid
+    options = @ccall $(spirv_tools(:spvOptimizerOptionsCreate))()::Ptr{Cvoid}
+    @ccall $(spirv_tools(:spvOptimizerOptionsSetRunValidator))(options::Ptr{Cvoid}, false::Bool)::Cvoid
+    binary = Ref{Ptr{spv_binary_t}}(C_NULL)
+    try
+        status = GC.@preserve spirv @ccall $(spirv_tools_opt(:spvOptimizerRun))(
+            optimizer::Ptr{Cvoid}, words::Ptr{UInt32}, length(words)::Csize_t,
+            binary::Ptr{Ptr{spv_binary_t}}, options::Ptr{Cvoid})::Cint
+        status == SPV_SUCCESS || return nothing
+        result = unsafe_load(binary[])
+        return copy(reinterpret(UInt8, unsafe_wrap(Array, result.code, result.wordCount)))
+    finally
+        @ccall $(spirv_tools(:spvBinaryDestroy))(binary[]::Ptr{spv_binary_t})::Cvoid
+        @ccall $(spirv_tools(:spvOptimizerOptionsDestroy))(options::Ptr{Cvoid})::Cvoid
+        @ccall $(spirv_tools_opt(:spvOptimizerDestroy))(optimizer::Ptr{Cvoid})::Cvoid
+    end
+end
+
+function spirv_disassemble(spirv::Vector{UInt8})
+    words = spirv_words(spirv)
+    context = @ccall $(spirv_tools(:spvContextCreate))(SPV_ENV_UNIVERSAL_1_6::Cint)::Ptr{Cvoid}
+    text = Ref{Ptr{spv_text_t}}(C_NULL)
+    diagnostic = Ref{Ptr{spv_diagnostic_t}}(C_NULL)
+    try
+        options = SPV_BINARY_TO_TEXT_OPTION_INDENT | SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES
+        status = GC.@preserve spirv @ccall $(spirv_tools(:spvBinaryToText))(
+            context::Ptr{Cvoid}, words::Ptr{UInt32}, length(words)::Csize_t, options::UInt32,
+            text::Ptr{Ptr{spv_text_t}}, diagnostic::Ptr{Ptr{spv_diagnostic_t}})::Cint
+        if status != SPV_SUCCESS
+            error("Failed to disassemble SPIR-V: $(diagnostic_message(diagnostic[], status))")
         end
+        result = unsafe_load(text[])
+        return unsafe_string(result.str, result.length)
+    finally
+        @ccall $(spirv_tools(:spvTextDestroy))(text[]::Ptr{spv_text_t})::Cvoid
+        @ccall $(spirv_tools(:spvDiagnosticDestroy))(diagnostic[]::Ptr{spv_diagnostic_t})::Cvoid
+        @ccall $(spirv_tools(:spvContextDestroy))(context::Ptr{Cvoid})::Cvoid
     end
 end
 
