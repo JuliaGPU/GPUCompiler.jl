@@ -319,6 +319,29 @@ end
     end
 end
 
+@testset "SPIR-V tools" begin
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+    job, _ = SPIRV.create_job(mod.kernel, Tuple{}; backend, kernel=true)
+    obj = JuliaContext() do ctx
+        obj, meta = GPUCompiler.compile(:obj, job)
+        dispose(meta.ir)
+        obj
+    end
+
+    @test GPUCompiler.spirv_validate(obj) === nothing
+    # dropping the last two instructions leaves the function unterminated
+    @test occursin("Missing OpFunctionEnd", GPUCompiler.spirv_validate(obj[1:end-8]))
+
+    optimized = GPUCompiler.spirv_optimize(obj)
+    @test optimized !== nothing
+    @test GPUCompiler.spirv_validate(optimized) === nothing
+
+    asm = GPUCompiler.spirv_disassemble(obj)
+    @test occursin(r"OpEntryPoint Kernel %\w+ \"_Z6kernel\"", asm)
+end
+
 @testset "min and max" begin
     # Julia's `min` and `max` propagate NaNs and order -0.0 before +0.0, which OpenCL's `fmin`
     # and `fmax` don't do, so the back-ends expand `llvm.minimum` and `llvm.maximum` around
