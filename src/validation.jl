@@ -148,6 +148,7 @@ const NONCONST_GLOBAL  = "use of a non-constant global"
 const DYNAMIC_CALL     = "dynamic function invocation"
 const UNKNOWN_INTRINSIC = "call to an unknown LLVM intrinsic"
 const UNSUPPORTED_ALLOCATION = "allocation of an object with references"
+const UNSUPPORTED_CONSTANT = "use of a constant that is not isbits, a Symbol or a type"
 
 function show_reason(io::IO, err::InvalidIRError, error::IRError)
     kind, bt, meta = error
@@ -164,6 +165,8 @@ function show_reason(io::IO, err::InvalidIRError, error::IRError)
             printstyled(io, " (", meta, ")"; color=:red)
         elseif kind == UNSUPPORTED_ALLOCATION
             printstyled(io, " (", meta, ")"; color=:red)
+        elseif kind == UNSUPPORTED_CONSTANT
+            printstyled(io, " (of type ", meta, ")"; color=:red)
         end
     end
     explanation = get(err.explanations, error, nothing)
@@ -294,6 +297,7 @@ function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Reloc
     for f in mod.functions
         check_ir!(job, errors, f, relocs, explain)
     end
+    check_constants!(job, errors, mod, relocs)
 
     # custom validation
     append!(errors, validate_ir(job, mod))
@@ -329,6 +333,64 @@ function check_ir!(job, errors::Vector{IRError}, f::LLVM.Function, relocs::Reloc
     end
 
     return errors
+end
+
+# Device code can only embed Julia values that are isbits, which are copied into the module,
+# and Symbols and types, which are only compared and passed along. Any other value is only
+# reachable through its host address, which most devices cannot dereference.
+#
+# Only relocations that are still symbolic during validation are checked: not those resolved
+# before optimization (the `:bake` strategy), nor the addresses Julia 1.10 embeds itself.
+is_device_constant(@nospecialize(value)) = isbits(value) || value isa Symbol || value isa Type
+
+function check_constants!(@nospecialize(job::CompilerJob), errors::Vector{IRError},
+                          mod::LLVM.Module, relocs::Relocations)
+    uses_julia_runtime(job) && return errors
+    for rec in relocs.records
+        rec.kind === SlotSite && rec.target isa JuliaValueRef || continue
+        value = rec.target.value
+        is_device_constant(value) && continue
+        # bindings are reported as accesses to a global
+        value isa Core.Binding && continue
+        gv = get(mod.globals, rec.name, nothing)
+        gv === nothing && continue
+        inst = constant_use(job, gv)
+        inst === nothing && continue
+        push!(errors, (UNSUPPORTED_CONSTANT, backtrace(inst), typeof(value)))
+    end
+    return errors
+end
+
+# The first instruction using the value loaded from a relocation slot, or `nothing`. Calls to
+# declarations that are not intrinsics are left out: those are reported themselves.
+function constant_use(@nospecialize(job::CompilerJob), slot::GlobalVariable)
+    seen = Set{LLVM.Value}()
+    worklist = LLVM.Value[slot]
+    while !isempty(worklist)
+        address = pop!(worklist)
+        address in seen && continue
+        push!(seen, address)
+        for use in address.uses
+            user = use.user
+            if user isa LLVM.LoadInst
+                for use in user.uses
+                    value_user = use.user
+                    if value_user isa LLVM.CallInst
+                        callee = value_user.called_operand
+                        callee isa LLVM.Function && isdeclaration(callee) &&
+                            !LLVM.isintrinsic(callee) && !isintrinsic(job, callee.name) &&
+                            continue
+                    end
+                    return value_user
+                end
+            elseif user isa LLVM.ConstantExpr ||
+                   (user isa LLVM.Instruction && forwarded_addresses(user) !== nothing)
+                # the slot's address, cast or merged with other addresses
+                push!(worklist, user)
+            end
+        end
+    end
+    return nothing
 end
 
 const libjulia = Ref{Ptr{Cvoid}}(C_NULL)

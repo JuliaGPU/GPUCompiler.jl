@@ -643,6 +643,9 @@ function prune_dead_relocations!(mod::LLVM.Module, relocs::Relocations)
     dead_names = Set{String}()
     for rec in relocs.records
         gv = get(mod_gvs, rec.name, nothing)
+        # A slot can be left with only unused loads, e.g. of the arguments to a throw call
+        # that was dropped late, which would keep it alive.
+        gv === nothing || erase_dead_loads!(gv)
         if gv === nothing || (!isdeclaration(gv) && isempty(gv.uses))
             push!(dead_names, rec.name)
         end
@@ -651,6 +654,17 @@ function prune_dead_relocations!(mod::LLVM.Module, relocs::Relocations)
     for name in dead_names
         gv = get(mod_gvs, name, nothing)
         gv === nothing || isdeclaration(gv) || erase!(gv)
+    end
+    return
+end
+
+
+function erase_dead_loads!(gv::GlobalVariable)
+    for use in collect(gv.uses)
+        val = use.user
+        if val isa LLVM.LoadInst && isempty(val.uses) && !val.volatile
+            erase!(val)
+        end
     end
     return
 end
