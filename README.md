@@ -79,6 +79,11 @@ shared kernel result repeatedly; this favors correctness over retaining multiple
 Byte-backed libraries copy and hash their input once; treat the descriptor's payload as
 read-only and construct a new descriptor to replace it.
 
+Software binary64 support is an optional library; see
+[`src/softfloat/README.md`](src/softfloat/README.md). Its legalization runs at this same
+boundary for both the caller and Julia libraries to keep late-imported runtime ABIs
+consistent.
+
 ### Testing
 
 GPUCompiler.jl's own test suite runs on GitHub Actions. In addition, Buildkite runs the test
