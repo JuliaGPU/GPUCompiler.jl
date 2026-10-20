@@ -130,6 +130,41 @@ end
     end
 end
 
+@testset "linkonce library exports" begin
+    original = LibraryFixtures.selection[]
+    try
+        JuliaContext() do ctx
+            function bitcode(text)
+                @dispose mod=parse(LLVM.Module, text) begin
+                    buffer = IOBuffer()
+                    write(buffer, mod)
+                    take!(buffer)
+                end
+            end
+            functions = GPUCompiler.DeviceLibrary(:functions; bitcode=bitcode("""
+                @control = external constant i32
+                define linkonce_odr i32 @test_export(i32 %value) {
+                    %control = load i32, i32* @control
+                    %result = add i32 %value, %control
+                    ret i32 %result
+                }
+                define linkonce_odr i32 @unused() { ret i32 0 }
+                """))
+            constants = GPUCompiler.DeviceLibrary(:constants; bitcode=bitcode("""
+                @control = linkonce_odr constant i32 137
+                """))
+            LibraryFixtures.selection[] = (functions, constants)
+            text = LibraryFixtures.ir(LibraryFixtures.caller)
+            @test occursin("137", text)
+            @test !occursin("declare i32 @test_export", text)
+            @test !occursin("@control", text)
+            @test !occursin("@unused", text)
+        end
+    finally
+        LibraryFixtures.selection[] = original
+    end
+end
+
 @testset "bitcode replacement invalidates caches" begin
     original = LibraryFixtures.selection[]
     try

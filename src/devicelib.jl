@@ -452,6 +452,12 @@ function resolve_device_libraries!(@nospecialize(job::CompilerJob), mod, relocs;
             end
             append!(needed, [global_var.name for global_var in artifact.globals
                              if global_var.externally_initialized])
+            for value in Iterators.flatten((artifact.functions, artifact.globals))
+                if value.name in needed && !isdeclaration(value) &&
+                   value.linkage in (LLVM.Linkage.LinkOnceAny, LLVM.Linkage.LinkOnceODR)
+                    value.linkage = LLVM.Linkage.External
+                end
+            end
             with_llvm_machine(job.config.target) do tm
                 run!(InternalizePass(; preserved_gvs=needed), artifact, tm)
                 run!(GlobalDCEPass(), artifact, tm)
