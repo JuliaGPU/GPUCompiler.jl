@@ -410,6 +410,8 @@ function map_constant(remapper, value_map::Dict{LLVM.Value,LLVM.Value}, value::L
                 LLVM.LLVMType(LLVM.API.LLVMGetGEPSourceElementType(value)))
             return LLVM.const_gep(source_type, first(ops), ops[2:end])
         end
+        # e.g. `icmp` constant expressions (LLVM < 19) that do not involve binary64
+        typ == LLVM.value_type(value) && ops == collect(LLVM.operands(value)) && return value
         error("unsupported constant expression during binary64 legalization: opcode $opcode")
     elseif remap_type(remapper, LLVM.value_type(value)) != LLVM.value_type(value)
         error("unsupported changed constant $(typeof(value)) during binary64 legalization")
