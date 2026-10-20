@@ -4,18 +4,29 @@ using ..GPUCompiler
 import LLVM
 import ..TestRuntime
 
-struct CompilerParams <: AbstractCompilerParams end
+struct CompilerParams <: AbstractCompilerParams
+    emulate_fp64::Bool
+    CompilerParams(emulate_fp64::Bool=false) = new(emulate_fp64)
+end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
+GPUCompiler.device_libraries(job::CompilerJob{<:Any,CompilerParams}) =
+    job.config.params.emulate_fp64 ?
+    (GPUCompiler.runtime_library(TestRuntime), GPUCompiler.SoftFloat.softfloat_library()) :
+    (GPUCompiler.runtime_library(TestRuntime),)
+function GPUCompiler.lower_intrinsics!(job::CompilerJob{<:Any,CompilerParams}, mod::LLVM.Module)
+    job.config.params.emulate_fp64 && GPUCompiler.SoftFloat.legalize!(job, mod)
+    return
+end
 
 function create_job(@nospecialize(func), @nospecialize(types);
                    supports_fp16=true, supports_fp64=true, supports_bfloat16=false,
                    backend::Symbol, driver::Symbol=:generic, extensions::String="",
-                   atomics::SPIRVAtomics=SPIRVAtomics(), kwargs...)
+                   atomics::SPIRVAtomics=SPIRVAtomics(), emulate_fp64=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = SPIRVCompilerTarget(; backend, validate=true, optimize=true, extensions, atomics,
                                    supports_fp16, supports_fp64, supports_bfloat16, driver)
-    params = CompilerParams()
+    params = CompilerParams(emulate_fp64)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end
