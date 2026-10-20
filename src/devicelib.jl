@@ -127,6 +127,21 @@ end
 
 library_bytes(lib::DeviceLibrary) = bitcode_library(lib).bytes
 
+"""
+    device_library_bitcode(library) -> (; bytes, digest)
+
+Obtain a cached content snapshot of a bitcode-backed device library. `bytes` is a
+shared, read-only byte vector; `digest` is its SHA-256 as an `NTuple{32,UInt8}`.
+Back-ends may use the digest to cache context-independent metadata, such as the
+attributes needed on declarations before late linking. Do not mutate the bytes.
+Julia-backed libraries must instead be built with `load_device_library`.
+"""
+function device_library_bitcode(lib::DeviceLibrary)
+    lib.bitcode === nothing && throw(ArgumentError("Expected a bitcode-backed device library"))
+    snapshot = bitcode_library(lib)
+    return (; snapshot.bytes, snapshot.digest)
+end
+
 library_method_key(method) =
     (method.def, method.return_type, method.types, method.name,
      method.llvm_return_type, method.llvm_types, method.llvm_name)
@@ -488,3 +503,4 @@ end
 
 @public DeviceLibrary, DeviceLibraryMethod, device_libraries, runtime_library
 @public runtime_imports, load_device_library
+@public device_library_bitcode

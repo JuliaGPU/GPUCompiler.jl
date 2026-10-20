@@ -154,6 +154,11 @@ end
                 @control = linkonce_odr constant i32 137
                 """))
             LibraryFixtures.selection[] = (functions, constants)
+            snapshot = GPUCompiler.device_library_bitcode(functions)
+            @test snapshot.bytes == functions.bitcode
+            @test snapshot.digest == functions.digest
+            @test GPUCompiler.device_library_bitcode(functions).bytes === snapshot.bytes
+            @test_throws ArgumentError GPUCompiler.device_library_bitcode(first(original))
             text = LibraryFixtures.ir(LibraryFixtures.caller)
             @test occursin("137", text)
             @test !occursin("declare i32 @test_export", text)
