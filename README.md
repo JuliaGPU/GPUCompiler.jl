@@ -38,11 +38,17 @@ implementation of GPUCompiler's runtime, and is selected by default for
 
 Definitions are imported on demand, searching the libraries in order, until no library
 provides any remaining reference; unresolved references are reported by IR validation.
-This happens before optimization, for everything the kernel references, so that library
-code is optimized along with the kernel (as Clang does with `-mlink-builtin-bitcode`),
-and again after GC lowering, which introduces calls to the runtime.
+This happens twice:
 
-Library selection should only depend on the job's configuration, which
+- before optimization, for everything the kernel references, so that library code is
+  optimized along with the kernel (as Clang does with `-mlink-builtin-bitcode`);
+- after optimization, once `lower_intrinsics!(job, mod)` has lowered operations the
+  target cannot select (e.g. LLVM math intrinsics) to library calls, and again after GC
+  lowering, which introduces calls to the runtime. These late imports are processed by
+  `finish_imports!(job, mod, imported)`. Julia libraries imported at this point have been
+  lowered by `lower_intrinsics!` too.
+
+Library selection and lowering should only depend on the job's configuration, which
 identifies cached kernels. Compiled kernels are not invalidated when a library changes:
 Julia library methods are recompiled when redefined, but cached kernels keep using the
 previous version, and bitcode files are read once per session.

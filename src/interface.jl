@@ -746,6 +746,28 @@ prepare_job!(@nospecialize(job::CompilerJob)) = return
 # again afterwards for references introduced late. prefer `device_libraries`.
 link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
+"""
+    lower_intrinsics!(job, mod)
+
+Lower operations that the target cannot select (e.g. LLVM math intrinsics) to calls into
+device libraries. This runs after optimization, on the whole module, after which the
+definitions for any new references are imported. It also runs on Julia device libraries
+imported at that point, so it should only depend on `runtime_config(job)`. Names of
+defined functions must be preserved. Not called when `libraries=false`.
+"""
+lower_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
+
+"""
+    finish_imports!(job, mod, imported)
+
+Prepare definitions imported from device libraries after optimization, whose names are
+listed in `imported`. Definitions imported before optimization are processed by
+`finish_linked_module!` instead.
+"""
+finish_imports!(@nospecialize(job::CompilerJob), mod::LLVM.Module, imported) = return
+
+@public lower_intrinsics!, finish_imports!
+
 # finalization of the module, before deferred codegen and optimization
 finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =
     entry

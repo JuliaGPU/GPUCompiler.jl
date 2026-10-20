@@ -255,6 +255,9 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}
     return
 end
 
+finish_imports!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module,
+                imported) = finish_linked_module!(job, mod)
+
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     with_llvm_machine(job.config.target) do tm
