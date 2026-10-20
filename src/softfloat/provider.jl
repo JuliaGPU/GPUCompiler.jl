@@ -1,9 +1,9 @@
 # device-library provider for binary64 emulation
 
 """
-    softfloat_library()
+    softfloat_libraries()
 
-Device library implementing IEEE 754 binary64 (`Float64`) arithmetic using only
+Device libraries implementing IEEE 754 binary64 (`Float64`) arithmetic using only
 64-bit integer operations, for targets without native double-precision support.
 
 The selecting target calls `legalize!` from `lower_intrinsics!`, including when building
@@ -16,8 +16,21 @@ Supported semantics: round-to-nearest-even, gradual underflow, signed zeros, inf
 quiet comparisons, and canonical quiet NaN results (`0x7ff8000000000000`). Not supported:
 floating-point exception flags, other rounding modes, and `Float64` atomics.
 """
-softfloat_library() = GPUCompiler.DeviceLibrary(:softfloat64; methods=Tuple(METHODS),
-                                               optimize=true, always_inline=false)
+softfloat_libraries() =
+    (GPUCompiler.DeviceLibrary(:softfloat64;
+                               methods=Tuple(m for m in METHODS if !(m.name in OUTLINED)),
+                               optimize=true, always_inline=true),
+     GPUCompiler.DeviceLibrary(:softfloat64_outlined;
+                               methods=Tuple(m for m in METHODS if m.name in OUTLINED),
+                               optimize=true, always_inline=false))
+
+# Routines kept out of line. GPUCompiler has no cost-based inliner, so the others are
+# forced inline: they are at most ~45 instructions once optimized (sign operations 2-4,
+# comparisons 7-33, rounding 19-40, other conversions 27-43), and are often called with
+# constant operands that simplify further. These are 127 (`mul64`) to 444 (`fma64`)
+# instructions, or 79 for the narrowing conversions, and large kernels (e.g. Base's `sin`)
+# call `add64` and `mul64` over a hundred times each.
+const OUTLINED = (:add64, :mul64, :div64, :sqrt64, :fma64, :f64_to_f32, :f64_to_f16)
 
 # name of the LLVM function implementing one of the library's routines
 helper_name(name::Symbol) = "gpu_softfloat_$name"

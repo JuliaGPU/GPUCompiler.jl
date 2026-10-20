@@ -2,13 +2,15 @@
 
 This directory implements IEEE 754 binary64 (`Float64`) support for GPU targets without
 native double-precision arithmetic, using only 64-bit integer operations. Back-ends opt in
-by returning `softfloat_library()` from `GPUCompiler.device_libraries(job)` and calling
+by returning `softfloat_libraries()...` from `GPUCompiler.device_libraries(job)` and calling
 `GPUCompiler.SoftFloat.legalize!(job, mod)` in `lower_intrinsics!`.
 The same hook legalizes Julia libraries imported after optimization, so imported runtime functions
 and their callers agree on integer ABIs. External bitcode is an ABI boundary: unsupported
 binary64 calls are rejected rather than silently changing their calling convention.
-The optimized integer routines are linked at the late library stage; larger routines
-remain out of line to avoid duplicating their implementation at every arithmetic operation.
+The optimized integer routines are linked at the late library stage, from two libraries:
+small routines (sign operations, comparisons, rounding, most conversions) are forced inline,
+while the arithmetic and narrowing conversions remain out of line to avoid duplicating
+their implementation at every operation (see `OUTLINED` in `provider.jl`).
 
 The emulation operates on ordinary `Float64` code in the final LLVM module, including
 Base's pure-Julia math functions. The usual GPU restrictions still apply: external

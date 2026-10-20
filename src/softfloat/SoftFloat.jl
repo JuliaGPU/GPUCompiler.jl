@@ -17,6 +17,6 @@ include("paynehanek.jl")
 include("provider.jl")
 include("legalize.jl")
 
-export SoftFloat64, softfloat_library
+export SoftFloat64, softfloat_libraries
 
 end

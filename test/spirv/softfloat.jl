@@ -25,6 +25,15 @@
     @test occursin("OpStore", assembly)
     @test !occursin(r"LinkageAttributes[^\n]*gpu_softfloat[^\n]*Import", assembly)
 
+    # small routines are inlined, arithmetic is shared between call sites
+    ir = GPUCompiler.JuliaContext() do ctx
+        string(first(GPUCompiler.compile(:llvm, job)))
+    end
+    @test !occursin("@gpu_softfloat_abs64", ir)
+    @test !occursin("@gpu_softfloat_lt64", ir)
+    @test occursin(r"define internal .*@gpu_softfloat_add64", ir)
+    @test occursin(r"call .*@gpu_softfloat_add64", ir)
+
     native_job, _ = SPIRV.create_job(mod.kernel, types; backend=:llvm, kernel=true)
-    @test all(lib -> lib.name != :softfloat64, GPUCompiler.device_libraries(native_job))
+    @test all(lib -> !startswith(String(lib.name), "softfloat64"), GPUCompiler.device_libraries(native_job))
 end

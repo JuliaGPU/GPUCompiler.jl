@@ -11,7 +11,7 @@ end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 GPUCompiler.device_libraries(job::CompilerJob{<:Any,CompilerParams}) =
     job.config.params.emulate_fp64 ?
-    (GPUCompiler.runtime_library(TestRuntime), GPUCompiler.SoftFloat.softfloat_library()) :
+    (GPUCompiler.runtime_library(TestRuntime), GPUCompiler.SoftFloat.softfloat_libraries()...) :
     (GPUCompiler.runtime_library(TestRuntime),)
 function GPUCompiler.lower_intrinsics!(job::CompilerJob{<:Any,CompilerParams}, mod::LLVM.Module)
     job.config.params.emulate_fp64 && GPUCompiler.SoftFloat.legalize!(job, mod)
