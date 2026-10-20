@@ -330,24 +330,6 @@ const __llvm_initialized = Ref(false)
     # around for back-ends that cannot express their signatures (e.g. SPIR-V).
     entrypoints = filter(((job′, _),) -> job′ === job || job′.config.kernel, jobs)
 
-    if job.config.toplevel && job.config.libraries
-        # load the runtime outside of a timing block (because it recurses into the compiler)
-        if !uses_julia_runtime(job)
-            runtime, runtime_relocs = load_runtime(job)
-        end
-
-        @tracepoint "Library linking" begin
-            # target-specific libraries
-            @tracepoint "target libraries" link_libraries!(job, ir)
-
-            # GPU run-time library
-            if !uses_julia_runtime(job)
-                @tracepoint "runtime library" link_relocatable!(
-                    ir, relocations, runtime, runtime_relocs; only_needed=true)
-            end
-        end
-    end
-
     @tracepoint "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
@@ -355,6 +337,9 @@ const __llvm_initialized = Ref(false)
         end
 
         if job.config.toplevel
+            if job.config.libraries && uses_legacy_linker(job)
+                link_libraries!(job, ir)
+            end
             # mark everything internal except for entrypoints and any exported
             # global variables. this makes sure that the optimizer can, e.g.,
             # rewrite function signatures.
@@ -368,7 +353,9 @@ const __llvm_initialized = Ref(false)
                 run!(InternalizePass(; preserved_gvs), ir, tm)
             end
 
+            entry_name = entry.name
             finish_linked_module!(job, ir)
+            entry = ir.functions[entry_name]
             lower_syncscopes!(job, ir)
 
             # Resolve early so optimization sees concrete values.
@@ -380,7 +367,7 @@ const __llvm_initialized = Ref(false)
 
             if job.config.optimize
                 @tracepoint "optimization" begin
-                    optimize!(job, ir, relocations; job.config.opt_level)
+                    optimize!(job, ir, relocations; job.config.opt_level, entry_name)
 
                     # deferred codegen has some special optimization requirements,
                     # which also need to happen _after_ regular optimization.
@@ -402,6 +389,8 @@ const __llvm_initialized = Ref(false)
                         end
                     end
                 end
+            elseif job.config.libraries
+                resolve_device_libraries!(job, ir, relocations; entry_name)
             end
 
             # Runtime linking during optimization can add relocations.

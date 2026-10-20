@@ -572,7 +572,8 @@ end
         Metal.code_llvm_threaded_runtime(io, mod.kernel, Tuple{Int};
                                          kernel=true, dump_module=true)
     end
-    @test occursin(r"define .*@gpu_gc_pool_alloc\([^)]*<3 x i32>", ir)
+    @test !occursin("julia.air.thread_position_in_grid", ir)
+    @test occursin(r"call .*@gpu_report_oom\([^)]*<3 x i32>", ir)
     @test occursin("thread_position_in_grid", ir)
     @test !occursin(r"declare .*@gpu_gc_pool_alloc\(", ir)
 

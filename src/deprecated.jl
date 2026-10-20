@@ -239,7 +239,7 @@ end
 function cached_results(::Type{V}, job::CompilerJob) where {V}
     ci = job_code_instance(job)
     ci === nothing && return nothing
-    return session_results(V, ci, job.config)
+    return device_dependent_results(V, ci, job)
 end
 
 end # !HAS_INTEGRATED_CACHE
@@ -270,7 +270,7 @@ function cached_compilation(cache::AbstractDict{<:Any,V},
                             src::MethodInstance, cfg::CompilerConfig,
                             compiler::Function, linker::Function) where {V}
     world = tls_world_age()
-    key = (objectid(src), world, cfg)
+    key = (objectid(src), world, cfg, library_signature(CompilerJob(src, cfg, world)))
     # NOTE: store the MethodInstance's objectid (not the MI) to avoid an expensive boxing
     # allocation. Base does this with a multi-level lookup; we use a single-level dict.
 

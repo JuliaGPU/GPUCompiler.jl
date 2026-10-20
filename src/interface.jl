@@ -628,9 +628,9 @@ function cached_results(::Type{V}, job::CompilerJob) where {V}
     ci = job_code_instance(job)
     ci === nothing && return nothing
     if can_persist_results(job)
-        return persistent_results(V, ci, job.config)
+        return device_dependent_results(V, ci, job; persistent=true)
     else
-        return session_results(V, ci, job.config)
+        return device_dependent_results(V, ci, job)
     end
 end
 
@@ -742,9 +742,35 @@ end
 # priming the cache with entries that cannot be easily inferred.
 prepare_job!(@nospecialize(job::CompilerJob)) = return
 
-# early extension point used to link-in external bitcode files.
-# this is typically used by downstream packages to link vendor libraries.
+# Legacy linker; overrides retain their early and late compatibility calls.
 link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
+
+uses_legacy_linker(job::CompilerJob) =
+    which(link_libraries!, Tuple{typeof(job),LLVM.Module}) !==
+    which(link_libraries!, Tuple{CompilerJob,LLVM.Module})
+
+"""
+    lower_intrinsics!(job, mod, entry) -> entry
+
+Lower operations that the target cannot select, immediately before device libraries are
+resolved. Preserve exported names and return the entry function, even if it was rebuilt.
+This hook also runs when `optimize=false`, but never when `libraries=false`.
+Its policy must depend only on `runtime_config(job)`: Julia library artifacts are
+lowered before caching and share that configuration.
+"""
+lower_intrinsics!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                  entry::LLVM.Function) = entry
+
+"""
+    finish_imports!(job, mod, imported)
+
+Apply target attributes and intrinsic annotations to newly imported definitions.
+`imported` contains their names; function handles may be replaced by target processing.
+Library resolution and internalization are handled by GPUCompiler.
+"""
+finish_imports!(@nospecialize(job::CompilerJob), mod::LLVM.Module, imported) = nothing
+
+@public lower_intrinsics!, finish_imports!
 
 # finalization of the module, before deferred codegen and optimization
 finish_module!(@nospecialize(job::CompilerJob), mod::LLVM.Module, entry::LLVM.Function) =

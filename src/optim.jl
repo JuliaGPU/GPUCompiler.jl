@@ -50,7 +50,7 @@ function aggressiveinstcombine_pass(@nospecialize(job::CompilerJob))
 end
 
 function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                   relocs::Relocations; opt_level=2)
+                   relocs::Relocations; opt_level=2, entry_name=nothing)
     with_llvm_machine(job.config.target) do tm
         tti = llvm_targetinfo(job.config.target)
 
@@ -60,9 +60,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             register!(pb, GPULowerCPUFeaturesPass(job))
             register!(pb, GPULowerPTLSPass(job))
             register!(pb, GPULowerGCFramePass(job, relocs))
-            register!(pb, GPULinkRuntimePass(job, relocs))
-            register!(pb, GPULinkLibrariesPass(job))
-            register!(pb, GPUFinishRuntimeIntrinsicsPass(job))
+            register!(pb, GPUDeviceLibrariesPass(job, relocs, entry_name))
             register!(pb, AddKernelStatePass(job))
             register!(pb, LowerKernelStatePass(job))
             register!(pb, CleanupKernelStatePass(job))
@@ -327,12 +325,9 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
             # Use the registered pass because it owns `relocs`.
             add!(fpm, "GPULowerGCFrame")
         end
-        if job.config.libraries
-            # Use the registered pass because it owns `relocs`; the others only capture `job`.
-            add!(mpm, "GPULinkRuntime")
-            add!(mpm, GPULinkLibrariesPass(job))
-            add!(mpm, GPUFinishRuntimeIntrinsicsPass(job))
-        end
+    end
+    if job.config.libraries
+        add!(mpm, "GPUDeviceLibraries")
     end
 
     # lower kernel state intrinsics
@@ -404,6 +399,15 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
     # FIXME: we should fix the inliner so that inlined code gets optimized early-on
     add!(mpm, AlwaysInlinerPass())
+    if opt_level >= 1
+        add!(mpm, FunctionPassManager()) do fpm
+            add!(fpm, SROAPass())
+            add!(fpm, instcombine_pass(job))
+            add!(fpm, SimplifyCFGPass())
+            add!(fpm, opt_level >= 2 ? GVNPass() : EarlyCSEPass())
+            add!(fpm, DCEPass())
+        end
+    end
 end
 
 function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
@@ -483,51 +487,17 @@ function (self::CPUFeatures)(mod::LLVM.Module)
 end
 GPULowerCPUFeaturesPass(job) = ModulePass("GPULowerCPUFeatures", CPUFeatures(job))
 
-struct LinkRuntime
+struct DeviceLibraries
     job::CompilerJob
     relocs::Relocations
+    entry_name::Union{Nothing,String}
 end
-function (self::LinkRuntime)(mod::LLVM.Module)
-    self.job.config.libraries || return false
-    uses_julia_runtime(self.job) && return false
-
-    # GC lowering can introduce new calls to GPU runtime functions after the runtime
-    # was linked initially. Link again now so those calls resolve to definitions before
-    # later intrinsic-lowering passes inspect or rewrite the runtime call graph.
-    runtime, runtime_relocs = load_runtime(self.job)
-    # `RemoveNIPass` stripped non-integral address spaces from `mod`'s datalayout, but the
-    # cached runtime kept them; align it (as with target libraries) to avoid a warning.
-    runtime.triple = mod.triple
-    runtime.datalayout = mod.datalayout
-    link_relocatable!(mod, self.relocs, runtime, runtime_relocs; only_needed=true)
+function (self::DeviceLibraries)(mod::LLVM.Module)
+    resolve_device_libraries!(self.job, mod, self.relocs; self.entry_name)
     return true
 end
-GPULinkRuntimePass(job, relocs::Relocations) =
-    ModulePass("GPULinkRuntime", LinkRuntime(job, relocs))
-
-struct LinkLibraries
-    job::CompilerJob
-end
-function (self::LinkLibraries)(mod::LLVM.Module)
-    self.job.config.libraries || return false
-
-    # Runtime functions materialized by GC lowering can introduce target-library
-    # references after the normal library-linking phase has run. Give back-ends a
-    # second chance to resolve those references before they lower their own runtime
-    # intrinsics. This is a no-op for back-ends without a link_libraries! override.
-    link_libraries!(self.job, mod)
-    return true
-end
-GPULinkLibrariesPass(job) = ModulePass("GPULinkLibraries", LinkLibraries(job))
-
-struct FinishRuntimeIntrinsics
-    job::CompilerJob
-end
-function (self::FinishRuntimeIntrinsics)(mod::LLVM.Module)
-    return finish_runtime_intrinsics!(self.job, mod)
-end
-GPUFinishRuntimeIntrinsicsPass(job) =
-    ModulePass("GPUFinishRuntimeIntrinsics", FinishRuntimeIntrinsics(job))
+GPUDeviceLibrariesPass(job, relocs::Relocations, entry_name) =
+    ModulePass("GPUDeviceLibraries", DeviceLibraries(job, relocs, entry_name))
 
 # lower object allocations to to PTX malloc
 #

@@ -83,9 +83,8 @@ end
 # required relocation metadata, this persists with the function's `CodeInstance`.
 # `runtime_libs` below provides the session cache on older Julia versions.
 mutable struct RuntimeFunctionResults
-    bitcode::Union{Nothing,Vector{UInt8}}
-    relocations::Relocations
-    RuntimeFunctionResults() = new(nothing, Relocations())
+    artifacts::Dict{String,Tuple{Vector{UInt8},Relocations}}
+    RuntimeFunctionResults() = new(Dict{String,Tuple{Vector{UInt8},Relocations}}())
 end
 
 # Compile a single runtime function and link it into `mod`. The renamed bitcode is
@@ -99,10 +98,14 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # Don't run a standalone inference walk on a miss: `compile_unhooked` below drives
     # inference itself.
     ci, res = runtime_function_results(rt_job)
-    if res !== nothing && res.bitcode !== nothing
-        link_relocatable!(mod, relocs,
-                          parse(LLVM.Module, res.bitcode),
-                          res.relocations)
+    if res !== nothing && haskey(res.artifacts, name)
+        bytes, relocations = res.artifacts[name]
+        artifact = parse(LLVM.Module, bytes)
+        if artifact.functions[name].function_type != runtime_function_type(rt_job, method)
+            dispose(artifact)
+            error("Invalid ABI for cached device-library function '$name'")
+        end
+        link_relocatable!(mod, relocs, artifact, relocations)
         ci === nothing && (ci = runtime_code_instance(rt_job))
         return ci::CodeInstance
     end
@@ -112,11 +115,13 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     new_mod, meta = compile_unhooked(:llvm, rt_job; resolve_relocations=false)
     ft = meta.entry.function_type
     expected_ft = runtime_function_type(rt_job, method)
-    if ft.return_type != expected_ft.return_type
-        error("Invalid return type for runtime function '$(method.name)': expected $(expected_ft.return_type), got $(ft.return_type)")
+    if ft != expected_ft
+        dispose(new_mod)
+        error("Invalid ABI for device-library function '$(method.name)': expected $expected_ft, got $ft")
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
+    collect_cglobal_relocations!(rt_job, new_mod, meta.relocations)
     with_llvm_machine(config.target) do tm
         run!(StripDeadPrototypesPass(), new_mod, tm)
     end
@@ -137,8 +142,7 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     ci === nothing && (ci = runtime_code_instance(rt_job))
     if supports_relocatable_ir()
         res === nothing && (res = runtime_results(RuntimeFunctionResults, ci, rt_job.config))
-        res.bitcode = take!(io)
-        res.relocations = meta.relocations
+        res.artifacts[name] = (take!(io), meta.relocations)
     end
 
     link_relocatable!(mod, relocs, new_mod, meta.relocations)
@@ -203,30 +207,10 @@ end
 
 # build the runtime library, returning its bitcode
 function build_runtime(@nospecialize(job::CompilerJob), config::CompilerConfig)
-    @dispose mod=LLVM.Module("GPUCompiler run-time library") begin
-        sources = MethodInstance[]
-        code_instances = CodeInstance[]
-        relocs = Relocations()
-
-        for method in runtime_methods()
-            resolved = runtime_method_instance(job, method)
-            resolved === nothing && continue
-            source = resolved
-            push!(sources, source)
-            push!(code_instances,
-                  emit_function!(mod, relocs, config, source, method, job.world))
-        end
-
-        # we cannot optimize the runtime library, because the code would then be optimized
-        # again during main compilation (and optimizing twice isn't safe). for example,
-        # optimization removes Julia address spaces, which would then lead to type
-        # mismatches when using functions from the runtime library from IR that has not been
-        # stripped of AS info.
-
-        io = IOBuffer()
-        write(io, mod)
-        return take!(io), sources, code_instances, relocs
-    end
+    methods = [method for method in runtime_methods() if !(method.def isa Symbol)]
+    append!(methods, runtime_library(runtime_module(job)).methods)
+    sort!(methods; by=method -> method.name)
+    build_device_library(job, config, DeviceLibrary(:runtime; methods=Tuple(methods)))
 end
 
 # Runtime.methods is a Dict, but library layout and source validation require the same order.
@@ -251,14 +235,14 @@ mutable struct RuntimeLibrary
     relocations::Relocations
 end
 
-function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob))
+function device_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob), methods)
     # Method-table changes and CI invalidations always advance the world counter. A runtime
     # already validated for this exact world therefore needs no per-function scan on the
     # common cache-hit path.
     job.world == lib.validated_world && return true
 
     i = 0
-    for method in runtime_methods()
+    for method in methods
         resolved = runtime_method_instance(job, method)
         resolved === nothing && continue
         i += 1
@@ -271,9 +255,19 @@ function runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJ
     return true
 end
 
+runtime_library_valid(lib::RuntimeLibrary, @nospecialize(job::CompilerJob)) =
+    device_library_valid(lib, job, runtime_methods())
+
 const runtime_libs = Dict{Tuple{CompilerConfig, Bool}, RuntimeLibrary}()
 const runtime_libs_lock = ReentrantLock()
 
+"""
+    load_runtime(job)
+
+Deprecated compatibility loader for the combined runtime artifact. New back-ends should
+warm each selected Julia library with `load_device_library`; this legacy cache is not
+used by the compilation pipeline.
+"""
 @locked function load_runtime(@nospecialize(job::CompilerJob))
     config = runtime_config(job)
     key = (config, !supports_typed_pointers(context()))

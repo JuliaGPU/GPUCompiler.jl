@@ -14,9 +14,10 @@ module ThreadedRuntime
 
     signal_exception() = return
     malloc(sz) = C_NULL
-    function report_oom(sz)
-        ccall("extern julia.air.thread_position_in_grid.v3i32", llvmcall,
-              NTuple{3, VecElement{UInt32}}, ())
+    @noinline function report_oom(sz)
+        position = ccall("extern julia.air.thread_position_in_grid.v3i32", llvmcall,
+                         NTuple{3, VecElement{UInt32}}, ())
+        parentmodule(parentmodule(@__MODULE__)).sink(position[1].value)
         return
     end
     report_exception(ex) = return

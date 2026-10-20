@@ -40,6 +40,30 @@ precompile_test_harness("Inference caching") do load_path
         persistent_kernel(x) = x + 1
         session_kernel(x) = x + 2
 
+        using NativeCompiler: GPUCompiler
+        library_inner(value::Int32) = value + Int32(7)
+        library_export(value::Int32) = library_inner(value)
+        library_wrap(value::Int32) = value + Int32(1)
+        library_caller(value::Int32) = library_wrap(
+            ccall("extern persisted_export", llvmcall, Int32, (Int32,), value))
+        struct LibraryParams <: GPUCompiler.AbstractCompilerParams end
+        const LIBRARY = GPUCompiler.DeviceLibrary(:persisted; methods=(
+            GPUCompiler.DeviceLibraryMethod(library_export, Int32, (Int32,);
+                                            llvm_name="persisted_export"),))
+        GPUCompiler.device_libraries(::GPUCompiler.CompilerJob{<:Any,LibraryParams}) = (LIBRARY,)
+        GPUCompiler.relocation_lowering(::GPUCompiler.CompilerJob{<:Any,LibraryParams}) = :patch
+        library_job() = GPUCompiler.CompilerJob(
+            GPUCompiler.methodinstance(typeof(library_caller), Tuple{Int32}),
+            GPUCompiler.CompilerConfig(GPUCompiler.NativeCompilerTarget(), LibraryParams();
+                                       kernel=false, validate=false))
+        let job = library_job()
+            GPUCompiler.JuliaContext() do ctx
+                mod, _ = GPUCompiler.compile(:llvm, job)
+                GPUCompiler.LLVM.dispose(mod)
+            end
+            GPUCompiler.cached_results(Results, job).artifact = "linked"
+        end
+
         # A back-end implementing relocation keeps results across sessions.
         let
             job, _ = NativeCompiler.Native.create_job(persistent_kernel, (Int,); relocations=:patch)
@@ -119,6 +143,21 @@ precompile_test_harness("Inference caching") do load_path
         else
             @test persistent_res.artifact === nothing
         end
+
+        library_job = NativeBackend.library_job()
+        library_res = GPUCompiler.cached_results(NativeBackend.Results, library_job)
+        @test library_res.artifact ==
+              (GPUCompiler.supports_relocatable_ir() ? "linked" : nothing)
+        @eval NativeBackend library_inner(value::Int32) = value + Int32(23)
+        library_job = NativeBackend.library_job()
+        @test GPUCompiler.cached_results(NativeBackend.Results, library_job).artifact === nothing
+        GPUCompiler.JuliaContext() do ctx
+            mod, _ = GPUCompiler.compile(:llvm, library_job)
+            @test occursin("23", string(mod))
+            GPUCompiler.LLVM.dispose(mod)
+        end
+        @test GPUCompiler.cached_results(NativeBackend.Results, persistent_job).artifact ==
+              (GPUCompiler.supports_relocatable_ir() ? "persistent" : nothing)
 
         session_job, _ = NativeCompiler.Native.create_job(NativeBackend.session_kernel, (Int,))
         session_res = GPUCompiler.cached_results(NativeBackend.Results, session_job)

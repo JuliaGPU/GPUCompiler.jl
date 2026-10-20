@@ -26,6 +26,61 @@ as [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl), [AMDGPU.jl](https://github.co
 
 ## Development
 
+### Device libraries
+
+Back-ends select an ordered tuple with `GPUCompiler.device_libraries(job)`. Each
+`DeviceLibrary(:name; methods=(DeviceLibraryMethod(...), ...))` describes Julia
+specializations and their exported ABIs; `DeviceLibrary(:name; bitcode=path)` describes
+vendor bitcode. GPUCompiler prepends its core runtime when Julia's runtime is unavailable.
+`runtime_library(MyRuntime)` describes the target's runtime implementations using
+GPUCompiler's signatures. Existing `runtime_module(job)` implementations remain supported.
+
+The compiler keeps LLVM intrinsics through the main optimizer, then calls
+`lower_intrinsics!(job, mod, entry)` after GC-frame lowering. This hook preserves exported
+names and returns the current entry, including when it rebuilds functions. Libraries are
+linked once in selection order: every live import must resolve to a later library, a
+registered relocation, or a target intrinsic. Duplicate exports, backward dependencies,
+and missing implementations produce errors naming the library and symbol. Unused Julia
+libraries are not built. Overrides of the legacy `link_libraries!` hook retain their
+early and late calls as an opaque compatibility boundary (some back-ends inspect globals
+before optimization). Migrating to `device_libraries` removes that double linking;
+early inspection belongs in `finish_module!`, not in a linker.
+
+Unoptimized Julia libraries may still contain Julia runtime operations that later passes
+remove. These, and missing optional target-runtime implementations, go through final IR
+validation so an invalid kernel retains its original diagnostic and backtrace.
+
+`finish_imports!(job, mod, imported_names)` applies target policy to late definitions.
+Runtime-intrinsic and kernel-state lowering follow. Post-import inlining and cleanup run
+after Julia's GC lowering, when aggregate loads are safe to inline. `libraries=false`
+skips resolution and intrinsic lowering; `optimize=false, libraries=true` still resolves
+libraries.
+
+Julia libraries reuse the runtime's relocatable per-specialization cache and are lowered
+before caching. `optimize=true` additionally optimizes the library, checks that it has no
+Julia address spaces, runtime operations, relocations, mutable globals or indirect calls,
+and marks exports for late inlining. It is intended for standalone numerical routines;
+`always_inline=false` keeps larger routines, such as software division, out of line.
+Unoptimized runtime libraries retain Julia's address spaces until the caller's pipeline
+removes them. Library selection and target lowering policy must depend on compiler
+configuration, which is also used for building library jobs.
+
+Kernel caches record library dependencies at compilation, validate method identities and
+CodeInstance world ranges on reuse, and fingerprint vendor bitcode by SHA-256. File bytes
+and symbol manifests are cached using file metadata; changing a library selection or
+replacing its bitcode invalidates dependent kernel results. Export names are part of the
+per-function cache, so one specialization can supply multiple symbols.
+Replace bitcode files atomically. Each compilation uses one content snapshot for export
+discovery, linking, and dependency recording, even if a file is replaced during compilation.
+Selection is cached per configuration and world; hooks must not consult mutable selection
+state. File metadata is still checked on reuse, without rebuilding descriptors or scanning
+Julia methods in an unchanged world. Alternating old and new worlds can invalidate a
+shared kernel result repeatedly; this favors correctness over retaining multiple versions.
+Byte-backed libraries copy and hash their input once; treat the descriptor's payload as
+read-only and construct a new descriptor to replace it.
+
+### Testing
+
 GPUCompiler.jl's own test suite runs on GitHub Actions. In addition, Buildkite runs the test
 suites of the GPU back-ends that build on GPUCompiler (CUDA.jl, AMDGPU.jl, Metal.jl, oneAPI.jl
 and OpenCL.jl) against the version of GPUCompiler being tested. These back-end tests run on

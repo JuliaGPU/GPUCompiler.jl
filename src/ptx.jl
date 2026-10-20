@@ -255,6 +255,9 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}
     return
 end
 
+finish_imports!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module,
+                imported) = finish_linked_module!(job, mod)
+
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     with_llvm_machine(job.config.target) do tm
@@ -717,6 +720,8 @@ function nvvm_reflect!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                         job.config.target.cap.major*100 + job.config.target.cap.minor*10)
         elseif reflect_arg == "__CUDA_FTZ"
             ConstantInt(reflect_typ, ftz_val)
+        elseif reflect_arg == "__CUDA_PREC_SQRT" || reflect_arg == "__CUDA_PREC_DIV"
+            ConstantInt(reflect_typ, !job.config.target.fastmath)
         else
             ConstantInt(reflect_typ, 0)
         end

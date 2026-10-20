@@ -9,6 +9,7 @@ using ExprTools: splitdef, combinedef
 using Libdl
 
 using Preferences
+using SHA
 
 const ENABLE_TRACY = parse(Bool, @load_preference("tracy", "false"))
 
@@ -80,6 +81,7 @@ include("determinism.jl")
 include("optim.jl")
 include("validation.jl")
 include("rtlib.jl")
+include("devicelib.jl")
 include("mcgen.jl")
 include("debug.jl")
 include("driver.jl")
@@ -94,6 +96,11 @@ include("precompile.jl")
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
     empty!(session_results_cache)
+    empty!(library_selections)
+    empty!(device_libs)
+    empty!(runtime_libs)
+    empty!(bitcode_files)
+    empty!(bitcode_buffers)
 
     @static if !HAS_INTEGRATED_CACHE
         # CodeInstances created by GPUCompiler's precompile workload are process-local.
