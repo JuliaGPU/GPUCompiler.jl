@@ -742,8 +742,8 @@ end
 # priming the cache with entries that cannot be easily inferred.
 prepare_job!(@nospecialize(job::CompilerJob)) = return
 
-# early extension point used to link-in external bitcode files.
-# this is typically used by downstream packages to link vendor libraries.
+# extension point used to link-in external bitcode files, called before optimization and
+# again afterwards for references introduced late. prefer `device_libraries`.
 link_libraries!(@nospecialize(job::CompilerJob), mod::LLVM.Module) = return
 
 # finalization of the module, before deferred codegen and optimization

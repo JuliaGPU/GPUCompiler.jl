@@ -26,6 +26,29 @@ as [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl), [AMDGPU.jl](https://github.co
 
 ## Development
 
+### Device libraries
+
+Back-ends describe the libraries that implement functions called from device code by
+overriding `GPUCompiler.device_libraries(job)`, returning a tuple of `DeviceLibrary`s.
+A library either exports Julia methods, `DeviceLibrary(:name; methods=(DeviceLibraryMethod(f,
+rettyp, argtyps; llvm_name), ...))`, or contains LLVM bitcode, `DeviceLibrary(:name;
+bitcode=path_or_bytes)`. `runtime_library(MyRuntime)` describes the target's
+implementation of GPUCompiler's runtime, and is selected by default for
+`runtime_module(job)`.
+
+Definitions are imported on demand, searching the libraries in order, until no library
+provides any remaining reference; unresolved references are reported by IR validation.
+This happens before optimization, for everything the kernel references, so that library
+code is optimized along with the kernel (as Clang does with `-mlink-builtin-bitcode`),
+and again after GC lowering, which introduces calls to the runtime.
+
+Library selection should only depend on the job's configuration, which
+identifies cached kernels. Compiled kernels are not invalidated when a library changes:
+Julia library methods are recompiled when redefined, but cached kernels keep using the
+previous version, and bitcode files are read once per session.
+
+### Testing
+
 GPUCompiler.jl's own test suite runs on GitHub Actions. In addition, Buildkite runs the test
 suites of the GPU back-ends that build on GPUCompiler (CUDA.jl, AMDGPU.jl, Metal.jl, oneAPI.jl
 and OpenCL.jl) against the version of GPUCompiler being tested. These back-end tests run on
