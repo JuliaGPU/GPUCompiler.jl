@@ -11,6 +11,7 @@ module Runtime
     report_exception(ex) = return
     report_exception_name(ex) = return
     report_exception_frame(idx, func, file, line) = return
+    exception_site(id) = (unsafe_store!(Ptr{Int32}(Int(0xDEADBEEF)), id); return)
 end
 
 helper(value::Int32) = value + Int32(7)
@@ -28,17 +29,50 @@ const julia_library = GPUCompiler.DeviceLibrary(:test;
              GPUCompiler.DeviceLibraryMethod(exported, Int32, (Int32,);
                                              llvm_name="test_alias")))
 
+# `lower_intrinsics!` replaces `llvm.exp.f32` with a call to `test_exp`
+exp_caller(value::Float32) = ccall("llvm.exp.f32", llvmcall, Float32, (Float32,), value)
+both_caller(value::Float32) =
+    ccall("extern test_exp", llvmcall, Float32, (Float32,), value) + exp_caller(value)
+library_exp(value::Float32) = value * 2f0 + 3f0
+fma_exp(value::Float32) = fma(value, 2f0, 3f0)
+mutable struct Box
+    value::Float32
+end
+@noinline escape(box::Box) = (box.value += 1f0; box.value)
+allocating_exp(value::Float32) = escape(Box(value))
+throwing_exp(value::Float32) = (value > 1f6 && throw(nothing); value * 2f0)
+throwing_caller(value::Float32) = (value < 0f0 && throw(nothing); exp_caller(value))
+exp_library(f; kwargs...) = GPUCompiler.DeviceLibrary(:exp;
+    methods=(GPUCompiler.DeviceLibraryMethod(f, Float32, (Float32,);
+                                             llvm_name="test_exp"),), kwargs...)
+
 struct Params <: GPUCompiler.AbstractCompilerParams
     libraries::Tuple
+    exception_sites::Bool
 end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = Runtime
+GPUCompiler.uses_exception_sites(job::CompilerJob{<:Any,Params}) =
+    job.config.params.exception_sites
 GPUCompiler.device_libraries(job::CompilerJob{<:Any,Params}) =
     (job.config.params.libraries..., GPUCompiler.runtime_library(Runtime))
-function job(func, types; libs=(julia_library,), target=:native, kwargs...)
+function GPUCompiler.lower_intrinsics!(::CompilerJob{<:Any,Params}, mod::LLVM.Module)
+    exp = LLVM.Intrinsic("llvm.exp")
+    for fun in mod.functions
+        isdeclaration(fun) && continue
+        GPUCompiler.lower_intrinsic_calls!(fun) do builder, call, intrinsic
+            intrinsic == exp || return nothing
+            GPUCompiler.call_declared!(builder, "test_exp", LLVM.FloatType(),
+                                       collect(LLVM.Value, call.arguments))
+        end
+    end
+end
+
+function job(func, types; libs=(julia_library,), target=:native, exception_sites=false,
+             kwargs...)
     source = GPUCompiler.methodinstance(typeof(func), Base.to_tuple_type(types))
     target = target === :native ? NativeCompilerTarget() : PTXCompilerTarget(; cap=v"7.0")
     validate = target isa PTXCompilerTarget
-    CompilerJob(source, CompilerConfig(target, Params(libs);
+    CompilerJob(source, CompilerConfig(target, Params(libs, exception_sites);
                                        kernel=false, validate, kwargs...))
 end
 function ir(func, types=(Int32,); kwargs...)
@@ -51,6 +85,10 @@ function ir(func, types=(Int32,); kwargs...)
             LLVM.dispose(mod)
         end
     end
+end
+
+asm(func, types; kwargs...) = JuliaContext() do ctx
+    first(GPUCompiler.compile(:asm, job(func, types; kwargs...)))
 end
 
 bitcode(text) = JuliaContext() do ctx
@@ -81,11 +119,11 @@ end
                                                  llvm_name="vector_export"),))
     job = LibraryFixtures.job(LibraryFixtures.caller, (Int32,))
     cached = JuliaContext() do ctx
-        GPUCompiler.load_julia_library(vectors(TypeVar(:T, Real)), job)
+        GPUCompiler.load_julia_library(vectors(TypeVar(:T, Real)), job; lowered=false)
         length(GPUCompiler.device_libs)
     end
     @test cached == JuliaContext() do ctx
-        GPUCompiler.load_julia_library(vectors(TypeVar(:S, Real)), job)
+        GPUCompiler.load_julia_library(vectors(TypeVar(:S, Real)), job; lowered=false)
         length(GPUCompiler.device_libs)
     end
 
@@ -201,4 +239,86 @@ end
                    LibraryFixtures.ir(LibraryFixtures.caller; libs=(noinline,)))
     @test !occursin("@test_export",
                     LibraryFixtures.ir(LibraryFixtures.caller; libs=(inline,)))
+end
+
+@testset "late imports" begin
+    exp_library = LibraryFixtures.exp_library
+
+    # lowered intrinsics are imported after optimization
+    for library in (exp_library(LibraryFixtures.library_exp),
+                    exp_library(LibraryFixtures.library_exp; optimize=true),
+                    exp_library(LibraryFixtures.library_exp; optimize=true, always_inline=false))
+        text = LibraryFixtures.ir(LibraryFixtures.exp_caller, (Float32,);
+                                  libs=(library,))
+        @test !occursin("llvm.exp", text)
+        @test !occursin("declare float @test_exp", text)
+        @test occursin("3.000000e+00", text)
+        @test occursin("call fastcc float @test_exp", text) == !library.always_inline
+    end
+    text = LibraryFixtures.ir(LibraryFixtures.exp_caller, (Float32,);
+                              libs=(exp_library(LibraryFixtures.library_exp),),
+                              optimize=false)
+    @test !occursin("llvm.exp", text)
+    @test occursin("define", text)
+
+    # an export can be needed both before and after optimization
+    text = LibraryFixtures.ir(LibraryFixtures.both_caller, (Float32,);
+                              libs=(exp_library(LibraryFixtures.library_exp),))
+    @test !occursin("llvm.exp", text)
+    @test !occursin("declare float @test_exp", text)
+    @test !occursin("unreachable", text)
+    @test count("call fastcc float @test_exp", text) == 2
+
+    # Julia libraries imported late are lowered like any other Julia code
+    library = exp_library(LibraryFixtures.allocating_exp)
+    text = LibraryFixtures.ir(LibraryFixtures.exp_caller, (Float32,);
+                              libs=(library,), target=:ptx)
+    @test !occursin("@julia.", text)
+    @test occursin("gpu_gc_pool_alloc", text)
+
+    # late imports are processed like early ones
+    text = LibraryFixtures.ir(LibraryFixtures.exp_caller, (Float32,);
+                              libs=(exp_library(LibraryFixtures.fma_exp),), target=:ptx)
+    @test !occursin("@julia.cpu", text)
+    fence = GPUCompiler.DeviceLibrary(:fence; bitcode=LibraryFixtures.bitcode("""
+        define float @test_exp(float %value) {
+            fence syncscope("workgroup") seq_cst
+            ret float %value
+        }"""))
+    text = LibraryFixtures.ir(LibraryFixtures.exp_caller, (Float32,);
+                              libs=(fence,), target=:ptx)
+    @test occursin("syncscope(\"block\")", text)
+
+    # late imports are internalized, including aliases (which need PTX 6.3)
+    if NVPTX_LLVM_Backend_jll.is_available()
+        aliased = GPUCompiler.DeviceLibrary(:aliased; bitcode=LibraryFixtures.bitcode("""
+            define float @implementation(float %value) { ret float %value }
+            @test_exp = alias float (float), float (float)* @implementation"""))
+        text = LibraryFixtures.asm(LibraryFixtures.exp_caller, (Float32,);
+                                   libs=(aliased,), target=:ptx)
+        @test !occursin(".alias", text)
+    end
+
+    # late imports call the definitions imported before optimization, which are internal by
+    # then, instead of importing (and exporting) another copy
+    library = exp_library(LibraryFixtures.throwing_exp)
+    text = LibraryFixtures.ir(LibraryFixtures.throwing_caller, (Float32,);
+                              libs=(library,), target=:ptx)
+    @test count(r"define [^@]*@gpu_report_exception\d*\(", text) == 1
+    @test count(r"define [^@]*@gpu_signal_exception\d*\(", text) == 1
+    @test !occursin(r"define (?!internal )[^@]*@gpu_", text)
+
+    # throw sites in late imports get ids, like those in the kernel
+    JuliaContext() do ctx
+        job = LibraryFixtures.job(LibraryFixtures.throwing_caller, (Float32,);
+                                  libs=(library,), target=:ptx, exception_sites=true,
+                                  debug_level=2)
+        mod, meta = GPUCompiler.compile(:llvm, job)
+        text = string(mod)
+        @test !occursin("julia.gpu.exception_site_id", text)
+        @test count(r"define [^@]*@gpu_exception_site\d*\(", text) <= 1
+        @test length(meta.exception_sites) == 2
+        @test any(site -> first(site.frames).func == "throwing_exp", meta.exception_sites)
+        LLVM.dispose(mod)
+    end
 end
