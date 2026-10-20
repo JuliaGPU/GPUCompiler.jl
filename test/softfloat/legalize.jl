@@ -283,3 +283,25 @@ end
         dispose(mod)
     end
 end
+
+if LLVM.version() < v"19"
+    # LLVM 19 removed `icmp` constant expressions; before, Base's `sin` contained one
+    @testset "unrelated constant expressions" begin
+        LLVM.Context(; opaque_pointers=true) do ctx
+            mod = parse(LLVM.Module, """
+            @flag = global i8 0
+
+            define double @select_by_address(double %x) {
+              %y = fadd double %x, 1.0
+              %z = select i1 icmp ult (i64 ptrtoint (ptr @flag to i64), i64 4096), double %x, double %y
+              ret double %z
+            }
+            """)
+            legalize_module!(mod)
+            @test LLVM.verify(mod) === nothing
+            @test isempty(validate_module(mod))
+            @test occursin("icmp ult (i64 ptrtoint (ptr @flag to i64), i64 4096)", string(mod))
+            dispose(mod)
+        end
+    end
+end
