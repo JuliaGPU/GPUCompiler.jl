@@ -78,6 +78,8 @@ include("jlgen.jl")
 include("irgen.jl")
 include("determinism.jl")
 include("optim.jl")
+include("narrowing.jl")
+@public IndexNarrowing
 include("validation.jl")
 include("rtlib.jl")
 include("mcgen.jl")
