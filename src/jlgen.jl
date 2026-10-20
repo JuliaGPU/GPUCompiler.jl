@@ -751,6 +751,12 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     if v"1.12.0-DEV.2126" <= VERSION < v"1.13-" || VERSION >= v"1.13.0-DEV.285"
         cgparams = (; force_emit_all = true , cgparams...)
     end
+    # TODO: fill in both version bounds once JuliaLang/julia#63978 lands and is backported.
+    if v"1.14.0-DEV.TBD" <= VERSION < v"1.15-" || VERSION >= v"1.15.0-DEV.TBD"
+        # Image code may omit inline scopes, but our diagnostics and downstream debuggers
+        # need them without access to Julia's CodeInstance debuginfo.
+        cgparams = (; cgparams..., debug_info_inline_scopes = true)
+    end
     params = Base.CodegenParams(; cgparams...)
 
     # generate IR
