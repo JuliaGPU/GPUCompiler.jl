@@ -80,6 +80,10 @@ Compile a `job` to one of the following formats as specified by the `target` arg
 
 The default [`relocation_lowering`](@ref) strategy resolves Julia-value relocations in the
 `:llvm` result. Other strategies retain relocation metadata for their loader.
+
+The IR in the result (the `:llvm` module, or `meta.ir` and `meta.entry`) lives in the
+LLVM context of the enclosing [`JuliaContext`](@ref) block, and is freed with it. Use it,
+and dispose of it, within that block.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     run_compile_hook(job)

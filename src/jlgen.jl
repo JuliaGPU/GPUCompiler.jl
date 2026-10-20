@@ -681,6 +681,30 @@ function fix_runtime_lookup_casts!(mod::LLVM.Module)
     return changed
 end
 
+# Julia has no API to free native code without dumping it, but dumping it without any
+# outputs frees it as well.
+function free_native_code(native_code::Ptr{Cvoid})
+    @static if false
+        # TODO: enable on the version of Julia that adds `jl_free_native`
+        #       (JuliaLang/julia#63960), which doesn't rely on that implementation detail.
+        @ccall jl_free_native(native_code::Ptr{Cvoid})::Cvoid
+    elseif VERSION >= v"1.14.0-DEV.2885"
+        @ccall jl_dump_native(native_code::Ptr{Cvoid},
+                              C_NULL::Cstring, C_NULL::Cstring, C_NULL::Cstring, C_NULL::Cstring,
+                              C_NULL::Ptr{Cvoid}, 0::UInt32, C_NULL::Cstring,
+                              C_NULL::Ptr{Cvoid})::Cvoid
+    elseif VERSION >= v"1.11.0-DEV.384"
+        @ccall jl_dump_native(native_code::Ptr{Cvoid},
+                              C_NULL::Cstring, C_NULL::Cstring, C_NULL::Cstring, C_NULL::Cstring,
+                              C_NULL::Ptr{Cvoid}, C_NULL::Ptr{Cvoid},
+                              C_NULL::Ptr{Cvoid})::Cvoid
+    else
+        @ccall jl_dump_native(native_code::Ptr{Cvoid},
+                              C_NULL::Cstring, C_NULL::Cstring, C_NULL::Cstring, C_NULL::Cstring,
+                              C_NULL::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Cvoid
+    end
+end
+
 function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.source.def.primary_world > job.world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
@@ -754,7 +778,8 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
     params = Base.CodegenParams(; cgparams...)
 
     # generate IR
-    native_code, llvm_mod = GC.@preserve lookup_cb let ts_mod = ThreadSafeModule("start")
+    ts_mod = ThreadSafeModule("start")
+    native_code, llvm_mod = GC.@preserve lookup_cb let
         # configure the module
         ts_mod() do mod
             mod.triple = llvm_triple(job.config.target)
@@ -796,34 +821,19 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         end
         @assert native_code != C_NULL
 
-        # we never dispose of `ts_mod`: from Julia 1.14, the native code keeps using it, and
-        # together with the native code, which is never freed either, it keeps the context
-        # alive. That leaks the context of every compilation, but it keeps the IR that
-        # `compile` returns valid after `JuliaContext` returns, as callers expect (see
-        # JuliaGPU/GPUCompiler.jl#970 for freeing them).
-        LLVM.mark_untracked(ts_mod)
-
         llvm_mod_ref =
             ccall(:jl_get_llvm_module, LLVM.API.LLVMOrcThreadSafeModuleRef,
                   (Ptr{Cvoid},), native_code)
         @assert llvm_mod_ref != C_NULL
         llvm_ts_mod = ThreadSafeModule(llvm_mod_ref; borrowed=true)
 
-        # take the module out of the native code, which is never freed, and whose module we
-        # don't use anymore (the queries below only use its tables of functions and global
-        # variables, which remain valid as they point into the module). The caller then
-        # owns the module: it links it into another one, disposes of it, or keeps it, which
-        # leaks it along with its context (see above).
+        # take the module out of the native code. the queries below only use the native
+        # code's tables of functions and global variables, which point into the module.
         llvm_mod = @static if LLVM.version() >= v"16"
             LLVM.unsafe_take_module!(llvm_ts_mod)
         else
             # LLVM 15 (Julia 1.10) can't move the module out of a thread-safe module, so we
-            # borrow it instead, and hand it to callers that link or dispose of it. That
-            # violates the contract of `unsafe_module`, which forbids disposing of or
-            # consuming the module, but it is safe here: the native code that owns the
-            # thread-safe module is never freed, so the module is never freed twice, and
-            # nothing uses it through the native code anymore. (memcheck doesn't track the
-            # module, and reports disposing of it as an unknown module being disposed of.)
+            # borrow it, and hand out a copy once we're done with the native code.
             LLVM.unsafe_module(llvm_ts_mod)
         end
 
@@ -1070,6 +1080,16 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # ensure that the requested method instance was compiled
     @assert haskey(compiled, job.source)
+
+    # free the native code, and with it its reference to the LLVM context, so that the
+    # context is freed when `JuliaContext` returns. that also frees the module we borrowed
+    # on Julia 1.10, so hand out a copy instead. from Julia 1.14, the native code refers to
+    # `ts_mod`, so only dispose of it afterwards.
+    @static if LLVM.version() < v"16"
+        llvm_mod = copy(llvm_mod)
+    end
+    free_native_code(native_code)
+    dispose(ts_mod)
 
     return llvm_mod, compiled, gv_to_value
 end
