@@ -965,15 +965,15 @@ function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}
         target.metal < v"4.1")
         return :cmpxchg_loop
     end
-    # The macOS 26 compiler for Apple10 GPUs (the M5) crashes on a floating-point add or
-    # subtract on device memory when a release fence precedes it without another atomic
-    # operation in between, if fast math is disabled ("cannot select:
-    # intrinsic(@llvm.agx3.disable.smashing.float)"; Apple's own compiler reproduces it with
-    # `-fno-fast-math`). Below MSL 4.1 ordered operations get such fences, and the fence can
-    # also be the trailing one of a previous operation or come from user code, so expand all
-    # these operations into compare-exchange loops (about 2x slower on an M1). The compiler
-    # ships with the OS, so the deployment target identifies it: the macOS 27 compiler is
-    # fixed. Later families are included as a precaution.
+    # The macOS 26 compiler for Apple10 GPUs (the M5) can crash on a floating-point add or
+    # subtract on device memory when the module lacks `air.compile.fast_math_enable`
+    # ("cannot select: intrinsic(@llvm.agx3.disable.smashing.float)"; Apple's own compiler
+    # reproduces it with `-fno-fast-math`). An operation on a buffer argument crashes by
+    # itself; one through a pointer loaded from memory only after a device release fence,
+    # which ordered operations get below MSL 4.1. That depends on context, so expand all of
+    # them into compare-exchange loops (about 2x slower on an M1) unless fast math is
+    # enabled. The compiler ships with the OS, so the deployment target identifies it: the
+    # macOS 27 compiler is fixed. Later families are included as a precaution.
     if op in (LLVM.AtomicRMWBinOp.FAdd, LLVM.AtomicRMWBinOp.FSub) && target.macos < v"27" &&
        !target.fastmath && (target.apple_family === nothing || target.apple_family >= 10)
         return :cmpxchg_loop
