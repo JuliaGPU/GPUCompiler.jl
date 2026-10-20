@@ -143,7 +143,8 @@ else
 end
 
 const CONFIG_KWARGS = [:kernel, :name, :entry_abi, :always_inline, :opt_level,
-                       :debug_level, :libraries, :optimize, :cleanup, :validate, :strip]
+                       :debug_level, :libraries, :optimize, :cleanup, :validate, :strip,
+                       :argument_ranges, :narrow_indices]
 
 """
     CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, name=nothing,
@@ -177,6 +178,13 @@ Several keyword arguments can be used to customize the compilation process:
 - `cleanup`: run cleanup passes on the code (default: true)
 - `validate`: enable optional validation of input and outputs (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
+- `argument_ranges`: caller-supplied integer bounds, as a tuple with one entry for the
+  function and each argument. Each entry is a tuple of `path => range` pairs, e.g.
+  `((), ((:dims, 1) => 0:typemax(Int32),))`. An empty outer tuple supplies no facts.
+  These are assertions, not requests for runtime checks: the caller must ensure they hold
+  on every launch. They participate in cache identity as ordinary immutable values.
+- `narrow_indices`: narrow index arithmetic after optimization (default: argument ranges present).
+  Can also be enabled without argument facts to use bounds already present in the IR.
 """
 struct CompilerConfig{T,P}
     target::T
@@ -193,6 +201,8 @@ struct CompilerConfig{T,P}
     cleanup::Bool
     validate::Bool
     strip::Bool
+    argument_ranges::Tuple
+    narrow_indices::Bool
 
     # internal
     toplevel::Bool
@@ -206,7 +216,8 @@ struct CompilerConfig{T,P}
                             always_inline=false, opt_level=2,
                             debug_level=Base.JLOptions().debug_level, optimize=toplevel,
                             libraries=toplevel, cleanup=toplevel, validate=toplevel,
-                            strip=false, only_entry=false)
+                            strip=false, only_entry=false, argument_ranges=(),
+                            narrow_indices=!isempty(argument_ranges))
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
         end
@@ -217,8 +228,8 @@ struct CompilerConfig{T,P}
         end
         new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
                                             always_inline, opt_level, debug_level, libraries,
-                                            optimize, cleanup, validate, strip, toplevel,
-                                            only_entry, owner)
+                                            optimize, cleanup, validate, strip, argument_ranges,
+                                            narrow_indices, toplevel, only_entry, owner)
     end
 end
 
@@ -229,7 +240,8 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
                         debug_level=cfg.debug_level, libraries=cfg.libraries,
                         optimize=cfg.optimize, cleanup=cfg.cleanup,
                         validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
-                        only_entry=cfg.only_entry)
+                        only_entry=cfg.only_entry, argument_ranges=cfg.argument_ranges,
+                        narrow_indices=cfg.narrow_indices)
     # deriving a non-toplevel job disables certain features
     # XXX: should we keep track if any of these were set explicitly in the first place?
     #      see how PkgEval does that.
@@ -241,11 +253,26 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
     end
     CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
                    debug_level, libraries, optimize, cleanup, validate, strip, toplevel,
-                   only_entry)
+                   only_entry, argument_ranges, narrow_indices)
 end
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
     print(io, "CompilerConfig for ", T)
+end
+
+# Hash the description, not the elements of each range. Array hashing can enumerate
+# ranges (and their length need not fit Int, e.g. the full UInt128 domain).
+@inline hash_argument_ranges(::Tuple{}, h::UInt) = hash(0, h)
+@inline hash_argument_ranges(ranges::Tuple, h::UInt) =
+    hash_argument_ranges(Base.tail(ranges), hash_argument_bounds(first(ranges), h))
+
+@inline hash_argument_bounds(::Tuple{}, h::UInt) = hash(0, h)
+@inline function hash_argument_bounds(bounds::Tuple, h::UInt)
+    path, range = first(bounds)
+    h = hash(path, h)
+    h = hash(first(range), h)
+    h = hash(last(range), h)
+    hash_argument_bounds(Base.tail(bounds), h)
 end
 
 function Base.hash(cfg::CompilerConfig, h::UInt)
@@ -263,6 +290,8 @@ function Base.hash(cfg::CompilerConfig, h::UInt)
     h = hash(cfg.cleanup, h)
     h = hash(cfg.validate, h)
     h = hash(cfg.strip, h)
+    h = hash_argument_ranges(cfg.argument_ranges, h)
+    h = hash(cfg.narrow_indices, h)
     h = hash(cfg.toplevel, h)
     h = hash(cfg.only_entry, h)
     # `cache_owner` deliberately is not hashed: its target/params/inlining components were
@@ -488,13 +517,21 @@ end
 const session_results_cache = IdDict{CodeInstance,Vector{SessionResultEntry}}()
 const session_results_lock = ReentrantLock()
 
+# Bounded and unbounded code share an inference cache entry. Reject that common mismatch
+# before jl_egal walks the target and parameter structs. Narrow the entry's abstract config
+# type first, so these field loads stay cheap on the launch path.
+@inline function matches_config(entry::CompilerConfig, config::C) where {C<:CompilerConfig}
+    entry isa C || return false
+    entry.argument_ranges === config.argument_ranges && entry === config
+end
+
 function session_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}
     Base.@lock session_results_lock begin
         entries = get!(session_results_cache, ci) do
             SessionResultEntry[]
         end
         for entry in entries
-            entry.config === config && entry.value isa V && return entry.value::V
+            matches_config(entry.config, config) && entry.value isa V && return entry.value::V
         end
         value = V()
         push!(entries, SessionResultEntry(config, value))
@@ -591,7 +628,7 @@ function persistent_results(::Type{V}, ci::CodeInstance, config::CompilerConfig)
     results = CompilerCaching.results(PersistentJobResults, ci)
     Base.@lock persistent_results_lock begin
         for entry in results.entries
-            entry.config === config && entry.value isa V && return entry.value::V
+            matches_config(entry.config, config) && entry.value isa V && return entry.value::V
         end
         v = V()
         push!(results.entries, PersistentResultEntry(config, v))

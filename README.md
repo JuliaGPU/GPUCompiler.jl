@@ -24,6 +24,59 @@ Instead, you should use one of the packages that builds on GPUCompiler.jl, such
 as [CUDA.jl](https://github.com/JuliaGPU/CUDA.jl), [AMDGPU.jl](https://github.com/JuliaGPU/AMDGPU.jl), [Reactant.jl](https://github.com/EnzymeAD/Reactant.jl), [Metal.jl](https://github.com/JuliaGPU/Metal.jl), [oneAPI.jl](https://github.com/JuliaGPU/oneAPI.jl), or [OpenCL.jl](https://github.com/JuliaGPU/OpenCL.jl).
 
 
+## Narrowing index arithmetic
+
+Back-ends can opt into computing bounded 64-bit index expressions in 32 bits with
+`CompilerConfig(...; narrow_indices=true)`. The pass runs after optimization and target
+finalization, using LLVM range analyses and `llvm.assume` bounds. It leaves loop-affine
+indices wide for strength reduction. It can also be run directly as
+`GPUCompiler.IndexNarrowing.narrow_indices!(mod, tm)` (`tm` may be `nothing`).
+
+The caller owns specialization policy: select meaningful axes, bin argument values, and
+supply facts that hold for the selected bin. GPUCompiler neither inspects runtime values
+nor chooses or guards variants. For example, after establishing bounds for a device array
+argument with two dimensions:
+
+```julia
+ranges = (
+    (),  # function object (captured fields can have bounds too)
+    ((:dims, 1) => 0:typemax(Int32),
+     (:dims, 2) => 0:typemax(Int32),
+     (:len,) => 0:typemax(Int32)),
+)
+config = CompilerConfig(target, params; argument_ranges=ranges)
+```
+
+`argument_ranges` is an ordinary immutable tuple with one entry for the function and each
+argument, including ghost arguments. Each entry contains `path => range` pairs. A path
+uses physical field names or indices; `()` refers to the argument itself. Bounds are
+nonempty integer `UnitRange`s whose endpoints fit the fixed-width integer leaf. Signed and
+unsigned integers through 128 bits and `Bool` are supported. Properties, array indexing,
+pointer dereferences, and stepped ranges are not supported. Ranges are never enumerated.
+
+These facts are **caller assertions**. Passing incorrect facts can produce incorrect code.
+GPUCompiler includes them in the configuration's cache identity alongside the existing
+signature, world, target, and options. On a cache miss it resolves the field paths and emits
+assumptions before argument ABI lowering. There is no runtime validation, type-based
+specialization hook, or range metadata encoded in Julia type parameters.
+
+An empty outer tuple, `argument_ranges=()`, supplies no additional facts. Nonempty ranges
+enable narrowing by default; `narrow_indices` can be set independently. The caller decides
+how many variants to create and how to reuse them safely. For example, a launcher can use
+one aggregate “selected indices fit Int32” bin and one unbounded bin, reusing precomputed
+range tuples instead of constructing metadata on each launch. A retained kernel must only
+be invoked with values satisfying its facts; guards and fallback selection, if needed,
+belong to the launcher. Type-only precompilation may supply facts under the same contract.
+
+Device array accessors may additionally emit `LLVM.Interop.assume(1 <= index <= length(A))`
+where out-of-bounds access is already undefined. These bounds allow the pass to narrow a
+linearized index even when its intermediate products could overflow 32 bits. Arrays created
+inside a kernel do not automatically inherit argument facts. The bounds do not select an
+arithmetic width: narrowing currently targets 32 bits independently. Assumptions can also
+inhibit single-use optimizations, so back-ends should measure their workloads before enabling
+this.
+
+
 ## Development
 
 GPUCompiler.jl's own test suite runs on GitHub Actions. In addition, Buildkite runs the test

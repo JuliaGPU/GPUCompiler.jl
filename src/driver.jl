@@ -222,6 +222,10 @@ const __llvm_initialized = Ref(false)
         entry = ir.functions[entry_fn]
     end
 
+    if job.config.kernel && job.config.toplevel && !isempty(job.config.argument_ranges)
+        emit_argument_ranges!(job, entry)
+    end
+
     # finalize the current module. this needs to happen before linking deferred modules,
     # since those modules have been finalized themselves, and we don't want to re-finalize.
     entry = finish_module!(job, ir, entry)
@@ -440,6 +444,14 @@ const __llvm_initialized = Ref(false)
             for (job′, fn′) in entrypoints
                 job′ === job && continue
                 finish_ir!(job′, ir, ir.functions[fn′])
+            end
+        end
+
+        # Run after every target finalizer: a subsequent InstCombine could widen the
+        # arithmetic again. Facts are optional; existing IR bounds can suffice.
+        if job.config.kernel && job.config.optimize && job.config.narrow_indices
+            with_llvm_machine(job.config.target) do tm
+                IndexNarrowing.narrow_indices!(ir, tm)
             end
         end
 

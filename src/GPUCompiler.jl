@@ -79,6 +79,7 @@ include("irgen.jl")
 include("determinism.jl")
 include("optim.jl")
 include("narrowing.jl")
+include("argument_ranges.jl")
 @public IndexNarrowing
 include("validation.jl")
 include("rtlib.jl")
