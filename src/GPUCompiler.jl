@@ -84,6 +84,7 @@ include("devicelib.jl")
 include("mcgen.jl")
 include("debug.jl")
 include("driver.jl")
+include("softfloat/SoftFloat.jl")
 
 # other reusable functionality
 include("execution.jl")

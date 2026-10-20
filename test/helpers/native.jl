@@ -11,10 +11,11 @@ struct CompilerParams <: AbstractCompilerParams
     entry_safepoint::Bool
     method_table
     relocations::Symbol
+    softfloat::Bool
 
     CompilerParams(entry_safepoint::Bool=false, method_table=test_method_table,
-                   relocations::Symbol=:bake) =
-        new(entry_safepoint, method_table, relocations)
+                   relocations::Symbol=:bake, softfloat::Bool=false) =
+        new(entry_safepoint, method_table, relocations, softfloat)
 end
 
 module Runtime end
@@ -77,11 +78,12 @@ end
 
 function create_job(@nospecialize(func), @nospecialize(types);
                     entry_safepoint::Bool=false, method_table=test_method_table,
-                    relocations::Symbol=:bake, jlruntime::Bool=true, kwargs...)
+                    relocations::Symbol=:bake, jlruntime::Bool=true,
+                    softfloat::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = NativeCompilerTarget(;jlruntime)
-    params = CompilerParams(entry_safepoint, method_table, relocations)
+    params = CompilerParams(entry_safepoint, method_table, relocations, softfloat)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end
