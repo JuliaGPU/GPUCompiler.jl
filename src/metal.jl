@@ -2588,86 +2588,6 @@ end
 #
 # we don't have a proper back-end, so we're missing out on intrinsics-related functionality.
 
-# The function `name` of `mod`, declaring it with type `ft` (or creating it with `create()`)
-# if it doesn't exist yet. An existing function must have that type.
-function declare!(create, mod::LLVM.Module, name::String, ft::LLVM.FunctionType)
-    f = get!(create, mod.functions, name)
-    f.function_type == ft ||
-        error("Conflicting declarations of $name: $(f.function_type) and $ft")
-    return f
-end
-declare!(mod::LLVM.Module, name::String, ft::LLVM.FunctionType) =
-    declare!(() -> LLVM.Function(mod, name, ft), mod, name, ft)
-
-# Call the function `name`, declaring it for the types of `args` and return type `T_ret`.
-function call_declared!(builder::IRBuilder, name::String, T_ret::LLVMType,
-                        args::Vector{<:LLVM.Value})
-    mod = builder.insert_block.parent.parent
-    ft = LLVM.FunctionType(T_ret, LLVMType[arg.value_type for arg in args])
-    return call!(builder, ft, declare!(mod, name, ft), args)
-end
-
-# the suffix LLVM and AIR use to mangle overloaded intrinsics on `typ`, e.g. `v4f32`
-function type_suffix(@nospecialize(typ::LLVMType))
-    typ isa LLVM.IntegerType && return "i$(typ.width)"
-    typ isa LLVM.HalfType && return "f16"
-    typ isa LLVM.BFloatType && return "bf16"
-    typ isa LLVM.FloatType && return "f32"
-    typ isa LLVM.DoubleType && return "f64"
-    typ isa LLVM.VectorType && return "v$(typ.length)$(type_suffix(typ.element_type))"
-    error("Unsupported intrinsic type: $typ")
-end
-
-# the Julia floating-point type of an LLVM one (the C API lacks getPrimitiveSizeInBits)
-function julia_float_type(typ::LLVMType)
-    typ isa LLVM.HalfType && return Float16
-    typ isa LLVM.FloatType && return Float32
-    typ isa LLVM.DoubleType && return Float64
-    error("Unsupported floating-point type: $typ")
-end
-
-# the intrinsic that `inst` calls, if any
-# The tables below map intrinsics by name, but calls are matched on the intrinsic's ID:
-# the `name` of an `Intrinsic` cannot name an overloaded intrinsic (LLVM asserts that it
-# isn't), and IDs are only known at run time.
-# Intrinsics that the running LLVM doesn't know (e.g. `llvm.vector.reduce.fminimum` before
-# LLVM 17) can't be called, so they are left out.
-intrinsic_table(table) = Dict(intr => val for (intr, val) in
-                              ((tryparse(LLVM.Intrinsic, name), val) for (name, val) in table)
-                              if intr !== nothing)
-
-function called_intrinsic(inst::LLVM.Instruction)
-    inst isa LLVM.CallBase || return nothing
-    callee = inst.called_function
-    return callee === nothing ? nothing : callee.intrinsic
-end
-
-# Lower the calls to intrinsics in `fun`: `lower(builder, call, intrinsic)` is called for each,
-# with `builder` positioned at the call, and returns the value that replaces the call,
-# `:erase` to remove it, or `nothing` to keep it. The calls are collected first, so `lower`
-# can emit code, but it must not erase other instructions.
-function lower_intrinsic_calls!(lower, fun::LLVM.Function)
-    calls = LLVM.CallBase[]
-    for bb in fun.blocks, inst in bb.instructions
-        inst isa LLVM.CallBase || continue
-        called_intrinsic(inst) === nothing || push!(calls, inst)
-    end
-    isempty(calls) && return false
-    changed = false
-    @dispose builder=IRBuilder() begin
-        for call in calls
-            position!(builder, LLVM.before(call))
-            builder.debug_location = call.debug_location
-            new = lower(builder, call, called_intrinsic(call))
-            new === nothing && continue
-            new === :erase || replace_uses!(call, new)
-            erase!(call)
-            changed = true
-        end
-    end
-    return changed
-end
-
 # AIR has no vector floating-point min/max intrinsic; only the scalar `air.fmin`/`air.fmax`
 # exist. Julia's NaN-propagating `min`/`max` lower to `llvm.minimum`/`llvm.maximum` (and the
 # non-propagating `llvm.minnum`/`llvm.maxnum`), which LLVM's vectorizers can widen to vector
@@ -2678,24 +2598,7 @@ end
 # form, and semantically exact.
 function scalarize_vector_minmax!(fun::LLVM.Function)
     minmax = LLVM.Intrinsic.(["llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum"])
-    mod = fun.parent
-    return lower_intrinsic_calls!(fun) do builder, call, intr
-        vecty = call.value_type
-        (intr in minmax && vecty isa LLVM.VectorType) || return nothing
-        # the scalar overload of the same intrinsic, e.g. llvm.minimum.v4f32 -> llvm.minimum.f32
-        scalar_f = LLVM.Function(mod, intr, LLVMType[vecty.element_type])
-        scalar_ft = scalar_f.function_type
-        arg0, arg1 = call.arguments
-        res = PoisonValue(vecty)
-        for i in 0:Int(vecty.length)-1
-            idx = ConstantInt(LLVM.Int32Type(), i)
-            a = extract_element!(builder, arg0, idx)
-            b = extract_element!(builder, arg1, idx)
-            s = call!(builder, scalar_ft, scalar_f, LLVM.Value[a, b])
-            res = insert_element!(builder, res, s, idx)
-        end
-        res
-    end
+    scalarize_vector_calls!((call, intrinsic) -> intrinsic in minmax, fun)
 end
 
 # AIR has no vector reductions either, and Apple's back-end rejects `llvm.vector.reduce.*` or

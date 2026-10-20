@@ -522,3 +522,144 @@ function load_pointer_as_word!(builder::IRBuilder, load::LLVM.LoadInst, T_word::
     erase!(load)
     return word
 end
+
+# The function `name` of `mod`, declaring it with type `ft` (or creating it with `create()`)
+# if it doesn't exist yet. An existing function must have that type.
+function declare!(create, mod::LLVM.Module, name::String, ft::LLVM.FunctionType)
+    f = get!(create, mod.functions, name)
+    f.function_type == ft ||
+        error("Conflicting declarations of $name: $(f.function_type) and $ft")
+    return f
+end
+declare!(mod::LLVM.Module, name::String, ft::LLVM.FunctionType) =
+    declare!(() -> LLVM.Function(mod, name, ft), mod, name, ft)
+
+# Call the function `name`, declaring it for the types of `args` and return type `T_ret`.
+function call_declared!(builder::IRBuilder, name::String, T_ret::LLVMType,
+                        args::Vector{<:LLVM.Value})
+    mod = builder.insert_block.parent.parent
+    ft = LLVM.FunctionType(T_ret, LLVMType[arg.value_type for arg in args])
+    f = declare!(mod, name, ft)
+    call = call!(builder, ft, f, args)
+    # an existing definition may have been optimized to use a different convention
+    call.callconv = f.callconv
+    return call
+end
+
+# the suffix LLVM and AIR use to mangle overloaded intrinsics on `typ`, e.g. `v4f32`
+function type_suffix(@nospecialize(typ::LLVMType))
+    typ isa LLVM.IntegerType && return "i$(typ.width)"
+    typ isa LLVM.HalfType && return "f16"
+    typ isa LLVM.BFloatType && return "bf16"
+    typ isa LLVM.FloatType && return "f32"
+    typ isa LLVM.DoubleType && return "f64"
+    typ isa LLVM.VectorType && return "v$(typ.length)$(type_suffix(typ.element_type))"
+    error("Unsupported intrinsic type: $typ")
+end
+
+# the Julia floating-point type of an LLVM one (the C API lacks getPrimitiveSizeInBits)
+function julia_float_type(typ::LLVMType)
+    typ isa LLVM.HalfType && return Float16
+    typ isa LLVM.FloatType && return Float32
+    typ isa LLVM.DoubleType && return Float64
+    error("Unsupported floating-point type: $typ")
+end
+
+# the intrinsic that `inst` calls, if any
+# The tables below map intrinsics by name, but calls are matched on the intrinsic's ID:
+# the `name` of an `Intrinsic` cannot name an overloaded intrinsic (LLVM asserts that it
+# isn't), and IDs are only known at run time.
+# Intrinsics that the running LLVM doesn't know (e.g. `llvm.vector.reduce.fminimum` before
+# LLVM 17) can't be called, so they are left out.
+intrinsic_table(table) = Dict(intr => val for (intr, val) in
+                              ((tryparse(LLVM.Intrinsic, name), val) for (name, val) in table)
+                              if intr !== nothing)
+
+function called_intrinsic(inst::LLVM.Instruction)
+    inst isa LLVM.CallBase || return nothing
+    callee = inst.called_function
+    return callee === nothing ? nothing : callee.intrinsic
+end
+
+# Lower the calls to intrinsics in `fun`: `lower(builder, call, intrinsic)` is called for each,
+# with `builder` positioned at the call, and returns the value that replaces the call,
+# `:erase` to remove it, or `nothing` to keep it. The calls are collected first, so `lower`
+# can emit code, but it must not erase other instructions.
+function lower_intrinsic_calls!(lower, fun::LLVM.Function)
+    calls = LLVM.CallBase[]
+    for bb in fun.blocks, inst in bb.instructions
+        inst isa LLVM.CallBase || continue
+        called_intrinsic(inst) === nothing || push!(calls, inst)
+    end
+    isempty(calls) && return false
+    changed = false
+    @dispose builder=IRBuilder() begin
+        for call in calls
+            position!(builder, LLVM.before(call))
+            builder.debug_location = call.debug_location
+            new = lower(builder, call, called_intrinsic(call))
+            new === nothing && continue
+            new === :erase || replace_uses!(call, new)
+            erase!(call)
+            changed = true
+        end
+    end
+    return changed
+end
+
+"""
+    scalarize_vector_calls!(select, fun)
+
+Replace selected intrinsic calls with one scalar call per lane. `select(call, intrinsic)`
+chooses elementwise intrinsics; scalar operands (such as `powi`'s exponent) are shared.
+Fixed vectors and structures of fixed vectors are supported. Fast-math flags and debug
+locations are preserved. Reductions and scalable vectors are not elementwise calls.
+"""
+function scalarize_vector_calls!(select, fun::LLVM.Function)
+    lower_intrinsic_calls!(fun) do builder, call, intrinsic
+        select(call, intrinsic) || return nothing
+        result_type = call.value_type
+        fields = result_type isa LLVM.StructType ? collect(result_type.elements) :
+                                                   LLVMType[result_type]
+        all(typ -> typ isa LLVM.VectorType, fields) || return nothing
+        # capturing an abstractly-typed value would expose this code, and its callers, to
+        # invalidation by unrelated method definitions
+        lanes = (first(fields)::LLVM.VectorType).length
+        all(typ -> (typ::LLVM.VectorType).length == lanes, fields) ||
+            error("Mismatched vector result lengths")
+        scalar_fields = LLVMType[typ.element_type for typ in fields]
+        scalar_result = result_type isa LLVM.StructType ? LLVM.StructType(scalar_fields) :
+                                                          only(scalar_fields)
+        args = collect(call.arguments)
+        scalar_types = LLVMType[arg.value_type isa LLVM.VectorType ?
+                               arg.value_type.element_type : arg.value_type for arg in args]
+        scalar_name = call.called_function.name
+        for typ in unique(vcat(fields, LLVMType[arg.value_type for arg in args]))
+            typ isa LLVM.VectorType || continue
+            scalar_name = replace(scalar_name, type_suffix(typ) => type_suffix(typ.element_type))
+        end
+        scalar_type = LLVM.FunctionType(scalar_result, scalar_types)
+        scalar = declare!(fun.parent, scalar_name, scalar_type)
+        results = LLVM.Value[PoisonValue(typ) for typ in fields]
+        for lane in 0:lanes-1
+            index = ConstantInt(LLVM.Int32Type(), lane)
+            lane_args = LLVM.Value[arg.value_type isa LLVM.VectorType ?
+                                  extract_element!(builder, arg, index) : arg for arg in args]
+            value = call!(builder, scalar_type, scalar, lane_args)
+            supports_fast_math(value) && (value.fast_math = call.fast_math)
+            for field in eachindex(fields)
+                element = result_type isa LLVM.StructType ?
+                          extract_value!(builder, value, field - 1) : value
+                results[field] = insert_element!(builder, results[field], element, index)
+            end
+        end
+        result_type isa LLVM.StructType || return only(results)
+        result = PoisonValue(result_type)
+        for field in eachindex(fields)
+            result = insert_value!(builder, result, results[field], field - 1)
+        end
+        result
+    end
+end
+
+@public call_declared!, lower_intrinsic_calls!, scalarize_vector_calls!
