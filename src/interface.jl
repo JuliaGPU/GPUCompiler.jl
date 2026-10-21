@@ -61,7 +61,7 @@ llvm_targetinfo(@nospecialize(target::AbstractCompilerTarget)) = nothing
 # the target's datalayout, with Julia's non-integral address spaces added to it, as a
 # `DataLayout` the caller owns (or `nothing`)
 function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
-    dl = llvm_datalayout(target)
+    dl = llvm_datalayout(target)::Union{Nothing,String}
     dl === nothing && return nothing
     LLVM.DataLayout(dl * "-ni:10:11:12:13")
 end
