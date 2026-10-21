@@ -13,6 +13,11 @@ using ..GPUCompiler
 using LLVM, LLVM.IR, LLVM.Build
 using LLVM.Interop
 
+# imported explicitly, so that the binding exists before the generated functions below
+# first use it. Julia 1.13 reports edges to a binding that a downstream package's
+# precompilation created as invalidations (JuliaLang/julia#59135).
+import Base: |
+
 
 ## representation of a runtime method instance
 
