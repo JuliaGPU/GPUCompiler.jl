@@ -180,6 +180,28 @@ end
         @test (verify(ir); true)
     end
 end
+
+@testset "closed-form loop sums" begin
+    mod = @eval module $(gensym())
+        function kernel(out::Core.LLVMPtr{Int,1}, n::Int)
+            s = 0
+            for i in 1:n
+                s += i
+            end
+            Base.unsafe_store!(out, s)
+            return
+        end
+    end
+
+    # Loop optimizations replace this loop by its closed form, which ScalarEvolution
+    # computes at 65 bits (to divide n*(n+1) by 2 without overflow). SPIR-V only has
+    # 8, 16, 32 and 64-bit integers.
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6kernel"
+        @check_not "i65"
+        SPIRV.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}, Int}; backend, kernel=true)
+    end
+end
 end
 
 @testset "unsupported type detection" begin
