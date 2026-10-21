@@ -3380,6 +3380,132 @@ end
     end
 end
 
+@testset "simdgroup matrix lowering" begin
+    # the AIR 2.8 form Metal.jl emits: a transposed load, and a store that isn't transposed
+    v2(a, b) = (VecElement(Int64(a)), VecElement(Int64(b)))
+    function kernel(p::Core.LLVMPtr{Float32,1})
+        m = ccall("extern air.simdgroup_matrix_8x8_load.v64f32.p1f32", llvmcall,
+                  NTuple{64, VecElement{Float32}}, (Core.LLVMPtr{Float32,1}, NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}},
+                   NTuple{2, VecElement{Int64}}),
+                  p, v2(8, 16), v2(16, 1), v2(3, 2))
+        ccall("extern air.simdgroup_matrix_8x8_store.v64f32.p1f32", llvmcall,
+              Cvoid, (NTuple{64, VecElement{Float32}}, Core.LLVMPtr{Float32,1}, NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}},
+                   NTuple{2, VecElement{Int64}}),
+              m, p, v2(16, 8), v2(1, 16), v2(2, 3))
+        return
+    end
+    # the legacy form, as older versions of Metal.jl emitted it for older targets
+    function legacy_kernel(p::Core.LLVMPtr{Float32,1})
+        m = ccall("extern air.simdgroup_matrix_8x8_load.v64f32.p1f32", llvmcall,
+                  NTuple{64, VecElement{Float32}}, (Core.LLVMPtr{Float32,1}, Int64, NTuple{2, VecElement{Int64}}, Bool),
+                  p, 16, v2(2, 3), true)
+        ccall("extern air.simdgroup_matrix_8x8_store.v64f32.p1f32", llvmcall,
+              Cvoid, (NTuple{64, VecElement{Float32}}, Core.LLVMPtr{Float32,1}, Int64, NTuple{2, VecElement{Int64}}, Bool),
+              m, p, 16, v2(2, 3), false)
+        return
+    end
+    function air_module(f, air)
+        source = methodinstance(typeof(f), Tuple{Core.LLVMPtr{Float32,1}},
+                                Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"26", metal=v"3.2", air)
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+    end
+    ptr = raw"(?:(?:float|\{\}) addrspace\(1\)\*|ptr addrspace\(1\))"
+    v64 = raw"<64 x float>"
+
+    @testset "AIR $air" for air in (v"2.7", v"2.8")
+        asm = air_module(kernel, air)
+        if air >= v"2.8"
+            @test occursin(Regex("call $v64 @air\\.simdgroup_matrix_8x8_load\\.v64f32\\.p1f32\\($ptr [^,]+, <2 x i64> <i64 8, i64 16>, <2 x i64> <i64 16, i64 1>, <2 x i64> <i64 3, i64 2>\\)"), asm)
+            @test occursin(Regex("call void @air\\.simdgroup_matrix_8x8_store\\.v64f32\\.p1f32\\($v64 [^,]+, $ptr [^,]+, <2 x i64> <i64 16, i64 8>, <2 x i64> <i64 1, i64 16>, <2 x i64> <i64 2, i64 3>\\)"), asm)
+        else
+            # the transposed origin is swapped back
+            @test occursin(Regex("call $v64 @air\\.simdgroup_matrix_8x8_load\\.v64f32\\.p1f32\\($ptr [^,]+, i64 16, <2 x i64> <i64 2, i64 3>, i1 true\\)"), asm)
+            @test occursin(Regex("call void @air\\.simdgroup_matrix_8x8_store\\.v64f32\\.p1f32\\($v64 [^,]+, $ptr [^,]+, i64 16, <2 x i64> <i64 2, i64 3>, i1 false\\)"), asm)
+        end
+    end
+
+    # with a leading dimension and origin only known at run time
+    function dynamic_kernel(p::Core.LLVMPtr{Float32,1}, n::Int64)
+        m = ccall("extern air.simdgroup_matrix_8x8_load.v64f32.p1f32", llvmcall,
+                  NTuple{64, VecElement{Float32}},
+                  (Core.LLVMPtr{Float32,1}, NTuple{2, VecElement{Int64}},
+                   NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}}),
+                  p, v2(8, n), v2(n, 1), v2(n, 2))
+        ccall("extern air.simdgroup_matrix_8x8_store.v64f32.p1f32", llvmcall,
+              Cvoid, (NTuple{64, VecElement{Float32}}, Core.LLVMPtr{Float32,1},
+                      NTuple{2, VecElement{Int64}}, NTuple{2, VecElement{Int64}},
+                      NTuple{2, VecElement{Int64}}),
+              m, p, v2(8, n), v2(n, 1), v2(n, 2))
+        return
+    end
+    let source = methodinstance(typeof(dynamic_kernel), Tuple{Core.LLVMPtr{Float32,1}, Int64},
+                                Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"26", metal=v"3.2", air=v"2.7")
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        asm = sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+        @test occursin(r"@air\.simdgroup_matrix_8x8_load\.v64f32\.p1f32\([^,]+ [^,]+, i64 %[^,]+, <2 x i64> %[^,]+, i1 true\)", asm)
+        @test occursin(r"@air\.simdgroup_matrix_8x8_store\.v64f32\.p1f32\(<64 x float> [^,]+, [^,]+ [^,]+, i64 %[^,]+, <2 x i64> %[^,]+, i1 true\)", asm)
+    end
+
+    # the legacy form is left alone
+    @test occursin(r"i64 16, <2 x i64> <i64 2, i64 3>, i1 (?:zeroext )?true\)",
+                   air_module(legacy_kernel, v"2.7"))
+end
+
+@testset "tensor lowering" begin
+    # the AIR 2.9 form Metal.jl emits
+    function kernel(d::Core.LLVMPtr{Int8,1}, p::Core.LLVMPtr{Float32,1},
+                    e::Core.LLVMPtr{Int32,1}, out::Core.LLVMPtr{Int32,1})
+        ccall("extern air.init_strided_private_tensor.i32.global", llvmcall, Cvoid,
+              (Core.LLVMPtr{Int8,1}, Int16, Core.LLVMPtr{Float32,1}, Core.LLVMPtr{Int32,1},
+               Core.LLVMPtr{Int32,1}, Int8, Core.LLVMPtr{Float32,1}, Int32, Int8),
+              d, 2, p, e, e, 3, reinterpret(Core.LLVMPtr{Float32,1}, C_NULL), 0, -1)
+        n = ccall("extern air.get_extent_private_tensor.i32", llvmcall, Int32,
+                  (Core.LLVMPtr{Int8,1}, Int16, Int16, Int16), d, 2, 1, 0)
+        unsafe_store!(out, n)
+        return
+    end
+    # the AIR 2.8 form, as older versions of Metal.jl emitted it for every target
+    function legacy_kernel(d::Core.LLVMPtr{Int8,1}, p::Core.LLVMPtr{Float32,1},
+                           e::Core.LLVMPtr{Int32,1}, out::Core.LLVMPtr{Int32,1})
+        ccall("extern air.init_strided_private_tensor.i32.global", llvmcall, Cvoid,
+              (Core.LLVMPtr{Int8,1}, Int16, Core.LLVMPtr{Float32,1}, Core.LLVMPtr{Int32,1},
+               Core.LLVMPtr{Int32,1}, Int8),
+              d, 2, p, e, e, 3)
+        n = ccall("extern air.get_extent_private_tensor.i32", llvmcall, Int32,
+                  (Core.LLVMPtr{Int8,1}, Int16, Int16), d, 2, 1)
+        unsafe_store!(out, n)
+        return
+    end
+    function air_module(f, air)
+        tt = Tuple{Core.LLVMPtr{Int8,1}, Core.LLVMPtr{Float32,1},
+                   Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}}
+        source = methodinstance(typeof(f), tt, Base.get_world_counter())
+        target = MetalCompilerTarget(; macos=v"26", metal=v"4.0", air)
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        sprint(io->GPUCompiler.code_native(io, job; dump_module=true))
+    end
+    nullptr = raw"(?:(?:float|i8|\{\}) addrspace\(1\)\*|ptr addrspace\(1\)) null"
+
+    @testset "AIR $air" for air in (v"2.8", v"2.9")
+        asm = air_module(kernel, air)
+        if air >= v"2.9"
+            @test occursin(Regex("call void @air\\.init_strided_private_tensor\\.i32\\.global\\(.*, i8 (?:signext )?3, $nullptr, i32 0, i8 (?:signext )?-1\\)\\n"), asm)
+            @test occursin(r"call i32 @air\.get_extent_private_tensor\.i32\(.*, i16 (?:signext )?1, i16 (?:signext )?0\)\n", asm)
+        else
+            @test occursin(r"call void @air\.init_strided_private_tensor\.i32\.global\(.*, i8 (?:signext )?3\)\n", asm)
+            @test occursin(r"call i32 @air\.get_extent_private_tensor\.i32\(.*, i16 (?:signext )?1\)\n", asm)
+        end
+    end
+
+    # the AIR 2.8 form is left alone
+    asm = air_module(legacy_kernel, v"2.8")
+    @test occursin(r"call void @air\.init_strided_private_tensor\.i32\.global\(.*, i8 (?:signext )?3\)\n", asm)
+    @test occursin(r"call i32 @air\.get_extent_private_tensor\.i32\(.*, i16 (?:signext )?1\)\n", asm)
+end
+
 @testset "floating-point atomics on Apple10" begin
     # the macOS 26 compiler for Apple10 GPUs crashes on a floating-point add or subtract on
     # device memory that a release fence precedes, like the fences that implement ordered

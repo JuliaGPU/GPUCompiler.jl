@@ -730,6 +730,8 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     lower_fences!(job, mod)
 
     legalize_barrier_abi!(job, mod)
+    legalize_simdgroup_matrix_abi!(job, mod)
+    legalize_tensor_abi!(job, mod)
 
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
@@ -1390,6 +1392,140 @@ function legalize_barrier_abi!(@nospecialize(job::CompilerJob{MetalCompilerTarge
         end
         erase!(f)
         changed = true
+    end
+    return changed
+end
+
+# The statically-known integer in lane `i` of a vector value, or `nothing` if that lane isn't
+# a compile-time constant. Looks through the `insertelement` chains and constant vectors that
+# front-ends build vector operands from.
+function static_vector_lane(v::LLVM.Value, i::Integer)
+    if v isa LLVM.InsertElementInst
+        base, elt, idx = v.operands
+        idx isa LLVM.ConstantInt || return nothing  # unknown insert position
+        if convert(Int, idx) == i
+            return elt isa LLVM.ConstantInt ? convert(Int, elt) : nothing
+        end
+        return static_vector_lane(base, i)  # this lane is untouched by the insert
+    end
+    # (lanes of other values, including undef and poison vectors, aren't known integers)
+    v isa Union{LLVM.ConstantVector, LLVM.ConstantDataVector,
+                LLVM.ConstantAggregateZero} || return nothing
+    el = get(v.elements, i+1, nothing)
+    return el isa LLVM.ConstantInt ? convert(Int, el) : nothing
+end
+
+# Redeclare `f` with type `ft`, under the same name, and rewrite its calls with `rewrite`,
+# which is given the builder (positioned before the call) and the call's arguments, and
+# returns the arguments of the new call.
+function redeclare_intrinsic!(rewrite, mod::LLVM.Module, f::LLVM.Function,
+                              ft::LLVM.FunctionType)
+    fn = f.name
+    calls = [u::LLVM.CallInst for u in f.users]
+    f.name = ""
+    new_f = LLVM.Function(mod, fn, ft)
+    append!(new_f.function_attributes, f.function_attributes)
+    for call in calls
+        @dispose builder=IRBuilder() begin
+            position!(builder, LLVM.before(call))
+            builder.debug_location = call.debug_location
+            new = call!(builder, ft, new_f, rewrite(builder, collect(call.arguments)))
+            replace_uses!(call, new)
+        end
+        erase!(call)
+    end
+    erase!(f)
+    return new_f
+end
+
+# Rewrite the calls to `air.simdgroup_matrix_8x8_{load,store}` that front-ends emit, in the
+# form of AIR 2.8, into the form of the target. AIR 2.8 replaced the elements-per-row scalar,
+# matrix origin and transposition flag with vectors describing the dimensions, strides and
+# origin of the memory operand, with transposition expressed by swapping their elements.
+# Only the legacy form is derived; calls already in it, as older front-ends emitted them, are
+# left alone. Also tell the downgrader the element type of the pointer operand.
+function legalize_simdgroup_matrix_abi!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                                        mod::LLVM.Module)
+    T_i64 = LLVM.Int64Type()
+    T_vec2 = LLVM.VectorType(T_i64, 2)
+    T_bool = LLVM.Int1Type()
+    changed = false
+    for f in collect(mod.functions)
+        fn = f.name
+        m = match(r"^air\.simdgroup_matrix_8x8_(load|store)\.v64(\w+)\.p\d+\w+$", fn)
+        m === nothing && continue
+        is_load = m.captures[1] == "load"
+        ptr_idx = is_load ? 1 : 2
+
+        # pointer element type for the typed-pointer downgrader
+        suffix = m.captures[2]
+        T = suffix == "f16"  ? LLVM.HalfType() :
+            suffix == "bf16" ? LLVM.BFloatType() :
+            suffix == "f32"  ? LLVM.FloatType() :
+                               LLVM.IntType(parse(Int, suffix[2:end]))
+        eltypes = MDNode([ConstantInt(Int32(ptr_idx - 1)), null(T)])
+        f.metadata["arg_eltypes"] = eltypes
+
+        job.config.target.air >= v"2.8" && continue
+        params = f.function_type.parameters
+        # older front-ends emitted the legacy form themselves
+        last(params) == T_bool && continue
+
+        # elements per row; origin; transpose
+        legacy_ft = LLVM.FunctionType(f.function_type.return_type,
+                                      [params[1:ptr_idx]..., T_i64, T_vec2, T_bool])
+        changed |= !isempty(f.uses)
+        legacy_f = redeclare_intrinsic!(mod, f, legacy_ft) do builder, args
+            _, strides, origin = args[end-2:end]
+
+            # the transposed layout has a unit stride in the second dimension, the other one
+            # in the first. the legacy intrinsic needs the flag as an immediate, so one of the
+            # two has to be the literal 1.
+            transposed = static_vector_lane(strides, 1) == 1
+            transposed || static_vector_lane(strides, 0) == 1 ||
+                error("$fn with strides that are not statically unit in either " *
+                      "dimension requires AIR 2.8; the target is AIR $(job.config.target.air)")
+
+            # elements per row is the non-unit (leading-dimension) stride
+            epr = extract_element!(builder, strides, ConstantInt(Int32(transposed ? 0 : 1)))
+
+            # the transposed layout swaps the origin's elements; the legacy form doesn't
+            if transposed
+                o1 = extract_element!(builder, origin, ConstantInt(Int32(0)))
+                o2 = extract_element!(builder, origin, ConstantInt(Int32(1)))
+                origin = insert_element!(builder, UndefValue(T_vec2), o2, ConstantInt(Int32(0)))
+                origin = insert_element!(builder, origin, o1, ConstantInt(Int32(1)))
+            end
+
+            [args[1:ptr_idx]..., epr, origin, ConstantInt(T_bool, transposed)]
+        end
+        legacy_f.metadata["arg_eltypes"] = eltypes
+    end
+    return changed
+end
+
+# Rewrite the calls to the tensor intrinsics that front-ends emit, in the form of AIR 2.9,
+# into the form of the target. AIR 2.9 appended operands, which Apple's front-end always
+# passes as constants (`null, 0, -1` to `air.init_strided_private_tensor`, presumably
+# describing blockwise-quantization scales, and `0` to `air.get_extent_private_tensor`), so
+# they are dropped before AIR 2.9.
+function legalize_tensor_abi!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
+                              mod::LLVM.Module)
+    job.config.target.air >= v"2.9" && return false
+    changed = false
+    for (fn, nparams) in ("air.init_strided_private_tensor.i32.global" => 6,
+                          "air.init_strided_private_tensor.i32.local" => 6,
+                          "air.get_extent_private_tensor.i32" => 3)
+        f = get(mod.functions, fn, nothing)
+        f === nothing && continue
+        ft = f.function_type
+        params = ft.parameters
+        # older front-ends emitted the AIR 2.8 form
+        length(params) == nparams && continue
+
+        changed |= !isempty(f.uses)
+        legacy_ft = LLVM.FunctionType(ft.return_type, params[1:nparams])
+        redeclare_intrinsic!((_, args) -> args[1:nparams], mod, f, legacy_ft)
     end
     return changed
 end
