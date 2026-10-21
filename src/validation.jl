@@ -73,7 +73,7 @@ function explain_nonisbits(@nospecialize(dt), depth=1; maxdepth=10)
 end
 
 function check_invocation(@nospecialize(job::CompilerJob))
-    sig = job.source.specTypes
+    sig = job.source.specTypes::DataType
     ft = sig.parameters[1]
     tt = Tuple{sig.parameters[2:end]...}
 
@@ -795,7 +795,9 @@ end
 function describe_call(src::CodeInfo, mi::MethodInstance, pc::Int, @nospecialize(callee),
                        world::UInt; strict::Bool=false)
     stmt = src.code[pc]
-    (stmt isa Expr && stmt.head === :call) || return nothing
+    # separate checks, so that inference narrows `stmt` to an `Expr`
+    stmt isa Expr || return nothing
+    stmt.head === :call || return nothing
     f = constant_value(stmt.args[1], world)
     if callee !== nothing
         f === nothing && strict && return nothing

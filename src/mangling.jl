@@ -82,7 +82,7 @@ function mangle_param(@nospecialize(t), substitutions = Any[], top = false)
         else
             # encode typevars as template parameters
             if isempty(t.parameters)
-                w_types = t.name.wrapper.types
+                w_types = (t.name.wrapper::DataType).types
                 if !isempty(w_types) && !isempty(w_types[end] isa Core.TypeofVararg)
                     # If the type accepts a variable amount of parameters,
                     # e.g. `Tuple{}`, then we mark it as empty: "Tuple<>"
@@ -123,7 +123,7 @@ function mangle_param(@nospecialize(t), substitutions = Any[], top = false)
         # `N` is a `TypeVar` when the length is still parametric, which is what unwrapping a
         # `UnionAll` such as `NTuple{N,Int}` leaves behind. There is no count to repeat then,
         # so the type is mangled like the unbounded `Vararg{T}` it is equal to.
-        N = isdefined(t, :N) && isa(t.N, Integer) ? t.N : nothing
+        N = isdefined(t, :N) && isa(t.N, Int) ? t.N::Int : nothing
         if N !== nothing
             # For NTuple, repeat the type as needed
             str = ""
