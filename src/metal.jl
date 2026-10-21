@@ -2389,18 +2389,19 @@ function msl_identifier(@nospecialize(T))
     str = String(strip(replace(julia_type_words(T), r"[^A-Za-z0-9_]+" => "_"), '_'))
     return isempty(str) || isdigit(str[1]) ? "_" * str : str
 end
-function julia_type_words(@nospecialize(x))
+# (recursive, so the result type is declared for inference)
+function julia_type_words(@nospecialize(x))::String
     if x isa DataType
-        join([String(nameof(x)); map(julia_type_words, x.parameters)], "_")
+        join([String(nameof(x)); String[julia_type_words(p) for p in x.parameters]], "_")
     elseif x isa Union
         # (sorted, as Julia orders union members by module name, which can be generated)
-        join(["Union"; sort!(map(julia_type_words, Base.uniontypes(x)))], "_")
+        join(["Union"; sort!(String[julia_type_words(T) for T in Base.uniontypes(x)])], "_")
     elseif x isa UnionAll
         julia_type_words(Base.unwrap_unionall(x))
     elseif x isa TypeVar
         String(x.name)
     elseif x isa Tuple
-        join(map(julia_type_words, x), "_")
+        join(String[julia_type_words(y) for y in x], "_")
     elseif x isa Union{Number,Symbol,AbstractChar,AbstractString}
         string(x)
     else
