@@ -4,6 +4,14 @@
 # `src/` and `ext/`, `Project.toml` and the CI configuration, except the other back-ends'
 # target files. The `if:` conditions implement the commit message tags documented in the
 # Development section of the README; keep both in sync when adding a step.
+#
+# TEMPORARY, until JuliaIR.jl is registered: every package also gets a "(ports)" step,
+# which runs its tests with the ports of Julia's passes (the `julia_passes = "ports"`
+# preference, with JuliaIR.jl set up by `.ci/juliair.jl` in an environment of its own,
+# as the default one persists on some agents) and fails unless JuliaIR.jl's
+# ledger shows that they ran. `[only ports]` selects only the ports steps and
+# `[skip ports]` skips them; a package's own tags (e.g. `[only cuda]`) select both of its
+# steps. Steps are skipped on draft pull requests unless a tag selects them.
 steps:
   - label: "CUDA.jl"
     plugins:
@@ -34,6 +42,7 @@ steps:
         - "ext/**"
         - "Project.toml"
         - ".buildkite/**"
+        - ".ci/**"
       exclude:
         - "src/{gcn,spirv,metal,bpf,native}.jl"
     if: |
@@ -43,6 +52,39 @@ steps:
     timeout_in_minutes: 120
     soft_fail:
       - exit_status: 3
+
+  - label: "CUDA.jl (ports)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      unset LD_LIBRARY_PATH
+      echo "--- :julia: Instantiating project"
+      # an environment of its own, so that the preference doesn't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      julia .ci/juliair.jl downstream CUDA
+
+      export JULIAIR_LEDGER="$$PWD/juliair-ledger.tsv"
+      rm -f "$$JULIAIR_LEDGER"
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("CUDA")'
+
+      echo "+++ :julia: Checking that the ports ran"
+      julia .ci/juliair.jl check-ledger "$$JULIAIR_LEDGER"
+    agents:
+      queue: "cuda"
+    env:
+      JULIA_CPU_THREADS: "3"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{gcn,spirv,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|cuda|ptx|ports)/ &&
+      (build.message =~ /\[only [^\]]*(cuda|ptx|ports)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
 
   - label: "oneAPI.jl"
     plugins:
@@ -77,6 +119,39 @@ steps:
     soft_fail:
       - exit_status: 3
 
+  - label: "oneAPI.jl (ports)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      echo "--- :julia: Instantiating project"
+      # an environment of its own, so that the preference doesn't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      julia .ci/juliair.jl downstream oneAPI
+      julia -e 'using Pkg;
+                println("+++ :julia: Building support library")
+                include(joinpath(Pkg.devdir(), "oneAPI", "deps", "build_ci.jl"))'
+
+      export JULIAIR_LEDGER="$$PWD/juliair-ledger.tsv"
+      rm -f "$$JULIAIR_LEDGER"
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("oneAPI")'
+
+      echo "+++ :julia: Checking that the ports ran"
+      julia .ci/juliair.jl check-ledger "$$JULIAIR_LEDGER"
+    agents:
+      queue: "oneapi"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|oneapi|spirv|ports)/ &&
+      (build.message =~ /\[only [^\]]*(oneapi|spirv|ports)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 60
+
   - label: "AMDGPU.jl"
     plugins:
       - JuliaCI/julia#v1:
@@ -105,6 +180,36 @@ steps:
     timeout_in_minutes: 60
     soft_fail:
       - exit_status: 3
+
+  - label: "AMDGPU.jl (ports)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      echo "--- :julia: Instantiating project"
+      # an environment of its own, so that the preference doesn't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      julia .ci/juliair.jl downstream AMDGPU
+
+      export JULIAIR_LEDGER="$$PWD/juliair-ledger.tsv"
+      rm -f "$$JULIAIR_LEDGER"
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("AMDGPU")'
+
+      echo "+++ :julia: Checking that the ports ran"
+      julia .ci/juliair.jl check-ledger "$$JULIAIR_LEDGER"
+    agents:
+      queue: "rocm"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,spirv,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|amdgpu|gcn|ports)/ &&
+      (build.message =~ /\[only [^\]]*(amdgpu|gcn|ports)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 60
 
   - label: "Metal.jl"
     plugins:
@@ -146,6 +251,36 @@ steps:
     soft_fail:
       - exit_status: 3
 
+  - label: "Metal.jl (ports)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      echo "--- :julia: Instantiating project"
+      # an environment of its own, so that the preference doesn't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      JULIA_PKG_PRECOMPILE_AUTO=0 julia .ci/juliair.jl downstream Metal --workspace
+
+      export JULIAIR_LEDGER="$$PWD/juliair-ledger.tsv"
+      rm -f "$$JULIAIR_LEDGER"
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("Metal")'
+
+      echo "+++ :julia: Checking that the ports ran"
+      julia .ci/juliair.jl check-ledger "$$JULIAIR_LEDGER"
+    agents:
+      queue: "metal"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,spirv,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|metal|ports)/ &&
+      (build.message =~ /\[only [^\]]*(metal|ports)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
+
   - label: "OpenCL.jl"
     plugins:
       - JuliaCI/julia#v1:
@@ -175,6 +310,39 @@ steps:
     timeout_in_minutes: 120
     soft_fail:
       - exit_status: 3
+
+  - label: "OpenCL.jl (ports)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      echo "--- :julia: Instantiating project"
+      # an environment of its own, so that the preference doesn't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      julia .ci/juliair.jl downstream OpenCL SPIRVIntrinsics
+
+      export JULIAIR_LEDGER="$$PWD/juliair-ledger.tsv"
+      rm -f "$$JULIAIR_LEDGER"
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("OpenCL")'
+
+      echo "+++ :julia: Checking that the ports ran"
+      julia .ci/juliair.jl check-ledger "$$JULIAIR_LEDGER"
+    agents:
+      queue: "cuda"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|opencl|spirv|ports)/ &&
+      (build.message =~ /\[only [^\]]*(opencl|spirv|ports)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
+
+env:
+  JULIA_PKG_SERVER_REGISTRY_PREFERENCE: "eager" # see freshly-registered versions without cloning the registry
 
 env:
   JULIA_PKG_SERVER_REGISTRY_PREFERENCE: "eager" # see freshly-registered versions without cloning the registry

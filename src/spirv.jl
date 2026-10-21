@@ -370,7 +370,8 @@ source_code(target::SPIRVCompilerTarget) = "spirv"
 # reimplementation that uses the SPIR-V disassembler, giving much more pleasant output
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
-    obj = JuliaContext() do ctx
+    opaque_pointers = context_opaque_pointers(config.julia_passes)
+    obj = JuliaContext(; opaque_pointers) do ctx
         obj, meta = compile(:obj, CompilerJob(job; config))
         dispose(meta.ir)
         obj

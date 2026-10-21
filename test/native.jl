@@ -344,6 +344,19 @@ end
     @test Base.isdispatchtuple(mi.specTypes)
 end
 
+@testset "argument classification checks the arity" begin
+    # e.g. codegen passing a `Type{T}` argument that the signature does not key as
+    # `Core.TypeEgal`, which `classify_arguments` treats as a ghost
+    job, _ = Native.create_job(identity, (Int,))
+    JuliaContext() do ctx
+        ft = LLVM.FunctionType(LLVM.VoidType(), [LLVM.Int64Type(), LLVM.Int64Type()])
+        @test_throws "the function generated for it has 2 parameters" GPUCompiler.classify_arguments(job, ft)
+        ft = LLVM.FunctionType(LLVM.VoidType(), [LLVM.Int64Type()])
+        args = GPUCompiler.classify_arguments(job, ft)
+        @test [arg.idx for arg in args] == [nothing, 1]
+    end
+end
+
 # on 1.10, `methodinstance` is the generic, allocating lookup
 VERSION >= v"1.11.0-DEV.1552" && @testset "method instance lookups don't allocate" begin
     # back-ends look up the method instance on every kernel launch
@@ -1000,6 +1013,23 @@ end
         @check "{{atomicrmw add|cmpxchg}}"
         Native.code_llvm(mod.increment, Tuple{mod.Counter})
     end
+end
+
+@static if VERSION >= v"1.14.0-DEV.2872"
+@testset "cancellation points" begin
+    # from Julia 1.14, `@cancel_check` emits a `julia.cancellation_point()` call, which
+    # has to be lowered to a `setjmp` into the task (JuliaLang/julia#62604)
+    mod = @eval module $(gensym())
+        f(x) = (Base.@cancel_check; x + 1)
+    end
+
+    @testset "$julia_passes" for julia_passes in (:cpp, :ports)
+        @test @filecheck implicit_check_not=["julia.cancellation_point"] begin
+            @check "setjmp"
+            Native.code_llvm(mod.f, Tuple{Int}; julia_passes, dump_module=true)
+        end
+    end
+end
 end
 
 @testset "tracked pointers" begin
