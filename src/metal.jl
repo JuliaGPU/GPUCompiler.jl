@@ -729,8 +729,6 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # the macOS 27 back-end rejects bare LLVM fences (Metal.jl#968)
     lower_fences!(job, mod)
 
-    legalize_barrier_abi!(job, mod)
-
     # strip device-side `trap`s and rewrite `unreachable` into clean returns (#433, #370). this
     # runs post-`optimize!`, after the trap has finished serving as the optimizer guard; the pass
     # force-inlines throwing functions into the kernel first so the rewrite is sound, then scrubs
@@ -828,10 +826,8 @@ end
 #   form the target's AIR and MSL versions use.
 #
 # Front-ends pass MSL's memory flags, which LLVM cannot express, in the synchronization scope
-# (see `metal_syncscope`). They can also call `air.atomic.*` intrinsics directly, in the MSL 4.1
-# (AIR 2.9) form, which `legalize_atomic_abi!` rewrites for older targets. `validate_ir`
-# rejects the atomics that cannot be lowered (see `metal_atomic_action`), so the lowering can
-# assume every atomic it sees is supported.
+# (see `metal_syncscope`). `validate_ir` rejects the atomics that cannot be lowered (see
+# `metal_atomic_action`), so the lowering can assume every atomic it sees is supported.
 
 # MSL memory_order values: relaxed=0, acquire=2, release=3, acq_rel=4, seq_cst=5
 metal_memory_order(order::LLVM.AtomicOrdering.T) =
@@ -1169,27 +1165,12 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
     return
 end
 
-# the number of operands of an `air.atomic.*` intrinsic in its MSL 4.1 (AIR 2.9) form
-function air_atomic_arity(name::String)
-    occursin(".cmpxchg.", name) && return 8
-    occursin(".load.", name) && return 5
-    return 6
-end
-
-# Rewrite the `air.atomic.*` calls front-ends emit (in the MSL 4.1 form) into the form the
-# target uses: AIR 2.9 introduced the memory flags operand, and before MSL 4.1 the volatile bit
-# is always set, only relaxed orderings are supported and the flags must be zero. Also tell the
-# downgrader the element types of the pointer operands, which LLVM cannot infer.
-function legalize_atomic_abi!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                              mod::LLVM.Module)
-    target = job.config.target
-    changed = false
-    for f in collect(mod.functions)
-        fn = f.name
-        m = match(r"^air\.atomic\.(global|local)\..+\.(i32|f32|i64)$", fn)
+# Tell the downgrader the element types of the pointer operands of the `air.atomic.*`
+# intrinsics, which LLVM cannot infer.
+function annotate_atomic_eltypes!(mod::LLVM.Module)
+    for f in mod.functions
+        m = match(r"^air\.atomic\.(global|local)\..+\.(i32|f32|i64)$", f.name)
         m === nothing && continue
-
-        # pointer element types for the typed-pointer downgrader
         T = m.captures[2] == "f32" ? LLVM.FloatType() : LLVM.IntType(parse(Int, m.captures[2][2:end]))
         mds = []
         for (i, param) in enumerate(f.function_type.parameters)
@@ -1198,66 +1179,14 @@ function legalize_atomic_abi!(@nospecialize(job::CompilerJob{MetalCompilerTarget
             push!(mds, null(T))
         end
         f.metadata["arg_eltypes"] = MDNode(mds)
-
-        target.metal >= v"4.1" && continue
-        nparams = length(f.function_type.parameters)
-        # older front-ends rewrote their calls for the target themselves
-        nparams == air_atomic_arity(fn) || continue
-
-        is_cmpxchg = occursin(".cmpxchg.", fn)
-        calls = [u::LLVM.CallInst for u in f.users]
-        for call in calls
-            args = collect(call.arguments)
-            orders = is_cmpxchg ? args[end-4:end-3] : args[end-3:end-3]
-            if !all(o -> o isa ConstantInt && convert(Int, o) == 0, [orders..., args[end-1]])
-                error("$fn with an ordering or memory flags requires MSL 4.1; " *
-                      "the target is MSL $(target.metal)")
-            end
-        end
-        changed |= !isempty(calls)
-
-        if target.air >= v"2.9"
-            # the flags operand exists, but the volatile bit must be set
-            for call in calls
-                # LLVM models the callee as the final operand, after all arguments
-                call.operands[end-1] = ConstantInt(true)
-            end
-            continue
-        end
-
-        # before AIR 2.9, there is no flags operand
-        ft = f.function_type
-        params = ft.parameters
-        legacy_ft = LLVM.FunctionType(ft.return_type, [params[1:end-2]..., params[end]])
-        f.name = fn * ".msl41"
-        legacy_f = LLVM.Function(mod, fn, legacy_ft)
-        append!(legacy_f.function_attributes, f.function_attributes)
-        legacy_f.metadata["arg_eltypes"] = f.metadata["arg_eltypes"]
-        for call in calls
-            args = collect(call.arguments)
-            @dispose builder=IRBuilder() begin
-                position!(builder, LLVM.before(call))
-                builder.debug_location = call.debug_location
-                new = call!(builder, legacy_ft, legacy_f,
-                            [args[1:end-2]..., ConstantInt(true)])
-                replace_uses!(call, new)
-            end
-            erase!(call)
-        end
-        erase!(f)
     end
-    return changed
 end
 
 function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
                         mod::LLVM.Module)
-    # first rewrite the intrinsic calls front-ends emitted, so that the ones we select below
-    # agree with them
-    changed = legalize_atomic_abi!(job, mod)
-
     atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
                if is_atomic_memop(inst)]
-    isempty(atomics) && return changed
+    isempty(atomics) && return false
 
     for inst in atomics
         action = metal_atomic_action(job, inst)
@@ -1302,7 +1231,7 @@ function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
     isempty(unsupported) || throw(InvalidIRError(job, unsupported))
 
     # attach element type metadata to the declarations we introduced
-    legalize_atomic_abi!(job, mod)
+    annotate_atomic_eltypes!(mod)
     return true
 end
 
@@ -1345,53 +1274,6 @@ function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod
         erase!(inst)
     end
     return true
-end
-
-# Rewrite the `air.wg.barrier` and `air.simdgroup.barrier` calls front-ends emit, in either
-# form, into the form of the target: AIR 2.9 added a memory order operand between the memory
-# flags and the scope, and Apple's tools reject the form of the other AIR versions. Barriers
-# are sequentially consistent before MSL 4.1, so other orders are strengthened then.
-function legalize_barrier_abi!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                               mod::LLVM.Module)
-    target = job.config.target
-    T_int32 = LLVM.Int32Type()
-    seq_cst = ConstantInt(T_int32, 5)
-    changed = false
-    for fn in ("air.wg.barrier", "air.simdgroup.barrier")
-        haskey(mod.functions, fn) || continue
-        f = mod.functions[fn]
-        calls = [u::LLVM.CallInst for u in f.users]
-        nparams = length(f.function_type.parameters)
-        if target.air >= v"2.9" && nparams == 3
-            target.metal >= v"4.1" && continue
-            for call in calls
-                call.operands[2] = seq_cst
-            end
-            changed |= !isempty(calls)
-            continue
-        elseif target.air < v"2.9" && nparams == 2
-            continue
-        end
-
-        new_ft = LLVM.FunctionType(LLVM.VoidType(),
-                                   fill(T_int32, target.air >= v"2.9" ? 3 : 2))
-        f.name = ""
-        new_f = LLVM.Function(mod, fn, new_ft)
-        append!(new_f.function_attributes, f.function_attributes)
-        for call in calls
-            flags, scope = call.arguments[1], call.arguments[end]
-            args = target.air >= v"2.9" ? [flags, seq_cst, scope] : [flags, scope]
-            @dispose builder=IRBuilder() begin
-                position!(builder, LLVM.before(call))
-                builder.debug_location = call.debug_location
-                call!(builder, new_ft, new_f, args)
-            end
-            erase!(call)
-        end
-        erase!(f)
-        changed = true
-    end
-    return changed
 end
 
 # Julia names each generated LLVM function `julia_<name>_<counter>`, where the counter is
