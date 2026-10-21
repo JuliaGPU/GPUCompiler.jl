@@ -37,7 +37,7 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
             runtime_function_type(job, rt)
         end
         LLVM.Function(mod, rt.llvm_name, ft)
-    end
+    end::LLVM.Function
     ft = f.function_type
     if !isdeclaration(f) && (rt.name !== :gc_pool_alloc && rt.name !== :report_exception)
         # XXX: uses of the gc_pool_alloc intrinsic can be introduced _after_ the runtime

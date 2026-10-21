@@ -656,6 +656,7 @@ function emitted_functions(mod::LLVM.Module, compiled)
     for entry in values(compiled)
         for name in (entry.func, entry.specfunc)
             name === nothing && continue
+            name = name::String     # `compiled` holds entries of any type
             emitted[name] = entry
             # functions may have been renamed since, but not their debug information
             f = get(functions, name, nothing)
