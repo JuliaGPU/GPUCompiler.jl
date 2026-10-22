@@ -507,8 +507,8 @@ function ptx_may_be_local(ptr::LLVM.Value)
                val isa LLVM.AddrSpaceCastInst
             push!(worklist, val.operands[1])
         elseif val isa LLVM.ConstantExpr &&
-               LLVM.opcode(val) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast,
-                               LLVM.API.LLVMAddrSpaceCast)
+               val.opcode in (LLVM.Opcode.GetElementPtr, LLVM.Opcode.BitCast,
+                              LLVM.Opcode.AddrSpaceCast)
             push!(worklist, val.operands[1])
         elseif val isa LLVM.PHIInst
             append!(worklist, first.(val.incoming))
@@ -575,8 +575,8 @@ function guard_local_atomic!(inst::LLVM.Instruction)
         br!(builder, is_local, local_block, other_block)
 
         for (block, atomic) in ((local_block, local_atomic), (other_block, other_atomic))
+            move!(atomic, LLVM.at_end(block))
             position!(builder, LLVM.at_end(block))
-            LLVM.API.LLVMInsertIntoBuilder(builder, atomic)
             br!(builder, exit)
         end
 

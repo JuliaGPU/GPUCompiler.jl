@@ -266,7 +266,7 @@ end
     end
 
     @test @filecheck begin
-        @check_not "!julia.kernel = !{!"
+        @check_not "!julia.kernel"
         @check "!air.kernel = !{!{{[0-9]+}}}"
         Metal.code_native(mod.kernel, Tuple{}; dump_module=true, kernel=true)
     end
