@@ -78,12 +78,12 @@ function dedup_compile_units!(mod::LLVM.Module)
     cus = mds["llvm.dbg.cu"].operands
     length(cus) <= 1 && return false
 
-    canonical = Dict{Tuple,LLVM.Metadata}()
+    canonical = Dict{Vector{Union{Nothing,LLVM.Metadata}},LLVM.Metadata}()
     canonical_cus = LLVM.Metadata[]
     replacement = Dict{LLVM.Metadata,LLVM.Metadata}()
     for cu in cus
         cu === nothing && continue
-        key = Tuple(cu.operands)
+        key = Union{Nothing,LLVM.Metadata}[cu.operands...]
         canon = get!(canonical, key, cu)
         if canon == cu
             push!(canonical_cus, cu)

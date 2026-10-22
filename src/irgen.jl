@@ -565,7 +565,7 @@ end
 #          is not passed at the LLVM level.
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType;
                             post_optimization::Bool=false)
-    source_sig = job.source.specTypes
+    source_sig = job.source.specTypes::DataType
     source_types = collect(Any, source_sig.parameters)
 
     source_argnames = Base.method_argnames(job.source.def)

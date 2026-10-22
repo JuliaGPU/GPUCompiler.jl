@@ -71,7 +71,7 @@ function mangle_param(@nospecialize(t), substitutions = Any[], top = false)
         # check if we already know this base type
         str = find_substitution(t.name.wrapper)
         if str === nothing
-            tn = safe_name(t)
+            tn = safe_name(t)::String
             str = "$(length(tn))$tn"
             push!(substitutions, t.name.wrapper)
         end
@@ -171,7 +171,7 @@ function mangle_param(@nospecialize(t), substitutions = Any[], top = false)
         bits = string(reinterpret(UInt64, t); base=16)
         "Ld$(bits)E"
     else
-        tn = safe_name(t)   # TODO: actually does support digits...
+        tn = safe_name(t)::String   # TODO: actually does support digits...
         if startswith(tn, r"\d")
             # C++ classes cannot start with a digit, so mangling doesn't support it
             tn = "_$(tn)"

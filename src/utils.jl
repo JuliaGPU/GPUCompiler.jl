@@ -72,6 +72,9 @@ end
 struct ExternalBackend
     library::String     # path to the shared library, as exported by its JLL
     prefix::String      # e.g. "NVPTX" for `NVPTXCompile`
+
+    # JLLs are loaded lazily, so the type of their library paths isn't inferred
+    ExternalBackend(library, prefix) = new(library::String, prefix::String)
 end
 
 function api(backend::ExternalBackend, name::String)

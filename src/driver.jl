@@ -282,7 +282,13 @@ const __llvm_initialized = Ref(false)
                     # which was loaded in a newer world.
                     dyn_ir, dyn_meta = @invokelatest deferred_codegen(dyn_job, job)
                     dyn_entry_fn = dyn_meta.entry.name
-                    merge!(compiled, dyn_meta.compiled)
+                    # the sibling compiler's result isn't inferred
+                    dyn_compiled = dyn_meta.compiled
+                    if dyn_compiled isa Dict{Any,Any}
+                        merge!(compiled, dyn_compiled)
+                    else
+                        Base.inferencebarrier(merge!)(compiled, dyn_compiled)
+                    end
                     @assert dyn_ir.context == ir.context
                     link_relocatable!(ir, relocations, dyn_ir,
                                       dyn_meta.relocations)
