@@ -13,42 +13,60 @@ concurrency:
 
 jobs:
   release_test:
-    name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }} - ${{ matrix.os }}
+    name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }} - ${{ matrix.os }} - ${{ matrix.codegen }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # TEMPORARY: raised from 20 for building LLVMExtra
+    timeout-minutes: 45
+    # JuliaCodegen.jl is experimental: its jobs report, and don't fail the workflow
+    continue-on-error: ${{ matrix.codegen == 'juliacodegen' }}
     strategy:
       fail-fast: false
       matrix:
         version: ['1.10', '1.11', '1.12', '1.13', 'nightly']
         os: [ubuntu-24.04, ubuntu-24.04-arm, macOS-15, windows-2025]
         llvm_args: ['']
+        # the code generator (the `codegen` preference); JuliaCodegen.jl needs Julia 1.12
+        codegen: [julia, juliacodegen]
+        exclude:
+          - version: '1.10'
+            codegen: juliacodegen
+          - version: '1.11'
+            codegen: juliacodegen
         include:
           # starting with Julia 1.10, we can enable opaque pointers
           # from Julia 1.12 on, this is the default.
           - version: '1.10'
             os: 'ubuntu-24.04'
             llvm_args: '--opaque-pointers'
+            codegen: julia
           - version: '1.10'
             os: 'ubuntu-24.04-arm'
             llvm_args: '--opaque-pointers'
+            codegen: julia
           - version: '1.10'
             os: 'macOS-15'
             llvm_args: '--opaque-pointers'
+            codegen: julia
           - version: '1.10'
             os: 'windows-2025'
             llvm_args: '--opaque-pointers'
+            codegen: julia
           - version: '1.11'
             os: 'ubuntu-24.04'
             llvm_args: '--opaque-pointers'
+            codegen: julia
           - version: '1.11'
             os: 'ubuntu-24.04-arm'
             llvm_args: '--opaque-pointers'
+            codegen: julia
           - version: '1.11'
             os: 'macOS-15'
             llvm_args: '--opaque-pointers'
+            codegen: julia
           - version: '1.11'
             os: 'windows-2025'
             llvm_args: '--opaque-pointers'
+            codegen: julia
     steps:
       - uses: actions/checkout@v7
 
@@ -60,19 +78,35 @@ jobs:
       - name: Set-up cache
         uses: julia-actions/cache@v3
 
+      # TEMPORARY, until the LLVM.jl, JuliaIR.jl and JuliaCodegen.jl changes this branch
+      # needs are released: build LLVMExtra from the LLVM.jl branch, and set up the test
+      # environment with it and JuliaCodegen.jl (see .ci/juliacodegen.jl). Restore
+      # julia-runtest and the coverage steps after.
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          path-type: inherit
+          install: make mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake
+      - name: Build LLVMExtra
+        if: runner.os != 'Windows'
+        run: julia --color=yes .ci/juliacodegen.jl build
+      - name: Build LLVMExtra (in msys2)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: julia --color=yes .ci/juliacodegen.jl build
+      - name: Set up the test environment
+        run: julia --color=yes .ci/juliacodegen.jl test ${{ matrix.codegen }}
+
       - name: Run tests
-        uses: julia-actions/julia-runtest@v1
+        run: julia --color=yes --project=test test/runtests.jl
         env:
           JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
+          JULIACODEGEN_LEDGER: ${{ runner.temp }}/juliacodegen-ledger.tsv
 
-      - name: Process coverage
-        # CoverageTools 1.4.1 uses a PkgLoadSpec field renamed in Julia 1.14.
-        if: matrix.version != 'nightly'
-        uses: julia-actions/julia-processcoverage@v1
-      - name: Submit coverage
-        if: matrix.version != 'nightly'
-        uses: codecov/codecov-action@v7
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-          files: lcov.info
+      # the suite also runs JuliaCodegen.jl explicitly, so check the preference too
+      - name: Check that JuliaCodegen.jl was the default
+        if: matrix.codegen == 'juliacodegen'
+        run: julia --project=test -e 'using GPUCompiler; GPUCompiler.CODEGEN === :juliacodegen || error("codegen preference not applied")'
+      - name: Check that JuliaCodegen.jl ran
+        if: matrix.codegen == 'juliacodegen'
+        run: julia .ci/juliacodegen.jl check-ledger '${{ runner.temp }}/juliacodegen-ledger.tsv'

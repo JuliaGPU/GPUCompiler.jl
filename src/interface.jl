@@ -143,7 +143,8 @@ else
 end
 
 const CONFIG_KWARGS = [:kernel, :name, :entry_abi, :always_inline, :opt_level,
-                       :debug_level, :libraries, :optimize, :cleanup, :validate, :strip]
+                       :debug_level, :libraries, :optimize, :cleanup, :validate, :strip,
+                       :codegen]
 
 """
     CompilerConfig(target, params; kernel=true, entry_abi=:specfunc, name=nothing,
@@ -177,6 +178,10 @@ Several keyword arguments can be used to customize the compilation process:
 - `cleanup`: run cleanup passes on the code (default: true)
 - `validate`: enable optional validation of input and outputs (default: true)
 - `strip`: strip non-functional metadata and debug information (default: false)
+- `codegen`: the code generator that lowers Julia IR to LLVM IR: `:julia` for Julia's own,
+   or `:juliacodegen` for JuliaCodegen.jl (experimental, Julia 1.12 and later), which must
+   then be loaded. The default comes from the `codegen` preference of GPUCompiler
+   (`:julia` if unset).
 """
 struct CompilerConfig{T,P}
     target::T
@@ -193,6 +198,7 @@ struct CompilerConfig{T,P}
     cleanup::Bool
     validate::Bool
     strip::Bool
+    codegen::Symbol
 
     # internal
     toplevel::Bool
@@ -206,9 +212,12 @@ struct CompilerConfig{T,P}
                             always_inline=false, opt_level=2,
                             debug_level=Base.JLOptions().debug_level, optimize=toplevel,
                             libraries=toplevel, cleanup=toplevel, validate=toplevel,
-                            strip=false, only_entry=false)
+                            strip=false, codegen=default_codegen(), only_entry=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")
+        end
+        if codegen ∉ (:julia, :juliacodegen)
+            error("Unknown codegen=$codegen")
         end
         owner = @static if HAS_INTEGRATED_CACHE
             cache_owner(target, params, always_inline)
@@ -217,8 +226,8 @@ struct CompilerConfig{T,P}
         end
         new{typeof(target), typeof(params)}(target, params, kernel, name, entry_abi,
                                             always_inline, opt_level, debug_level, libraries,
-                                            optimize, cleanup, validate, strip, toplevel,
-                                            only_entry, owner)
+                                            optimize, cleanup, validate, strip, codegen,
+                                            toplevel, only_entry, owner)
     end
 end
 
@@ -228,8 +237,8 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
                         always_inline=cfg.always_inline, opt_level=cfg.opt_level,
                         debug_level=cfg.debug_level, libraries=cfg.libraries,
                         optimize=cfg.optimize, cleanup=cfg.cleanup,
-                        validate=cfg.validate, strip=cfg.strip, toplevel=cfg.toplevel,
-                        only_entry=cfg.only_entry)
+                        validate=cfg.validate, strip=cfg.strip, codegen=cfg.codegen,
+                        toplevel=cfg.toplevel, only_entry=cfg.only_entry)
     # deriving a non-toplevel job disables certain features
     # XXX: should we keep track if any of these were set explicitly in the first place?
     #      see how PkgEval does that.
@@ -240,8 +249,8 @@ function CompilerConfig(cfg::CompilerConfig; target=cfg.target, params=cfg.param
         validate = false
     end
     CompilerConfig(target, params; kernel, entry_abi, name, always_inline, opt_level,
-                   debug_level, libraries, optimize, cleanup, validate, strip, toplevel,
-                   only_entry)
+                   debug_level, libraries, optimize, cleanup, validate, strip, codegen,
+                   toplevel, only_entry)
 end
 
 function Base.show(io::IO, @nospecialize(cfg::CompilerConfig{T})) where {T}
@@ -263,6 +272,7 @@ function Base.hash(cfg::CompilerConfig, h::UInt)
     h = hash(cfg.cleanup, h)
     h = hash(cfg.validate, h)
     h = hash(cfg.strip, h)
+    h = hash(cfg.codegen, h)
     h = hash(cfg.toplevel, h)
     h = hash(cfg.only_entry, h)
     # `cache_owner` deliberately is not hashed: its target/params/inlining components were
