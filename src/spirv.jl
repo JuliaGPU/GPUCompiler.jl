@@ -694,8 +694,8 @@ function spirv_partword_storage(ptr::LLVM.Value)
             end
         elseif val isa Union{LLVM.GetElementPtrInst,LLVM.BitCastInst,LLVM.AddrSpaceCastInst} ||
                (val isa LLVM.ConstantExpr &&
-                LLVM.opcode(val) in (LLVM.API.LLVMGetElementPtr, LLVM.API.LLVMBitCast,
-                                     LLVM.API.LLVMAddrSpaceCast))
+                val.opcode in (LLVM.Opcode.GetElementPtr, LLVM.Opcode.BitCast,
+                               LLVM.Opcode.AddrSpaceCast))
             push!(worklist, val.operands[1])
         elseif val isa LLVM.PHIInst
             append!(worklist, first.(val.incoming))

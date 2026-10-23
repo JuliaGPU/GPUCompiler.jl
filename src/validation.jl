@@ -660,22 +660,13 @@ function emitted_functions(mod::LLVM.Module, compiled)
             # functions may have been renamed since, but not their debug information
             f = get(functions, name, nothing)
             f === nothing && continue
-            sp = LLVM.subprogram(f)
+            sp = f.subprogram
             sp === nothing && continue
-            linkage = linkage_name(sp)
+            linkage = sp.linkage_name
             linkage === nothing || (emitted[linkage] = entry)
         end
     end
     return emitted
-end
-
-# the linkage name of a subprogram, which LLVM's C API does not expose
-function linkage_name(sp::LLVM.Metadata)
-    sp isa LLVM.MDNode || return nothing
-    ops = LLVM.operands(sp)
-    length(ops) >= 4 || return nothing
-    name = ops[4]
-    return name isa LLVM.MDString ? convert(String, name) : nothing
 end
 
 # the Julia IR that codegen compiled a function from
@@ -723,7 +714,7 @@ function explain_error(inst::LLVM.Instruction, (kind, bt, meta)::IRError, emitte
     while loc !== nothing
         push!(lines, loc.line)
         scope = loc.scope
-        name = scope === nothing ? nothing : linkage_name(scope)
+        name = scope isa LLVM.DISubprogram ? scope.linkage_name : nothing
         entry = name === nothing ? nothing : get(emitted, name, nothing)
         entry === nothing || break
         loc = loc.inlined_at

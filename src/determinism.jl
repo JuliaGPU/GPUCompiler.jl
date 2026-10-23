@@ -46,7 +46,7 @@ function merge_constant_clones!(mod::LLVM.Module)
         gv.dllstorage == base.dllstorage || continue
         gv.threadlocal_mode == base.threadlocal_mode || continue
         gv.externally_initialized == base.externally_initialized || continue
-        gv.initializer.ref == base.initializer.ref || continue
+        gv.initializer == base.initializer || continue
         replace_uses!(gv, base)
         erase!(gv)
         merged = true
