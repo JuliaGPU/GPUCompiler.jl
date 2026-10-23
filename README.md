@@ -53,6 +53,11 @@ identifies cached kernels. Compiled kernels are not invalidated when a library c
 Julia library methods are recompiled when redefined, but cached kernels keep using the
 previous version, and bitcode files are read once per session.
 
+Software binary64 support is an optional library; see
+[`src/softfloat/README.md`](src/softfloat/README.md). Its legalization runs at this same
+boundary for both the caller and Julia libraries to keep late-imported runtime ABIs
+consistent.
+
 ### Testing
 
 GPUCompiler.jl's own test suite runs on GitHub Actions. In addition, Buildkite runs the test
