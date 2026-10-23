@@ -10,6 +10,29 @@
     end
 end
 
+LLVM.version() >= v"17" && @testset "alignment inference" begin
+    # accesses get the alignment that can be proven, here from that of a global, which the
+    # back-end needs to vectorize them
+    mod = @eval module $(gensym())
+        kernel(i::Int) = Base.llvmcall(("""
+            @shmem = internal addrspace(3) global [64 x i64] zeroinitializer, align 16
+            define i64 @entry(i64 %i) #0 {
+              %j = xor i64 %i, 1
+              %q = getelementptr inbounds i64, ptr addrspace(3) @shmem, i64 %j
+              store i64 %i, ptr addrspace(3) %q, align 1
+              %p = getelementptr inbounds i64, ptr addrspace(3) @shmem, i64 %i
+              %v = load i64, ptr addrspace(3) %p, align 1
+              ret i64 %v
+            }
+            attributes #0 = { alwaysinline }""", "entry"), Int, Tuple{Int}, i)
+    end
+    @test @filecheck begin
+        @check "store i64 {{.*}}, ptr addrspace(3) {{.*}}, align 8"
+        @check "load i64, ptr addrspace(3) {{.*}}, align 8"
+        PTX.code_llvm(mod.kernel, Tuple{Int})
+    end
+end
+
 @testset "synchronization scopes" begin
     # front-ends spell scopes like LLVM's SPIR-V back-end; they're renamed for the target
     mod = @eval module $(gensym())
