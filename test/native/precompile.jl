@@ -171,3 +171,42 @@ precompile_test_harness("Inference caching") do load_path
         end
     end
 end
+
+# Two package images that each cache code for the same callee hold distinct CodeInstances
+# for it, and both are reachable from a kernel calling into both packages (see #1056).
+precompile_test_harness("Duplicate CodeInstances") do load_path
+    # a package name of its own, as the one loaded by the testset above would not match
+    create_standalone(load_path, "DuplicateCompiler", "native.jl")
+
+    write(joinpath(load_path, "SharedHelper.jl"), :(
+        module SharedHelper
+        @noinline helper(x) = x * 2f0 + 1f0
+        end) |> string)
+    for name in ("KernelsA", "KernelsB")
+        write(joinpath(load_path, "$name.jl"), :(
+            module $(Symbol(name))
+            import DuplicateCompiler, SharedHelper
+            @noinline step(x) = SharedHelper.helper(x) + 1f0
+            kernel(x) = step(x)
+            let
+                job, _ = DuplicateCompiler.Native.create_job(kernel, (Float32,))
+                precompile(job)
+            end
+            end) |> string)
+    end
+    Base.compilecache(Base.PkgId("KernelsA"), stderr, stdout)
+    Base.compilecache(Base.PkgId("KernelsB"), stderr, stdout)
+
+    @eval let
+        import DuplicateCompiler, SharedHelper, KernelsA, KernelsB
+
+        kernel(x) = KernelsA.step(x) + KernelsB.step(x)
+        job, _ = DuplicateCompiler.Native.create_job(kernel, (Float32,))
+        helper_mi = GPUCompiler.methodinstance(typeof(SharedHelper.helper), Tuple{Float32})
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job)
+            @test haskey(meta.compiled, helper_mi)
+            @test count(f -> occursin("helper", LLVM.name(f)), LLVM.functions(ir)) == 1
+        end
+    end
+end
