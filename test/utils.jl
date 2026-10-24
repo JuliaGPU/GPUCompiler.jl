@@ -308,3 +308,20 @@ end
     # Check that we can call this function from the CPU, to support deferred codegen for Enzyme.
     @test ccall("extern deferred_codegen", llvmcall, UInt, (UInt,), id) == id
 end
+
+@testset "elementwise scalarization" begin
+    JuliaContext() do ctx
+        @dispose mod=parse(LLVM.Module, """
+            declare <2 x float> @llvm.powi.v2f32.i32(<2 x float>, i32)
+            define <2 x float> @test(<2 x float> %value, i32 %power) {
+                %result = call afn <2 x float> @llvm.powi.v2f32.i32(<2 x float> %value, i32 %power)
+                ret <2 x float> %result
+            }
+            """) begin
+            @test GPUCompiler.scalarize_vector_calls!((call, intrinsic) -> true,
+                                                       mod.functions["test"])
+            @test verify(mod) === nothing
+            @test count("call afn float @llvm.powi.f32.i32", string(mod)) == 2
+        end
+    end
+end

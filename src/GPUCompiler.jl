@@ -80,6 +80,7 @@ include("determinism.jl")
 include("optim.jl")
 include("validation.jl")
 include("rtlib.jl")
+include("devicelib.jl")
 include("mcgen.jl")
 include("debug.jl")
 include("driver.jl")
@@ -94,6 +95,8 @@ include("precompile.jl")
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
     empty!(session_results_cache)
+    empty!(device_libs)
+    empty!(bitcode_files)
 
     @static if !HAS_INTEGRATED_CACHE
         # CodeInstances created by GPUCompiler's precompile workload are process-local.

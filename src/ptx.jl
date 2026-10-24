@@ -255,6 +255,9 @@ function finish_linked_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}
     return
 end
 
+finish_imports!(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module,
+                imported) = finish_linked_module!(job, mod)
+
 function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                           mod::LLVM.Module)
     with_llvm_machine(job.config.target) do tm
@@ -642,7 +645,9 @@ end
 # This matches LLVM's NVVMReflectPass: `__CUDA_ARCH` is derived from the target
 # capability, `__CUDA_FTZ` is read from the `nvvm-reflect-ftz` module flag, and every
 # other key folds to 0. Knobs like denormal flushing or FMAD contraction must be
-# configured through module flags or LLVM fast-math flags, not here.
+# configured through module flags or LLVM fast-math flags, not here. The exception are
+# `__CUDA_PREC_SQRT` and `__CUDA_PREC_DIV`, which select precise libdevice implementations
+# unless fast math is enabled, like nvcc does (LLVM defaults these to approximations).
 const NVVM_REFLECT_FUNCTION = "__nvvm_reflect"
 function nvvm_reflect!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
@@ -679,18 +684,10 @@ function nvvm_reflect!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             continue
         end
 
-        # decode the string argument
-        if LLVM.version() >= v"17"
-            sym = call.operands[1]
-        else
-            str = call.operands[1]
-            if !isa(str, LLVM.ConstantExpr) || str.opcode != LLVM.Opcode.GetElementPtr
-                @safe_error """Unrecognized format of __nvvm_reflect call:
-                               $(string(call))
-                               Operand should be a GEP instruction, got a $(typeof(str)). Please file an issue."""
-                continue
-            end
-            sym = str.operands[1]
+        # decode the string argument (a GEP only with typed pointers)
+        sym = call.operands[1]
+        if isa(sym, LLVM.ConstantExpr) && sym.opcode == LLVM.Opcode.GetElementPtr
+            sym = sym.operands[1]
             if isa(sym, LLVM.ConstantExpr) && sym.opcode == LLVM.Opcode.GetElementPtr
                 # CUDA 11.0 or below
                 sym = sym.operands[1]
@@ -717,6 +714,8 @@ function nvvm_reflect!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
                         job.config.target.cap.major*100 + job.config.target.cap.minor*10)
         elseif reflect_arg == "__CUDA_FTZ"
             ConstantInt(reflect_typ, ftz_val)
+        elseif reflect_arg == "__CUDA_PREC_SQRT" || reflect_arg == "__CUDA_PREC_DIV"
+            ConstantInt(reflect_typ, !job.config.target.fastmath)
         else
             ConstantInt(reflect_typ, 0)
         end
