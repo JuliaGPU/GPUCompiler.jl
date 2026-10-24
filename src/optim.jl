@@ -395,6 +395,13 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
         add!(mpm, FunctionPassManager()) do fpm
             add!(fpm, instcombine_pass(job))
             add!(fpm, SimplifyCFGPass(; AggressiveSimplifyCFGOptions...))
+            # raise the alignment of memory accesses to what can be proven, e.g., from the
+            # alignment of a shared memory global. back-ends only look at the alignment of
+            # each access, e.g., to vectorize them. Julia's own pipeline does the same since
+            # JuliaLang/julia#64020.
+            if LLVM.version() >= v"17"
+                add!(fpm, "infer-alignment")
+            end
         end
     end
 
