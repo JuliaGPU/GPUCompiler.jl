@@ -21,7 +21,9 @@ function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
                 name = replace(something(scope.name, ""), r";$"=>"")
                 isempty(name) && (name = "unknown")
                 file = scope.file
-                path = file === nothing ? "unknown" : joinpath(file.directory, file.filename)
+                path = file === nothing ? "unknown" :
+                       joinpath(file.directory::Union{Nothing,String},
+                                file.filename::Union{Nothing,String})
                 line = loc.line
                 push!(bt, StackTraces.StackFrame(name, path, line))
             end

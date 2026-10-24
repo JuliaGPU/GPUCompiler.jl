@@ -13,6 +13,11 @@ using ..GPUCompiler
 using LLVM, LLVM.IR, LLVM.Build
 using LLVM.Interop
 
+# imported explicitly, so that the binding exists before the generated functions below
+# first use it. Julia 1.13 reports edges to a binding that a downstream package's
+# precompilation created as invalidations (JuliaLang/julia#59135).
+import Base: |
+
 
 ## representation of a runtime method instance
 
@@ -202,7 +207,7 @@ const gc_bits = 0x3 # FIXME
     T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
 
     # this isn't really a function, but we abuse it to get the JIT to resolve the address
-    typ = LLVM.Function(current_module(builder), "jl_" * String(type_name) * "_type",
+    typ = LLVM.Function(current_module(builder), "jl_" * String(type_name::Symbol) * "_type",
                         LLVM.FunctionType(T_pjlvalue))
 
     typ_var = bitcast!(builder, typ, T_ptag)

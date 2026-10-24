@@ -565,7 +565,7 @@ end
 #          is not passed at the LLVM level.
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType;
                             post_optimization::Bool=false)
-    source_sig = job.source.specTypes
+    source_sig = job.source.specTypes::DataType
     source_types = collect(Any, source_sig.parameters)
 
     source_argnames = Base.method_argnames(job.source.def)
@@ -979,7 +979,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
                     position!(builder, LLVM.before(val))
                     state_arg = call!(builder, state_intr_ft, state_intr, Value[], "state")
                     new_val = if val isa LLVM.CallInst
-                        call!(builder, ft, f, [state_arg, val.arguments...],
+                        call!(builder, ft, f, Value[state_arg, val.arguments...],
                               val.operand_bundles)
                     else
                         # TODO: invoke and callbr
@@ -997,13 +997,10 @@ function (self::AddKernelState)(mod::LLVM.Module)
                     # XXX: we won't have to do this with opaque pointers.
                     position!(builder, LLVM.before(val))
                     target_ft = val.called_type
-                    new_args = map(zip(target_ft.parameters,
-                                       val.arguments)) do (param_typ, arg)
-                        if arg.value_type != param_typ
-                            const_bitcast(arg, param_typ)
-                        else
-                            arg
-                        end
+                    new_args = Value[]
+                    for (param_typ, arg) in zip(target_ft.parameters, val.arguments)
+                        push!(new_args, arg.value_type != param_typ ?
+                                        const_bitcast(arg, param_typ) : arg)
                     end
                     new_val = call!(builder, val.called_type, val.called_operand, new_args,
                                     val.operand_bundles)
@@ -1460,7 +1457,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                     position!(builder, LLVM.before(val))
                     new_val = if val isa LLVM.CallInst
                         call!(builder, new_f.function_type, new_f,
-                              [val.arguments..., callee_f.parameters[end-nargs+1:end]...],
+                              Value[val.arguments..., callee_f.parameters[end-nargs+1:end]...],
                               val.operand_bundles)
                     else
                         # TODO: invoke and callbr

@@ -83,7 +83,7 @@ end
 function resolve_relocation_target(target::CGlobalRef)
     if target.library === nothing
         # `jl_cglobal` accepts the symbol directly and does the process-wide `jl_dlfind`.
-        address = ccall(:jl_cglobal, Any, (Any, Any), target.symbol, UInt)
+        address = ccall(:jl_cglobal, Any, (Any, Any), target.symbol, UInt)::Ptr{UInt}
         return unsafe_load(address + target.offset)
     end
     handle = Libdl.dlopen(target.library)
