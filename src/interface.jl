@@ -448,6 +448,21 @@ can_safepoint(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 # state (possibly indirectly) via the `kernel_state_pointer` function.
 kernel_state_type(@nospecialize(job::CompilerJob)) = Nothing
 
+# Which pointers in the arguments of a kernel reach disjoint memory, as established by the
+# caller of the kernel (e.g. by inspecting the arguments it launches the kernel with).
+# Returns `nothing`, or a vector of `(arg, offset, class)` tuples: the pointer stored at byte
+# `offset` of Julia-level argument `arg` (indexing `job.source.specTypes`, so the function
+# itself is argument 1) only reaches memory of alias class `class`, and the memory that is
+# reached through pointers of different classes is disjoint. Nothing is assumed about the
+# memory reached through pointers that are not listed. The compiled code is only valid for
+# arguments that satisfy these facts, so they need to be part of the job's params.
+kernel_argument_alias_classes(@nospecialize(job::CompilerJob)) = nothing
+
+# Whether loads from memory of an alias class that the kernel does not write to (see
+# `kernel_argument_alias_classes`) should be marked invariant, which lets back-ends use
+# non-coherent loads. Whether that pays off depends on the kernel and the hardware.
+kernel_argument_invariant_loads(@nospecialize(job::CompilerJob)) = false
+
 # Does the target need to pass kernel arguments by value?
 pass_by_value(@nospecialize(job::CompilerJob)) = true
 
