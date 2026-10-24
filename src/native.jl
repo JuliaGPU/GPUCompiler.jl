@@ -44,3 +44,13 @@ llvm_syncscope(::NativeCompilerTarget, name::String) =
 
 uses_julia_runtime(job::CompilerJob{NativeCompilerTarget}) = job.config.target.jlruntime
 can_vectorize(job::CompilerJob{NativeCompilerTarget}) = true
+
+function llvm_debug_info(@nospecialize(job::CompilerJob{NativeCompilerTarget}))
+    if uses_julia_runtime(job)
+        Base.default_debug_info_kind()
+    else
+        invoke(llvm_debug_info, Tuple{CompilerJob}, job)
+    end
+end
+
+llvm_gnu_pubnames(@nospecialize(job::CompilerJob{NativeCompilerTarget})) = true
