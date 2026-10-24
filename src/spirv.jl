@@ -295,6 +295,63 @@ function translate(input::Vector{UInt8}, options::Ref{LLVMSPIRVTranslateOptions}
     return take_buffer(backend, buffer[])
 end
 
+# Kernels may only contract floating-point operations marked `contract`, so the LLVM back-end
+# gives them the `ContractionOff` execution mode. With SPV_KHR_float_controls2, which
+# deprecates that, it instead gives them `FPFastMathDefault` (with no flags) for every
+# floating-point type in the module, but only declares the `FloatControls2` capability and
+# the extension that mode needs when it decorates an instruction with fast-math flags. A
+# kernel with floating-point types but without `contract` operations is then invalid. Declare
+# them in the generated binary. (Declaring the default in `spirv.ExecutionMode` metadata
+# instead makes the back-end account for it, but crashes it on some `OpExtInst`s.)
+function add_float_controls2_declarations(spirv::Vector{UInt8})
+    OpExtension, OpCapability, OpExecutionModeId = 10, 17, 331
+    ExecutionModeFPFastMathDefault, CapabilityFloatControls2 = 6028, 6029
+    extension = "SPV_KHR_float_controls2"
+
+    words = reinterpret(UInt32, spirv)
+    length(words) >= 5 && words[1] == 0x07230203 || return spirv
+    # find the end of the capabilities and of the extensions, which come first, and whether
+    # they need to be declared
+    capabilities_end = extensions_end = 6
+    has_capability = has_extension = uses_mode = false
+    i = 6
+    while i <= length(words)
+        count, opcode = Int(words[i] >> 16), Int(words[i] & 0xffff)
+        count == 0 && return spirv
+        if opcode == OpCapability
+            has_capability |= words[i+1] == CapabilityFloatControls2
+            capabilities_end = extensions_end = i + count
+        elseif opcode == OpExtension
+            has_extension |= spirv_string(words, i+1, i+count-1) == extension
+            extensions_end = i + count
+        elseif opcode == OpExecutionModeId
+            uses_mode |= words[i+2] == ExecutionModeFPFastMathDefault
+        end
+        i += count
+    end
+    uses_mode && !(has_capability && has_extension) || return spirv
+
+    # the extension's name, NUL-terminated and padded to whole words
+    name = Vector{UInt8}(extension)
+    append!(name, zeros(UInt8, 4 - length(name) % 4))
+    declarations = UInt32[]
+    has_capability || append!(declarations, (UInt32(2) << 16 | OpCapability,
+                                             CapabilityFloatControls2))
+    capability_words = length(declarations)
+    has_extension || append!(declarations, UInt32(1 + length(name) ÷ 4) << 16 | OpExtension,
+                             reinterpret(UInt32, name))
+    patched = vcat(words[1:capabilities_end-1], declarations[1:capability_words],
+                   words[capabilities_end:extensions_end-1], declarations[capability_words+1:end],
+                   words[extensions_end:end])
+    return Vector{UInt8}(reinterpret(UInt8, patched))
+end
+
+# the NUL-terminated string literal in `words[first:last]`
+function spirv_string(words, first, last)
+    bytes = reinterpret(UInt8, words[first:last])
+    return String(bytes[1:something(findfirst(iszero, bytes), length(bytes) + 1) - 1])
+end
+
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
@@ -322,9 +379,10 @@ end
             options = Ref(SPIRVCompileOptions(Int === Int64, version.major, version.minor,
                                               Base.unsafe_convert(Cstring, extensions),
                                               #=opt_level=# 2))
-            external_compile(backend, input, options,
-                             "Failed to compile to SPIR-V with the SPIR-V back-end")
+            obj = external_compile(backend, input, options,
+                                   "Failed to compile to SPIR-V with the SPIR-V back-end")
         end
+        add_float_controls2_declarations(obj)
     elseif target.backend === :khronos
         # translate in-process through libllvm_spirv. like `llvm-spirv`, the translator
         # takes the triple from the module and rejects unknown extensions.
