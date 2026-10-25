@@ -525,6 +525,38 @@ end
     end
 end
 
+@testset "struct layouts" begin
+    # on 32-bit x86, Julia places `Int64` and `Float64` fields at 4-byte offsets, which SPIR-V
+    # consumers (applying OpenCL C's rules) only reproduce from packed structs
+    mod = @eval module $(gensym())
+        struct Params
+            a::Int32
+            b::Int64
+            c::Float64
+            d::Int32
+        end
+        function kernel(y, p)
+            unsafe_store!(y, p.b + p.c + p.d)
+            return
+        end
+    end
+    # code is generated for Julia's layout
+    JuliaContext() do ctx
+        T = convert(LLVMType, mod.Params)
+        dl = LLVM.DataLayout(GPUCompiler.llvm_datalayout(SPIRVCompilerTarget(; backend)))
+        @test [LLVM.offsetof(dl, T, i) for i in 1:4] == fieldoffset.(mod.Params, 1:4)
+        @test LLVM.abi_size(dl, T) == sizeof(mod.Params)
+    end
+
+    # which SPIR-V consumers only reproduce from packed structs
+    packed = Base.datatype_alignment(Int64) < 8
+    @test @filecheck begin
+        @check cond=packed "OpDecorate {{%.+}} CPacked"
+        @check_not cond=!packed "CPacked"
+        SPIRV.code_native(mod.kernel, Tuple{Ptr{Float64}, mod.Params}; backend, kernel=true)
+    end
+end
+
 @testset "inlining of throwing callees" begin
     mod = @eval module $(gensym())
         @noinline function guard(x)
@@ -745,4 +777,102 @@ end
     @test occursin("@odd = internal addrspace(3) global { [6 x i8], [2 x i8] } zeroinitializer, align 4", ir)
     @test occursin("@even = internal addrspace(3) global [8 x i8] zeroinitializer, align 8", ir)
     @test occursin("getelementptr i8, ptr addrspace(3) @odd", ir)
+end
+
+@testset "struct layout preservation" begin
+    # Julia's layout on 32-bit x86, and the one SPIR-V consumers use
+    julia = "e-p:32:32-i64:32:64-f64:32:64"
+    consumer = "e-p:32:32-i64:64"
+    source = """
+        target datalayout = "$julia"
+        %S = type { i8, i64 }
+        %N = type { i32, %S }
+        %U = type { i32, i32 }
+
+        @g = global [2 x %S] [%S { i8 1, i64 2 }, %S zeroinitializer]
+        @p = global ptr getelementptr (%S, ptr @g, i32 1, i32 1)
+        @table = global [1 x ptr] [ptr getelementptr inbounds (%S, ptr @g, i32 0, i32 1)]
+        @u = global %U { i32 1, i32 2 }
+
+        declare void @callee(ptr byval(%S))
+
+        define i64 @kernel(ptr byval(%N) %n, i32 %i) {
+          %a = alloca %S
+          %agg = load %S, ptr @g
+          store %S %agg, ptr %a
+          call void @callee(ptr byval(%S) %a)
+          %f = getelementptr %N, ptr %n, i32 0, i32 1, i32 1
+          %x = load i64, ptr %f
+          %e = getelementptr [2 x %S], ptr @g, i32 0, i32 %i, i32 1
+          %y = load i64, ptr %e
+          %w = getelementptr %S, ptr %n, i64 4294967296, i32 1
+          store i64 %y, ptr %w
+          %w2 = getelementptr %S, ptr %n, i128 18446744073709551617, i32 1
+          store i64 %y, ptr %w2
+          %v = getelementptr %U, ptr @u, i32 0, i32 1
+          %z = load i32, ptr %v
+          %z64 = sext i32 %z to i64
+          %xy = add i64 %x, %y
+          %r = add i64 %xy, %z64
+          ret i64 %r
+        }"""
+    ir = Context(; opaque_pointers=true) do ctx
+        mod = parse(LLVM.Module, source)
+        @test GPUCompiler.preserve_struct_layouts!(mod, consumer)
+        verify(mod)
+        string(mod)
+    end
+    S = "<{ i8, [3 x i8], i64 }>"
+    # memory gets packed types with Julia's offsets, sizes and alignment
+    @test occursin("@g = global [2 x $S] [$S <{ i8 1, [3 x i8] zeroinitializer, i64 2 }>, $S zeroinitializer], align 4", ir)
+    @test occursin("@p = global ptr getelementptr (i8, ptr @g, i32 16)", ir)
+    @test occursin("@table = global [1 x ptr] [ptr getelementptr inbounds (i8, ptr @g, i32 4)]", ir)
+    @test occursin("define i64 @kernel(ptr byval(<{ i32, $S }>) align 4 %n, i32 %i)", ir)
+    @test occursin("declare void @callee(ptr byval($S) align 4)", ir)
+    @test occursin("call void @callee(ptr byval($S) align 4 %a)", ir)
+    # (keeping the preferred alignment of the original alloca)
+    @test occursin("%a = alloca $S, align 8", ir)
+    # addresses are computed as byte offsets, also for aggregate loads and stores
+    @test occursin("%f = getelementptr i8, ptr %n, i32 8", ir)
+    @test occursin(r"mul i32 %i, 12\n.*add i32 4, %\d+\n.*%e = getelementptr i8, ptr @g, i32 %\d+", ir)
+    # (with the index width of the pointer, like LLVM)
+    @test occursin("%w = getelementptr i8, ptr %n, i32 4", ir)
+    @test occursin("%w2 = getelementptr i8, ptr %n, i32 16", ir)
+    @test occursin("load i64, ptr getelementptr inbounds (i8, ptr @g, i32 4), align 4", ir)
+    @test occursin(r"store i64 %\d+, ptr %\d+, align 4", ir)
+    @test !occursin(r"(load|alloca|getelementptr|byval\() %S", ir) && !occursin("%N", ir)
+    # structs whose layout is the same are left alone
+    @test occursin("@u = global %U { i32 1, i32 2 }", ir)
+    @test occursin("%v = getelementptr %U, ptr @u, i32 0, i32 1", ir)
+
+    # with typed pointers, the pointers are cast to and from bytes
+    if LLVM.version() < v"17"
+        ir = Context(; opaque_pointers=false) do ctx
+            mod = parse(LLVM.Module, """
+                target datalayout = "$julia"
+                %S = type { i8, i64 }
+                @g = global %S { i8 1, i64 2 }
+                define i64 @kernel(%S* %p) {
+                  %f = getelementptr %S, %S* %p, i32 0, i32 1
+                  %x = load i64, i64* %f
+                  %y = load i64, i64* getelementptr (%S, %S* @g, i32 0, i32 1)
+                  %r = add i64 %x, %y
+                  ret i64 %r
+                }""")
+            @test GPUCompiler.preserve_struct_layouts!(mod, consumer)
+            verify(mod)
+            string(mod)
+        end
+        @test occursin("@g = global $S <{ i8 1, [3 x i8] zeroinitializer, i64 2 }>, align 4", ir)
+        @test occursin(r"%f = bitcast i8\* %\d+ to i64\*", ir)
+        @test occursin(r"getelementptr (inbounds )?\(i8, i8\* .*@g.*, i32 4\)", ir)
+    end
+
+    # nothing changes when the layouts agree
+    Context(; opaque_pointers=true) do ctx
+        mod = parse(LLVM.Module, source)
+        before = string(mod)
+        @test !GPUCompiler.preserve_struct_layouts!(mod, julia)
+        @test string(mod) == before
+    end
 end
