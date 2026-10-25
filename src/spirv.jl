@@ -83,7 +83,7 @@ function llvm_triple(target::SPIRVCompilerTarget)
         environment = "unknown"
         return "$architecture$subarchitecture-$vendor-$os-$environment"
     elseif target.backend == :khronos
-        return Int===Int64 ? "spir64-unknown-unknown" : "spirv-unknown-unknown"
+        return Int===Int64 ? "spir64-unknown-unknown" : "spir-unknown-unknown"
     end
 end
 

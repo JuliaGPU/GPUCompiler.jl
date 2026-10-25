@@ -292,6 +292,17 @@ end
 
 @testset "asm" begin
 
+@testset "addressing model" begin
+    # physical addressing with the host's pointer size
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+    @test @filecheck begin
+        @check "OpMemoryModel Physical$(8*sizeof(Int)) OpenCL"
+        SPIRV.code_native(mod.kernel, Tuple{}; backend, kernel=true)
+    end
+end
+
 @testset "trap removal" begin
     mod = @eval module $(gensym())
         function kernel(x)
