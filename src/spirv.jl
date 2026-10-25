@@ -139,9 +139,24 @@ function spirv_extensions(target::SPIRVCompilerTarget)
     return spec
 end
 
-llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
+# the data layout SPIR-V consumers use, which aligns `long` and `double` to 8 bytes like
+# OpenCL C does (SPIR-V itself does not carry a data layout)
+spirv_datalayout() = Int===Int64 ?
     "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-n8:16:32:64-G1" :
     "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-n8:16:32:64-G1"
+
+# code is generated for Julia's layout of the host's data, which on 32-bit x86 (other than
+# Windows) aligns `Int64` and `Float64` to 4 bytes. `preserve_struct_layouts!` makes the
+# layout explicit before handing the module to the back-end.
+function llvm_datalayout(::SPIRVCompilerTarget)
+    dl = spirv_datalayout()
+    i64 = 8 * Base.datatype_alignment(Int64)
+    f64 = 8 * Base.datatype_alignment(Float64)
+    if i64 != 64 || f64 != 64
+        dl = replace(dl, "-i64:64-" => "-i64:$i64:64-f64:$f64:64-")
+    end
+    return dl
+end
 
 
 ## job
@@ -310,6 +325,11 @@ end
     # the LLVM to SPIR-V translator does not support the freeze instruction
     # (SPIRV-LLVM-Translator#1140)
     rm_freeze!(job, mod)
+
+    # SPIR-V carries no data layout, so make Julia's explicit where it differs from OpenCL's
+    if llvm_datalayout(target) != spirv_datalayout()
+        preserve_struct_layouts!(mod)
+    end
 
     # translate to SPIR-V
     input = bitcode(mod)
@@ -1168,16 +1188,36 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
 
     # generate the wrapper function type & definition: byval params become pointers to a struct
     # wrapping the value, and the body GEPs into that struct to recover the original pointer.
-    wrapper(i) = LLVM.StructType([convert(LLVMType, types[i])])
-    new_types = Union{Nothing,LLVM.LLVMType}[
-        byval[i] ? LLVM.PointerType(wrapper(i), ft.parameters[i].addrspace) : nothing
-        for i in 1:length(ft.parameters)]
-    new_f = clone_with_converted_args!(mod, f, new_types,
-        (builder, param, i) -> struct_gep!(builder, wrapper(i), param, 0))
+    # the struct has Julia's layout, also if SPIR-V consumers would lay it out differently
+    # (see `preserve_struct_layouts!`), in which case the value is at its start.
+    new_f = @dispose cdl=LLVM.DataLayout(spirv_datalayout()) begin
+        layouts = StructLayouts(mod.datalayout, cdl)
+        wrapper(i) = packed(layouts, LLVM.StructType([types[i]]))
+        new_types = Union{Nothing,LLVM.LLVMType}[
+            byval[i] ? LLVM.PointerType(wrapper(i), ft.parameters[i].addrspace) : nothing
+            for i in 1:length(ft.parameters)]
+        function unwrap(builder, param, i)
+            if !affected(layouts, types[i])
+                struct_gep!(builder, wrapper(i), param, 0)
+            elseif layouts.typed
+                bitcast!(builder, param, ft.parameters[i])
+            else
+                param
+            end
+        end
+        new_f = clone_with_converted_args!(mod, f, new_types, unwrap)
 
-    # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
-    for i in 1:length(byval)
-        byval[i] && push!(new_f.parameter_attributes[i], TypeAttribute(:byval, wrapper(i)))
+        # apply byval attributes again (`clone_into!` didn't due to the type mismatch)
+        for i in 1:length(byval)
+            byval[i] || continue
+            attrs = new_f.parameter_attributes[i]
+            push!(attrs, TypeAttribute(:byval, wrapper(i)))
+            # packed structs are byte-aligned, so keep Julia's alignment explicitly
+            if affected(layouts, types[i]) && get(attrs, :align, nothing) === nothing
+                push!(attrs, EnumAttribute(:align, LLVM.abi_alignment(mod.datalayout, types[i])))
+            end
+        end
+        new_f
     end
 
     # remove the old function
@@ -1194,4 +1234,356 @@ function wrap_byval(@nospecialize(job::CompilerJob), mod::LLVM.Module, f::LLVM.F
         end
     end
     return new_f
+end
+
+
+## struct layouts
+
+# SPIR-V consumers lay out structs by OpenCL C's rules (`spirv_datalayout`), while code is
+# generated for Julia's layout (`llvm_datalayout`), which on 32-bit x86 places `Int64` and
+# `Float64` fields at 4-byte offsets. Make that layout explicit wherever a struct type
+# describes memory, the way Clang does for C structs that LLVM's natural layout can't
+# express: allocas, globals and `byval`-like parameters get a packed struct with explicit
+# padding (decorated `CPacked` in SPIR-V), and the addresses into them are computed as byte
+# offsets. Aggregate values in registers have no layout and keep their types. This is a
+# no-op when both layouts agree, as they do on 64-bit hosts.
+
+# the layouts of types under Julia's data layout and under the consumers'
+struct StructLayouts
+    julia::LLVM.DataLayout
+    consumer::LLVM.DataLayout
+    typed::Bool
+    affected::Dict{LLVMType,Bool}
+    packed::Dict{LLVMType,LLVMType}
+    # the (0-based) index of each field of a struct in its packed type
+    fields::Dict{LLVMType,Vector{Int}}
+end
+StructLayouts(julia, consumer) =
+    StructLayouts(julia, consumer, supports_typed_pointers(context()), Dict(), Dict(), Dict())
+
+# whether the layout of `T` differs between Julia's and the consumers' data layout
+function affected(l::StructLayouts, @nospecialize(T::LLVMType))
+    get!(l.affected, T) do
+        if T isa LLVM.StructType
+            !isopaque(T) &&
+                (LLVM.abi_size(l.julia, T) != LLVM.abi_size(l.consumer, T) ||
+                 any(i -> LLVM.offsetof(l.julia, T, i) != LLVM.offsetof(l.consumer, T, i),
+                     1:length(T.elements)) ||
+                 any(elT -> affected(l, elT), T.elements))
+        elseif T isa LLVM.ArrayType
+            affected(l, T.element_type)
+        else
+            false
+        end
+    end
+end
+
+# a type with Julia's layout under any data layout
+function packed(l::StructLayouts, @nospecialize(T::LLVMType))
+    affected(l, T) || return T
+    get!(l.packed, T) do
+        T isa LLVM.ArrayType && return LLVM.ArrayType(packed(l, T.element_type), T.length)
+        elems = LLVMType[]
+        fields = Int[]
+        offset = 0
+        for (i, elT) in enumerate(T.elements)
+            field_offset = LLVM.offsetof(l.julia, T, i)
+            if field_offset > offset
+                push!(elems, LLVM.ArrayType(LLVM.Int8Type(), field_offset - offset))
+            end
+            push!(fields, length(elems))
+            push!(elems, packed(l, elT))
+            offset = field_offset + LLVM.abi_size(l.julia, elT)
+        end
+        size = LLVM.abi_size(l.julia, T)
+        size > offset && push!(elems, LLVM.ArrayType(LLVM.Int8Type(), size - offset))
+        l.fields[T] = fields
+        LLVM.StructType(elems; packed=true)
+    end
+end
+
+# a constant of type `T`, as one of its packed type
+function packed(l::StructLayouts, c::Constant, @nospecialize(T::LLVMType))
+    affected(l, T) || return c
+    PT = packed(l, T)
+    if c isa LLVM.ConstantAggregateZero
+        return null(PT)
+    elseif c isa LLVM.PoisonValue
+        return LLVM.PoisonValue(PT)
+    elseif c isa LLVM.UndefValue
+        return LLVM.UndefValue(PT)
+    elseif T isa LLVM.ArrayType
+        return ConstantArray(PT.element_type,
+                             Constant[packed(l, c.elements[i], T.element_type)
+                                      for i in 1:T.length])
+    else
+        vals = Constant[null(elT) for elT in PT.elements]
+        for (i, elT) in enumerate(T.elements)
+            vals[l.fields[T][i]+1] = packed(l, c.elements[i], elT)
+        end
+        return ConstantStruct(PT, vals)
+    end
+end
+
+# the byte offset that the indices of a GEP over `T` add: as a constant, and the dynamic
+# indices with their stride. like LLVM, compute with the width of the index type, `bits`.
+wrap_index(x::Integer, bits) = (Int64(x) << (64 - bits)) >> (64 - bits)
+function byte_offset(l::StructLayouts, @nospecialize(T::LLVMType), indices, bits)
+    offset = Int64(0)
+    scaled = Tuple{Value,Int}[]
+    for (k, idx) in enumerate(indices)
+        if k > 1 && T isa LLVM.StructType
+            field = convert(Int, idx::ConstantInt)
+            offset += LLVM.offsetof(l.julia, T, field+1)
+            T = T.elements[field+1]
+            continue
+        end
+        k > 1 && (T = T.element_type)
+        stride = LLVM.abi_size(l.julia, T)
+        if idx isa ConstantInt
+            # (only the low bits matter, so even wider ones fit in 64)
+            idx.value_type.width > 64 && (idx = const_trunc(idx, LLVM.Int64Type()))
+            offset += stride * wrap_index(convert(Int64, idx), bits)
+        else
+            idx.value_type isa LLVM.VectorType &&
+                error("Unsupported vector GEP over a struct whose layout must be preserved")
+            push!(scaled, (idx, stride))
+        end
+    end
+    return wrap_index(offset, bits), scaled
+end
+
+index_type(l::StructLayouts, ptr::Value) =
+    LLVM.IntType(8 * LLVM.pointersize(l.julia, ptr.value_type.addrspace))
+pointer_type(l::StructLayouts, @nospecialize(T::LLVMType), ptr::Value) =
+    l.typed ? LLVM.PointerType(T, ptr.value_type.addrspace) : ptr.value_type
+
+# a constant with the GEPs over affected types it contains computed as byte offsets
+function byte_offsets(l::StructLayouts, c::Constant)
+    if c isa LLVM.ConstantStruct || c isa LLVM.ConstantArray
+        vals = Constant[byte_offsets(l, val) for val in c.elements]
+        all(((val, new),) -> val == new, zip(c.elements, vals)) && return c
+        return c isa LLVM.ConstantStruct ? ConstantStruct(c.value_type, vals) :
+                                           ConstantArray(c.value_type.element_type, vals)
+    end
+    c isa ConstantExpr || return c
+    ops = Constant[byte_offsets(l, op) for op in c.operands]
+    if c.opcode == LLVM.Opcode.GetElementPtr && affected(l, c.source_element_type)
+        ptr = ops[1]
+        T_idx = index_type(l, ptr)
+        offset, scaled = byte_offset(l, c.source_element_type, ops[2:end], T_idx.width)
+        @assert isempty(scaled)
+        T_ptr = ptr.value_type
+        bytes = l.typed ? const_bitcast(ptr, LLVM.PointerType(LLVM.Int8Type(), T_ptr.addrspace)) :
+                          ptr
+        gep = (c.inbounds ? const_inbounds_gep : const_gep)(
+            LLVM.Int8Type(), bytes, [ConstantInt(T_idx, offset)])
+        return l.typed ? const_bitcast(gep, c.value_type) : gep
+    end
+    all(((op, new),) -> op == new, zip(c.operands, ops)) && return c
+    if c.opcode == LLVM.Opcode.GetElementPtr
+        return const_gep(c.source_element_type, ops[1], ops[2:end])
+    elseif c.opcode == LLVM.Opcode.BitCast
+        return const_bitcast(ops[1], c.value_type)
+    elseif c.opcode == LLVM.Opcode.AddrSpaceCast
+        return const_addrspacecast(ops[1], c.value_type)
+    elseif c.opcode == LLVM.Opcode.PtrToInt
+        return const_ptrtoint(ops[1], c.value_type)
+    else
+        error("Unsupported constant expression over a struct whose layout must be preserved: $c")
+    end
+end
+
+# a pointer `offset` bytes past `ptr`, of type `T_ptr`
+function byte_pointer!(l::StructLayouts, builder::IRBuilder, ptr::Value, offset::Integer,
+                       scaled, @nospecialize(T_ptr::LLVMType); inbounds::Bool=true)
+    if offset == 0 && isempty(scaled)
+        return l.typed && ptr.value_type != T_ptr ? bitcast!(builder, ptr, T_ptr) : ptr
+    end
+    T_idx = index_type(l, ptr)
+    total = offset == 0 ? nothing : ConstantInt(T_idx, offset)
+    for (idx, stride) in scaled
+        if idx.value_type.width < T_idx.width
+            idx = sext!(builder, idx, T_idx)
+        elseif idx.value_type.width > T_idx.width
+            idx = trunc!(builder, idx, T_idx)
+        end
+        idx = mul!(builder, idx, ConstantInt(T_idx, stride))
+        total = total === nothing ? idx : add!(builder, total, idx)
+    end
+    if l.typed
+        ptr = bitcast!(builder, ptr, LLVM.PointerType(LLVM.Int8Type(), ptr.value_type.addrspace))
+    end
+    ptr = (inbounds ? inbounds_gep! : gep!)(builder, LLVM.Int8Type(), ptr, Value[total])
+    return l.typed ? bitcast!(builder, ptr, T_ptr) : ptr
+end
+
+# load or store the aggregate `T` at `ptr`, one part with the same layout at a time
+function load_parts!(l::StructLayouts, builder::IRBuilder, @nospecialize(T::LLVMType),
+                     ptr::Value, offset::Integer, align::Integer)
+    if !affected(l, T)
+        part = byte_pointer!(l, builder, ptr, offset, (), pointer_type(l, T, ptr))
+        load = load!(builder, T, part)
+        load.alignment = offset == 0 ? align : gcd(align, offset)
+        return load
+    end
+    agg = UndefValue(T)
+    for i in 0:(T isa LLVM.StructType ? length(T.elements) : T.length)-1
+        elT, elOffset = T isa LLVM.StructType ?
+            (T.elements[i+1], LLVM.offsetof(l.julia, T, i+1)) :
+            (T.element_type, i * LLVM.abi_size(l.julia, T.element_type))
+        val = load_parts!(l, builder, elT, ptr, offset + elOffset, align)
+        agg = insert_value!(builder, agg, val, i)
+    end
+    return agg
+end
+function store_parts!(l::StructLayouts, builder::IRBuilder, val::Value, ptr::Value,
+                      offset::Integer, align::Integer)
+    T = val.value_type
+    if !affected(l, T)
+        part = byte_pointer!(l, builder, ptr, offset, (), pointer_type(l, T, ptr))
+        store = store!(builder, val, part)
+        store.alignment = offset == 0 ? align : gcd(align, offset)
+        return
+    end
+    for i in 0:(T isa LLVM.StructType ? length(T.elements) : T.length)-1
+        elOffset = T isa LLVM.StructType ? LLVM.offsetof(l.julia, T, i+1) :
+                                           i * LLVM.abi_size(l.julia, T.element_type)
+        store_parts!(l, builder, extract_value!(builder, val, i), ptr, offset + elOffset,
+                     align)
+    end
+end
+
+# the attributes whose type describes the memory a pointer argument refers to
+const memory_type_attributes = (:byval, :sret, :byref, :inalloca, :preallocated,
+                                :elementtype)
+
+# replace the memory types of affected structs in the attributes of a pointer argument
+function packed_attributes!(l::StructLayouts, attrs)
+    changed = false
+    for kind in memory_type_attributes
+        attr = get(attrs, kind, nothing)
+        attr === nothing && continue
+        T = attr.value
+        affected(l, T) || continue
+        # with typed pointers, the type of the pointer would have to change too
+        l.typed && error("Unsupported $kind argument of a struct whose layout must be preserved")
+        delete!(attrs, kind)
+        push!(attrs, TypeAttribute(kind, packed(l, T)))
+        # packed structs are byte-aligned, so keep Julia's alignment explicitly
+        if kind !== :elementtype && get(attrs, :align, nothing) === nothing
+            push!(attrs, EnumAttribute(:align, LLVM.abi_alignment(l.julia, T)))
+        end
+        changed = true
+    end
+    return changed
+end
+
+preserve_struct_layouts!(mod::LLVM.Module, consumer::String=spirv_datalayout()) =
+    @dispose cdl=LLVM.DataLayout(consumer) begin
+        preserve_struct_layouts!(StructLayouts(mod.datalayout, cdl), mod)
+    end
+
+# Kernel arguments are handled when wrapping them (see `wrap_byval`), as that is where the
+# kernel function gets replaced.
+function preserve_struct_layouts!(l::StructLayouts, mod::LLVM.Module)
+    changed = false
+
+    # globals
+    for gv in collect(mod.globals)
+        T = gv.global_value_type
+        affected(l, T) || continue
+        new_gv = GlobalVariable(mod, packed(l, T), "", gv.value_type.addrspace)
+        copy_attributes!(new_gv, gv)
+        new_gv.linkage = gv.linkage
+        new_gv.constant = gv.constant
+        new_gv.comdat = gv.comdat
+        for (kind, md) in gv.metadata
+            add_metadata!(new_gv, kind, md)
+        end
+        new_gv.alignment = max(gv.alignment, LLVM.abi_alignment(l.julia, T))
+        init = gv.initializer
+        init === nothing || (new_gv.initializer = packed(l, init, T))
+        replace_uses!(gv, l.typed ? const_bitcast(new_gv, gv.value_type) : new_gv)
+        take_name!(new_gv, gv)
+        erase!(gv)
+        changed = true
+    end
+    for gv in mod.globals
+        init = gv.initializer
+        init === nothing && continue
+        new_init = byte_offsets(l, init)
+        new_init == init || (gv.initializer = new_init; changed = true)
+    end
+
+    # pointer arguments, of definitions and used declarations
+    for f in mod.functions
+        isdeclaration(f) && isempty(f.uses) && continue
+        for i in 1:length(f.parameters)
+            changed |= packed_attributes!(l, f.parameter_attributes[i])
+        end
+    end
+
+    # instructions
+    @dispose builder=IRBuilder() begin
+        for f in mod.functions, bb in f.blocks, inst in collect(bb.instructions)
+            position!(builder, LLVM.before(inst))
+
+            for (i, op) in enumerate(inst.operands)
+                op isa Constant || continue
+                new_op = byte_offsets(l, op)
+                new_op == op && continue
+                inst.operands[i] = new_op
+                changed = true
+            end
+
+            if inst isa LLVM.AllocaInst && affected(l, inst.allocated_type)
+                T = inst.allocated_type
+                count = inst.operands[1]
+                align = max(inst.alignment, LLVM.abi_alignment(l.julia, T))
+                addrspace = inst.value_type.addrspace
+                new_inst = count isa ConstantInt && convert(Int, count) == 1 ?
+                           alloca!(builder, packed(l, T); align, addrspace) :
+                           array_alloca!(builder, packed(l, T), count; align, addrspace)
+                copy_metadata!(new_inst, inst)
+                replace_uses!(inst, l.typed ? bitcast!(builder, new_inst, inst.value_type) :
+                                              new_inst)
+                take_name!(new_inst, inst)
+                erase!(inst)
+                changed = true
+            elseif inst isa LLVM.GetElementPtrInst && affected(l, inst.source_element_type)
+                ptr, indices... = inst.operands
+                offset, scaled = byte_offset(l, inst.source_element_type, indices,
+                                             index_type(l, ptr).width)
+                new_inst = byte_pointer!(l, builder, ptr, offset, scaled, inst.value_type;
+                                         inst.inbounds)
+                replace_uses!(inst, new_inst)
+                # (the GEP may have folded into an existing value, which keeps its name)
+                new_inst isa Instruction && new_inst != ptr && take_name!(new_inst, inst)
+                erase!(inst)
+                changed = true
+            elseif inst isa LLVM.LoadInst && affected(l, inst.value_type)
+                (inst.volatile || is_atomic_memop(inst)) &&
+                    error("Unsupported volatile or atomic load of a struct whose layout must be preserved")
+                val = load_parts!(l, builder, inst.value_type, inst.operands[1], 0,
+                                  inst.alignment)
+                replace_uses!(inst, val)
+                erase!(inst)
+                changed = true
+            elseif inst isa LLVM.StoreInst && affected(l, inst.operands[1].value_type)
+                (inst.volatile || is_atomic_memop(inst)) &&
+                    error("Unsupported volatile or atomic store of a struct whose layout must be preserved")
+                store_parts!(l, builder, inst.operands[1], inst.operands[2], 0,
+                             inst.alignment)
+                erase!(inst)
+                changed = true
+            elseif inst isa LLVM.CallBase
+                for i in 1:length(inst.arguments)
+                    changed |= packed_attributes!(l, inst.argument_attributes[i])
+                end
+            end
+        end
+    end
+
+    return changed
 end
