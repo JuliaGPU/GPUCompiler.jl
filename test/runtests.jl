@@ -60,6 +60,14 @@ if filter_tests!(testsuite, args)
         @warn "AMDGPU back-end not available; skipping GCN tests"
         delete!(testsuite, "gcn")
     end
+    if Sys.WORD_SIZE == 32
+        # Metal and BPF targets are 64-bit only, and Julia's codegen assumes pointers as
+        # large as the host's
+        @warn "32-bit host; skipping Metal and BPF tests"
+        for key in collect(keys(testsuite))
+            (startswith(key, "metal") || startswith(key, "bpf")) && delete!(testsuite, key)
+        end
+    end
 end
 
 runtests(GPUCompiler, args; testsuite, init_code)

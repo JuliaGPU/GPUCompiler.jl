@@ -157,7 +157,8 @@ end
                          atomics) == []
     for body in ["%r = atomicrmw add ptr addrspace(1) %g, i64 1 monotonic, align 8",
                  "%r = cmpxchg ptr addrspace(3) %l, i64 0, i64 1 monotonic monotonic, align 8",
-                 "%r = atomicrmw xchg ptr addrspace(1) %g, ptr null monotonic, align 8",
+                 # (pointers are 64-bit on 64-bit hosts only)
+                 (sizeof(Int) == 8 ? ["%r = atomicrmw xchg ptr addrspace(1) %g, ptr null monotonic, align 8"] : [])...,
                  "%r = load atomic double, ptr addrspace(1) %g monotonic, align 8",
                  "%r = atomicrmw fmax ptr addrspace(1) %g, double 1.0 monotonic, align 8",
                  # (a generic pointer needs the native addition for both global and local memory)
@@ -181,6 +182,11 @@ function builtin(name, T, as; operands=1)
 end
 
 const MEMORY = 0x380    # SubgroupMemory | WorkgroupMemory | CrossWorkgroupMemory
+
+# pointers are as large as the host's (the target is spirv32 on 32-bit hosts), and their
+# atomics are integer ones of that size
+const IPTR = "i$(8sizeof(Int))"
+const UPTR = sizeof(Int) == 8 ? "%ulong" : "%uint"
 
 @testset "32-bit pointers" begin
     # pointers are as large as the data layout says, so with 32-bit pointers, their atomics
@@ -339,10 +345,10 @@ end
         store ptr %old, ptr addrspace(1) %g
         """; backend)
     @test filecheck(ir,
-        "CHECK: [[NEW:%[0-9a-z]+]] = ptrtoint ptr %p to i64",
-        "CHECK: [[OLD:%[0-9a-z]+]] = call i64 @$(builtin("CompareExchange", "i64", 1; operands=2))(ptr addrspace(1) %g, i32 1, i32 $MEMORY, i32 $MEMORY, i64 [[NEW]], i64 0)",
-        "CHECK: inttoptr i64 {{%[0-9]+}} to ptr")
-    @test filecheck(asm, "CHECK: OpAtomicCompareExchange %ulong")
+        "CHECK: [[NEW:%[0-9a-z]+]] = ptrtoint ptr %p to $IPTR",
+        "CHECK: [[OLD:%[0-9a-z]+]] = call $IPTR @$(builtin("CompareExchange", IPTR, 1; operands=2))(ptr addrspace(1) %g, i32 1, i32 $MEMORY, i32 $MEMORY, $IPTR [[NEW]], $IPTR 0)",
+        "CHECK: inttoptr $IPTR {{%[0-9]+}} to ptr")
+    @test filecheck(asm, "CHECK: OpAtomicCompareExchange $UPTR")
 end
 
 @testset "floating-point and pointer accesses" begin
@@ -357,13 +363,13 @@ end
         "CHECK: call i32 @$(builtin("Load", "i32", 1; operands=0))(ptr addrspace(1) %g, i32 1, i32 $(MEMORY | 0x2))",
         "CHECK: call void @$(builtin("Store", "i64", 3))(ptr addrspace(3) %l, i32 2, i32 $(MEMORY | 0x4), i64 4607182418800017408)",
         "CHECK: call i32 @$(builtin("Exchange", "i32", 1))(ptr addrspace(1) %g, i32 1, i32 $MEMORY, i32 %",
-        "CHECK: [[P:%[0-9a-z]+]] = ptrtoint ptr %p to i64",
-        "CHECK: call i64 @$(builtin("Exchange", "i64", 4))(ptr addrspace(4) %generic, i32 1, i32 $MEMORY, i64 [[P]])")
+        "CHECK: [[P:%[0-9a-z]+]] = ptrtoint ptr %p to $IPTR",
+        "CHECK: call $IPTR @$(builtin("Exchange", IPTR, 4))(ptr addrspace(4) %generic, i32 1, i32 $MEMORY, $IPTR [[P]])")
     @test filecheck(asm,
         "CHECK: OpAtomicLoad %uint %g 1 $(MEMORY | 0x2)",
         "CHECK: OpAtomicStore %l 2 $(MEMORY | 0x4) 4607182418800017408",
         "CHECK: OpAtomicExchange %uint %g 1 $MEMORY",
-        "CHECK: OpAtomicExchange %ulong {{%.+}} 1 $MEMORY")
+        "CHECK: OpAtomicExchange $UPTR {{%.+}} 1 $MEMORY")
 end
 
 @testset "floating-point addition" begin
