@@ -623,6 +623,68 @@ end
     end
 end
 
+@testset "native integer widths" begin
+    # without native integer widths in the datalayout, InstCombine narrows this switch to
+    # an i2, which the Khronos translator does not support
+    mod = @eval module $(gensym())
+        function kernel(out, x)
+            v = unsafe_load(x) & 3
+            if v == 1
+                unsafe_store!(out, 10)
+            elseif v == 2
+                unsafe_store!(out, 20)
+            elseif v == 3
+                unsafe_store!(out, 30)
+            end
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6kernel"
+        @check_not "{{[^0-9A-Za-z_]i2[^0-9]}}"
+        @check "switch i64"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Int64}, Ptr{Int64}}; backend, kernel=true)
+    end
+end
+
+@testset "no switch lookup tables" begin
+    # SimplifyCFG would turn these into an odd-width bitmap and a lookup table once the
+    # datalayout declares native integer widths
+    mod = @eval module $(gensym())
+        function bitmap(out, x)
+            v = unsafe_load(x)
+            r = v == 0 ? Int8(5) : v == 1 ? Int8(17) : v == 2 ? Int8(9) :
+                v == 3 ? Int8(100) : v == 4 ? Int8(42) : Int8(0)
+            unsafe_store!(out, r)
+            return
+        end
+        function table(out, x)
+            v = unsafe_load(x)
+            r = v == 0 ? Int32(1000) : v == 1 ? Int32(77) : v == 2 ? Int32(123456) :
+                v == 3 ? Int32(9) : v == 4 ? Int32(31337) : Int32(0)
+            unsafe_store!(out, r)
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6bitmap"
+        @check_not "switch."
+        @check "ret void"
+        SPIRV.code_llvm(mod.bitmap, Tuple{Ptr{Int8}, Ptr{Int64}}; backend, kernel=true)
+    end
+
+    @test @filecheck begin
+        @check_not "switch.table"
+        @check_label "define spir_kernel void @_Z5table"
+        @check_not "switch."
+        @check "ret void"
+        SPIRV.code_llvm(mod.table, Tuple{Ptr{Int32}, Ptr{Int64}}; backend, kernel=true,
+                        dump_module=true)
+    end
+end
+
 end
 
 @testset "min and max lowering" begin

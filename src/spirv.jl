@@ -140,8 +140,8 @@ function spirv_extensions(target::SPIRVCompilerTarget)
 end
 
 llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
-    "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1" :
-    "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1"
+    "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-n8:16:32:64-G1" :
+    "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-n8:16:32:64-G1"
 
 
 ## job
@@ -150,6 +150,11 @@ llvm_datalayout(::SPIRVCompilerTarget) = Int===Int64 ?
 # which the back-ends translate (plain or Itanium-mangled)
 isintrinsic(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}), fn::String) =
     occursin(r"^(_Z\d+)?__spirv_", fn)
+
+# lookup bitmaps are integers of the table's bit size (e.g. i24), which the Khronos
+# translator does not support
+optimization_options(@nospecialize(job::CompilerJob{SPIRVCompilerTarget})) =
+    (; switch_to_lookup=false)
 
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                         entry::LLVM.Function)
