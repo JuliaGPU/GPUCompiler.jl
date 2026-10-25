@@ -582,6 +582,36 @@ end
         end
     end
 
+    @testset "runtime functions returning through sret" begin
+        # Julia returns values wider than a pointer through an `sret` argument (on 32-bit
+        # hosts, this includes the `Int64` returned by `unbox_int64`), while callers expect
+        # runtime functions to return by value. (`@noinline` checks that the wrapped
+        # function keeps its attributes valid.)
+        mod = @eval module $(gensym())
+            @noinline sret_function(x) = (x, x)
+        end
+        rt = GPUCompiler.Runtime.RuntimeMethodInstance(
+            mod.sret_function, NTuple{2,Int64}, (Int64,), :sret_function,
+            nothing, nothing, "gpu_sret_function")
+        job, _ = Native.create_job(mod.sret_function, (Int64,))
+        config = GPUCompiler.runtime_config(job)
+        JuliaContext() do ctx
+            expected_ft = GPUCompiler.runtime_function_type(job, rt)
+            @test expected_ft.return_type isa LLVM.ArrayType
+
+            # the second emission is served from the bitcode cache (when supported)
+            for i in 1:2
+                ir = LLVM.Module("runtime")
+                GPUCompiler.emit_function!(ir, GPUCompiler.Relocations(), config,
+                                           job.source, rt, job.world)
+                f = ir.functions["gpu_sret_function"]
+                @test f.function_type == expected_ft
+                @test !isdeclaration(f)
+                verify(ir)
+            end
+        end
+    end
+
     @testset "runtime relocations" begin
         # runtime functions like `box_bool` may reference Julia singletons through
         # `julia.constgv` globals. Keep their Julia identities with the cached bitcode
