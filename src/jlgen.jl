@@ -705,6 +705,25 @@ function free_native_code(native_code::Ptr{Cvoid})
     end
 end
 
+# Replace the functions emitted for `dup` by those of `kept`, two `compiled` entries for the
+# same method instance, if their CodeInstances share an ABI (as in Julia's `jl_is_ci_equiv`).
+# Otherwise both copies stay, but only `kept` is recorded in `compiled`.
+function merge_functions!(mod::LLVM.Module, kept, dup)
+    kept.ci.rettype === dup.ci.rettype || return
+    names = ((kept.func, dup.func), (kept.specfunc, dup.specfunc))
+    for (k, d) in names
+        (k === nothing) == (d === nothing) || return
+        k === nothing && continue
+        mod.functions[k].function_type == mod.functions[d].function_type || return
+    end
+    for (k, d) in names
+        (d === nothing || k == d) && continue
+        f = mod.functions[d]
+        replace_uses!(f, mod.functions[k])
+        erase!(f)
+    end
+end
+
 function compile_method_instance(@nospecialize(job::CompilerJob))
     if job.source.def.primary_world > job.world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
@@ -1061,12 +1080,23 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
         (; ci=ci′, func=llvm_func, specfunc=llvm_specfunc, src)
     end
 
+    # Several CIs may have been emitted for one MI: package images each carry their own CI
+    # for a callee they cached code for, and the callers invoke those CIs directly (see #1056).
+    # Valid in the same world for the same owner, they can usually substitute for each other,
+    # so keep one (the root CI for the entry point) and redirect calls to the others to it.
     for (ci′, mi) in zip(code_instances, method_instances)
-        @assert !haskey(compiled, mi)
-
         # NOTE: it's not safe to store raw LLVM functions here, since those may get
         #       removed or renamed during optimization, so we store their name instead.
-        compiled[mi] = compiled_entry(ci′)
+        entry = compiled_entry(ci′)
+        if haskey(compiled, mi)
+            kept = compiled[mi]
+            if ci′ === root_ci
+                kept, entry = entry, kept
+            end
+            merge_functions!(llvm_mod, kept, entry)
+            entry = kept
+        end
+        compiled[mi] = entry
     end
 
     if !haskey(compiled, job.source) && root_ci !== nothing
