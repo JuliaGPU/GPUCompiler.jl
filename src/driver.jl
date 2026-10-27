@@ -362,6 +362,15 @@ const __llvm_initialized = Ref(false)
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
             mark_kernel!(entry)
+
+            # device code cannot call a kernel, so it cannot recurse (clang does the same
+            # for CUDA and HIP kernels). this lets `ReversePostOrderFunctionAttrsPass` mark
+            # the functions it calls, which the AMDGPU back-end otherwise assumes may
+            # recurse, giving the kernel a dynamic stack. on the CPU, a kernel is an
+            # ordinary function that could be called back from code outside the module.
+            if !(job.config.target isa NativeCompilerTarget) && isempty(entry.uses)
+                push!(entry.function_attributes, EnumAttribute("norecurse", 0))
+            end
         end
 
         if job.config.toplevel

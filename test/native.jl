@@ -917,6 +917,23 @@ end
     @test_throws KernelError Native.code_llvm(devnull, mod.invalid_kernel, Tuple{}; kernel=true) == nothing
 end
 
+@testset "kernels may recurse" begin
+    # unlike on GPUs, a kernel is an ordinary function that may be called from elsewhere
+    mod = @eval module $(gensym())
+        import ..sink
+        @noinline child(i) = sink(i)
+        function kernel(i)
+            child(i)
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check_not "norecurse"
+        Native.code_llvm(mod.kernel, Tuple{Int64}; dump_module=true, kernel=true)
+    end
+end
+
 @testset "unbound typevars" begin
     # suppress the warning Julia emits when defining a method with an unbound typevar
     mod = redirect_stderr(devnull) do
