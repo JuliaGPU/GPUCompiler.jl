@@ -345,8 +345,8 @@ end
         error("Unsupported SPIR-V back-end $(repr(target.backend)); expected :llvm or :khronos.")
     end
 
-    dump_output() = let path = tempname(cleanup=false) * ".spv"
-        write(path, spirv)
+    dump_output(output) = let path = tempname(cleanup=false) * ".spv"
+        write(path, output)
         path
     end
 
@@ -354,7 +354,7 @@ end
         message = spirv_validate(spirv)
         if message !== nothing
             error("""Failed to validate generated SPIR-V: $message
-                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(dump_output()).""")
+                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(dump_output(spirv)).""")
         end
     end
 
@@ -362,7 +362,7 @@ end
         optimized = spirv_optimize(spirv)
         if optimized === nothing
             error("""Failed to optimize generated SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(dump_output()).""")
+                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(dump_output(spirv)).""")
         end
         spirv = optimized
     end
@@ -376,7 +376,7 @@ source_code(target::SPIRVCompilerTarget) = "spirv"
 function code_native(io::IO, job::CompilerJob{SPIRVCompilerTarget}; raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
     obj = JuliaContext() do ctx
-        obj, meta = compile(:obj, CompilerJob(job; config))
+        local obj, meta = compile(:obj, CompilerJob(job; config))
         dispose(meta.ir)
         obj
     end
@@ -766,7 +766,7 @@ function call_spirv_builtin!(builder::IRBuilder, mod::LLVM.Module, name::String,
     fn = "_Z$(length(name))$(name)$(mangled)"
     ft = LLVM.FunctionType(T_ret, LLVMType[arg.value_type for arg in args])
     f = declare!(mod, fn, ft) do
-        f = LLVM.Function(mod, fn, ft)
+        local f = LLVM.Function(mod, fn, ft)
         # (not `argmemonly` or `readonly`: they order other memory)
         for attr in (:mustprogress, :nounwind, :willreturn)
             push!(f.function_attributes, EnumAttribute(attr))

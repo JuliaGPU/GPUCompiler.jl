@@ -69,6 +69,24 @@ end
 
 ## compile-unit deduplication
 
+# Repoint the operands of the metadata graph rooted at `md` according to `replacement`.
+function repoint!(@nospecialize(md), replacement::Dict{LLVM.Metadata,LLVM.Metadata},
+                  visited::Set{LLVM.Metadata})
+    md isa LLVM.MDNode || return
+    md in visited && return
+    push!(visited, md)
+    # iterate a copy, as replacing an operand re-uniques the node
+    for (i, op) in enumerate(collect(md.operands))
+        op isa LLVM.MDNode || continue
+        repl = get(replacement, op, nothing)
+        if repl !== nothing
+            md.operands[i] = repl
+        else
+            repoint!(op, replacement, visited)
+        end
+    end
+end
+
 # LLVM does not merge distinct `DICompileUnit`s when linking. Group compile units by their
 # uniqued operands, repoint references to the first unit in each group, and shrink
 # `llvm.dbg.cu` to those canonical units.
@@ -95,34 +113,18 @@ function dedup_compile_units!(mod::LLVM.Module)
 
     # Metadata forms a graph, so walk every attachment reachable from module values.
     visited = Set{LLVM.Metadata}()
-    function repoint!(@nospecialize(md))
-        md isa LLVM.MDNode || return
-        md in visited && return
-        push!(visited, md)
-        # iterate a copy, as replacing an operand re-uniques the node
-        for (i, op) in enumerate(collect(md.operands))
-            op isa LLVM.MDNode || continue
-            repl = get(replacement, op, nothing)
-            if repl !== nothing
-                md.operands[i] = repl
-            else
-                repoint!(op)
-            end
-        end
-    end
-
     for f in mod.functions
         sp = f.subprogram
-        sp === nothing || repoint!(sp)
+        sp === nothing || repoint!(sp, replacement, visited)
         for bb in f.blocks, inst in bb.instructions
             for (kind, md) in inst.metadata
-                repoint!(md)
+                repoint!(md, replacement, visited)
             end
         end
     end
     for gv in mod.globals
         for (kind, md) in gv.metadata
-            repoint!(md)
+            repoint!(md, replacement, visited)
         end
     end
 

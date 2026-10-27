@@ -594,22 +594,23 @@ function collect_cglobal_relocations!(@nospecialize(job::CompilerJob), mod::LLVM
     return changed
 end
 
-function has_unresolved_cglobal_loads(mod::LLVM.Module, relocs::Relocations)
-    # also through merged addresses that `redirect_word_addresses!` had to leave alone
-    function has_load(value, seen=Set{LLVM.Value}())
-        for use in value.uses
-            val = use.user
-            val isa LLVM.LoadInst && return true
-            if val isa LLVM.ConstantExpr ||
-               (val isa LLVM.Instruction && forwarded_addresses(val) !== nothing)
-                val in seen && continue
-                push!(seen, val)
-                has_load(val, seen) && return true
-            end
+# is `value` loaded from, also through merged addresses that `redirect_word_addresses!` had
+# to leave alone?
+function has_load(value, seen=Set{LLVM.Value}())
+    for use in value.uses
+        val = use.user
+        val isa LLVM.LoadInst && return true
+        if val isa LLVM.ConstantExpr ||
+           (val isa LLVM.Instruction && forwarded_addresses(val) !== nothing)
+            val in seen && continue
+            push!(seen, val)
+            has_load(val, seen) && return true
         end
-        return false
     end
+    return false
+end
 
+function has_unresolved_cglobal_loads(mod::LLVM.Module, relocs::Relocations)
     for value in [collect(mod.functions); collect(mod.globals)]
         is_cglobal_candidate(value, relocs) || continue
         has_load(value) && return true
