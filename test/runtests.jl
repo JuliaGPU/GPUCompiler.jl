@@ -1,4 +1,5 @@
 using ParallelTestRunner
+using Test
 import GPUCompiler, LLVM
 using GPUCompiler, LLVM
 using SPIRV_LLVM_Backend_jll, SPIRV_LLVM_Translator_jll, SPIRV_Tools_jll
@@ -25,6 +26,13 @@ end
 
 testsuite = find_tests(@__DIR__)
 args = parse_args(ARGS)
+
+# captured variables that get boxed (`Core.Box`) lose their type
+if isdefined(Test, :detect_closure_boxes)
+    testsuite["closure_boxes"] = quote
+        @test Test.detect_closure_boxes(GPUCompiler, GPUCompiler.Runtime) == []
+    end
+end
 
 if filter_tests!(testsuite, args)
     helperkeys = String[]
