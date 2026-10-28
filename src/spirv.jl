@@ -69,6 +69,11 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     # unknown, `:intel` for Intel's GPU driver (NEO, with IGC), `:pocl`, `:nvidia`, ...
     driver::Symbol = :generic
 
+    # whether the device has a fused multiply-add instruction (OpenCL's `CL_FP_FMA`), so that
+    # multiplications and additions that may be contracted are fused into OpenCL's `fma`, see
+    # `contract_muladd!`
+    fma::Bool = false
+
     # XXX: these don't really belong in the _target_ struct
     validate::Bool = false
     optimize::Bool = false
@@ -222,6 +227,11 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # the SPIR-V back-ends lower the floating-point `minnum` and `minimumnum` intrinsics to
     # OpenCL's `fmin`/`fmax`, which don't order signed zeros
     lower_minimum_maximum!(mod)
+
+    # SPIR-V can't carry the `contract` flag, so fuse what it allows on devices with an FMA
+    if job.config.target.fma
+        contract_muladd!(mod)
+    end
 
     # IGC drops fields when legalizing aggregates built by nested `insertvalue`s
     if job.config.target.driver === :intel
@@ -487,6 +497,88 @@ function spirv_disassemble(spirv::Vector{UInt8})
         @ccall $(spirv_tools(:spvDiagnosticDestroy))(diagnostic[]::Ptr{spv_diagnostic_t})::Cvoid
         @ccall $(spirv_tools(:spvContextDestroy))(context::Ptr{Cvoid})::Cvoid
     end
+end
+
+
+## contraction
+
+# SPIR-V can only carry LLVM's `contract` fast-math flag with SPV_KHR_float_controls2, which
+# few drivers support. Without it, the back-ends drop the flag, and mark every kernel
+# `ContractionOff`, so a multiplication and addition that may be contracted (e.g., Julia's
+# `muladd`, and the multiplications in a `@simd` reduction) are never fused into an FMA by the
+# driver. Other targets fuse them when selecting instructions; on a device with an FMA, fuse
+# them here instead, by rewriting them into `llvm.fmuladd`, which the back-ends translate to
+# OpenCL's `fma`. (OpenCL's `fma` is correctly rounded, which a device without an FMA has to
+# emulate, so this is only worth it on a device with one.)
+#
+# Like LLVM's instruction selection, this fuses an `fadd` or `fsub` with an `fmul` that both
+# allow contraction, if that `fmul` has no other use, unless the `fadd` or `fsub` may be
+# reassociated:
+#
+# - `fadd (fmul a, b), c` and `fadd c, (fmul a, b)` become `fmuladd(a, b, c)`;
+# - `fsub (fmul a, b), c` becomes `fmuladd(a, b, -c)`;
+# - `fsub c, (fmul a, b)` becomes `fmuladd(-a, b, c)`.
+#
+# The `llvm.fmuladd` call takes the fast-math flags that both instructions have.
+function contract_muladd!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "contract muladd" begin
+
+    is_contractable(val) = val isa LLVM.Instruction && val.fast_math.contract
+    is_fusable_fmul(val) = val isa LLVM.Instruction &&
+        LLVM.opcode(val) == LLVM.API.LLVMFMul && is_contractable(val) && length(collect(val.uses)) == 1
+    function is_float(typ)
+        eltyp = typ isa LLVM.VectorType ? typ.element_type : typ
+        return eltyp isa Union{LLVM.HalfType, LLVM.FloatType, LLVM.DoubleType}
+    end
+
+    for f in mod.functions, bb in f.blocks
+        for inst in collect(bb.instructions)
+            op = LLVM.opcode(inst)
+            op == LLVM.API.LLVMFAdd || op == LLVM.API.LLVMFSub || continue
+            is_contractable(inst) && is_float(inst.value_type) || continue
+            # an addition that may be reassociated is left to the driver: the back-ends
+            # translate `reassoc` to `FPFastMathMode Fast`, which also allows the driver to
+            # contract it, and in a reduction (e.g. a `@simd` loop) the driver can only
+            # vectorize it unfused, as the `fma` can't carry the flag
+            inst.fast_math.reassoc && continue
+            lhs, rhs = inst.operands
+            # which operand is the multiplication, and whether the result negates its
+            # addend (`mul - c`) or the product (`c - mul`)
+            mul, addend, negate = if is_fusable_fmul(lhs)
+                lhs, rhs, op == LLVM.API.LLVMFSub ? :addend : :none
+            elseif is_fusable_fmul(rhs)
+                rhs, lhs, op == LLVM.API.LLVMFSub ? :product : :none
+            else
+                continue
+            end
+
+            typ = inst.value_type
+            fmuladd = LLVM.Function(mod, LLVM.Intrinsic("llvm.fmuladd"), LLVMType[typ])
+            flags = NamedTuple(inst.fast_math)
+            mul_flags = NamedTuple(mul.fast_math)
+            common = NamedTuple{keys(flags)}(map(&, values(flags), values(mul_flags)))
+            @dispose builder=IRBuilder() begin
+                position!(builder, LLVM.before(inst))
+                builder.debug_location = inst.debug_location
+                a, b = mul.operands
+                if negate === :addend
+                    addend = fneg!(builder, addend)
+                elseif negate === :product
+                    a = fneg!(builder, a)
+                end
+                call = call!(builder, fmuladd.function_type, fmuladd, LLVM.Value[a, b, addend])
+                call.fast_math = common
+                replace_uses!(inst, call)
+            end
+            erase!(inst)
+            erase!(mul)
+            changed = true
+        end
+    end
+
+    end
+    return changed
 end
 
 
