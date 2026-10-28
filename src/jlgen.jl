@@ -798,7 +798,7 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
 
     # generate IR
     ts_mod = ThreadSafeModule("start")
-    native_code, llvm_mod = GC.@preserve lookup_cb let
+    GC.@preserve lookup_cb begin
         # configure the module
         ts_mod() do mod
             mod.triple = llvm_triple(job.config.target)
@@ -855,8 +855,6 @@ function compile_method_instance(@nospecialize(job::CompilerJob))
             # borrow it, and hand out a copy once we're done with the native code.
             LLVM.unsafe_module(llvm_ts_mod)
         end
-
-        native_code, llvm_mod
     end
 
     # Older Julia merges the per-CodeInstance modules in pointer order; restore emission

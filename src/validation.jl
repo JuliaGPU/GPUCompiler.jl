@@ -270,12 +270,12 @@ function check_ir(job, mod::LLVM.Module, relocs::Relocations=Relocations(); comp
     explain = if compiled === nothing
         nothing
     else
-        emitted = nothing
+        emitted = Ref{Dict{String,Any}}()
         function (inst, error)
             error[1] == DYNAMIC_CALL || return
             explanation = try
-                emitted === nothing && (emitted = emitted_functions(mod, compiled))
-                explain_error(inst, error, emitted, job.world)
+                isassigned(emitted) || (emitted[] = emitted_functions(mod, compiled))
+                explain_error(inst, error, emitted[], job.world)
             catch e
                 @safe_debug "Explaining an IR error failed" exception=(e, catch_backtrace())
                 nothing
@@ -723,8 +723,8 @@ function explain_error(inst::LLVM.Instruction, (kind, bt, meta)::IRError, emitte
     entry === nothing && return nothing
     src = compiled_source(entry)
     src === nothing && return nothing
-    mi = entry.ci.def
-    mi isa MethodInstance || (mi = mi.def)  # an `ABIOverride`
+    def = entry.ci.def
+    mi = def isa MethodInstance ? def : def.def  # an `ABIOverride`
 
     if 0 < pc <= length(src.code)
         description = describe_call(src, mi, pc, meta, world)

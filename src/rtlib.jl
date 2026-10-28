@@ -31,7 +31,7 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
 
     # get or create a function prototype
     f = get!(mod.functions, rt.llvm_name) do
-        ft = if job === nothing
+        local ft = if job === nothing
             convert(LLVM.FunctionType, rt)
         else
             runtime_function_type(job, rt)

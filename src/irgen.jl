@@ -823,6 +823,22 @@ end
 # once LLVM supports this pattern, consider going back to passing the state by reference,
 # so that the julia.gpu.state_getter` can be simplified to return an opaque pointer.
 
+# add the functions using `val` (looking through constant expressions) to `additions`,
+# unless they are already part of `worklist`
+function add_using_functions!(additions, worklist, val)
+    for use in val.uses
+        user = use.user
+        if user isa Instruction
+            f = user.parent.parent
+            in(f, worklist) || push!(additions, f)
+        elseif user isa ConstantExpr
+            add_using_functions!(additions, worklist, user)
+        else
+            error("Don't know how to check uses of $user. Please file an issue.")
+        end
+    end
+end
+
 # add a state argument to every function in the module, starting from the kernel entry point
 struct AddKernelState
     job::CompilerJob
@@ -852,22 +868,8 @@ function (self::AddKernelState)(mod::LLVM.Module)
         # iteratively discover functions that use the intrinsic or any function calling it
         worklist_length = length(worklist)
         additions = LLVM.Function[]
-        function check_user(val)
-            if val isa Instruction
-                bb = val.parent
-                new_f = bb.parent
-                in(new_f, worklist) || push!(additions, new_f)
-            elseif val isa ConstantExpr
-                # constant expressions don't have a parent; we need to look up their uses
-                for use in val.uses
-                    check_user(use.user)
-                end
-            else
-                error("Don't know how to check uses of $val. Please file an issue.")
-            end
-        end
-        for f in worklist, use in f.uses
-            check_user(use.user)
+        for f in worklist
+            add_using_functions!(additions, worklist, f)
         end
         for f in additions
             push!(worklist, f)
@@ -957,76 +959,77 @@ function (self::AddKernelState)(mod::LLVM.Module)
         erase!(f)
     end
 
-    # update uses of the new function, modifying call sites to include the kernel state
-    function rewrite_uses!(f, ft)
-        # update uses
-        @dispose builder=IRBuilder() begin
-            for use in collect(f.uses)
-                val = use.user
-                if val isa LLVM.CallBase && val.called_operand == f
-                    # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
-                    #       as those have a fixed argument list, passing actual arguments
-                    #       in an array of objects. that doesn't matter, for now, since
-                    #       GPU back-ends don't support such calls anyhow. but if we ever
-                    #       want to support kernel state passing on more capable back-ends,
-                    #       we'll need to update the argument array instead.
-                    if val.callconv == 37 || val.callconv == 38
-                        # TODO: update for LLVM 15 when JuliaLang/julia#45088 is merged.
-                        continue
-                    end
-
-                    # forward the state argument
-                    position!(builder, LLVM.before(val))
-                    state_arg = call!(builder, state_intr_ft, state_intr, Value[], "state")
-                    new_val = if val isa LLVM.CallInst
-                        call!(builder, ft, f, Value[state_arg, val.arguments...],
-                              val.operand_bundles)
-                    else
-                        # TODO: invoke and callbr
-                        error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
-                    end
-                    new_val.callconv = val.callconv
-
-                    replace_uses!(val, new_val)
-                    @assert isempty(val.uses)
-                    erase!(val)
-                elseif val isa LLVM.CallBase
-                    # the function is being passed as an argument. to avoid having to
-                    # rewrite the target function, instead case the rewritten function to
-                    # the old stateless type.
-                    # XXX: we won't have to do this with opaque pointers.
-                    position!(builder, LLVM.before(val))
-                    target_ft = val.called_type
-                    new_args = Value[]
-                    for (param_typ, arg) in zip(target_ft.parameters, val.arguments)
-                        push!(new_args, arg.value_type != param_typ ?
-                                        const_bitcast(arg, param_typ) : arg)
-                    end
-                    new_val = call!(builder, val.called_type, val.called_operand, new_args,
-                                    val.operand_bundles)
-                    new_val.callconv = val.callconv
-
-                    replace_uses!(val, new_val)
-                    @assert isempty(val.uses)
-                    erase!(val)
-                elseif val isa LLVM.StoreInst
-                    # the function is being stored, which again we'll permit like before.
-                elseif val isa ConstantExpr
-                    rewrite_uses!(val, ft)
-                else
-                    error("Cannot rewrite $(typeof(val)) use of function: $val")
-                end
-            end
-        end
-    end
+    # update uses of the new functions, modifying call sites to include the kernel state
     for f in values(workmap)
         ft = f.function_type
-        rewrite_uses!(f, ft)
+        rewrite_state_uses!(f, ft, state_intr, state_intr_ft)
     end
 
     return true
 end
 AddKernelStatePass(job) = ModulePass("AddKernelStatePass", AddKernelState(job))
+
+# modify the call sites of `f` (of type `ft`) to pass the kernel state
+function rewrite_state_uses!(f, ft, state_intr, state_intr_ft)
+    @dispose builder=IRBuilder() begin
+        for use in collect(f.uses)
+            val = use.user
+            if val isa LLVM.CallBase && val.called_operand == f
+                # NOTE: we don't rewrite calls using Julia's jlcall calling convention,
+                #       as those have a fixed argument list, passing actual arguments
+                #       in an array of objects. that doesn't matter, for now, since
+                #       GPU back-ends don't support such calls anyhow. but if we ever
+                #       want to support kernel state passing on more capable back-ends,
+                #       we'll need to update the argument array instead.
+                if val.callconv == 37 || val.callconv == 38
+                    # TODO: update for LLVM 15 when JuliaLang/julia#45088 is merged.
+                    continue
+                end
+
+                # forward the state argument
+                position!(builder, LLVM.before(val))
+                state_arg = call!(builder, state_intr_ft, state_intr, Value[], "state")
+                new_val = if val isa LLVM.CallInst
+                    call!(builder, ft, f, Value[state_arg, val.arguments...],
+                          val.operand_bundles)
+                else
+                    # TODO: invoke and callbr
+                    error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
+                end
+                new_val.callconv = val.callconv
+
+                replace_uses!(val, new_val)
+                @assert isempty(val.uses)
+                erase!(val)
+            elseif val isa LLVM.CallBase
+                # the function is being passed as an argument. to avoid having to
+                # rewrite the target function, instead case the rewritten function to
+                # the old stateless type.
+                # XXX: we won't have to do this with opaque pointers.
+                position!(builder, LLVM.before(val))
+                target_ft = val.called_type
+                new_args = Value[]
+                for (param_typ, arg) in zip(target_ft.parameters, val.arguments)
+                    push!(new_args, arg.value_type != param_typ ?
+                                    const_bitcast(arg, param_typ) : arg)
+                end
+                new_val = call!(builder, val.called_type, val.called_operand, new_args,
+                                val.operand_bundles)
+                new_val.callconv = val.callconv
+
+                replace_uses!(val, new_val)
+                @assert isempty(val.uses)
+                erase!(val)
+            elseif val isa LLVM.StoreInst
+                # the function is being stored, which again we'll permit like before.
+            elseif val isa ConstantExpr
+                rewrite_state_uses!(val, ft, state_intr, state_intr_ft)
+            else
+                error("Cannot rewrite $(typeof(val)) use of function: $val")
+            end
+        end
+    end
+end
 
 # lower calls to the state getter intrinsic. this is a two-step process, so that the state
 # argument can be added before optimization, and that optimization can introduce new uses
@@ -1365,22 +1368,8 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # iteratively discover functions that use an intrinsic or any function calling it
         worklist_length = length(worklist)
         additions = Set{LLVM.Function}()
-        function scan_uses(val)
-            for use in val.uses
-                candidate = use.user
-                if isa(candidate, Instruction)
-                    bb = candidate.parent
-                    new_f = bb.parent
-                    in(new_f, worklist) || push!(additions, new_f)
-                elseif isa(candidate, ConstantExpr)
-                    scan_uses(candidate)
-                else
-                    error("Don't know how to check uses of $candidate. Please file an issue.")
-                end
-            end
-        end
         for f in worklist
-            scan_uses(f)
+            add_using_functions!(additions, worklist, f)
         end
         for f in additions
             push!(worklist, f)
@@ -1445,46 +1434,9 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         remove_dead_constant_users!(f)
     end
 
-    # update other uses of the old function, modifying call sites to pass the arguments
-    function rewrite_uses!(f, new_f)
-        # update uses
-        @dispose builder=IRBuilder() begin
-            for use in collect(f.uses)
-                val = use.user
-                if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
-                    callee_f = val.parent.parent
-                    # forward the arguments
-                    position!(builder, LLVM.before(val))
-                    new_val = if val isa LLVM.CallInst
-                        call!(builder, new_f.function_type, new_f,
-                              Value[val.arguments..., callee_f.parameters[end-nargs+1:end]...],
-                              val.operand_bundles)
-                    else
-                        # TODO: invoke and callbr
-                        error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
-                    end
-                    new_val.callconv = val.callconv
-
-                    replace_uses!(val, new_val)
-                    @assert isempty(val.uses)
-                    erase!(val)
-                elseif val isa LLVM.ConstantExpr && val.opcode == LLVM.Opcode.BitCast
-                    # XXX: why isn't this caught by the value materializer above?
-                    target = val.operands[1]
-                    @assert target == f
-                    new_val = LLVM.const_bitcast(new_f, val.value_type)
-                    rewrite_uses!(val, new_val)
-                    # we can't simply replace this constant expression, as it may be used
-                    # as a call, taking arguments (so we need to rewrite it to pass the input
-                    # arguments). the old constant is dropped below, once it's unused.
-                else
-                    error("Cannot rewrite unknown use of function: $val")
-                end
-            end
-        end
-    end
+    # update other uses of the old functions, modifying call sites to pass the arguments
     for (f, new_f) in workmap
-        rewrite_uses!(f, new_f)
+        rewrite_input_uses!(f, new_f, nargs)
         remove_dead_constant_users!(f)
         @assert isempty(f.uses)
         replace_metadata_uses!(f, new_f)
@@ -1511,4 +1463,42 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     end
 
     return mod.functions[entry_fn]
+end
+
+# modify the call sites of `f` to call `new_f`, passing on the trailing `nargs` arguments
+function rewrite_input_uses!(f, new_f, nargs)
+    @dispose builder=IRBuilder() begin
+        for use in collect(f.uses)
+            val = use.user
+            if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
+                callee_f = val.parent.parent
+                # forward the arguments
+                position!(builder, LLVM.before(val))
+                new_val = if val isa LLVM.CallInst
+                    call!(builder, new_f.function_type, new_f,
+                          Value[val.arguments..., callee_f.parameters[end-nargs+1:end]...],
+                          val.operand_bundles)
+                else
+                    # TODO: invoke and callbr
+                    error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
+                end
+                new_val.callconv = val.callconv
+
+                replace_uses!(val, new_val)
+                @assert isempty(val.uses)
+                erase!(val)
+            elseif val isa LLVM.ConstantExpr && val.opcode == LLVM.Opcode.BitCast
+                # XXX: why isn't this caught by the value materializer above?
+                target = val.operands[1]
+                @assert target == f
+                new_val = LLVM.const_bitcast(new_f, val.value_type)
+                rewrite_input_uses!(val, new_val, nargs)
+                # we can't simply replace this constant expression, as it may be used
+                # as a call, taking arguments (so we need to rewrite it to pass the input
+                # arguments). the old constant is dropped by the caller, once it's unused.
+            else
+                error("Cannot rewrite unknown use of function: $val")
+            end
+        end
+    end
 end

@@ -298,7 +298,7 @@ function code_native(io::IO, @nospecialize(job::CompilerJob);
                      raw::Bool=false, dump_module::Bool=false)
     config = CompilerConfig(job.config; strip=!raw, only_entry=!dump_module, validate=false)
     asm = JuliaContext() do ctx
-        asm, meta = compile(:asm, CompilerJob(job; config))
+        local asm, meta = compile(:asm, CompilerJob(job; config))
         dispose(meta.ir)
         asm
     end
@@ -506,11 +506,11 @@ Evaluates the expression `ex` and dumps all intermediate forms of code to the di
 `@device_code_*` macros for back-ends with other compilation stages.
 """
 macro device_code(ex...)
-    localUnique = 1
+    localUnique = Ref(1)
     function hook(@nospecialize(job); dir::AbstractString)
         job isa CompilerJob || throw(unsupported_reflection(:device_code, job))
         name = job.source.def.name
-        fn = "$(name)_$(localUnique)"
+        fn = "$(name)_$(localUnique[])"
         mkpath(dir)
 
         open(joinpath(dir, "$fn.lowered.jl"), "w") do io
@@ -535,7 +535,7 @@ macro device_code(ex...)
             code_native(io, job; dump_module=true, raw=true)
         end
 
-        localUnique += 1
+        localUnique[] += 1
     end
     emit_hooked_compilation(hook, ex...)
 end

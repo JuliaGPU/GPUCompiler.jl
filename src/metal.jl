@@ -228,29 +228,25 @@ function is_boxed_constant(@nospecialize(gv::LLVM.GlobalVariable))
            (length(els) >= 2 && is_pad(els[1]) && is_hdr(els[2]))
 end
 
-# Are all (transitive constant) users of `gv` instructions, i.e. does the box escape only
+# Are all (transitive constant) users of `v` instructions, i.e. does the box escape only
 # through function bodies? A box reachable from another global's *initializer* is the
 # `jl_true`/`jl_false` slot→box indirection, which lives fine in the constant space
 # (`add_global_address_spaces!`); demoting it would strand the slot's constant pointer. Only
 # the isbits-union interior boxes — whose payload address flows through a body `phi`/`select`
 # — need demotion, and those have instruction users exclusively.
-function box_used_only_by_instructions(@nospecialize(gv::LLVM.GlobalVariable))
-    ok = true
-    function walk(@nospecialize(v))
-        for u in v.users
-            if u isa LLVM.Instruction
-                # a body use: fine
-            elseif u isa LLVM.GlobalVariable
-                ok = false   # initializer reference (slot→box)
-            elseif u isa LLVM.Constant
-                walk(u)
-            else
-                ok = false
-            end
+function box_used_only_by_instructions(@nospecialize(v::LLVM.Value))
+    for u in v.users
+        if u isa LLVM.Instruction
+            # a body use: fine
+        elseif u isa LLVM.GlobalVariable
+            return false   # initializer reference (slot→box)
+        elseif u isa LLVM.Constant
+            box_used_only_by_instructions(u) || return false
+        else
+            return false
         end
     end
-    walk(gv)
-    return ok
+    return true
 end
 
 # Demote materialized boxed-constant globals to per-function stack allocas.
@@ -1276,6 +1272,26 @@ function lower_fences!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod
     return true
 end
 
+# Replace the names matching `codegen_name` in the strings of the metadata graph rooted at
+# `md`, by `normalize`d names or, in the root node itself, by `replacement`.
+function normalize_metadata!(@nospecialize(md), visited::Set{LLVM.MDNode}, codegen_name::Regex,
+                             normalize, replacement=nothing)
+    md isa LLVM.MDNode || return
+    md in visited && return
+    push!(visited, md)
+    # (a copy, as replacing an operand can re-unique the node)
+    for (i, op) in enumerate(collect(md.operands))
+        if op isa LLVM.MDString
+            str = convert(String, op)
+            occursin(codegen_name, str) || continue
+            new = replacement === nothing ? normalize(str) : replacement
+            new == str || (md.operands[i] = LLVM.MDString(new))
+        elseif op isa LLVM.MDNode
+            normalize_metadata!(op, visited, codegen_name, normalize)
+        end
+    end
+end
+
 # Julia names each generated LLVM function `julia_<name>_<counter>`, where the counter is
 # drawn from a process-global codegen sequence and so differs from one session to the next.
 # Left anywhere in the emitted bitcode it makes the AIR (and the metallib wrapping it)
@@ -1313,22 +1329,6 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
     # domain), so walk it, replacing every string that carries a name. Only nodes reachable
     # from a function or an instruction are visited, which is where inlining leaves its traces.
     visited = Set{LLVM.MDNode}()
-    function normalize_metadata!(@nospecialize(md), replacement=nothing)
-        md isa LLVM.MDNode || return
-        md in visited && return
-        push!(visited, md)
-        # (a copy, as replacing an operand can re-unique the node)
-        for (i, op) in enumerate(collect(md.operands))
-            if op isa LLVM.MDString
-                str = convert(String, op)
-                occursin(codegen_name, str) || continue
-                new = replacement === nothing ? normalize(str) : replacement
-                new == str || (md.operands[i] = LLVM.MDString(new))
-            elseif op isa LLVM.MDNode
-                normalize_metadata!(op)
-            end
-        end
-    end
 
     # the instruction metadata that can name a function: a debug location points at the
     # subprogram it came from (orphaned once that function is inlined away), and Julia's alias
@@ -1345,7 +1345,7 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
     for f in mod.functions
         isdeclaration(f) && continue
         sp = f.subprogram
-        sp === nothing || normalize_metadata!(sp, f.name)
+        sp === nothing || normalize_metadata!(sp, visited, codegen_name, normalize, f.name)
     end
     for f in mod.functions
         isdeclaration(f) && continue
@@ -1355,7 +1355,8 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
                 rename!(inst)
                 md = inst.metadata
                 for kind in md_kinds
-                    haskey(md, kind) && normalize_metadata!(md[kind])
+                    haskey(md, kind) &&
+                        normalize_metadata!(md[kind], visited, codegen_name, normalize)
                 end
             end
         end
@@ -1441,6 +1442,23 @@ function downgrade(input::Vector{UInt8}, version::VersionNumber)
 end
 
 
+function remapType(src)
+    # TODO: shouldn't we recurse into structs here, making sure the parent object's
+    #       address space matches the contained one? doesn't matter right now as we
+    #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
+    #       device addrss space (i.e. no mismatch between parent and field possible)
+    dst = if src isa LLVM.PointerType && src.addrspace == 0
+        if supports_typed_pointers(context())
+            LLVM.PointerType(remapType(src.element_type), #=device=# 1)
+        else
+            LLVM.PointerType(#=device=# 1)
+        end
+    else
+        src
+    end
+    return dst
+end
+
 # generic pointer removal
 #
 # every pointer argument (i.e. byref objs) to a kernel needs an address space attached.
@@ -1477,23 +1495,6 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
         byref[arg.idx] = (arg.cc == BITS_REF || arg.cc == KERNEL_STATE) &&
                          param isa LLVM.PointerType && param.addrspace == 0 ||
                          identity_word[arg.idx]
-    end
-
-    function remapType(src)
-        # TODO: shouldn't we recurse into structs here, making sure the parent object's
-        #       address space matches the contained one? doesn't matter right now as we
-        #       only use LLVMPtr (i.e. no rewriting of contained pointers needed) in the
-        #       device addrss space (i.e. no mismatch between parent and field possible)
-        dst = if src isa LLVM.PointerType && src.addrspace == 0
-            if supports_typed_pointers(context())
-                LLVM.PointerType(remapType(src.element_type), #=device=# 1)
-            else
-                LLVM.PointerType(#=device=# 1)
-            end
-        else
-            src
-        end
-        return dst
     end
 
     # generate the new function type & definition
@@ -1687,20 +1688,20 @@ function add_global_address_spaces!(@nospecialize(job::CompilerJob), mod::LLVM.M
 
     # determine which functions we need to update
     function_worklist = Set{LLVM.Function}()
-    function check_user(val)
+    pending_users = LLVM.Value[]
+    for gv in keys(global_map)
+        append!(pending_users, gv.users)
+    end
+    while !isempty(pending_users)
+        val = pop!(pending_users)
         if val isa LLVM.Instruction
             bb = val.parent
             f = bb.parent
 
             push!(function_worklist, f)
         elseif val isa LLVM.ConstantExpr
-            for user in val.users
-                check_user(user)
-            end
+            append!(pending_users, val.users)
         end
-    end
-    for gv in keys(global_map), user in gv.users
-        check_user(user)
     end
 
     # update functions that use the global
@@ -2966,13 +2967,6 @@ function lower_is_fpclass!(builder::IRBuilder, call::LLVM.CallBase)
                                sub!(builder, magnitude, LLVM.ConstantInt(ityp, 1)),
                                normal - 1)
     test_zero() = compare(LLVM.IntPredicate.EQ, magnitude, 0)
-    negative = nothing
-    function with_sign(test, neg)
-        if negative === nothing
-            negative = compare(LLVM.IntPredicate.SLT, bits, 0)
-        end
-        and!(builder, test, neg ? negative : not!(builder, negative))
-    end
 
     # combine the tested classes, as encoded by the `FPClassTest` mask bits
     terms = LLVM.Value[]
@@ -2984,12 +2978,18 @@ function lower_is_fpclass!(builder::IRBuilder, call::LLVM.CallBase)
     elseif tested(1)
         push!(terms, test_qnan())
     end
+    negative = nothing
     for (test, negbit, posbit) in ((test_inf, 2, 9), (test_normal, 3, 8),
                                    (test_subnormal, 4, 7), (test_zero, 5, 6))
         if tested(negbit) && tested(posbit)
             push!(terms, test())
         elseif tested(negbit) || tested(posbit)
-            push!(terms, with_sign(test(), tested(negbit)))
+            term = test()
+            if negative === nothing
+                negative = compare(LLVM.IntPredicate.SLT, bits, 0)
+            end
+            sign = tested(negbit) ? negative : not!(builder, negative)
+            push!(terms, and!(builder, term, sign))
         end
     end
     return isempty(terms) ? LLVM.ConstantInt(LLVM.Int1Type(), 0) :
