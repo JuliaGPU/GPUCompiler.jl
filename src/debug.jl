@@ -49,7 +49,7 @@ function backtrace(inst::LLVM.Instruction, bt = StackTraces.StackFrame[])
                 frame = StackTraces.StackFrame("multiple call sites", "unknown", 0)
                 push!(bt, frame)
             elseif length(call_sites) == 1
-                inst = first(call_sites).user
+                inst = first(call_sites).user::LLVM.CallInst
                 continue
             end
         end

@@ -888,7 +888,7 @@ function (self::AddKernelState)(mod::LLVM.Module)
         f.name = fn * ".stateless"
 
         # create a new function
-        new_param_types = [T_state, ft.parameters...]
+        new_param_types = pushfirst!(collect(LLVMType, ft.parameters), T_state)
         new_ft = LLVM.FunctionType(ft.return_type, new_param_types)
         new_f = LLVM.Function(mod, fn, new_ft)
         new_f.parameters[1].name = "state"
@@ -921,7 +921,8 @@ function (self::AddKernelState)(mod::LLVM.Module)
                     #      is all this even sound?
                     typ = val.value_type::LLVM.PointerType
                     ft = typ.element_type::LLVM.FunctionType
-                    new_ft = LLVM.FunctionType(ft.return_type, [T_state, ft.parameters...])
+                    new_params = pushfirst!(collect(LLVMType, ft.parameters), T_state)
+                    new_ft = LLVM.FunctionType(ft.return_type, new_params)
                     return const_bitcast(workmap[target], LLVM.PointerType(new_ft, typ.addrspace))
                 end
             elseif val.opcode == LLVM.Opcode.PtrToInt
@@ -989,9 +990,9 @@ function rewrite_state_uses!(f, ft, state_intr, state_intr_ft)
 
                 # forward the state argument
                 position!(builder, LLVM.before(val))
-                state_arg = call!(builder, state_intr_ft, state_intr, Value[], "state")
+                state_arg = call!(builder, state_intr_ft, state_intr, Value[], "state")::LLVM.CallInst
                 new_val = if val isa LLVM.CallInst
-                    call!(builder, ft, f, Value[state_arg, val.arguments...],
+                    call!(builder, ft, f, Value[state_arg; val.arguments],
                           val.operand_bundles)
                 else
                     # TODO: invoke and callbr
@@ -1390,7 +1391,7 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         ft = f.function_type
         f.name = fn * ".orig"
         # create a new function
-        new_param_types = LLVMType[ft.parameters...]
+        new_param_types = collect(LLVMType, ft.parameters)
 
         for intr_fn in used_intrinsics
             llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].typ)
@@ -1477,7 +1478,7 @@ function rewrite_input_uses!(f, new_f, nargs)
                 position!(builder, LLVM.before(val))
                 new_val = if val isa LLVM.CallInst
                     call!(builder, new_f.function_type, new_f,
-                          Value[val.arguments..., callee_f.parameters[end-nargs+1:end]...],
+                          Value[val.arguments; callee_f.parameters[end-nargs+1:end]],
                           val.operand_bundles)
                 else
                     # TODO: invoke and callbr

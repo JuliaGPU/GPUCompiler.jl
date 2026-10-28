@@ -50,7 +50,7 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
 
     # runtime functions are written in Julia, while we're calling from LLVM,
     # this often results in argument type mismatches. try to fix some here.
-    args = LLVM.Value[args...]
+    args = collect(LLVM.Value, args)
     if length(args) != length(ft.parameters)
         error("Incorrect number of arguments for runtime function: ",
               "passing ", length(args), " argument(s) to '", string(ft), " ", rt.name, "'")
