@@ -1035,6 +1035,41 @@ end
     end
 end
 
+@testset "nvvm_reflect" begin
+    reflect(key; kwargs...) = JuliaContext() do ctx
+        ir = if LLVM.version() >= v"17"
+            """
+            @key = private unnamed_addr constant [$(sizeof(key)+1) x i8] c"$(key)\\00"
+            declare i32 @__nvvm_reflect(ptr)
+            define i32 @test() {
+                %value = call i32 @__nvvm_reflect(ptr @key)
+                ret i32 %value
+            }"""
+        else
+            """
+            @key = private unnamed_addr constant [$(sizeof(key)+1) x i8] c"$(key)\\00"
+            declare i32 @__nvvm_reflect(i8*)
+            define i32 @test() {
+                %value = call i32 @__nvvm_reflect(i8* getelementptr ([$(sizeof(key)+1) x i8], [$(sizeof(key)+1) x i8]* @key, i64 0, i64 0))
+                ret i32 %value
+            }"""
+        end
+        @dispose mod=parse(LLVM.Module, ir) begin
+            job, _ = PTX.create_job(identity, (Int,); cap=v"7.5", kwargs...)
+            GPUCompiler.nvvm_reflect!(job, mod)
+            ret = LLVM.terminator(only(mod.functions["test"].blocks))
+            convert(Int, ret.operands[1])
+        end
+    end
+
+    @test reflect("__CUDA_ARCH") == 750
+    @test reflect("__CUDA_PREC_SQRT") == 1
+    @test reflect("__CUDA_PREC_DIV") == 1
+    @test reflect("__CUDA_PREC_SQRT"; fastmath=true) == 0
+    @test reflect("__CUDA_PREC_DIV"; fastmath=true) == 0
+    @test reflect("__CUDA_UNKNOWN") == 0
+end
+
 @testset "feature_set" begin
     # PTXCompilerTarget.feature_set controls the suffix on the LLVM CPU name, which is
     # what the NVPTX backend uses to flip `hasArchAccelFeatures()`. Verify it makes its

@@ -341,21 +341,7 @@ const __llvm_initialized = Ref(false)
     entrypoints = filter(((job′, _),) -> job′ === job || job′.config.kernel, jobs)
 
     if job.config.toplevel && job.config.libraries
-        # load the runtime outside of a timing block (because it recurses into the compiler)
-        if !uses_julia_runtime(job)
-            runtime, runtime_relocs = load_runtime(job)
-        end
-
-        @tracepoint "Library linking" begin
-            # target-specific libraries
-            @tracepoint "target libraries" link_libraries!(job, ir)
-
-            # GPU run-time library
-            if !uses_julia_runtime(job)
-                @tracepoint "runtime library" link_relocatable!(
-                    ir, relocations, runtime, runtime_relocs; only_needed=true)
-            end
-        end
+        @tracepoint "Library linking" link_device_libraries_early!(job, ir, relocations)
     end
 
     @tracepoint "IR post-processing" begin
@@ -421,6 +407,8 @@ const __llvm_initialized = Ref(false)
                         end
                     end
                 end
+            elseif job.config.libraries
+                lower_and_link_device_libraries!(job, ir, relocations)
             end
 
             # Runtime linking during optimization can add relocations.
