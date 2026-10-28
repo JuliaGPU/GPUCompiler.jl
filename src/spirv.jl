@@ -837,8 +837,8 @@ function lower_atomics!(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
     @tracepoint "lower atomics" begin
 
     # (the expansions split blocks, so collect the atomics first)
-    atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
-               if is_atomic_memop(inst)]
+    atomics = LLVM.Instruction[inst for f in mod.functions for bb in f.blocks
+                               for inst in bb.instructions if is_atomic_memop(inst)]
 
     # pad the local memory that 8- and 16-bit atomics may access
     variables = Set{LLVM.GlobalVariable}()
