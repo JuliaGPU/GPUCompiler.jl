@@ -200,18 +200,20 @@ const tag_size = sizeof(tag_type)
 
 const gc_bits = 0x3 # FIXME
 
-# get the type tag of a type at run-time
-@llvmgenerated builder function type_tag(::Val{type_name})::tag_type where type_name
-    T_tag = convert(LLVMType, tag_type)
-    T_ptag = LLVM.PointerType(T_tag)
-    T_pjlvalue = convert(LLVMType, Any; allow_boxed=true)
-
-    # this isn't really a function, but we abuse it to get the JIT to resolve the address
-    typ = LLVM.Function(current_module(builder), "jl_" * String(type_name::Symbol) * "_type",
-                        LLVM.FunctionType(T_pjlvalue))
-
-    typ_var = bitcast!(builder, typ, T_ptag)
-    load!(builder, T_tag, typ_var)
+# the type tag of a boxed `T`, as Julia writes it: types in `jl_small_typeof` are tagged with
+# a small constant, fixed for a given build of Julia, and other types with the address of
+# their type object, which is only known at run time. returns an expression for the latter.
+function type_tag(@nospecialize(T::Type))
+    obj = Ref{Any}(zero(T))
+    tag = GC.@preserve obj begin
+        ptr = unsafe_load(convert(Ptr{Ptr{tag_type}}, pointer_from_objref(obj)))
+        unsafe_load(ptr - tag_size) & ~tag_type(15)
+    end
+    if tag >= tag_type(64 << 4)     # jl_max_tags << 4
+        return :(reinterpret(tag_type, pointer_from_objref($T)))
+    else
+        return tag
+    end
 end
 
 # we use `jl_value_ptr`, a Julia pseudo-intrinsic that can be used to box and unbox values
@@ -220,9 +222,7 @@ end
     sz = sizeof(val)
     allocsz = sz + tag_size
 
-    # type-tags are ephemeral, so look them up at run time
-    #tag = unsafe_load(convert(Ptr{tag_type}, type_name))
-    tag = :( type_tag(Val(type_name)) )
+    tag = type_tag(val)
 
     quote
         ptr = malloc($(Csize_t(allocsz)))

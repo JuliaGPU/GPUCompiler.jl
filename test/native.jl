@@ -1,3 +1,5 @@
+import InteractiveUtils
+
 @testset "reflection" begin
     mod = @eval module $(gensym())
         f(x::Int) = x
@@ -605,6 +607,28 @@ end
             if GPUCompiler.supports_relocatable_ir()
                 # otherwise Julia embeds addresses without tagging globals
                 @test used > 0
+            end
+        end
+    end
+
+    @testset "runtime boxing on the host" begin
+        # sysimage builds and package images compile the runtime's boxing functions for the
+        # host, so they can't refer to type objects by symbol: on Windows, these data
+        # symbols don't link.
+        for (T, t) in [Int8 => :int8, Int16 => :int16, Int32 => :int32, Int64 => :int64,
+                       UInt8 => :uint8, UInt16 => :uint16, UInt32 => :uint32,
+                       UInt64 => :uint64, Bool => :bool, Float32 => :float32,
+                       Float64 => :float64]
+            f = getfield(GPUCompiler.Runtime, Symbol("box_$t"))
+            ir = sprint(io->InteractiveUtils.code_llvm(io, f, Tuple{T}; dump_module=true))
+            @test !occursin(r"@jl_\w+_type\b", ir)
+
+            # the tag is the one Julia writes
+            tag = GPUCompiler.Runtime.type_tag(T)
+            if tag isa Expr
+                @test Core.eval(GPUCompiler.Runtime, tag) == UInt(pointer_from_objref(T))
+            else
+                @test GPUCompiler.small_typeof(tag) == Some(T)
             end
         end
     end
