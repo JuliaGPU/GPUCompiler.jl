@@ -387,7 +387,7 @@ end
 # single block on targets without clusters, where NVPTX uses the block scope instead.
 const PTX_SYNCSCOPES = ("singlethread", "block", "cluster", "device", "system")
 
-ptx_syncscope_error(inst::LLVM.Instruction, what="atomic operation") =
+ptx_syncscope_error(@nospecialize(inst::LLVM.Instruction), what="atomic operation") =
     inst.syncscope.name in PTX_SYNCSCOPES ? nothing :
     "$what with synchronization scope $(repr(inst.syncscope.name))"
 
@@ -396,7 +396,7 @@ ptx_syncscope_error(inst::LLVM.Instruction, what="atomic operation") =
 # floating-point ones, or `fadd` on older devices) are fine: NVPTX expands them to
 # compare-exchange loops.
 function ptx_atomic_error(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
-                          dl::LLVM.DataLayout, inst::LLVM.Instruction)
+                          dl::LLVM.DataLayout, @nospecialize(inst::LLVM.Instruction))
     target = job.config.target
     reason = ptx_syncscope_error(inst)
     reason === nothing || return reason
@@ -450,7 +450,7 @@ end
 # Why the NVPTX back-end cannot compile the atomic memory operation `inst`, although the
 # target supports it, or `nothing` if it can. These work around bugs in the back-end, and
 # should be revisited when updating it.
-function nvptx_atomic_error(inst::LLVM.Instruction)
+function nvptx_atomic_error(@nospecialize(inst::LLVM.Instruction))
     # NVPTX's instruction printer aborts on the ordering of the `atom.cas.b128` and
     # `atom.exch.b128` that it legalizes these to (LLVM 23.1, and main as of October 2026)
     T = atomic_value_type(inst)
@@ -486,12 +486,12 @@ end
 # (`ld.relaxed` and `st.relaxed`) from sm_70 on, which hasn't been seen to fail.
 
 # Is `ptr` known to point to the thread's own memory?
-ptx_thread_private(ptr::LLVM.Value) =
+ptx_thread_private(@nospecialize(ptr::LLVM.Value)) =
     ptr.value_type.addrspace == #=local=# 5 || is_thread_private(ptr)
 
 # Can `ptr` point to local memory? Generic pointers can, unless every object they can be
 # derived from is in another address space.
-function ptx_may_be_local(ptr::LLVM.Value)
+function ptx_may_be_local(@nospecialize(ptr::LLVM.Value))
     seen = Set{LLVM.Value}()
     worklist = LLVM.Value[ptr]
     while !isempty(worklist)
@@ -523,7 +523,7 @@ end
 
 # Does the `!noalias.addrspace` metadata of `inst` rule out that it accesses local memory?
 # `guard_local_atomic!` adds it to the atomic it keeps for other memory.
-function excludes_local(inst::LLVM.Instruction)
+function excludes_local(@nospecialize(inst::LLVM.Instruction))
     haskey(inst.metadata, "noalias.addrspace") || return false
     md = inst.metadata["noalias.addrspace"]
     bounds = [convert(Int, Value(op)) % UInt32 for op in md.operands]
@@ -537,11 +537,11 @@ end
 # Replace the atomic memory operation `inst` by a call to a function that checks whether
 # its pointer points to local memory, and then performs it with plain accesses, or atomically
 # otherwise. The function is meant to be inlined (it is `alwaysinline`).
-function guard_local_atomic!(inst::LLVM.Instruction)
+function guard_local_atomic!(@nospecialize(inst::LLVM.Instruction))
     mod = LLVM.parent(LLVM.parent(LLVM.parent(inst)))
     args = collect(inst.operands)
     T = inst.value_type
-    ft = LLVM.FunctionType(T, [arg.value_type for arg in args])
+    ft = LLVM.FunctionType(T, LLVMType[arg.value_type for arg in args])
     f = LLVM.Function(mod, "gpucompiler.local_atomic", ft)
     f.linkage = LLVM.Linkage.Internal
     push!(f.function_attributes, EnumAttribute(:alwaysinline))
@@ -556,7 +556,7 @@ function guard_local_atomic!(inst::LLVM.Instruction)
         end
     end
     other_atomic.metadata["noalias.addrspace"] =
-        MDNode([Metadata(ConstantInt(Int32(5))), Metadata(ConstantInt(Int32(6)))])
+        MDNode(Metadata[ConstantInt(Int32(5)), ConstantInt(Int32(6))])
 
     isspacep = LLVM.Function(mod, LLVM.Intrinsic("llvm.nvvm.isspacep.local"))
     isspacep_ft = isspacep.function_type
@@ -585,7 +585,8 @@ function guard_local_atomic!(inst::LLVM.Instruction)
             ret!(builder)
         else
             result = phi!(builder, T)
-            append!(result.incoming, [(local_atomic, local_block), (other_atomic, other_block)])
+            append!(result.incoming, Tuple{LLVM.Value,BasicBlock}[(local_atomic, local_block),
+                                                                  (other_atomic, other_block)])
             ret!(builder, result)
         end
     end
@@ -606,8 +607,8 @@ function lower_local_atomics!(mod::LLVM.Module)
     changed = false
     @tracepoint "lower local atomics" begin
 
-    atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
-               if is_atomic_memop(inst)]
+    atomics = LLVM.Instruction[inst for f in mod.functions for bb in f.blocks
+                               for inst in bb.instructions if is_atomic_memop(inst)]
     guarded = false
     for inst in atomics
         if ptx_thread_private(inst.pointer_operand)
