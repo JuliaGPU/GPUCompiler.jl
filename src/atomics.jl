@@ -8,7 +8,8 @@
 is_ordered(order::LLVM.AtomicOrdering.T) = is_stronger(order, LLVM.AtomicOrdering.Monotonic)
 
 # (`atomicrmw` and `cmpxchg` are always atomic)
-is_atomic_memop(inst::LLVM.Instruction) = inst isa LLVM.MemAccessInst && isatomic(inst)
+is_atomic_memop(@nospecialize(inst::LLVM.Instruction)) =
+    inst isa LLVM.MemAccessInst && isatomic(inst)
 
 # the type of the value an atomic memory operation accesses
 atomic_value_type(inst::LLVM.LoadInst) = inst.value_type
@@ -67,11 +68,11 @@ end
 
 # the ordering of an atomic memory operation, merging a compare-exchange's orderings
 atomic_ordering(inst::LLVM.AtomicCmpXchgInst) = merged_ordering(inst)
-atomic_ordering(inst::LLVM.Instruction) = inst.ordering
+atomic_ordering(@nospecialize(inst::LLVM.Instruction)) = inst.ordering
 
 # the size in bits of the value an atomic memory operation accesses, with pointers as large as
 # the module's data layout says, or `nothing` if it isn't a scalar
-function atomic_bits(inst::LLVM.Instruction)
+function atomic_bits(@nospecialize(inst::LLVM.Instruction))
     T = atomic_value_type(inst)
     T isa Union{LLVM.IntegerType,LLVM.FloatingPointType,LLVM.PointerType} || return nothing
     mod = LLVM.parent(LLVM.parent(LLVM.parent(inst)))
@@ -86,7 +87,7 @@ end
 # when it has a pointer to it (thread memory is private to every thread), so plain accesses
 # behave the same. Anything this cannot trace back to an `alloca`, e.g., a function argument
 # or a loaded pointer, is not known to be private.
-function is_thread_private(ptr::LLVM.Value)
+function is_thread_private(@nospecialize(ptr::LLVM.Value))
     seen = Set{LLVM.Value}()
     worklist = LLVM.Value[ptr]
     while !isempty(worklist)
@@ -113,7 +114,7 @@ end
 # Replace an atomic operation on the thread's own memory (see `is_thread_private`) by plain
 # accesses. Its ordering and scope don't matter either: no other thread can observe the memory
 # it accesses, so it cannot synchronize with any.
-function demote_private_atomic!(inst::LLVM.Instruction)
+function demote_private_atomic!(@nospecialize(inst::LLVM.Instruction))
     if inst isa LLVM.LoadInst || inst isa LLVM.StoreInst
         # (a plain access has the default, system scope)
         inst.syncscope = SyncScope("system")
@@ -154,7 +155,7 @@ end
 # on the word containing it, like `AtomicExpand` does for targets without atomics of that
 # size. Like `AtomicExpand`, this assumes that the whole word can be accessed, which the
 # target has to ensure.
-function expand_partword_atomic!(inst::LLVM.Instruction, word_size::Integer)
+function expand_partword_atomic!(@nospecialize(inst::LLVM.Instruction), word_size::Integer)
     if inst isa LLVM.LoadInst
         # a word-sized load, shifted
         @dispose builder=IRBuilder() begin
