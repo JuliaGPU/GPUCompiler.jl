@@ -563,6 +563,8 @@ end
 # - `name`: the name of the argument
 # - `idx`: the index of the argument in the LLVM function type, or `nothing` if the argument
 #          is not passed at the LLVM level.
+const ArgumentInfo = @NamedTuple{cc::ArgumentCC, typ::Any, name::Symbol,
+                                 idx::Union{Nothing,Int}}
 function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.FunctionType;
                             post_optimization::Bool=false)
     source_sig = job.source.specTypes::DataType
@@ -576,12 +578,11 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
 
     codegen_types = codegen_ft.parameters
 
+    args = ArgumentInfo[]
     if post_optimization && kernel_state_type(job) !== Nothing
-        args = []
         push!(args, (cc=KERNEL_STATE, typ=kernel_state_type(job), name=:kernel_state, idx=1))
         codegen_i = 2
     else
-        args = []
         codegen_i = 1
     end
     for (source_typ, source_name) in zip(source_types, source_argnames)
