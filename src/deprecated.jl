@@ -314,12 +314,4 @@ end
 # `with_compile_hook`.
 Base.@deprecate_binding compile_hook active_compile_hook false ", use `run_compile_hook` or `with_compile_hook` instead."
 
-"""
-    compile_hook
-
-Deprecated: back-ends report the jobs they look up with [`run_compile_hook`](@ref), and
-tools install a hook with [`with_compile_hook`](@ref).
-"""
-compile_hook
-
 @public compile_hook
