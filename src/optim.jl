@@ -421,6 +421,9 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 end
 
 function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
+    # propagate `norecurse` from kernels to the functions they call, after the runtime
+    # has been linked and the last inliner has run
+    add!(mpm, ReversePostOrderFunctionAttrsPass())
     if opt_level >= 2
         add!(mpm, FunctionPassManager()) do fpm
             if VERSION < v"1.12.0-DEV.1390"

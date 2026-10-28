@@ -709,6 +709,30 @@ end
     end
 end
 
+@testset "calls without dynamic stack" begin
+    # the back-end assumes a callee without `norecurse` may recurse, and gives the kernel a
+    # dynamic stack, even if the call is never made
+    mod = @eval module $(gensym())
+        import ..sink_gcn
+        @noinline child(i) = sink_gcn(i)
+        function entry(i)
+            child(i)
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check "define internal {{.*}} @{{(julia|j)_child_[0-9]+}}({{.*}}) {{.*}} #[[ATTRS:[0-9]+]]"
+        @check "attributes #[[ATTRS]] = { {{.*}}norecurse"
+        GCN.code_llvm(mod.entry, Tuple{Int64}; dump_module=true, kernel=true)
+    end
+
+    @test @filecheck begin
+        @check ".amdhsa_uses_dynamic_stack 0"
+        GCN.code_native(mod.entry, Tuple{Int64}; dump_module=true, kernel=true)
+    end
+end
+
 @testset "child function reuse" begin
     # bug: depending on a child function from multiple parents resulted in
     #      the child only being present once
