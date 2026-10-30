@@ -389,6 +389,137 @@ else
 end
 
 
+## overlay dependencies
+#
+# Julia only records that a call depends on the absence of a method when the methods it
+# found do not fully cover the call. A call that misses in the overlay tables and resolves
+# to a method in a later table or in Base's table thus has no dependency on the overlay
+# tables, and adding an overlay later does not invalidate it (JuliaGPU/GPUCompiler.jl#207).
+# Record that dependency for every method lookup when inference finishes a function.
+#
+# XXX: this should be handled by Julia (JuliaLang/julia#63959)
+
+# the overlay tables a method table view consults before Base's, from most to least
+# specific, or `nothing` for views that may do something else
+overlay_tables(mtv::CC.MethodTableView) = nothing
+overlay_tables(mtv::CC.InternalMethodTable) = ()
+@static if isdefined(CC, :CachedMethodTable)
+    overlay_tables(mtv::CC.CachedMethodTable) = overlay_tables(mtv.table)
+end
+overlay_tables(mtv::CC.OverlayMethodTable) = (mtv.mt,)
+function overlay_tables(mtv::StackedMethodTable)
+    tables = overlay_tables(mtv.parent)
+    return tables === nothing ? nothing : (mtv.mt, tables...)
+end
+
+@static if isdefined(CC, :ForwardToBackedgeIterator)
+
+# On 1.12+, a missing-method edge is a `(sig, Core.methodtable)` pair in the forward edges.
+# These backedges are kept globally and checked when inserting into any method table,
+# overlay tables included, so a single edge covers all of them.
+function add_overlay_dependencies!(edges::Vector{Any})
+    sigs = Any[]
+    i = 1
+    while i <= length(edges)
+        item = edges[i]
+        if item isa Int             # a lookup: count, signature, then the matches
+            push!(sigs, edges[i+1])
+            i += 2 + abs(item)
+        elseif item isa CodeInstance
+            push!(sigs, CC.get_ci_mi(item).specTypes)
+            i += 1
+        elseif item isa MethodInstance
+            push!(sigs, item.specTypes)
+            i += 1
+        elseif item isa Type        # an `invoke` signature, or a missing-method edge
+            edges[i+1] === Core.methodtable || push!(sigs, item)
+            i += 2
+        else                        # bindings, methods
+            i += 1
+        end
+    end
+    for sig in sigs
+        exists = false
+        for j in 2:length(edges)
+            if edges[j] === Core.methodtable && edges[j-1] == sig
+                exists = true
+                break
+            end
+        end
+        exists || push!(edges, sig, Core.methodtable)
+    end
+    return
+end
+
+function CC.finish!(interp::GPUInterpreter, caller::CC.InferenceState,
+                    validation_world::UInt, time_before::UInt64)
+    tables = overlay_tables(interp.method_table_view)
+    if tables !== nothing && !isempty(tables)
+        # the optimizer shares and extends the frame's edges, so add to the final ones
+        opt = caller.result.src
+        edges = opt isa CC.OptimizationState ? opt.inlining.edges : caller.edges
+        add_overlay_dependencies!(edges)
+    end
+    return @invoke CC.finish!(interp::CC.AbstractInterpreter, caller::CC.InferenceState,
+                              validation_world::UInt, time_before::UInt64)
+end
+
+else
+
+# Before 1.12, a missing-method edge is a `(mt, sig)` pair, and its backedge is kept in that
+# table, so we need one for every overlay table.
+function add_overlay_dependencies!(edges::Vector{Any}, tables::Tuple)
+    sigs = Any[]
+    i = 1
+    while i <= length(edges)
+        item = edges[i]
+        if item isa MethodInstance
+            push!(sigs, item.specTypes)
+            i += 1
+        elseif item isa Core.MethodTable    # a missing-method edge
+            push!(sigs, edges[i+1])
+            i += 2
+        else                                # an `invoke` signature and its target
+            push!(sigs, item)
+            i += 2
+        end
+    end
+    for mt in tables, sig in sigs
+        exists = false
+        for j in 1:length(edges)-1
+            if edges[j] === mt && edges[j+1] == sig
+                exists = true
+                break
+            end
+        end
+        exists || push!(edges, mt, sig)
+    end
+    return
+end
+
+@static if hasmethod(CC.finish!, Tuple{CC.AbstractInterpreter, CC.InferenceState})
+    # 1.11: backedges are stored when finishing the frame, after optimization
+    function CC.finish!(interp::GPUInterpreter, caller::CC.InferenceState)
+        tables = overlay_tables(interp.method_table_view)
+        tables === nothing || isempty(tables) ||
+            add_overlay_dependencies!(caller.stmt_edges[1], tables)
+        return @invoke CC.finish!(interp::CC.AbstractInterpreter, caller::CC.InferenceState)
+    end
+else
+    # 1.10: backedges are stored after optimization without a hook in between, so add them
+    #       to the frame's edges as soon as they are collected
+    function CC.finish(me::CC.InferenceState, interp::GPUInterpreter)
+        ret = @invoke CC.finish(me::CC.InferenceState, interp::CC.AbstractInterpreter)
+        tables = overlay_tables(interp.method_table_view)
+        tables === nothing || isempty(tables) ||
+            add_overlay_dependencies!(me.stmt_edges[1]::Vector{Any}, tables)
+        return ret
+    end
+end
+
+end
+
+
 ## Julia IR passes
 
 # run Julia IR passes (see `julia_ir_passes`) on the IR of a function, as optimized by Julia.

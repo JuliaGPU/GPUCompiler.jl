@@ -2762,9 +2762,9 @@ end
 ############################################################################################
 
 @testset "overrides" begin
-    # NOTE: method overrides do not support redefinitions, so we use different kernels
-
     mod = @eval module $(gensym())
+        Base.Experimental.@MethodTable(method_table)
+
         kernel() = child()
         @inline child() = 0
     end
@@ -2772,25 +2772,76 @@ end
     @test @filecheck begin
         @check_label "@julia_kernel"
         @check "ret i64 0"
-        Native.code_llvm(mod.kernel, Tuple{})
+        Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
     end
 
-    mod = @eval module $(gensym())
-        using ..GPUCompiler
-
-        Base.Experimental.@MethodTable(method_table)
-
-        kernel() = child()
-        @inline child() = 0
-
-        Base.Experimental.@overlay method_table child() = 1
-    end
-
+    # adding an overlay invalidates code that called the method it overrides
+    @eval mod Base.Experimental.@overlay method_table child() = 1
     @test @filecheck begin
         @check_label "@julia_kernel"
         @check "ret i64 1"
         Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
     end
+
+    # ... as does redefining it
+    @eval mod Base.Experimental.@overlay method_table child() = 2
+    @test @filecheck begin
+        @check_label "@julia_kernel"
+        @check "ret i64 2"
+        Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
+    end
+end
+
+@testset "overrides invalidation" begin
+    # a back-end that caches results with the code
+    mod = @eval module $(gensym())
+        Base.Experimental.@MethodTable(method_table)
+        Base.Experimental.@MethodTable(other_method_table)
+
+        mutable struct Results
+            asm::Union{Nothing,String}
+            Results() = new(nothing)
+        end
+
+        kernel() = child()
+        @inline child() = 0
+        invoke_kernel() = invoke(invoked, Tuple{Any}, 1)
+        @inline invoked(x) = 0
+        applicable_kernel() = applicable(probe, 1) ? 1 : 0
+        function probe end
+    end
+    function cached_llvm(f; kwargs...)
+        job, _ = Native.create_job(f, (); kwargs...)
+        res = GPUCompiler.cached_results(mod.Results, job)
+        if res === nothing || res.asm === nothing
+            asm = JuliaContext() do ctx
+                ir, meta = GPUCompiler.compile(:llvm, job)
+                string(ir)
+            end
+            res = @something res GPUCompiler.cached_results(mod.Results, job)
+            res.asm = asm
+        end
+        return res.asm
+    end
+    tables = (mod.method_table, mod.other_method_table)
+
+    @test occursin("ret i64 0", cached_llvm(mod.kernel; method_table=tables))
+    @eval mod Base.Experimental.@overlay other_method_table child() = 1
+    @test occursin("ret i64 1", cached_llvm(mod.kernel; method_table=tables))
+
+    # an overlay in a more specific table overrides the one in a less specific table
+    @eval mod Base.Experimental.@overlay method_table child() = 2
+    @test occursin("ret i64 2", cached_llvm(mod.kernel; method_table=tables))
+
+    # `invoke` depends on the lookup of the signature it is given
+    @test occursin("ret i64 0", cached_llvm(mod.invoke_kernel; method_table=tables))
+    @eval mod Base.Experimental.@overlay method_table invoked(x::Any) = 1
+    @test occursin("ret i64 1", cached_llvm(mod.invoke_kernel; method_table=tables))
+
+    # so do reflection queries
+    @test occursin("ret i64 0", cached_llvm(mod.applicable_kernel; method_table=tables))
+    @eval mod Base.Experimental.@overlay other_method_table probe(x::Int) = nothing
+    @test occursin("ret i64 1", cached_llvm(mod.applicable_kernel; method_table=tables))
 end
 
 @testset "shared method table" begin
