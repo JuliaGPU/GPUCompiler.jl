@@ -2913,6 +2913,74 @@ end
     end
 end
 
+@testset "kernel overrides" begin
+    mod = @eval module $(gensym())
+        Base.Experimental.@MethodTable(method_table)
+
+        kernel() = 0
+        Base.Experimental.@overlay method_table kernel() = 1
+    end
+
+    @test @filecheck begin
+        # before 1.12, overlay methods are named `julia__kernel_N`
+        @check_label "@{{(julia|j)_+kernel_[0-9]+}}"
+        @check "ret i64 1"
+        Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
+    end
+
+    # reflection shows the method instance that is compiled
+    job, _ = Native.create_job(mod.kernel, (); mod.method_table)
+    @test job.source.def.external_mt === mod.method_table
+    lowered = only(GPUCompiler.code_lowered(job))
+    @test lowered.code[end] == Core.ReturnNode(1)
+    src, rt = only(GPUCompiler.code_typed(job))
+    @test src.code[end] == Core.ReturnNode(1)
+    @test rt === Int
+    @test occursin("return 1", sprint(GPUCompiler.code_warntype, job))
+
+    # ... also when that is not the method the job's tables would select
+    job = CompilerJob(job; source=methodinstance(typeof(mod.kernel), Tuple{}))
+    lowered = only(GPUCompiler.code_lowered(job))
+    @test lowered.code[end] == Core.ReturnNode(0)
+    src, _ = only(GPUCompiler.code_typed(job))
+    @test src.code[end] == Core.ReturnNode(0)
+
+    # the overlay is picked up when it is added after compiling the function
+    mod = @eval module $(gensym())
+        Base.Experimental.@MethodTable(method_table)
+        kernel() = 0
+    end
+    @test @filecheck begin
+        @check_label "@julia_kernel"
+        @check "ret i64 0"
+        Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
+    end
+    @eval mod Base.Experimental.@overlay method_table kernel() = 1
+    @test @filecheck begin
+        # before 1.12, overlay methods are named `julia__kernel_N`
+        @check_label "@{{(julia|j)_+kernel_[0-9]+}}"
+        @check "ret i64 1"
+        Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
+    end
+
+    # ... and for deferred compilation
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        Base.Experimental.@MethodTable(method_table)
+        @noinline child() = 0
+        Base.Experimental.@overlay method_table @noinline child() = 1
+        function kernel()
+            ptr = GPUCompiler.deferred_codegen(Val(typeof(child)), Val(Tuple{}))
+            ccall(ptr, Int, ())
+        end
+    end
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_+child_[0-9]+}}"
+        @check "ret i64 1"
+        Native.code_llvm(mod.kernel, Tuple{}; mod.method_table, dump_module=true)
+    end
+end
+
 @testset "runtime functions from overlay methods" begin
     # runtime library functions (`signal_exception`, `malloc`, ...) should be resolved
     # through the job's method table, so that back-ends can keep GPU-only code out of

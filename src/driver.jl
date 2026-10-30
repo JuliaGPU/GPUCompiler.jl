@@ -259,8 +259,9 @@ const __llvm_initialized = Ref(false)
                     dyn_val
                 else
                     ft, tt = dyn_val
-                    dyn_src = methodinstance(ft, tt, job.world)
-                    CompilerJob(dyn_src, job.config, job.world)
+                    dyn_job = CompilerJob(methodinstance(ft, tt, job.world), job.config,
+                                          job.world)
+                    CompilerJob(dyn_job; source=methodinstance(dyn_job))
                 end
 
                 push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
