@@ -110,10 +110,10 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # Keep this intermediate module relocatable even when the final back-end resolves
     # relocations eagerly. The caller links a fresh copy and lowers the merged sites.
     new_mod, meta = compile_unhooked(:llvm, rt_job; resolve_relocations=false)
-    ft = meta.entry.function_type
+    entry = meta.entry
     expected_ft = runtime_function_type(rt_job, method)
-    if ft.return_type != expected_ft.return_type
-        error("Invalid return type for runtime function '$(method.name)': expected $(expected_ft.return_type), got $(ft.return_type)")
+    if entry.function_type.return_type != expected_ft.return_type
+        entry = sret_wrapper!(new_mod, entry, expected_ft, method)
     end
 
     # recent Julia versions include prototypes for all runtime functions, even if unused
@@ -125,12 +125,12 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
     decl = get(new_mod.functions, name, nothing)
-    if decl !== nothing && decl != meta.entry
-        @assert decl.value_type == meta.entry.value_type
-        replace_uses!(decl, meta.entry)
+    if decl !== nothing && decl != entry
+        @assert decl.value_type == entry.value_type
+        replace_uses!(decl, entry)
         erase!(decl)
     end
-    meta.entry.name = name
+    entry.name = name
 
     io = IOBuffer()
     write(io, new_mod)
@@ -143,6 +143,31 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
 
     link_relocatable!(mod, relocs, new_mod, meta.relocations)
     return ci::CodeInstance
+end
+
+# Julia returns values wider than a pointer (e.g. `Int64` on 32-bit hosts) through an
+# `sret` argument, while callers of runtime functions expect them to be returned by value.
+# Bridge the two with a wrapper, like Julia does for `@cfunction`.
+function sret_wrapper!(mod::LLVM.Module, f::LLVM.Function, ft::LLVM.FunctionType, method)
+    actual_ft = f.function_type
+    sret = isempty(actual_ft.parameters) ? nothing :
+           get(f.parameter_attributes[1], :sret, nothing)
+    T = ft.return_type
+    if actual_ft.return_type != LLVM.VoidType() || sret === nothing || sret.value != T ||
+       actual_ft.parameters[2:end] != ft.parameters
+        error("Invalid signature for runtime function '$(method.name)': expected $ft, got $actual_ft")
+    end
+
+    wrapper = LLVM.Function(mod, "", ft)
+    f.linkage = LLVM.Linkage.Internal
+    @dispose builder=IRBuilder() begin
+        position!(builder, LLVM.at_end(BasicBlock(wrapper, "top")))
+        slot = alloca!(builder, T)
+        call = call!(builder, actual_ft, f, [slot, wrapper.parameters...])
+        push!(LLVM.argument_attributes(call)[1], TypeAttribute(:sret, T))
+        ret!(builder, load!(builder, T, slot))
+    end
+    return wrapper
 end
 
 function runtime_results(::Type{V}, ci::CodeInstance, config::CompilerConfig) where {V}

@@ -106,7 +106,7 @@ end
 
     # unions
     @test mangle(identity, Union{Int32, Int64}) == "identity(Union<Int32, Int64>)"
-    @test mangle(identity, Union, Int, Union{Int64, Int32}) == "identity(Union, Int64, Union<Int32, Int64>)"
+    @test mangle(identity, Union, Int64, Union{Int64, Int32}) == "identity(Union, Int64, Union<Int32, Int64>)"
 
     # union alls
     @test mangle(identity, Array) == "identity(Array<T, N>)"
@@ -115,10 +115,10 @@ end
     @test mangle(identity, NTuple{2, I} where {I <: Integer}) == "identity(Tuple<I__Integer, I__Integer>)"
 
     # Vararg
-    @test mangle(identity, Vararg{Int}) == "identity(Int64, ...)"
-    @test mangle(identity, Vararg{Int, 2}) == "identity(Int64, Int64)"
+    @test mangle(identity, Vararg{Int64}) == "identity(Int64, ...)"
+    @test mangle(identity, Vararg{Int64, 2}) == "identity(Int64, Int64)"
     @test mangle(identity, Tuple{1, 2}, Tuple{}, Tuple) == "identity(Tuple<1, 2>, Tuple<>, Tuple)"
-    @test mangle(identity, NTuple{2, Int}) == "identity(Tuple<Int64, Int64>)"
+    @test mangle(identity, NTuple{2, Int64}) == "identity(Tuple<Int64, Int64>)"
     @test mangle(identity, Tuple{Vararg{Int}}) == "identity(Tuple<>)"
     # A `Vararg` whose length is still a `TypeVar`, which is what unwrapping a `UnionAll`
     # leaves behind. It is the same type as the unbounded `Vararg` above, so it mangles alike.
@@ -133,8 +133,8 @@ end
 
     # intertwined substitutions
     @test mangle(
-        identity, Val{1}, Ptr{Tuple{Ptr{Int}}}, Ptr{Int}, Val{1}, Val{2},
-        Tuple{Ptr{Int}}, Tuple{Int8}, Int64, Int8
+        identity, Val{1}, Ptr{Tuple{Ptr{Int64}}}, Ptr{Int64}, Val{1}, Val{2},
+        Tuple{Ptr{Int64}}, Tuple{Int8}, Int64, Int8
     ) ==
         "identity(Val<1>, Tuple<Int64*>*, Int64*, Val<1>, Val<2>, Tuple<Int64*>, Tuple<Int8>, Int64, Int8)"
 

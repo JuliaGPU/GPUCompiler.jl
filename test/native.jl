@@ -437,19 +437,19 @@ end
         end
 
         # smoke test
-        job, _ = Native.create_job(mod.kernel, (Int64,))
+        job, _ = Native.create_job(mod.kernel, (Int,))
         @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 1"
+            @check_label "define $llvm_int @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add $llvm_int %{{[0-9]+}}, 1"
             GPUCompiler.code_llvm(job)
         end
 
         # basic redefinition
         @eval mod kernel(i) = child(i)+2
-        job, _ = Native.create_job(mod.kernel, (Int64,))
+        job, _ = Native.create_job(mod.kernel, (Int,))
         @test @filecheck begin
-            @check_label "define i64 @{{(julia|j)_kernel_[0-9]+}}"
-            @check "add i64 %{{[0-9]+}}, 2"
+            @check_label "define $llvm_int @{{(julia|j)_kernel_[0-9]+}}"
+            @check "add $llvm_int %{{[0-9]+}}, 2"
             GPUCompiler.code_llvm(job)
         end
     end
@@ -579,6 +579,36 @@ end
             new = GPUCompiler.runtime_libs[key]
             @test new !== old
             @test GPUCompiler.runtime_library_valid(new, new_job)
+        end
+    end
+
+    @testset "runtime functions returning through sret" begin
+        # Julia returns values wider than a pointer through an `sret` argument (on 32-bit
+        # hosts, this includes the `Int64` returned by `unbox_int64`), while callers expect
+        # runtime functions to return by value. (`@noinline` checks that the wrapped
+        # function keeps its attributes valid.)
+        mod = @eval module $(gensym())
+            @noinline sret_function(x) = (x, x)
+        end
+        rt = GPUCompiler.Runtime.RuntimeMethodInstance(
+            mod.sret_function, NTuple{2,Int64}, (Int64,), :sret_function,
+            nothing, nothing, "gpu_sret_function")
+        job, _ = Native.create_job(mod.sret_function, (Int64,))
+        config = GPUCompiler.runtime_config(job)
+        JuliaContext() do ctx
+            expected_ft = GPUCompiler.runtime_function_type(job, rt)
+            @test expected_ft.return_type isa LLVM.ArrayType
+
+            # the second emission is served from the bitcode cache (when supported)
+            for i in 1:2
+                ir = LLVM.Module("runtime")
+                GPUCompiler.emit_function!(ir, GPUCompiler.Relocations(), config,
+                                           job.source, rt, job.world)
+                f = ir.functions["gpu_sret_function"]
+                @test f.function_type == expected_ft
+                @test !isdeclaration(f)
+                verify(ir)
+            end
         end
     end
 
@@ -718,6 +748,7 @@ end
             ptrs = [ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x) for x in objs]
             function slot_module(ptr::Ptr{Cvoid})
                 llvm_mod = LLVM.Module("test")
+                llvm_mod.datalayout = Native.datalayout()
                 name = "jl_global#0"
                 LLVM.GlobalVariable(llvm_mod, LLVM.PointerType(LLVM.Int8Type()), name)
                 llvm_mod, Dict(name => ptr)
@@ -805,7 +836,7 @@ end
                 @dispose m=m begin
                     relocs = collect!(m, map)
                     rec = only(relocs.records)
-                    @test rec.offset == 8
+                    @test rec.offset == 16 - sizeof(UInt)
                     GPUCompiler.bake_relocations!(m, relocs)
                     box = m.globals[rec.name]
                     @test length(box.global_value_type.elements) == 3
@@ -815,6 +846,7 @@ end
                 # 1.11, whose backported GV API does not deduplicate); their
                 # content-derived names collide, so later slots must alias the first.
                 @dispose m=LLVM.Module("duplicate slots") begin
+                    m.datalayout = Native.datalayout()
                     gvs = [LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()),
                                                "jl_global#$i") for i in 1:2]
                     relocs = collect!(m, Dict("jl_global#1" => ptrs[3],
@@ -977,8 +1009,8 @@ end
     end
 
     @test @filecheck begin
-        @check_label "define i64 @{{(julia|j)_parent_[0-9]+}}"
-        @check "call{{.*}} i64 @{{(julia|j)_child_[0-9]+}}"
+        @check_label "define $llvm_int @{{(julia|j)_parent_[0-9]+}}"
+        @check "call{{.*}} $llvm_int @{{(julia|j)_child_[0-9]+}}"
         Native.code_llvm(mod.parent, Tuple{Int})
     end
 end
@@ -1401,7 +1433,7 @@ end
             @noinline produce(cond::Bool, a::Int32) = cond ? a : 1.0
             function f(cond::Bool)
                 x = produce(cond, Int32(7))
-                word = x isa Float64 ? reinterpret(UInt64, x) : UInt64(0)
+                word = x isa Float64 ? unsafe_trunc(UInt, x) : UInt(0)
                 return word + UInt(pointer_from_objref(:applied_probe))
             end
         end
@@ -1428,7 +1460,7 @@ end
             @test !isempty(relocs)   # the metadata is not consumed
             obj, _ = GPUCompiler.emit_asm(job, session_mod, LLVM.CodeGenFileType.Object)
 
-            expected = reinterpret(UInt64, 1.0) +
+            expected = UInt(1) +
                        GPUCompiler.resolve_relocation_target(
                            GPUCompiler.JuliaValueRef(:applied_probe))
             fptr, lljit, _table = Native.load(Vector{UInt8}(codeunits(obj)), entry,
@@ -1533,11 +1565,12 @@ end
             ref = GPUCompiler.JuliaValueRef(:shared_probe)
             function shared_object(entry)
                 m = parse(LLVM.Module, """
-                    @shared_reloc = external global i64
+                    target datalayout = "$(Native.datalayout())"
+                    @shared_reloc = external global $llvm_int
 
-                    define i64 @$entry() {
-                        %value = load i64, $(ptr("i64")) @shared_reloc
-                        ret i64 %value
+                    define $llvm_int @$entry() {
+                        %value = load $llvm_int, $(ptr(llvm_int)) @shared_reloc
+                        ret $llvm_int %value
                     }""")
                 relocs = GPUCompiler.Relocations(
                     [GPUCompiler.Relocation(GPUCompiler.SlotSite, "shared_reloc", 0, ref)])
@@ -1579,7 +1612,7 @@ end
             @noinline produce(cond::Bool, a::Int32) = cond ? a : 2.0
             function f(cond::Bool)
                 x = produce(cond, Int32(7))
-                word = x isa Float64 ? reinterpret(UInt64, x) : UInt64(0)
+                word = x isa Float64 ? unsafe_trunc(UInt, x) : UInt(0)
                 return word + UInt(pointer_from_objref(:table_probe))
             end
         end
@@ -1598,7 +1631,7 @@ end
             # the words are read out of the table, not baked into the module
             @test haskey(meta.ir.globals, Native.RELOC_TABLE_BASE)
 
-            expected = reinterpret(UInt64, 2.0) +
+            expected = UInt(2) +
                        GPUCompiler.resolve_relocation_target(
                            GPUCompiler.JuliaValueRef(:table_probe))
             fptr, lljit, table = Native.load(Vector{UInt8}(codeunits(obj)),
@@ -1646,8 +1679,8 @@ end
             function f(cond::Bool)
                 x = produce64(cond, Int32(7))
                 y = produce32(cond, Int32(8))
-                wx = x isa Float64 ? reinterpret(UInt64, x) : UInt64(0)
-                wy = y isa Float32 ? UInt64(reinterpret(UInt32, y)) : UInt64(0)
+                wx = x isa Float64 ? unsafe_trunc(UInt, x) : UInt(0)
+                wy = y isa Float32 ? unsafe_trunc(UInt, y) : UInt(0)
                 return wx + wy
             end
         end
@@ -1688,60 +1721,61 @@ end
             GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(Symbol(name)))
         JuliaContext() do ctx
             m = parse(LLVM.Module, """
+                target datalayout = "$(Native.datalayout())"
                 @merged_a = external global ptr
                 @merged_b = external global ptr
                 @merged_c = external global ptr
                 @merged_d = external addrspace(1) global ptr
                 @jl_nothing = external global ptr
 
-                define i64 @pick(i64 %i) {
+                define $llvm_int @pick($llvm_int %i) {
                 top:
-                    switch i64 %i, label %other [ i64 1, label %one
-                                                  i64 2, label %two ]
+                    switch $llvm_int %i, label %other [ $llvm_int 1, label %one
+                                                        $llvm_int 2, label %two ]
                 one:
                     br label %join
                 two:
                     br label %join
                 other:
-                    %large = icmp sgt i64 %i, 3
+                    %large = icmp sgt $llvm_int %i, 3
                     %other.addr = select i1 %large, ptr @jl_nothing, ptr @merged_c
                     br label %join
                 join:
                     %addr = phi ptr [ @merged_a, %one ], [ @merged_b, %two ],
                                     [ %other.addr, %other ]
-                    %word = load i64, ptr %addr, align 16
-                    ret i64 %word
+                    %word = load $llvm_int, ptr %addr, align 16
+                    ret $llvm_int %word
                 }
 
-                define i64 @constant_cast(i1 %cond) {
+                define $llvm_int @constant_cast(i1 %cond) {
                     %addr = select i1 %cond, ptr @merged_a,
                         ptr addrspacecast (ptr addrspace(1) @merged_d to ptr)
-                    %word = load i64, ptr %addr
-                    ret i64 %word
+                    %word = load $llvm_int, ptr %addr
+                    ret $llvm_int %word
                 }
 
-                define i64 @flip(i64 %n) {
+                define $llvm_int @flip($llvm_int %n) {
                 top:
                     br label %loop
                 loop:
-                    %k = phi i64 [ 0, %top ], [ %k.next, %loop ]
+                    %k = phi $llvm_int [ 0, %top ], [ %k.next, %loop ]
                     %addr = phi ptr [ @merged_a, %top ], [ %addr.next, %loop ]
-                    %flip = icmp eq i64 %k, 2
+                    %flip = icmp eq $llvm_int %k, 2
                     %addr.next = select i1 %flip, ptr @merged_b, ptr %addr
-                    %k.next = add i64 %k, 1
-                    %done = icmp sge i64 %k.next, %n
+                    %k.next = add $llvm_int %k, 1
+                    %done = icmp sge $llvm_int %k.next, %n
                     br i1 %done, label %exit, label %loop
                 exit:
                     %word = load ptr, ptr %addr.next
-                    %int = ptrtoint ptr %word to i64
-                    ret i64 %int
+                    %int = ptrtoint ptr %word to $llvm_int
+                    ret $llvm_int %int
                 }
 
-                define i64 @cast(i1 %cond) {
+                define $llvm_int @cast(i1 %cond) {
                     %addr = select i1 %cond, ptr @merged_a, ptr @merged_b
                     %cast = addrspacecast ptr %addr to ptr addrspace(1)
-                    %word = load i64, ptr addrspace(1) %cast
-                    ret i64 %word
+                    %word = load $llvm_int, ptr addrspace(1) %cast
+                    ret $llvm_int %word
                 }""")
             relocs = relocations()
             obj, _ = GPUCompiler.emit_asm(job, m, relocs, LLVM.CodeGenFileType.Object)
@@ -1779,24 +1813,26 @@ end
 
             # Mixed addresses need not share an address space on the target.
             m = parse(LLVM.Module, """
+                target datalayout = "$(Native.datalayout())"
                 @merged_a = external global ptr
 
-                define i64 @mixed(i1 %cond, ptr %other) {
+                define $llvm_int @mixed(i1 %cond, ptr %other) {
                     %addr = select i1 %cond, ptr @merged_a, ptr %other
-                    %word = load i64, ptr %addr
-                    ret i64 %word
+                    %word = load $llvm_int, ptr %addr
+                    ret $llvm_int %word
                 }""")
             @test_throws "merged with unsupported address" GPUCompiler.emit_asm(
                 job, m, relocations(), LLVM.CodeGenFileType.Object)
 
             # The table contains whole, read-only words.
             for (body, message) in (
-                ("%word = load i32, ptr %addr; ret i32 %word", "Unsupported relocation slot load"),
-                ("store i64 0, ptr %addr; ret i32 0", "Unsupported use of relocation slot address"))
+                ("%word = load i16, ptr %addr; ret i16 %word", "Unsupported relocation slot load"),
+                ("store $llvm_int 0, ptr %addr; ret i16 0", "Unsupported use of relocation slot address"))
                 m = parse(LLVM.Module, """
+                    target datalayout = "$(Native.datalayout())"
                     @merged_a = external global ptr
                     @merged_b = external global ptr
-                    define i32 @unsupported(i1 %cond) {
+                    define i16 @unsupported(i1 %cond) {
                         %addr = select i1 %cond, ptr @merged_a, ptr @merged_b
                         $(replace(body, "; " => "\n"))
                     }""")
@@ -1806,6 +1842,7 @@ end
 
             # Slot addresses are not exposed as general storage.
             m = parse(LLVM.Module, """
+                target datalayout = "$(Native.datalayout())"
                 @merged_a = external global ptr
                 @merged_b = external global ptr
 
@@ -1831,6 +1868,7 @@ end
                                        jlruntime=false)
             JuliaContext() do ctx
                 m = parse(LLVM.Module, """
+                    target datalayout = "$(Native.datalayout())"
                     @slot = external global ptr
                     @jl_float32_type = external global ptr
 
@@ -1839,11 +1877,11 @@ end
                         ret ptr %value
                     }
 
-                    define i64 @header() {
+                    define $llvm_int @header() {
                         %value = load ptr, ptr @slot, align 8, !nonnull !0, !invariant.load !0
-                        %header = getelementptr i64, ptr %value, i64 -1
-                        %word = load i64, ptr %header
-                        ret i64 %word
+                        %header = getelementptr $llvm_int, ptr %value, $llvm_int -1
+                        %word = load $llvm_int, ptr %header
+                        ret $llvm_int %word
                     }
 
                     define ptr @type() {
@@ -1862,7 +1900,7 @@ end
                     loads = [inst for f in ("value", "type")
                                   for inst in m.functions[f].entry.instructions
                                   if inst isa LLVM.LoadInst]
-                    @test all(load -> load.value_type == LLVM.Int64Type(), loads)
+                    @test all(load -> load.value_type == LLVM.IntType(8sizeof(UInt)), loads)
                     @test !any(load -> haskey(load.metadata, LLVM.MD_nonnull), loads)
                     @test any(load -> haskey(load.metadata, LLVM.MD_invariant_load), loads)
                 end
@@ -1936,7 +1974,7 @@ end
 
         # a slot must be word-sized
         mod = LLVM.Module("errors")
-        GlobalVariable(mod, LLVM.Int32Type(), "narrow")
+        GlobalVariable(mod, LLVM.Int16Type(), "narrow")
         @test_throws "has size" GPUCompiler.foreach_relocation(nop, mod, slot("narrow"))
 
         # an interior record must name a definition...
@@ -2018,9 +2056,10 @@ end
         word_ptr = ptr("i8")
         word_ptr_ptr = ptr(word_ptr)
         function_word_ptr(name) = GPUCompiler.supports_typed_pointers(ctx) ?
-            "i64* bitcast (i64 ()* @$name to i64*)" : "ptr @$name"
+            "$llvm_int* bitcast ($llvm_int ()* @$name to $llvm_int*)" : "ptr @$name"
 
         mod = parse(LLVM.Module, """
+            target datalayout = "$(Native.datalayout())"
             declare void @jl_get_pgcstack_resolved()
 
             define void @entry() {
@@ -2031,6 +2070,7 @@ end
         @test haskey(mod.functions, "jl_get_pgcstack_resolved")
 
         mod = parse(LLVM.Module, """
+            target datalayout = "$(Native.datalayout())"
             @jl_float32_type = external global $word_ptr
 
             define $word_ptr @entry() {
@@ -2042,9 +2082,10 @@ end
         @test !occursin("load $word_ptr, $word_ptr_ptr @jl_float32_type", ir)
         expected = GPUCompiler.resolve_relocation_target(
             GPUCompiler.CGlobalRef(:jl_float32_type))
-        @test occursin("inttoptr (i64 $expected to $word_ptr)", ir)
+        @test occursin("inttoptr ($llvm_int $(reinterpret(Int, expected)) to $word_ptr)", ir)
 
         mod = parse(LLVM.Module, """
+            target datalayout = "$(Native.datalayout())"
             @jl_float32_type = external global $word_ptr
 
             define $word_ptr @entry() {
@@ -2059,28 +2100,30 @@ end
         @test rec.offset == 0
         # the slot is a symbol a loader addresses, so its name carries the job's namespace
         @test startswith(rec.name, GPUCompiler.relocation_namespace(job))
-        @test occursin("@$(rec.name) = external global i64", string(mod))
+        @test occursin("@$(rec.name) = external global $llvm_int", string(mod))
         GPUCompiler.emit_patchable_relocations!(mod, relocs)
-        @test occursin("externally_initialized global i64 0", string(mod))
+        @test occursin("externally_initialized global $llvm_int 0", string(mod))
 
         mod = parse(LLVM.Module, """
-            declare i64 @jl_float32_type()
+            target datalayout = "$(Native.datalayout())"
+            declare $llvm_int @jl_float32_type()
 
-            define i64 @entry() {
-                %value = load i64, $(function_word_ptr("jl_float32_type"))
-                ret i64 %value
+            define $llvm_int @entry() {
+                %value = load $llvm_int, $(function_word_ptr("jl_float32_type"))
+                ret $llvm_int %value
             }""")
         relocs = GPUCompiler.Relocations()
         @test GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
         rec = only(relocs.records)
         @test rec.target == GPUCompiler.CGlobalRef(:jl_float32_type)
-        @test occursin("@$(rec.name) = external global i64", string(mod))
+        @test occursin("@$(rec.name) = external global $llvm_int", string(mod))
         GPUCompiler.emit_patchable_relocations!(mod, relocs)
-        @test occursin("externally_initialized global i64 0", string(mod))
+        @test occursin("externally_initialized global $llvm_int 0", string(mod))
 
         # A global whose address is merged with others before being loaded from (e.g.
         # `jl_nothing` with the relocation slots of other singletons) takes its slot's address.
         merged_ir = """
+            target datalayout = "$(Native.datalayout())"
             @jl_float32_type = external global $word_ptr
             @jl_float64_type = external global $word_ptr
 
@@ -2121,18 +2164,19 @@ end
             expected = GPUCompiler.resolve_relocation_target(
                 GPUCompiler.CGlobalRef(Symbol("jl_$(lowercase(string(T)))_type")))
             @test expected == UInt(pointer_from_objref(T))
-            @test occursin("inttoptr (i64 $expected to $word_ptr)", ir)
+            @test occursin("inttoptr ($llvm_int $(reinterpret(Int, expected)) to $word_ptr)", ir)
         end
         # a slot only holds a word, so anything else loaded is left, and reported, as is
         mod = parse(LLVM.Module, """
-            @jl_float32_type = external global i32
-            @jl_float64_type = external global i32
+            target datalayout = "$(Native.datalayout())"
+            @jl_float32_type = external global i16
+            @jl_float64_type = external global i16
 
-            define i32 @entry(i1 %cond) {
-                %addr = select i1 %cond, $(ptr("i32")) @jl_float32_type,
-                                         $(ptr("i32")) @jl_float64_type
-                %value = load i32, $(ptr("i32")) %addr
-                ret i32 %value
+            define i16 @entry(i1 %cond) {
+                %addr = select i1 %cond, $(ptr("i16")) @jl_float32_type,
+                                         $(ptr("i16")) @jl_float64_type
+                %value = load i16, $(ptr("i16")) %addr
+                ret i16 %value
             }""")
         relocs = GPUCompiler.Relocations()
         @test !GPUCompiler.collect_cglobal_relocations!(job, mod, relocs)
@@ -2675,14 +2719,14 @@ end
     @test_throws_message(InvalidIRError,
                          Native.code_execution(mod.kernel, Tuple{Ptr{Int}};
                                                jlruntime=false)) do msg
-        occursin(r"Julia code.*: .*\.g\(::Int64\), with .*\.g::Any", msg) &&
+        occursin(Regex("Julia code.*: .*\\.g\\(::$Int\\), with .*\\.g::Any"), msg) &&
         # Julia 1.14 types a type argument as `Core.TypeEgal{T}`
-        occursin(r"Julia code.*: convert\(::(Type|Core\.TypeEgal)\{Int64\}, ::Any\)", msg)
+        occursin(Regex("Julia code.*: convert\\(::(Type|Core\\.TypeEgal)\\{$Int\\}, ::Any\\)"), msg)
     end
     @test_throws_message(InvalidIRError,
                          Native.code_execution(mod.typed_kernel, Tuple{Ptr{Int}};
                                                jlruntime=false)) do msg
-        occursin(r"Julia code.*: .*\.typed\(::Int64\), with .*\.typed::Function", msg)
+        occursin(Regex("Julia code.*: .*\\.typed\\(::$Int\\), with .*\\.typed::Function"), msg)
     end
 
     # neither callee is known, and both calls are on the same line (so that they are reported
@@ -2705,7 +2749,7 @@ end
             @test precision === :exact
         else
             @test precision === :ambiguous
-            @test any(contains(".g(::Int64)"), code) && any(contains(".h(::Float64)"), code)
+            @test any(contains(".g(::$Int)"), code) && any(contains(".h(::Float64)"), code)
         end
     end
 end
@@ -2771,7 +2815,7 @@ end
 
     @test @filecheck begin
         @check_label "@julia_kernel"
-        @check "ret i64 0"
+        @check "ret $llvm_int 0"
         Native.code_llvm(mod.kernel, Tuple{})
     end
 
@@ -2788,7 +2832,7 @@ end
 
     @test @filecheck begin
         @check_label "@julia_kernel"
-        @check "ret i64 1"
+        @check "ret $llvm_int 1"
         Native.code_llvm(mod.kernel, Tuple{}; mod.method_table)
     end
 end
@@ -2812,7 +2856,7 @@ end
     end
 
     # shared overlays apply to code for devices, but not to code for the host
-    if :NVPTX in LLVM.backends()
+    if :NVPTX in LLVM.backends() && Sys.WORD_SIZE == 64
         @test @filecheck begin
             @check_label "@julia_shared_kernel"
             @check "ret i64 1"
@@ -2821,7 +2865,7 @@ end
     end
     @test @filecheck begin
         @check_label "@julia_shared_kernel"
-        @check "ret i64 0"
+        @check "ret $llvm_int 0"
         Native.code_llvm(mod.shared_kernel, Tuple{})
     end
     @test mod.shared_kernel() == 0
@@ -2829,18 +2873,18 @@ end
     # the tables from `method_tables` come first, in order
     @test @filecheck begin
         @check_label "@julia_stacked_kernel"
-        @check "ret i64 2"
+        @check "ret $llvm_int 2"
         Native.code_llvm(mod.stacked_kernel, Tuple{}; method_table=mod.other_method_table)
     end
     @test @filecheck begin
         @check_label "@julia_stacked_kernel"
-        @check "ret i64 3"
+        @check "ret $llvm_int 3"
         Native.code_llvm(mod.stacked_kernel, Tuple{};
                          method_table=(mod.method_table, mod.other_method_table))
     end
     @test @filecheck begin
         @check_label "@julia_stacked_kernel"
-        @check "ret i64 2"
+        @check "ret $llvm_int 2"
         Native.code_llvm(mod.stacked_kernel, Tuple{};
                          method_table=(mod.other_method_table, mod.method_table))
     end
@@ -2853,7 +2897,7 @@ end
         kernel() = probe()
         Base.Experimental.@overlay GPUCompiler.SHARED_METHOD_TABLE flag() = false
     end
-    if :NVPTX in LLVM.backends()
+    if :NVPTX in LLVM.backends() && Sys.WORD_SIZE == 64
         @test @filecheck begin
             @check_label "@julia_kernel"
             @check "ret i8 0"
