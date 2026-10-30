@@ -867,14 +867,15 @@ end
 
 # The MSL thread_scope of an atomic operation or fence (see `metal_syncscope`). Threadgroup
 # memory is only shared within a threadgroup, and MSL never uses a wider scope for it.
-function metal_thread_scope(inst::LLVM.Instruction, as::Union{Nothing,Int}=nothing)
+function metal_thread_scope(@nospecialize(inst::LLVM.Instruction),
+                            as::Union{Nothing,Int}=nothing)
     ss = metal_syncscope(inst.syncscope.name)
     ss === nothing && return nothing
     return as == 3 && ss.scope == 2 ? 1 : ss.scope
 end
 
 # The MSL mem_flags of an atomic operation or fence (see `metal_syncscope`)
-function metal_memory_flags(inst::LLVM.Instruction)
+function metal_memory_flags(@nospecialize(inst::LLVM.Instruction))
     ss = metal_syncscope(inst.syncscope.name)
     # (`validate_ir` rejects unknown scopes; without validation, use the default flags)
     return ss === nothing ? METAL_MEM_FLAGS : ss.flags
@@ -906,7 +907,7 @@ const EXPANDABLE_ATOMICRMW_OPS =
 #   compare-exchange loop (`AtomicExpand`'s `insertRMWCmpXchgLoop`);
 # - `:select`: an operation AIR can express, which becomes an `air.atomic.*` call.
 function metal_atomic_action(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                             inst::LLVM.Instruction)
+                             @nospecialize(inst::LLVM.Instruction))
     target = job.config.target
     op = inst isa LLVM.AtomicRMWInst ? inst.binop : nothing
     if op !== nothing && !haskey(AIR_ATOMICRMW_OPS, op) && !(op in EXPANDABLE_ATOMICRMW_OPS)
@@ -981,7 +982,7 @@ lowered_ordering(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
 
 # Give the operation the ordering it is lowered with, before expanding it into other atomics.
 function lower_ordering!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                         inst::LLVM.Instruction)
+                         @nospecialize(inst::LLVM.Instruction))
     if inst isa LLVM.AtomicCmpXchgInst
         inst.success_ordering = lowered_ordering(job, inst.success_ordering)
         inst.failure_ordering = lowered_ordering(job, inst.failure_ordering)
@@ -993,7 +994,7 @@ end
 
 # Cast a floating-point load, store or exchange to an integer one, returning the new operation.
 cast_atomic_to_int!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                    inst::LLVM.Instruction) =
+                    @nospecialize(inst::LLVM.Instruction)) =
     cast_atomic_to_integer!(lower_ordering!(job, inst))
 
 # Expand a 32-bit read-modify-write operation to a compare-exchange loop.
@@ -1005,7 +1006,7 @@ expand_to_cmpxchg_loop!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
 # the whole word can be accessed: true for device buffers, which Metal allocates in pages, and
 # for threadgroup arrays, which Metal.jl aligns and pads to 4 bytes.
 expand_partword_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                        inst::LLVM.Instruction) =
+                        @nospecialize(inst::LLVM.Instruction)) =
     expand_partword_atomic!(lower_ordering!(job, inst), 4)
 
 # On targets without ordered atomics (MSL < 4.1), bracket the operation with fences
@@ -1013,7 +1014,7 @@ expand_partword_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
 # `emitTrailingFence`), which `lower_fences!` turns into `air.atomic.fence` calls; the
 # operation itself is then lowered as a relaxed one (see `lowered_ordering`). The ordering is
 # not reset here.
-function insert_atomic_fences!(inst::LLVM.Instruction)
+function insert_atomic_fences!(@nospecialize(inst::LLVM.Instruction))
     order = atomic_ordering(inst)
     is_ordered(order) || return false
     scope = inst.syncscope
@@ -1040,7 +1041,7 @@ end
 # device memory as acquire ones (which on targets without ordered atomics adds a fence; before
 # MSL 3.2, there are no fences to lower that to).
 function strengthen_relaxed_load!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                                  inst::LLVM.Instruction)
+                                  @nospecialize(inst::LLVM.Instruction))
     job.config.target.metal >= v"3.2" && inst isa LLVM.LoadInst &&
         atomic_ordering(inst) == LLVM.AtomicOrdering.Monotonic &&
         inst.pointer_operand.value_type.addrspace == 1 &&
@@ -1060,7 +1061,7 @@ end
 # buffering, ~0.5% of the time on an M1), which sequential consistency forbids.
 # Read-modify-writes and compare-exchanges wait for their result and don't need this, and
 # fences before loads instead would cost more (loads are more common than stores).
-function insert_trailing_seq_cst_fence!(inst::LLVM.Instruction)
+function insert_trailing_seq_cst_fence!(@nospecialize(inst::LLVM.Instruction))
     inst isa LLVM.StoreInst &&
         atomic_ordering(inst) == LLVM.AtomicOrdering.SequentiallyConsistent ||
         return false
@@ -1085,7 +1086,7 @@ air_atomic_function(mod::LLVM.Module, name::String, ft::LLVM.FunctionType) =
 # Replace an atomic operation by the equivalent `air.atomic.*` call, in the form the
 # target's AIR and MSL versions use.
 function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
-                        mod::LLVM.Module, inst::LLVM.Instruction)
+                        mod::LLVM.Module, @nospecialize(inst::LLVM.Instruction))
     target = job.config.target
     ptr = inst.pointer_operand
     T_ptr = ptr.value_type
@@ -1111,30 +1112,31 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
     # read-modify-writes; stores and compare-exchanges are compiled the same either way.
     volatile = ConstantInt(T_i1, target.metal < v"4.1" || inst.volatile ||
                                  inst isa LLVM.LoadInst || inst isa LLVM.AtomicRMWInst)
-    trailing_types = target.air >= v"2.9" ? [T_i32, T_i32, T_i1] : [T_i32, T_i1]
-    trailing = target.air >= v"2.9" ? [scope, flags, volatile] : [scope, volatile]
+    trailing_types = target.air >= v"2.9" ? LLVMType[T_i32, T_i32, T_i1] : LLVMType[T_i32, T_i1]
+    trailing = target.air >= v"2.9" ? Value[scope, flags, volatile] : Value[scope, volatile]
     memory_order(order) = ConstantInt(T_i32, metal_memory_order(lowered_ordering(job, order)))
 
     @dispose builder=IRBuilder() begin
         position!(builder, LLVM.before(inst))
         builder.debug_location = inst.debug_location
         if inst isa LLVM.LoadInst
-            ft = LLVM.FunctionType(T, [T_ptr, T_i32, trailing_types...])
+            ft = LLVM.FunctionType(T, append!(LLVMType[T_ptr, T_i32], trailing_types))
             f = air_atomic_function(mod, "air.atomic.$mem.load.$suffix", ft)
-            new = call!(builder, ft, f, [ptr, memory_order(order), trailing...])
+            new = call!(builder, ft, f, append!(Value[ptr, memory_order(order)], trailing))
         elseif inst isa LLVM.StoreInst
-            ft = LLVM.FunctionType(LLVM.VoidType(), [T_ptr, T, T_i32, trailing_types...])
+            ft = LLVM.FunctionType(LLVM.VoidType(),
+                                   append!(LLVMType[T_ptr, T, T_i32], trailing_types))
             f = air_atomic_function(mod, "air.atomic.$mem.store.$suffix", ft)
-            new = call!(builder, ft, f, [ptr, inst.value_operand, memory_order(order),
-                                         trailing...])
+            new = call!(builder, ft, f,
+                        append!(Value[ptr, inst.value_operand, memory_order(order)], trailing))
         elseif inst isa LLVM.AtomicRMWInst
             op = AIR_ATOMICRMW_OPS[inst.binop]
             # AIR's 64-bit min/max don't return the old value
             T_ret = suffix == "i64" ? LLVM.VoidType() : T
-            ft = LLVM.FunctionType(T_ret, [T_ptr, T, T_i32, trailing_types...])
+            ft = LLVM.FunctionType(T_ret, append!(LLVMType[T_ptr, T, T_i32], trailing_types))
             f = air_atomic_function(mod, "air.atomic.$mem.$op.$suffix", ft)
-            new = call!(builder, ft, f, [ptr, inst.value_operand, memory_order(order),
-                                         trailing...])
+            new = call!(builder, ft, f,
+                        append!(Value[ptr, inst.value_operand, memory_order(order)], trailing))
         else
             # AIR only has a weak compare-exchange, which takes the expected value by
             # reference. Like MSL, derive the success flag from the returned old value.
@@ -1145,12 +1147,13 @@ function select_atomic!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
                 alloca!(entry_builder, T)
             end
             store!(builder, cmp, expected)
-            ft = LLVM.FunctionType(T, [T_ptr, expected.value_type, T, T_i32, T_i32,
-                                       trailing_types...])
+            ft = LLVM.FunctionType(T, append!(LLVMType[T_ptr, expected.value_type, T,
+                                                        T_i32, T_i32], trailing_types))
             f = air_atomic_function(mod, "air.atomic.$mem.cmpxchg.weak.$suffix", ft)
             old = call!(builder, ft, f,
-                        [ptr, expected, desired, memory_order(inst.success_ordering),
-                         memory_order(inst.failure_ordering), trailing...])
+                        append!(Value[ptr, expected, desired,
+                                      memory_order(inst.success_ordering),
+                                      memory_order(inst.failure_ordering)], trailing))
             success = icmp!(builder, LLVM.IntPredicate.EQ, old, cmp)
             new = insert_value!(builder, UndefValue(inst.value_type), old, 0)
             new = insert_value!(builder, new, success, 1)
@@ -1168,7 +1171,7 @@ function annotate_atomic_eltypes!(mod::LLVM.Module)
         m = match(r"^air\.atomic\.(global|local)\..+\.(i32|f32|i64)$", f.name)
         m === nothing && continue
         T = m.captures[2] == "f32" ? LLVM.FloatType() : LLVM.IntType(parse(Int, m.captures[2][2:end]))
-        mds = []
+        mds = Metadata[]
         for (i, param) in enumerate(f.function_type.parameters)
             i <= 2 && param isa LLVM.PointerType || continue
             push!(mds, ConstantInt(Int32(i - 1)))
@@ -1180,8 +1183,8 @@ end
 
 function lower_atomics!(@nospecialize(job::CompilerJob{MetalCompilerTarget}),
                         mod::LLVM.Module)
-    atomics = [inst for f in mod.functions for bb in f.blocks for inst in bb.instructions
-               if is_atomic_memop(inst)]
+    atomics = LLVM.Instruction[inst for f in mod.functions for bb in f.blocks
+                               for inst in bb.instructions if is_atomic_memop(inst)]
     isempty(atomics) && return false
 
     for inst in atomics
@@ -1596,7 +1599,7 @@ end
 
 # whether `ptr` is only used as the address of plain loads, directly or through GEPs and
 # bitcasts, all of which address-space inference can move to another address space
-function only_loaded_from(ptr::LLVM.Value)
+function only_loaded_from(@nospecialize(ptr::LLVM.Value))
     for use in ptr.uses
         u = LLVM.user(use)
         if u isa LLVM.GetElementPtrInst || u isa LLVM.BitCastInst
@@ -1625,14 +1628,14 @@ function add_byref_parameter_attributes!(@nospecialize(job::CompilerJob), f::LLV
         # argument is bound as its address word
         T = arg.cc == MUT_REF ? UInt : arg.typ
         attrs = f.parameter_attributes[arg.idx]
-        push!(attrs, EnumAttribute("dereferenceable", sizeof(T)))
+        push!(attrs, EnumAttribute("dereferenceable", sizeof(T)::Int))
         only_read_through(param) && push!(attrs, EnumAttribute("readonly"))
     end
     return
 end
 
 # whether memory is only read through `ptr` and the pointers derived from it
-function only_read_through(ptr::LLVM.Value, seen=Set{LLVM.Value}())
+function only_read_through(@nospecialize(ptr::LLVM.Value), seen=Set{LLVM.Value}())
     ptr in seen && return true
     push!(seen, ptr)
     for use in ptr.uses
@@ -2174,7 +2177,7 @@ end
 # hardware index counters (thread id, group id, etc) aren't accessed via intrinsics,
 # but using special arguments to the kernel function.
 
-const kernel_intrinsics = Dict()
+const kernel_intrinsics = Dict{String,@NamedTuple{name::String, typ::DataType}}()
 for intr in [
         "dispatch_quadgroups_per_threadgroup", "dispatch_simdgroups_per_threadgroup",
         "quadgroup_index_in_threadgroup", "quadgroups_per_threadgroup",
@@ -2301,7 +2304,8 @@ function msl_struct_type_info(@nospecialize(T))
     for i in 1:fieldcount(T)
         FT = fieldtype(T, i)
         # inline unions have no MSL equivalent; ghost fields take no space
-        FT isa DataType && sizeof(FT) > 0 || continue
+        FT isa DataType || continue
+        sizeof(FT) > 0 || continue
 
         # homogeneous tuples are laid out like MSL arrays
         elt, count = FT, 0
@@ -2316,7 +2320,7 @@ function msl_struct_type_info(@nospecialize(T))
             push!(info, nested)
         end
         push!(info, Metadata(ConstantInt(Int32(fieldoffset(T, i)))))
-        push!(info, Metadata(ConstantInt(Int32(sizeof(elt)))))
+        push!(info, Metadata(ConstantInt(Int32(sizeof(elt)::Int))))
         push!(info, Metadata(ConstantInt(Int32(count))))
         push!(info, MDString(msl_type_name(elt)))
         push!(info, MDString(string(fieldname(T, i))))
@@ -2373,7 +2377,7 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
 
         if by_reference
             push!(md, MDString("air.buffer_size"))
-            push!(md, Metadata(ConstantInt(Int32(sizeof(arg_type)))))
+            push!(md, Metadata(ConstantInt(Int32(sizeof(arg_type)::Int))))
         end
 
         push!(md, MDString("air.location_index"))
@@ -2387,7 +2391,8 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         push!(md, MDString(by_reference ? "air.read" : "air.read_write"))
 
         push!(md, MDString("air.address_space"))
-        push!(md, Metadata(ConstantInt(Int32(entry_ft.parameters[arg.idx].addrspace))))
+        ptr_type = entry_ft.parameters[arg.idx]::LLVM.PointerType
+        push!(md, Metadata(ConstantInt(Int32(ptr_type.addrspace))))
 
         struct_info = msl_struct_type_info(arg_type)
         if struct_info !== nothing
@@ -2396,10 +2401,10 @@ function add_argument_metadata!(@nospecialize(job::CompilerJob), mod::LLVM.Modul
         end
 
         push!(md, MDString("air.arg_type_size"))
-        push!(md, Metadata(ConstantInt(Int32(sizeof(arg_type)))))
+        push!(md, Metadata(ConstantInt(Int32(sizeof(arg_type)::Int))))
 
         push!(md, MDString("air.arg_type_align_size"))
-        push!(md, Metadata(ConstantInt(Int32(Base.datatype_alignment(arg_type)))))
+        push!(md, Metadata(ConstantInt(Int32(Base.datatype_alignment(arg_type)::Int))))
 
         # like MSL, name the pointee type for pointer arguments
         type_name = if arg.cc == BITS_VALUE && (arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
@@ -2638,7 +2643,7 @@ intrinsic_table(table) = Dict(intr => val for (intr, val) in
                               ((tryparse(LLVM.Intrinsic, name), val) for (name, val) in table)
                               if intr !== nothing)
 
-function called_intrinsic(inst::LLVM.Instruction)
+function called_intrinsic(@nospecialize(inst::LLVM.Instruction))
     inst isa LLVM.CallBase || return nothing
     callee = inst.called_function
     return callee === nothing ? nothing : callee.intrinsic

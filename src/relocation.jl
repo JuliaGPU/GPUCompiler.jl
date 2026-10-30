@@ -939,7 +939,7 @@ function check_relocation_slot_uses!(mod::LLVM.Module, slots::Vector{LLVM.Global
     dl = mod.datalayout
     loads = LLVM.LoadInst[]
     seen = Set{LLVM.Value}(slots)
-    worklist = LLVM.Value[slots...]
+    worklist = Vector{LLVM.Value}(slots)
     while !isempty(worklist)
         for use in pop!(worklist).uses
             val = use.user
