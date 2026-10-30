@@ -7,9 +7,19 @@ module HighlightsExt
 
 using GPUCompiler
 import Highlights
+using tree_sitter_llvm_jll, tree_sitter_ptx_jll, tree_sitter_spirv_jll,
+      tree_sitter_gcn_jll
 
-render(buf::IO, code, language, theme) =
-    Highlights.highlight(buf, MIME("text/ansi"), code, language, theme)
+# tree-sitter grammars for `GPUCompiler.highlight_languages`
+const languages = Dict(
+    "llvm"  => tree_sitter_llvm_jll,
+    "ptx"   => tree_sitter_ptx_jll,
+    "spirv" => tree_sitter_spirv_jll,
+    "gcn"   => tree_sitter_gcn_jll,
+)
+
+render(buf::IO, code, lexer, theme) =
+    Highlights.highlight(buf, MIME("text/ansi"), code, languages[lexer], theme)
 
 function __init__()
     GPUCompiler.highlighter[] = render

@@ -11,17 +11,10 @@ import InteractiveUtils
 # needed interactively. The extension publishes its renderer through this hook.
 const highlighter = Ref{Union{Nothing,Function}}(nothing)
 
-using tree_sitter_llvm_jll, tree_sitter_ptx_jll, tree_sitter_spirv_jll,
-      tree_sitter_gcn_jll
-
-# tree-sitter grammars for the assembly formats we emit, keyed by the
-# `source_code` of the compiler target
-const highlight_languages = Dict(
-    "llvm"  => tree_sitter_llvm_jll,
-    "ptx"   => tree_sitter_ptx_jll,
-    "spirv" => tree_sitter_spirv_jll,
-    "gcn"   => tree_sitter_gcn_jll,
-)
+# the assembly formats we have tree-sitter grammars for, by the `source_code` of the
+# compiler target. the grammars are dependencies of this package, so that they're installed
+# along with it, but only the extension loads them.
+const highlight_languages = ("llvm", "ptx", "spirv", "gcn")
 
 # Set to a Highlights.jl theme, or `nothing` to detect the terminal background.
 const highlight_theme = Ref{Any}(nothing)
@@ -150,8 +143,7 @@ end
 
 function highlight(io::IO, code, lexer)
     have_color = get(io, :color, false)
-    language = get(highlight_languages, lexer, nothing)
-    if !have_color || language === nothing
+    if !have_color || !in(lexer, highlight_languages)
         print(io, code)
         return
     end
@@ -169,7 +161,7 @@ function highlight(io::IO, code, lexer)
     # partial output
     buf = IOBuffer()
     try
-        Base.invokelatest(render, buf, code, language, selected_highlight_theme(io))
+        Base.invokelatest(render, buf, code, lexer, selected_highlight_theme(io))
         write(io, take!(buf))
     catch err
         @warn "Failed to highlight $lexer code" exception=(err, catch_backtrace()) maxlog=1
