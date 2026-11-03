@@ -685,6 +685,29 @@ end
     end
 end
 
+@testset "freeze" begin
+    # both back-ends lower `freeze` themselves, so it must reach them
+    mod = @eval module $(gensym())
+        frozen(x::Int32) = Base.llvmcall("""
+            %y = freeze i32 %0
+            ret i32 %y""", Int32, Tuple{Int32}, x)
+        function kernel(out::Ptr{Int32}, x::Int32)
+            unsafe_store!(out, frozen(x))
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check "freeze i32"
+        SPIRV.code_llvm(mod.kernel, Tuple{Ptr{Int32}, Int32}; backend, kernel=true)
+    end
+
+    @test @filecheck begin
+        @check "OpStore"
+        SPIRV.code_native(mod.kernel, Tuple{Ptr{Int32}, Int32}; backend, kernel=true)
+    end
+end
+
 end
 
 @testset "min and max lowering" begin
