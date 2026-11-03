@@ -61,7 +61,13 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     atomics::SPIRVAtomics = SPIRVAtomics()
     supports_fp16::Bool = true
     supports_fp64::Bool = true
+    # `bfloat` values, for storage and conversions (SPV_KHR_bfloat16, which the front-end
+    # enables in `extensions`)
     supports_bfloat16::Bool = false
+    # arithmetic, comparisons and math functions on `bfloat` values (needs
+    # `supports_bfloat16`, and SPV_INTEL_bfloat16_arithmetic in `extensions`). otherwise,
+    # these are performed on `float` (see `widen_bfloat16!`).
+    supports_bfloat16_arithmetic::Bool = false
 
     backend::Symbol = isavailable(SPIRV_LLVM_Backend_jll) ? :llvm : :khronos
 
@@ -183,17 +189,22 @@ function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     if !job.config.target.supports_fp64
         append!(errors, check_ir_values(mod, LLVM.DoubleType()))
     end
-    if !job.config.target.supports_bfloat16 && isdefined(LLVM, :BFloatType)
+    bfloat16 = job.config.target.supports_bfloat16
+    if !bfloat16
         append!(errors, check_ir_values(mod, LLVM.BFloatType()))
     end
 
-    # atomics that `lower_atomics!` cannot lower
+    # atomics that `lower_atomics!` cannot lower, and `bfloat` operations that
+    # `widen_bfloat16!` cannot widen
     for f in mod.functions, bb in f.blocks, inst in bb.instructions
         reason = if is_atomic_memop(inst)
             action = spirv_atomic_action(job, inst)
             action isa String ? action : nothing
         elseif inst isa LLVM.FenceInst && spirv_syncscope(inst.syncscope.name) === nothing
             "fence with synchronization scope $(repr(inst.syncscope.name))"
+        elseif bfloat16
+            action = spirv_bfloat16_action(job, inst)
+            action isa String ? action : nothing
         else
             nothing
         end
@@ -303,6 +314,9 @@ end
 @unlocked function mcgen(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                          format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
+
+    # (after `prepare_execution!`, whose InstCombine would narrow the widened operations)
+    widen_bfloat16!(job, mod)
 
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
@@ -1011,7 +1025,7 @@ function lower_minimum_maximum!(mod::LLVM.Module)
     for (call, is_min, quiet) in calls
         typ = call.value_type
         eltyp = typ isa LLVM.VectorType ? typ.element_type : typ
-        bits = if eltyp isa LLVM.HalfType
+        bits = if eltyp isa LLVM.HalfType || eltyp isa LLVM.BFloatType
             16
         elseif eltyp isa LLVM.FloatType
             32
@@ -1071,6 +1085,315 @@ function lower_minimum_maximum!(mod::LLVM.Module)
 
     end
     return changed
+end
+
+# Unless the target supports arithmetic on `bfloat` values, perform it on `float`, rounding
+# the result back to `bfloat`: SPV_KHR_bfloat16 only covers storage and conversions, and the
+# back-ends translate arithmetic, comparisons and math functions on `bfloat` to instructions
+# that need SPV_INTEL_bfloat16_arithmetic, which isn't a registered extension. As `float` has
+# more than twice the precision of `bfloat`, rounding the correctly-rounded `float` result of
+# an addition, subtraction, multiplication, division or square root of `bfloat` values gives
+# the correctly-rounded `bfloat` one (though OpenCL only requires the first three to be
+# correctly rounded by default). `fma` is computed in `double` with round-to-odd, like Julia
+# does, so it is not supported without double-precision support. `fneg`, `fabs` and
+# `copysign` operate on the bits, as conversions may change NaNs.
+#
+# This also corrects the conversions to `bfloat` that would round twice: SPV_KHR_bfloat16
+# defines them as converting to `float` first, which is inexact for doubles and for integers
+# wider than its significand. Those are rounded to `float` with round-to-odd instead, after
+# which rounding to `bfloat` is correct.
+#
+# Julia's `DemoteFloat16` pass widens arithmetic on CPUs, but leaves fast-math instructions,
+# intrinsics and conversions alone. This has to run after `prepare_execution!`, whose
+# InstCombine narrows `fptrunc(op(fpext x, fpext y))` back to a `bfloat` operation.
+function widen_bfloat16!(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
+                         mod::LLVM.Module)
+    changed = false
+    job.config.target.supports_bfloat16 || return changed
+    @tracepoint "widen bfloat16" begin
+
+    worklist = Tuple{LLVM.Instruction,Symbol}[]
+    unsupported = IRError[]
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        action = spirv_bfloat16_action(job, inst)
+        if action isa Symbol
+            push!(worklist, (inst, action))
+        elseif action isa String
+            push!(unsupported, (action, backtrace(inst), string(inst)))
+        end
+    end
+    # `validate_ir` rejects these too, but optimization after it can introduce them, and
+    # validation can be disabled. fail here rather than in the back-ends.
+    isempty(unsupported) || throw(InvalidIRError(job, unsupported))
+
+    @dispose builder=IRBuilder() begin
+        for (inst, action) in worklist
+            position!(builder, LLVM.before(inst))
+            builder.debug_location = inst.debug_location
+            new = if action === :convert
+                convert_to_bfloat16!(builder, inst)
+            else
+                widen_bfloat16_operation!(builder, inst)
+            end
+            name = inst.name
+            replace_uses!(inst, new)
+            erase!(inst)
+            new.name = name
+            changed = true
+        end
+    end
+
+    end
+    return changed
+end
+
+is_bfloat16(@nospecialize(typ::LLVMType)) =
+    (typ isa LLVM.VectorType ? typ.element_type : typ) isa LLVM.BFloatType
+
+# `typ`, with `float` elements instead of `bfloat` ones
+function widened_type(@nospecialize(typ::LLVMType))
+    is_bfloat16(typ) || return typ
+    typ isa LLVM.VectorType ? LLVM.VectorType(LLVM.FloatType(), Int(typ.length)) :
+                              LLVM.FloatType()
+end
+
+# the intrinsics on `bfloat` values for which performing them on `float` and rounding the
+# result to `bfloat` gives the same result, or one as accurate (for the approximate ones)
+const SPIRV_BFLOAT16_WIDENED_INTRINSICS = Set([
+    # exact
+    "llvm.minnum", "llvm.maxnum", "llvm.minimum", "llvm.maximum", "llvm.minimumnum",
+    "llvm.maximumnum", "llvm.floor", "llvm.ceil", "llvm.trunc", "llvm.rint", "llvm.nearbyint",
+    "llvm.round", "llvm.roundeven", "llvm.ldexp", "llvm.fptosi.sat", "llvm.fptoui.sat",
+    "llvm.lround", "llvm.llround", "llvm.lrint", "llvm.llrint",
+    # correctly rounded
+    "llvm.sqrt",
+    # approximate
+    "llvm.sin", "llvm.cos", "llvm.tan", "llvm.asin", "llvm.acos", "llvm.atan", "llvm.atan2",
+    "llvm.sinh", "llvm.cosh", "llvm.tanh", "llvm.exp", "llvm.exp2", "llvm.exp10", "llvm.log",
+    "llvm.log2", "llvm.log10", "llvm.pow", "llvm.powi",
+    # with their own expansion (see `widen_bfloat16_operation!`)
+    "llvm.fabs", "llvm.copysign", "llvm.fma", "llvm.fmuladd", "llvm.is.fpclass",
+])
+
+# How `widen_bfloat16!` handles `inst`: `:widen` to perform it on `float`, `:convert` to
+# round its operand to `float` first, `nothing` to leave it alone, or the reason why it is
+# not supported (which `validate_ir` reports).
+function spirv_bfloat16_action(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
+                               inst::LLVM.Instruction)
+    if inst isa LLVM.FPTruncInst || inst isa LLVM.SIToFPInst || inst isa LLVM.UIToFPInst
+        is_bfloat16(inst.value_type) || return nothing
+        typ = first(inst.operands).value_type
+        typ isa LLVM.VectorType && (typ = typ.element_type)
+        exact = if typ isa LLVM.IntegerType
+            typ.width <= 24 + (inst isa LLVM.SIToFPInst)
+        else
+            typ isa LLVM.FloatType
+        end
+        return exact ? nothing : :convert
+    end
+
+    job.config.target.supports_bfloat16_arithmetic && return nothing
+    if inst isa Union{LLVM.FNegInst, LLVM.FAddInst, LLVM.FSubInst, LLVM.FMulInst,
+                      LLVM.FDivInst, LLVM.FRemInst, LLVM.FCmpInst}
+        return is_bfloat16(first(inst.operands).value_type) ? :widen : nothing
+    elseif inst isa LLVM.CallInst
+        is_bfloat16(inst.value_type) ||
+            any(arg -> is_bfloat16(arg.value_type), inst.arguments) || return nothing
+        callee = inst.called_operand
+        # (other functions take `bfloat` values like any others)
+        callee isa LLVM.Function && LLVM.isintrinsic(callee) || return nothing
+        name = LLVM.name(LLVM.Intrinsic(callee))
+        if name == "llvm.fma" && !job.config.target.supports_fp64
+            return "call to $(callee.name) (the target supports neither bfloat arithmetic " *
+                   "nor double precision, which correctly rounding it needs)"
+        end
+        name in SPIRV_BFLOAT16_WIDENED_INTRINSICS && return :widen
+        return "call to $(callee.name) on bfloat values " *
+               "(the target does not support bfloat arithmetic)"
+    end
+    return nothing
+end
+
+# perform `inst`, an operation on `bfloat` values, on `float` values
+function widen_bfloat16_operation!(builder::IRBuilder, inst::LLVM.Instruction)
+    widen(val) = is_bfloat16(val.value_type) ?
+                 fpext!(builder, val, widened_type(val.value_type)) : val
+    typ = inst.value_type
+    flags = supports_fast_math(inst) ? NamedTuple(inst.fast_math) : nothing
+    function keep_flags(new)
+        if flags !== nothing && new isa LLVM.Instruction && supports_fast_math(new)
+            new.fast_math = flags
+        end
+        return new
+    end
+
+    new = if inst isa LLVM.FCmpInst
+        lhs, rhs = inst.operands
+        fcmp!(builder, inst.predicate, widen(lhs), widen(rhs))
+    elseif inst isa LLVM.FNegInst
+        return set_bfloat16_sign!(builder, only(inst.operands), :flip)
+    elseif !(inst isa LLVM.CallInst)
+        lhs, rhs = inst.operands
+        binop!(builder, inst.opcode, widen(lhs), widen(rhs))
+    else
+        callee = inst.called_operand::LLVM.Function
+        intr = LLVM.Intrinsic(callee)
+        args = collect(LLVM.Value, inst.arguments)
+        if intr.name == "llvm.fma"
+            return fma_bfloat16!(builder, args...)
+        elseif intr.name == "llvm.fabs"
+            return set_bfloat16_sign!(builder, only(args), :clear)
+        elseif intr.name == "llvm.copysign"
+            return set_bfloat16_sign!(builder, args...)
+        elseif intr.name == "llvm.fmuladd"
+            # unfused, like the bfloat `fmul` and `fadd` it may be
+            x, y, z = args
+            prod = fptrunc!(builder, keep_flags(fmul!(builder, widen(x), widen(y))), typ)
+            return fptrunc!(builder, keep_flags(fadd!(builder, widen(prod), widen(z))), typ)
+        else
+            # (`fpext` may quiet a signaling NaN, which `llvm.is.fpclass` distinguishes)
+            exact = intr.name == "llvm.is.fpclass"
+            args = LLVM.Value[exact ? extend_bfloat16_bits!(builder, arg) : widen(arg)
+                              for arg in args]
+            ft = LLVM.FunctionType(widened_type(typ), LLVMType[arg.value_type for arg in args])
+            mod = builder.insert_block.parent.parent
+            call!(builder, ft, LLVM.Function(mod, intr, ft), args)
+        end
+    end
+    keep_flags(new)
+    return is_bfloat16(typ) ? fptrunc!(builder, new, typ) : new
+end
+
+# `val`, `bfloat` values, with the sign bit flipped (`:flip`), cleared (`:clear`), or taken
+# from `sign`, leaving the other bits alone
+function set_bfloat16_sign!(builder::IRBuilder, val::LLVM.Value, sign)
+    typ = val.value_type
+    T_int = typ isa LLVM.VectorType ? LLVM.VectorType(LLVM.Int16Type(), Int(typ.length)) :
+                                      LLVM.Int16Type()
+    bits = bitcast!(builder, val, T_int)
+    sign_mask = int_constant(T_int, 0x8000)
+    bits = if sign === :flip
+        xor!(builder, bits, sign_mask)
+    else
+        bits = and!(builder, bits, int_constant(T_int, 0x7fff))
+        sign === :clear ? bits :
+            or!(builder, bits, and!(builder, bitcast!(builder, sign, T_int), sign_mask))
+    end
+    return bitcast!(builder, bits, typ)
+end
+
+# `float` values with the bits of the `bfloat` values `val`, keeping signaling NaNs
+function extend_bfloat16_bits!(builder::IRBuilder, val::LLVM.Value)
+    typ = val.value_type
+    is_bfloat16(typ) || return val
+    vec(T) = typ isa LLVM.VectorType ? LLVM.VectorType(T, Int(typ.length)) : T
+    bits = zext!(builder, bitcast!(builder, val, vec(LLVM.Int16Type())), vec(LLVM.Int32Type()))
+    bits = shl!(builder, bits, int_constant(vec(LLVM.Int32Type()), 16))
+    return bitcast!(builder, bits, widened_type(typ))
+end
+
+# the integer `val`, as a constant of the integer or integer vector type `typ`
+int_constant(typ::LLVM.IntegerType, val::Integer) = LLVM.ConstantInt(typ, val)
+int_constant(typ::LLVM.VectorType, val::Integer) =
+    LLVM.ConstantVector(fill(LLVM.ConstantInt(typ.element_type, val), Int(typ.length)))
+
+# `fma` on `bfloat` values, computed in `double` (where the product is exact) and rounded
+# to odd using an exact TwoSum, so that rounding to `bfloat` afterwards is correct. this is
+# what Julia's codegen emits for `fma_float` since 1.13 (`emit_bfloat_fma`).
+function fma_bfloat16!(builder::IRBuilder, x::LLVM.Value, y::LLVM.Value, z::LLVM.Value)
+    typ = x.value_type
+    vec(T) = typ isa LLVM.VectorType ? LLVM.VectorType(T, Int(typ.length)) : T
+    T_double = vec(LLVM.DoubleType())
+    T_int = vec(LLVM.Int64Type())
+
+    a, b, c = (fpext!(builder, v, T_double) for v in (x, y, z))
+    ab = fmul!(builder, a, b)
+    res = fadd!(builder, ab, c)
+    # the exact error of `ab + c`
+    bb = fsub!(builder, res, ab)
+    err = fadd!(builder, fsub!(builder, ab, fsub!(builder, res, bb)), fsub!(builder, c, bb))
+    # round to odd: if inexact with an even last bit, step towards the exact result
+    u = bitcast!(builder, res, T_int)
+    zero = LLVM.null(T_int)
+    inexact = fcmp!(builder, LLVM.RealPredicate.ONE, err, LLVM.null(T_double))
+    even = icmp!(builder, LLVM.IntPredicate.EQ, and!(builder, u, int_constant(T_int, 1)), zero)
+    away = icmp!(builder, LLVM.IntPredicate.EQ,
+                 icmp!(builder, LLVM.IntPredicate.SLT, bitcast!(builder, err, T_int), zero),
+                 icmp!(builder, LLVM.IntPredicate.SLT, u, zero))
+    step = select!(builder, away, int_constant(T_int, 1), int_constant(T_int, -1))
+    u = select!(builder, and!(builder, inexact, even), add!(builder, u, step), u)
+    return convert_to_bfloat16!(builder, bitcast!(builder, u, T_double), typ)
+end
+
+# the conversion `inst` to `bfloat`, rounding its operand to `float` with round-to-odd first
+function convert_to_bfloat16!(builder::IRBuilder, inst::LLVM.Instruction)
+    val = only(inst.operands)
+    signed = inst isa LLVM.SIToFPInst
+    return convert_to_bfloat16!(builder, val, inst.value_type, signed)
+end
+function convert_to_bfloat16!(builder::IRBuilder, val::LLVM.Value, typ::LLVMType,
+                              signed::Bool=false)
+    # (vectors one element at a time, as the expansions need scalar constants)
+    if typ isa LLVM.VectorType
+        res = LLVM.UndefValue(typ)
+        for i in 0:Int(typ.length)-1
+            idx = LLVM.ConstantInt(LLVM.Int32Type(), i)
+            elem = convert_to_bfloat16!(builder, extract_element!(builder, val, idx),
+                                        typ.element_type, signed)
+            res = insert_element!(builder, res, elem, idx)
+        end
+        return res
+    end
+
+    f = if val.value_type isa LLVM.IntegerType
+        round_to_odd_float!(builder, val, signed)
+    else
+        round_to_odd_float!(builder, val)
+    end
+    return fptrunc!(builder, f, typ)
+end
+
+# round the `double` value `x` to a `float` with round-to-odd: towards zero, setting the
+# last bit if that was inexact. this keeps enough information for rounding the result to
+# `bfloat` (which has less than half the precision) to be correct.
+function round_to_odd_float!(builder::IRBuilder, x::LLVM.Value)
+    T_float = LLVM.FloatType()
+    T_int = LLVM.Int32Type()
+    f = fptrunc!(builder, x, T_float)
+    back = fpext!(builder, f, x.value_type)
+    mod = builder.insert_block.parent.parent
+    fabs = LLVM.Function(mod, LLVM.Intrinsic("llvm.fabs"), LLVMType[x.value_type])
+    abs(val) = call!(builder, fabs.function_type, fabs, LLVM.Value[val])
+    away = fcmp!(builder, LLVM.RealPredicate.OGT, abs(back), abs(x))
+    inexact = fcmp!(builder, LLVM.RealPredicate.ONE, back, x)     # (false for NaN)
+    bits = bitcast!(builder, f, T_int)
+    bits = select!(builder, away, sub!(builder, bits, LLVM.ConstantInt(T_int, 1)), bits)
+    bits = select!(builder, inexact, or!(builder, bits, LLVM.ConstantInt(T_int, 1)), bits)
+    return bitcast!(builder, bits, T_float)
+end
+
+# convert the integer `x` to a `float`, rounding to odd: the bits below the 24 most
+# significant ones are replaced by a sticky bit, so the conversion to `float` is exact. this
+# is what Julia's codegen emits for conversions to `BFloat16` since 1.13 (`emit_inttobfloat`).
+function round_to_odd_float!(builder::IRBuilder, x::LLVM.Value, signed::Bool)
+    typ = x.value_type::LLVM.IntegerType
+    zero = LLVM.ConstantInt(typ, 0)
+    one = LLVM.ConstantInt(typ, 1)
+    neg = signed ? icmp!(builder, LLVM.IntPredicate.SLT, x, zero) : nothing
+    # the magnitude, as an unsigned integer
+    m = signed ? select!(builder, neg, sub!(builder, zero, x), x) : x
+    mod = builder.insert_block.parent.parent
+    ctlz = LLVM.Function(mod, LLVM.Intrinsic("llvm.ctlz"), LLVMType[typ])
+    lz = call!(builder, ctlz.function_type, ctlz, LLVM.Value[m, LLVM.ConstantInt(false)])
+    shift = sub!(builder, LLVM.ConstantInt(typ, typ.width - 24), lz)
+    shift = select!(builder, icmp!(builder, LLVM.IntPredicate.SGT, shift, zero), shift, zero)
+    sticky = shl!(builder, one, shift)
+    lowmask = sub!(builder, sticky, one)
+    inexact = icmp!(builder, LLVM.IntPredicate.NE, and!(builder, m, lowmask), zero)
+    m = or!(builder, and!(builder, m, not!(builder, lowmask)),
+            select!(builder, inexact, sticky, zero))
+    f = uitofp!(builder, m, LLVM.FloatType())   # exact
+    return signed ? select!(builder, neg, fneg!(builder, f), f) : f
 end
 
 # Align a global or local memory variable to 4 bytes, and pad it to a multiple of 4 bytes, so
