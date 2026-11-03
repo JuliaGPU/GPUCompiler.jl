@@ -30,6 +30,10 @@ using LLVM, LLVM.IR, LLVM.Build, LLVM.Interop
     value
 end
 
+# the LLVM type of `Int` and `UInt` (and thus of a relocation word), for checks of IR that
+# depends on the host's word size
+const llvm_int = "i$(8sizeof(Int))"
+
 # typed/opaque pointer detection for conditional FileCheck checks
 
 const typed_ptrs = JuliaContext() do ctx
