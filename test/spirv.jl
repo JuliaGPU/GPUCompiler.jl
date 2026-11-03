@@ -286,6 +286,14 @@ end
         @check "insertvalue {{.*}}, 1"
         SPIRV.code_llvm(mod.kernel, tt; backend, driver=:intel)
     end
+
+    # the flattened form must survive the passes that run between `finish_ir!` and the
+    # back end (`prepare_execution!` runs InstCombine)
+    @test @filecheck begin
+        @check "OpFunction"
+        @check_not "OpCompositeInsert {{.*}} {{[0-9]+}} {{[0-9]+}}{{\$}}"
+        SPIRV.code_native(mod.kernel, tt; backend, driver=:intel)
+    end
 end
 
 ############################################################################################

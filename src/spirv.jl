@@ -927,7 +927,9 @@ end
 # indices than the field it is looking for, silently dropping the store of that field.
 # e.g., storing `(flag::Bool, (a, b))` built by inserting `flag`, `a` and `b`, loses `flag`
 # (intel/intel-graphics-compiler#378, JuliaGPU/OpenCL.jl#502, JuliaGPU/oneAPI.jl#259).
-# this needs to run after optimization, as InstCombine folds these sequences back together.
+# this runs after optimization, where SROA introduces these `insertvalue`s when splitting
+# aggregate loads. the InstCombine run in `prepare_execution!` doesn't reconstruct them
+# from the flattened form.
 function flatten_nested_insertvalue!(mod::LLVM.Module)
     changed = false
     @tracepoint "flatten nested insertvalue" begin
