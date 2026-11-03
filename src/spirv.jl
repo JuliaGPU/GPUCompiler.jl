@@ -307,10 +307,6 @@ end
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
-    # the LLVM to SPIR-V translator does not support the freeze instruction
-    # (SPIRV-LLVM-Translator#1140)
-    rm_freeze!(job, mod)
-
     # translate to SPIR-V
     input = bitcode(mod)
     dump_input() = let path = tempname(cleanup=false) * ".bc"
@@ -904,26 +900,6 @@ end
 
 
 ## LLVM passes
-
-# remove freeze and replace uses by the original value
-# (KhronosGroup/SPIRV-LLVM-Translator#1140)
-function rm_freeze!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
-    changed = false
-    @tracepoint "remove freeze" begin
-
-    for f in mod.functions, bb in f.blocks, inst in bb.instructions
-        if inst isa LLVM.FreezeInst
-            orig = first(inst.operands)
-            replace_uses!(inst, orig)
-            @compiler_assert isempty(inst.uses) job
-            erase!(inst)
-            changed = true
-        end
-    end
-
-    end
-    return changed
-end
 
 # flatten `insertvalue`s with multiple indices into single-index ones, extracting and
 # re-inserting the intermediate aggregates: `insertvalue %agg, %val, 1, 0` becomes
