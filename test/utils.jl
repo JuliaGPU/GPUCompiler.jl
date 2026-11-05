@@ -55,6 +55,56 @@ end
     end
 end
 
+@testset "failure dumps" begin
+    # files of one dump share a base name, wherever they are written
+    function check_dump(paths, dir)
+        @test length(paths) == 2
+        @test all(path -> dirname(path) == dir, paths)
+        @test first.(splitext.(paths))[1] == first.(splitext.(paths))[2]
+        @test read(paths[1]) == UInt8[1, 2, 3]
+        @test read(paths[2], String) == "output"
+        rm.(paths)
+    end
+
+    withenv("GITHUB_ACTIONS" => nothing, "BUILDKITE" => nothing) do
+        paths = GPUCompiler.dump_failure(".bc" => UInt8[1, 2, 3], ".spv" => "output")
+        check_dump(paths, tempdir())
+    end
+
+    # on GitHub Actions, next to the runner's other temporary files, with a notice
+    mktempdir() do runner_temp
+        withenv("GITHUB_ACTIONS" => "true", "RUNNER_TEMP" => runner_temp,
+                "BUILDKITE" => nothing) do
+            paths, output = mktemp() do log, io
+                paths = redirect_stdout(io) do
+                    GPUCompiler.dump_failure(".bc" => UInt8[1, 2, 3], ".spv" => "output")
+                end
+                flush(io)
+                paths, read(log, String)
+            end
+            dir = joinpath(runner_temp, "gpucompiler-dumps")
+            @test startswith(output, "::notice")
+            @test all(path -> occursin(basename(path), output), paths)
+            check_dump(paths, dir)
+
+            # failures of the external back-ends point at their dump
+            backend = GPUCompiler.ExternalBackend("libdoesnotexist", "Test")
+            err = try
+                redirect_stdout(devnull) do
+                    GPUCompiler.external_result(backend, 1, "Failed to compile", Cstring(C_NULL),
+                                                String[], UInt8[1, 2, 3])
+                end
+                nothing
+            catch err
+                err
+            end
+            @test err isa ErrorException
+            m = match(r"attach (\S+\.bc)\.", err.msg)
+            @test m !== nothing && dirname(m[1]) == dir && read(m[1]) == UInt8[1, 2, 3]
+        end
+    end
+end
+
 using Logging
 
 safe_log() = GPUCompiler.@safe_debug "safe_log"

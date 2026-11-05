@@ -114,8 +114,7 @@ function external_result(backend::ExternalBackend, status, what::String, message
                          diagnostics::Vector{String}, input::Vector{UInt8};
                          warn=(msg)->@warn(msg))
     if status != 0
-        path = tempname(cleanup=false) * ".bc"
-        write(path, input)
+        path, = dump_failure(".bc" => input)
         msg = what
         message == C_NULL || (msg *= ":\n" * take_message(backend, message))
         isempty(diagnostics) || (msg *= "\n" * join(diagnostics, "\n"))
@@ -211,6 +210,40 @@ macro safe_show(exs...)
     end
     isempty(exs) || push!(blk.args, :value)
     return blk
+end
+
+
+## failure dumps
+
+# Write the inputs and outputs of a failed compilation step (`extension => data` pairs, which
+# share a random base name) to files that can be attached to a bug report, and return their
+# paths. Such failures often only happen on CI, so make the files downloadable there: on
+# GitHub Actions they are written to `$RUNNER_TEMP/gpucompiler-dumps` for an
+# `actions/upload-artifact` step to pick up, and on Buildkite they are uploaded as artifacts.
+function dump_failure(artifacts::Pair{String}...)
+    on_github = get(ENV, "GITHUB_ACTIONS", "false") == "true" && haskey(ENV, "RUNNER_TEMP")
+    dir = on_github ? mkpath(joinpath(ENV["RUNNER_TEMP"], "gpucompiler-dumps")) : tempdir()
+    stem = tempname(dir; cleanup=false)
+    paths = String[]
+    for (ext, data) in artifacts
+        path = stem * ext
+        write(path, data)
+        push!(paths, path)
+    end
+
+    if on_github
+        println("::notice title=GPUCompiler failure dump::wrote $(join(basename.(paths), ", ")) to $dir")
+    elseif get(ENV, "BUILDKITE", "false") == "true"
+        for path in paths
+            try
+                run(`buildkite-agent artifact upload $path`)
+            catch err
+                @safe_warn "Failed to upload $path as a Buildkite artifact" exception=err
+            end
+        end
+    end
+
+    return paths
 end
 
 
