@@ -680,6 +680,8 @@ from [`method_tables`](@ref), then [`SHARED_METHOD_TABLE`](@ref), over Base's me
 
 Back-ends should not need to override this. Ones that do replace the whole stack, including
 `SHARED_METHOD_TABLE`, so code compiled for them behaves as if it were compiled by Julia.
+Returning a view of another type also gives inference a different interpreter type, so the
+back-end doesn't share the inference code that GPUCompiler precompiles.
 """
 method_table_view(@nospecialize(job::CompilerJob)) =
     stack_method_tables(job.world, method_tables(job)..., SHARED_METHOD_TABLE)
