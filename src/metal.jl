@@ -778,6 +778,9 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # narrow the promoted operations back, but before merging the byte GEPs this introduces.
     legalize_odd_width_integers!(mod)
 
+    # after the last SimplifyCFG above, which would undo it
+    unify_loop_exits!(mod)
+
     # flatten chained byte GEPs that the AGX back-end miscompiles for 1-byte accesses on a
     # 2-threadgroup grid (see `merge_byte_gep_chains!`). run last, after the intrinsic-lowering
     # cleanup above, so the merged form is what reaches the AIR downgrader / back-end.
@@ -787,6 +790,44 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     load_thread_pointers_as_words!(mod)
 
     return
+end
+
+# The Metal back-end can hang, or skip code, on loops with many exits (Metal.jl#1127), and
+# `lower_unreachable_control_flow!` makes an exit of every exception. Route each loop's exits
+# through one block, as LLVM does before structurizing for AMDGPU.
+function unify_loop_exits!(mod::LLVM.Module)
+    @dispose pb=PassBuilder() begin
+        add!(pb, FunctionPassManager()) do fpm
+            # these passes only handle branches before LLVM 24 (llvm/llvm-project#206567)
+            LLVM.version() < v"24" && add!(fpm, LowerSwitchPass())
+            add!(fpm, FixIrreduciblePass())
+        end
+        run!(pb, mod)
+    end
+
+    LLVM.library!(mod.library) do
+        for f in mod.functions
+            isdeclaration(f) && continue
+            # LLVM 20-22 crash on a loop without exits (llvm/llvm-project#165343)
+            v"20" <= LLVM.version() < v"23" && has_blocks_without_return_path(f) && continue
+            @dispose pb=PassBuilder() begin
+                add!(pb, UnifyLoopExitsPass())
+                run!(pb, f)
+            end
+        end
+    end
+    return
+end
+
+function has_blocks_without_return_path(f::LLVM.Function)
+    returning = Set(bb for bb in f.blocks if bb.terminator isa LLVM.RetInst)
+    work = collect(returning)
+    while !isempty(work)
+        for pred in pop!(work).predecessors
+            pred in returning || (push!(returning, pred); push!(work, pred))
+        end
+    end
+    return length(returning) < length(f.blocks)
 end
 
 # The AGX back-end keeps only the low 32 bits of a thread (AS 0) pointer that is loaded from

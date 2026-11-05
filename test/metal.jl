@@ -951,6 +951,127 @@ end
     end
 end
 
+@testset "loop exits" begin
+    # the blocks outside the loop with header `name` that the loop branches to
+    function exit_blocks(f, name)
+        header = only(filter(bb -> bb.name == name, collect(f.blocks)))
+        function reach(next)
+            seen = Set([header])
+            work = [header]
+            while !isempty(work)
+                for bb in next(pop!(work))
+                    bb in seen || (push!(seen, bb); push!(work, bb))
+                end
+            end
+            return seen
+        end
+        body = intersect(reach(bb -> bb.successors), reach(bb -> bb.predecessors))
+        return unique(succ for bb in body for succ in bb.successors if !(succ in body))
+    end
+
+    JuliaContext() do ctx
+        # every exception leaves the loop it is in, which the back-end can hang or
+        # miscompile on (Metal.jl#1127)
+        mod = parse(LLVM.Module, """
+            define i32 @checked(i32 %n, i32 %m) {
+            entry:
+              br label %loop
+            loop:
+              %i = phi i32 [ 0, %entry ], [ %next, %latch ]
+              %oob = icmp ugt i32 %i, %m
+              br i1 %oob, label %throw, label %latch
+            latch:
+              %next = add i32 %i, 1
+              %more = icmp ult i32 %next, %n
+              br i1 %more, label %loop, label %done
+            throw:
+              ret i32 -1
+            done:
+              ret i32 %next
+            }
+
+            define i32 @switched(i32 %n, i32 %k) {
+            entry:
+              br label %loop
+            loop:
+              %i = phi i32 [ 0, %entry ], [ %next, %latch ]
+              switch i32 %k, label %latch [ i32 1, label %one
+                                            i32 2, label %two ]
+            latch:
+              %next = add i32 %i, 1
+              %more = icmp ult i32 %next, %n
+              br i1 %more, label %loop, label %done
+            one:
+              ret i32 1
+            two:
+              ret i32 2
+            done:
+              ret i32 %next
+            }
+
+            define i32 @irreducible(i1 %c, i32 %n, i32 %m) {
+            entry:
+              br i1 %c, label %a, label %b
+            a:
+              %i = phi i32 [ 0, %entry ], [ %j, %b ]
+              %next = add i32 %i, 1
+              %oob = icmp ugt i32 %next, %m
+              br i1 %oob, label %throw, label %b
+            b:
+              %j = phi i32 [ 0, %entry ], [ %next, %a ]
+              %more = icmp ult i32 %j, %n
+              br i1 %more, label %a, label %done
+            throw:
+              ret i32 -1
+            done:
+              ret i32 %j
+            }
+
+            define void @endless() {
+            entry:
+              br label %loop
+            loop:
+              br label %loop
+            }
+
+            define void @endless_after_lowering() {
+            entry:
+              br label %loop
+            loop:
+              switch i32 0, label %done [ i32 0, label %loop ]
+            done:
+              ret void
+            }
+            """)
+        GPUCompiler.unify_loop_exits!(mod)
+        @test isnothing(verify(mod))
+        @test length(exit_blocks(mod.functions["checked"], "loop")) == 1
+        @test length(exit_blocks(mod.functions["switched"], "loop")) == 1
+        @test length(exit_blocks(mod.functions["irreducible"], "a")) == 1
+        dispose(mod)
+    end
+
+    # the same for exceptions in a kernel, after the rest of the lowering
+    mod = @eval module $(gensym())
+        function kernel(ptr, n, m)
+            acc = 0f0
+            i = 1
+            while i <= n
+                i > m && throw(BoundsError())
+                acc += unsafe_load(ptr, i)
+                i + 1 > m && throw(BoundsError())
+                acc += unsafe_load(ptr, i + 1)
+                i += 2
+            end
+            unsafe_store!(ptr, acc)
+            return
+        end
+    end
+    air = sprint(io -> Metal.code_native(io, mod.kernel, (Core.LLVMPtr{Float32,1}, Int, Int);
+                                         kernel=true))
+    @test occursin("loop.exit", air)
+end
+
 @testset "reproducible output" begin
     # Compiling the same kernel twice in one session has to yield byte-identical AIR: the two
     # compilations see different LLVM wrapper addresses and codegen counters, so any pass that
