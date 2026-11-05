@@ -1053,6 +1053,131 @@ end
     end
 end
 
+@testset "odd-width integers" begin
+    # The AGX back-end cannot handle integers whose width is not a power of two: arithmetic
+    # and underaligned loads crash it, and naturally-aligned stores overwrite the bytes after
+    # the value (Metal.jl#1125). Such integers are promoted, and their accesses split into
+    # power-of-two pieces.
+    p(T) = opaque_ptrs ? "ptr addrspace(1)" : "$T addrspace(1)*"
+    accesses = [("i24", 1), ("i24", 4), ("i12", 1), ("i56", 1), ("i72", 8)]
+    ir = join(map(enumerate(accesses)) do (i, (T, align))
+        """
+        define void @f$i($(p(T)) %p, $(p(T)) %q) {
+          %v = load $T, $(p(T)) %p, align $align
+          store $T %v, $(p(T)) %q, align $align
+          ret void
+        }
+        """
+    end, "\n")
+
+    # the expected (offset, width, alignment) of the pieces
+    pieces = Dict(
+        1 => [(0, 16, 1), (2, 8, 1)],
+        2 => [(0, 16, 4), (2, 8, 2)],
+        3 => [(0, 16, 1)],
+        4 => [(0, 32, 1), (4, 16, 1), (6, 8, 1)],
+        5 => [(0, 64, 8), (8, 8, 8)],
+    )
+
+    @dispose ctx=Context() begin
+        mod = parse(LLVM.Module, ir)
+        @test GPUCompiler.legalize_odd_width_integers!(mod)
+        @test !GPUCompiler.legalize_odd_width_integers!(mod)
+        @test LLVM.verify(mod) === nothing
+
+        piece_offset(ptr) =
+            ptr isa LLVM.BitCastInst ? piece_offset(ptr.operands[1]) :
+            ptr isa LLVM.GetElementPtrInst ? convert(Int, ptr.operands[2]) : 0
+        for (i, expected) in pieces
+            insts = collect(only(mod.functions["f$i"].blocks).instructions)
+            loads = filter(inst -> inst isa LLVM.LoadInst, insts)
+            stores = filter(inst -> inst isa LLVM.StoreInst, insts)
+            @test map(loads) do ld
+                (piece_offset(ld.pointer_operand), LLVM.width(ld.value_type), ld.alignment)
+            end == expected
+            @test map(stores) do st
+                (piece_offset(st.pointer_operand), LLVM.width(st.value_operand.value_type),
+                 st.alignment)
+            end == expected
+        end
+    end
+
+    # operations on odd-width values, including in a loop, with no odd-width value left
+    ir = """
+    define i64 @f(i64 %x, i64 %y, i64 %n) {
+    entry:
+      %a = trunc i64 %x to i56
+      %b = trunc i64 %y to i56
+      br label %loop
+    loop:
+      %i = phi i64 [ 0, %entry ], [ %i.next, %loop ]
+      %acc = phi i56 [ %a, %entry ], [ %acc.next, %loop ]
+      %sum = add i56 %acc, %b
+      %shr = ashr i56 %sum, 3
+      %div = udiv i56 %shr, 7
+      %big = icmp slt i56 %div, %b
+      %acc.next = select i1 %big, i56 %div, i56 %sum
+      %i.next = add i64 %i, 1
+      %done = icmp eq i64 %i.next, %n
+      br i1 %done, label %exit, label %loop
+    exit:
+      %r = sext i56 %acc.next to i64
+      ret i64 %r
+    }
+
+    define i32 @g($(p("i24")) %p) {
+    entry:
+      br label %exit
+    dead:
+      %v = load i24, $(p("i24")) %p, align 1
+      br label %exit
+    exit:
+      %r = phi i24 [ 0, %entry ], [ %v, %dead ]
+      %z = zext i24 %r to i32
+      ret i32 %z
+    }
+    """
+    @dispose ctx=Context() begin
+        mod = parse(LLVM.Module, ir)
+        @test GPUCompiler.legalize_odd_width_integers!(mod)
+        @test LLVM.verify(mod) === nothing
+        odd(v) = GPUCompiler.is_odd_width(v.value_type)
+        @testset "$(LLVM.name(f))" for f in mod.functions
+            @test !any(bb -> any(inst -> odd(inst) || any(odd, LLVM.operands(inst)),
+                                 LLVM.instructions(bb)),
+                       LLVM.blocks(f))
+        end
+    end
+
+    # ... as part of the AIR lowering
+    mod = @eval module $(gensym())
+        const ir = $(opaque_ptrs ? """
+            define void @entry(ptr addrspace(1) %p) #0 {
+              %q = getelementptr i8, ptr addrspace(1) %p, i64 5
+              %v = load i24, ptr addrspace(1) %q, align 1
+              store i24 %v, ptr addrspace(1) %p, align 4
+              ret void
+            }
+            attributes #0 = { alwaysinline }""" : """
+            define void @entry(i8 addrspace(1)* %p) #0 {
+              %q = getelementptr i8, i8 addrspace(1)* %p, i64 5
+              %qq = bitcast i8 addrspace(1)* %q to i24 addrspace(1)*
+              %v = load i24, i24 addrspace(1)* %qq, align 1
+              %pp = bitcast i8 addrspace(1)* %p to i24 addrspace(1)*
+              store i24 %v, i24 addrspace(1)* %pp, align 4
+              ret void
+            }
+            attributes #0 = { alwaysinline }""")
+        function kernel(p::Core.LLVMPtr{UInt8,1})
+            Base.llvmcall((ir, "entry"), Nothing, Tuple{Core.LLVMPtr{UInt8,1}}, p)
+            return
+        end
+    end
+    air = sprint(io -> Metal.code_native(io, mod.kernel, Tuple{Core.LLVMPtr{UInt8,1}};
+                                         kernel=true))
+    @test !occursin("i24", air)
+end
+
 @testset "boxed constant classification" begin
     JuliaContext() do ctx
         mod = LLVM.Module("boxed-constant-classification")

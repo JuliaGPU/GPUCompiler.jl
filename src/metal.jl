@@ -773,6 +773,11 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         end
     end
 
+    # the AGX back-end cannot handle integers whose width is not a power of two (see
+    # `legalize_odd_width_integers!`). run after the cleanups above, as InstCombine would
+    # narrow the promoted operations back, but before merging the byte GEPs this introduces.
+    legalize_odd_width_integers!(mod)
+
     # flatten chained byte GEPs that the AGX back-end miscompiles for 1-byte accesses on a
     # 2-threadgroup grid (see `merge_byte_gep_chains!`). run last, after the intrinsic-lowering
     # cleanup above, so the merged form is what reaches the AIR downgrader / back-end.
@@ -800,6 +805,285 @@ function load_thread_pointers_as_words!(mod::LLVM.Module)
         end
     end
     return
+end
+
+# Legalization of odd-width integers
+#
+# The AGX back-end cannot handle integers wider than a byte whose width is not a power of two
+# (Metal.jl#1125). Arithmetic on them crashes the compiler, except for a `zext` that it folds
+# into a naturally-aligned load; underaligned loads of them crash too, and naturally-aligned
+# stores are widened to the next power of two, overwriting the bytes after the value. LLVM's
+# SROA introduces such integers when it splits or widens an aggregate, e.g. copying the 3
+# padding bytes of `{i32, i8}` as one `i24`, or assembling a 7-byte alloca in an `i56`.
+#
+# Legalize them like SelectionDAG's type legalizer does for other back-ends: promote every
+# odd-width value to the next power of two, leaving its upper bits undefined, and split loads
+# and stores into power-of-two pieces. Operations whose result depends on the upper bits
+# (right shifts, division, comparisons and extensions) first clear or sign-fill them. Uses
+# that are not legalized (e.g., calls) get the value truncated back, and odd-width values
+# that are not legalized (e.g., call results) are extended where they are defined.
+#
+# This has to run after the last InstCombine, which narrows promoted operations back.
+
+is_odd_width(T::LLVMType) =
+    T isa LLVM.IntegerType && 8 < LLVM.width(T) && !ispow2(LLVM.width(T))
+promoted_type(T::LLVM.IntegerType) = LLVM.IntType(nextpow(2, LLVM.width(T)))
+
+function legalize_odd_width_integers!(mod::LLVM.Module)
+    changed = false
+    for f in mod.functions
+        isdeclaration(f) && continue
+        changed |= legalize_odd_width_integers!(f)
+    end
+    return changed
+end
+
+function legalize_odd_width_integers!(f::LLVM.Function)
+    odd(v) = is_odd_width(v.value_type)
+    any(LLVM.blocks(f)) do bb
+        any(inst -> odd(inst) || any(odd, LLVM.operands(inst)), LLVM.instructions(bb))
+    end || return false
+
+    # visit the blocks in reverse post-order, so that values are legalized before their uses
+    # (except in phis, which are completed last), and then the unreachable ones
+    order = LLVM.BasicBlock[]
+    visited = Set{LLVM.BasicBlock}([LLVM.entry(f)])
+    stack = [(LLVM.entry(f), 1)]
+    while !isempty(stack)
+        bb, i = stack[end]
+        succs = collect(LLVM.successors(LLVM.terminator(bb)))
+        if i <= length(succs)
+            stack[end] = (bb, i + 1)
+            succ = succs[i]
+            if !(succ in visited)
+                push!(visited, succ)
+                push!(stack, (succ, 1))
+            end
+        else
+            pop!(stack)
+            push!(order, bb)
+        end
+    end
+    reverse!(order)
+    append!(order, Iterators.filter(bb -> !(bb in visited), LLVM.blocks(f)))
+
+    typed_ptrs = supports_typed_pointers(context())
+    T_i8 = LLVM.Int8Type()
+    aa_kinds = (MD_tbaa, MD_alias_scope, MD_noalias)
+
+    wide = Dict{LLVM.Value,LLVM.Value}()    # odd-width value => its promoted value
+    producers = LLVM.Instruction[]          # legalized odd-width instructions
+    consumers = LLVM.Instruction[]          # legalized instructions using odd-width values
+    phis = LLVM.PHIInst[]
+
+    function position_before_non_phi!(builder, inst)
+        while inst isa LLVM.PHIInst
+            inst = LLVM.next(inst)
+        end
+        position!(builder, LLVM.before(inst))
+    end
+    position_after!(builder, inst) = position_before_non_phi!(builder, LLVM.next(inst))
+
+    # the promoted value of an odd-width `v`
+    function promote(v)
+        haskey(wide, v) && return wide[v]
+        @dispose builder=IRBuilder() begin
+            if v isa LLVM.Instruction
+                position_after!(builder, v)
+            else
+                position_before_non_phi!(builder, first(LLVM.instructions(LLVM.entry(f))))
+            end
+            return wide[v] = zext!(builder, v, promoted_type(v.value_type))
+        end
+    end
+
+    @dispose builder=IRBuilder() begin
+        # the promoted value of `v` with the bits above `T` cleared, or filled with its sign
+        function zext_in_reg(v, T)
+            W = promoted_type(T)
+            return and!(builder, promote(v), ConstantInt(W, (big(1) << LLVM.width(T)) - 1))
+        end
+        function sext_in_reg(v, T)
+            W = promoted_type(T)
+            amount = ConstantInt(W, LLVM.width(W) - LLVM.width(T))
+            return ashr!(builder, shl!(builder, promote(v), amount), amount)
+        end
+        resize(v, T, extend) =
+            LLVM.width(T) > LLVM.width(v.value_type) ? extend(builder, v, T) :
+            LLVM.width(T) < LLVM.width(v.value_type) ? trunc!(builder, v, T) : v
+
+        # little-endian (offset, size) pieces of an access of `T`, in bytes
+        function pieces(T)
+            nbytes = cld(LLVM.width(T), 8)
+            ps = Tuple{Int,Int}[]
+            offset = 0
+            while offset < nbytes
+                size = prevpow(2, nbytes - offset)
+                push!(ps, (offset, size))
+                offset += size
+            end
+            return ps
+        end
+        function piece_pointer(inst, offset, T_piece)
+            ptr = inst.pointer_operand
+            as = ptr.value_type.addrspace
+            typed_ptrs && (ptr = bitcast!(builder, ptr, LLVM.PointerType(T_i8, as)))
+            offset > 0 &&
+                (ptr = inbounds_gep!(builder, T_i8, ptr, [ConstantInt(Int64(offset))]))
+            typed_ptrs && (ptr = bitcast!(builder, ptr, LLVM.PointerType(T_piece, as)))
+            align = offset == 0 ? inst.alignment :
+                    min(inst.alignment, 1 << trailing_zeros(offset))
+            return ptr, align
+        end
+        function copy_metadata!(dst, src)
+            md = src.metadata
+            for kind in aa_kinds
+                haskey(md, kind) && (dst.metadata[kind] = md[kind])
+            end
+        end
+
+        # `op` of `src` to `T`, where either is an odd-width integer
+        function legalize_conversion(op, src, T)
+            extend = op == LLVM.API.LLVMSExt ? sext! : zext!
+            if odd(src)
+                src = op == LLVM.API.LLVMZExt ? zext_in_reg(src, src.value_type) :
+                      op == LLVM.API.LLVMSExt ? sext_in_reg(src, src.value_type) :
+                      promote(src)
+            end
+            return resize(src, T, extend)
+        end
+
+        # the promoted version of an odd-width instruction, or `nothing`
+        function legalize_producer(inst)
+            T = inst.value_type
+            W = promoted_type(T)
+            op = LLVM.opcode(inst)
+            ops = LLVM.operands(inst)
+            if inst isa LLVM.LoadInst
+                # AIR atomics are lowered separately, and Julia only emits power-of-two ones
+                isatomic(inst) && return nothing
+                val = nothing
+                for (offset, size) in pieces(T)
+                    T_piece = LLVM.IntType(8 * size)
+                    ptr, align = piece_pointer(inst, offset, T_piece)
+                    part = load!(builder, T_piece, ptr; align, volatile=inst.volatile)
+                    copy_metadata!(part, inst)
+                    part = zext!(builder, part, W)
+                    offset > 0 && (part = shl!(builder, part, ConstantInt(W, 8 * offset)))
+                    val = val === nothing ? part : or!(builder, val, part)
+                end
+                return val
+            elseif op in (LLVM.API.LLVMAdd, LLVM.API.LLVMSub, LLVM.API.LLVMMul,
+                          LLVM.API.LLVMAnd, LLVM.API.LLVMOr, LLVM.API.LLVMXor)
+                build = op == LLVM.API.LLVMAdd ? add! : op == LLVM.API.LLVMSub ? sub! :
+                        op == LLVM.API.LLVMMul ? mul! : op == LLVM.API.LLVMAnd ? and! :
+                        op == LLVM.API.LLVMOr ? or! : xor!
+                return build(builder, promote(ops[1]), promote(ops[2]))
+            elseif op == LLVM.API.LLVMShl
+                return shl!(builder, promote(ops[1]), zext_in_reg(ops[2], T))
+            elseif op == LLVM.API.LLVMLShr
+                return lshr!(builder, zext_in_reg(ops[1], T), zext_in_reg(ops[2], T))
+            elseif op == LLVM.API.LLVMAShr
+                return ashr!(builder, sext_in_reg(ops[1], T), zext_in_reg(ops[2], T))
+            elseif op in (LLVM.API.LLVMUDiv, LLVM.API.LLVMURem)
+                build = op == LLVM.API.LLVMUDiv ? udiv! : urem!
+                return build(builder, zext_in_reg(ops[1], T), zext_in_reg(ops[2], T))
+            elseif op in (LLVM.API.LLVMSDiv, LLVM.API.LLVMSRem)
+                build = op == LLVM.API.LLVMSDiv ? sdiv! : srem!
+                return build(builder, sext_in_reg(ops[1], T), sext_in_reg(ops[2], T))
+            elseif op == LLVM.API.LLVMSelect && !(ops[1].value_type isa LLVM.VectorType)
+                return select!(builder, ops[1], promote(ops[2]), promote(ops[3]))
+            elseif op == LLVM.API.LLVMFreeze
+                return LLVM.freeze!(builder, promote(ops[1]))
+            elseif op in (LLVM.API.LLVMZExt, LLVM.API.LLVMSExt, LLVM.API.LLVMTrunc)
+                return legalize_conversion(op, ops[1], W)
+            end
+            return nothing
+        end
+
+        # the legalized version of an instruction using odd-width values, or `nothing`
+        function legalize_consumer(inst)
+            op = LLVM.opcode(inst)
+            ops = LLVM.operands(inst)
+            if inst isa LLVM.StoreInst && odd(inst.value_operand) && !isatomic(inst)
+                T = inst.value_operand.value_type
+                W = promoted_type(T)
+                val = promote(inst.value_operand)
+                local part
+                for (offset, size) in pieces(T)
+                    T_piece = LLVM.IntType(8 * size)
+                    ptr, align = piece_pointer(inst, offset, T_piece)
+                    part = offset == 0 ? val :
+                           lshr!(builder, val, ConstantInt(W, 8 * offset))
+                    part = store!(builder, trunc!(builder, part, T_piece), ptr; align,
+                                  volatile=inst.volatile)
+                    copy_metadata!(part, inst)
+                end
+                return part
+            elseif inst isa LLVM.ICmpInst && odd(ops[1])
+                pred = LLVM.predicate(inst)
+                T = ops[1].value_type
+                ext = LLVM.is_signed_predicate(pred) ? sext_in_reg : zext_in_reg
+                return icmp!(builder, pred, ext(ops[1], T), ext(ops[2], T))
+            elseif op in (LLVM.API.LLVMZExt, LLVM.API.LLVMSExt, LLVM.API.LLVMTrunc) &&
+                   odd(ops[1])
+                return legalize_conversion(op, ops[1], inst.value_type)
+            end
+            return nothing
+        end
+
+        for bb in order, inst in collect(LLVM.instructions(bb))
+            if inst isa LLVM.PHIInst
+                odd(inst) || continue
+                position!(builder, LLVM.before(inst))
+                wide[inst] = phi!(builder, promoted_type(inst.value_type))
+                push!(phis, inst)
+                push!(producers, inst)
+                continue
+            end
+            # (positioning the builder gives new instructions the original's debug location)
+            position!(builder, LLVM.before(inst))
+            if odd(inst)
+                new = legalize_producer(inst)
+                new === nothing && continue
+                wide[inst] = new
+                push!(producers, inst)
+            elseif any(odd, LLVM.operands(inst))
+                new = legalize_consumer(inst)
+                new === nothing && continue
+                inst isa LLVM.StoreInst || replace_uses!(inst, new)
+                push!(consumers, inst)
+            end
+        end
+    end
+
+    for phi in phis
+        append!(LLVM.incoming(wide[phi]),
+                [(promote(val), bb) for (val, bb) in LLVM.incoming(phi)])
+    end
+
+    # remaining (not legalized) uses of legalized values get them truncated back
+    truncs = LLVM.Instruction[]
+    @dispose builder=IRBuilder() begin
+        for inst in producers
+            isempty(LLVM.uses(inst)) && continue
+            w = wide[inst]
+            if w isa LLVM.Instruction
+                position_after!(builder, w)
+            else
+                position!(builder, LLVM.before(inst))
+            end
+            narrow = trunc!(builder, w, inst.value_type)
+            narrow isa LLVM.Instruction && push!(truncs, narrow)
+            replace_uses!(inst, narrow)
+        end
+    end
+    foreach(erase!, consumers)
+    foreach(erase!, producers)
+    for narrow in truncs
+        isempty(LLVM.uses(narrow)) && erase!(narrow)
+    end
+    return true
 end
 
 # lowering of LLVM atomics
