@@ -323,10 +323,6 @@ end
 
     # translate to SPIR-V
     input = bitcode(mod)
-    dump_input() = let path = tempname(cleanup=false) * ".bc"
-        write(path, input)
-        path
-    end
     spirv = if target.backend === :llvm
         # compile in-process through libspirv. the back-end derives the triple from the
         # options; unlike `llc`, it rejects unknown extensions instead of ignoring them.
@@ -355,16 +351,13 @@ end
         error("Unsupported SPIR-V back-end $(repr(target.backend)); expected :llvm or :khronos.")
     end
 
-    dump_output(output) = let path = tempname(cleanup=false) * ".spv"
-        write(path, output)
-        path
-    end
+    dump_files(output) = join(dump_failure(".bc" => input, ".spv" => output), " and ")
 
     if target.validate
         message = spirv_validate(spirv)
         if message !== nothing
             error("""Failed to validate generated SPIR-V: $message
-                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(dump_output(spirv)).""")
+                     If you think this is a bug, please file an issue and attach $(dump_files(spirv)).""")
         end
     end
 
@@ -372,7 +365,7 @@ end
         optimized = spirv_optimize(spirv)
         if optimized === nothing
             error("""Failed to optimize generated SPIR-V.
-                     If you think this is a bug, please file an issue and attach $(dump_input()) and $(dump_output(spirv)).""")
+                     If you think this is a bug, please file an issue and attach $(dump_files(spirv)).""")
         end
         spirv = optimized
     end
