@@ -430,6 +430,30 @@ end
         end
     end
 
+    @testset "sanitized function names" begin
+        # `+` and `*` both sanitize to `_`, so the callees' names collide wherever Julia
+        # numbers functions per compilation.
+        mod = @eval module $(gensym())
+            @noinline var"f+"(x) = x + 1
+            @noinline var"f*"(x) = x * 3
+            kernel(x) = var"f+"(x) - var"f*"(x)
+        end
+
+        job, _ = Native.create_job(mod.kernel, (Int,); validate=false)
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job)
+
+            specfuncs = Dict(mi.def.name => entry.specfunc for (mi, entry) in meta.compiled)
+            @test allunique(values(specfuncs))
+            for name in values(specfuncs)
+                @test haskey(ir.functions, name)
+                @test name == GPUCompiler.safe_name(name)
+            end
+            @test occursin("mul", string(ir.functions[specfuncs[Symbol("f*")]]))
+            @test !occursin("mul", string(ir.functions[specfuncs[Symbol("f+")]]))
+        end
+    end
+
     @testset "cached compilation" begin
         mod = @eval module $(gensym())
             @noinline child(i) = i
