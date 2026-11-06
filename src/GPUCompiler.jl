@@ -94,6 +94,8 @@ include("precompile.jl")
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
     empty!(session_results_cache)
+    # world ages from the session that generated the package image are meaningless here
+    @atomic overlay_miss_cache.entries = IdDict{Any,OverlayMissesRef}()
 
     @static if !HAS_INTEGRATED_CACHE
         # CodeInstances created by GPUCompiler's precompile workload are process-local.
