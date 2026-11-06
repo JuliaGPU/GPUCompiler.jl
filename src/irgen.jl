@@ -621,6 +621,14 @@ function classify_arguments(@nospecialize(job::CompilerJob), codegen_ft::LLVM.Fu
         codegen_i += 1
     end
 
+    # codegen omits ghost arguments, and `Type{T}` ones only if the signature uses
+    # `Core.TypeEgal` keys like GPUCompiler's `methodinstance` does; otherwise the arguments
+    # would be classified against the wrong parameters. after optimization, back-ends may
+    # have added parameters.
+    if !post_optimization && codegen_i - 1 != length(codegen_types)
+        error("Cannot classify the arguments of $(job.source): the signature has $(codegen_i - 1) non-ghost arguments, but the function generated for it has $(length(codegen_types)) parameters")
+    end
+
     return args
 end
 
