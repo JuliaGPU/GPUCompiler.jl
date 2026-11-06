@@ -352,6 +352,58 @@ next_world = Base.get_world_counter()
 end
 
 
+module StackTables
+    Base.Experimental.@MethodTable(A)
+    Base.Experimental.@MethodTable(B)
+    Base.Experimental.@MethodTable(C)
+    f(x) = 0
+    Base.Experimental.@overlay A f(x::Int) = 1
+    Base.Experimental.@overlay B f(x::Integer) = 2
+    Base.Experimental.@overlay C f(x) = 3
+    g(x) = 0
+    Base.Experimental.@overlay B g(x::Float64) = 1
+    h(x::Int) = 0
+    h(x::Float64) = 0
+    function k end
+    Base.Experimental.@overlay C k(x) = 1
+    function amb end
+    Base.Experimental.@overlay A amb(x::Int, y) = 1
+    Base.Experimental.@overlay A amb(x, y::Int) = 2
+end
+
+@testset "stacked method tables" begin
+    # the flat stack that `method_table_view` uses behaves like nested `StackedMethodTable`s
+    world = Base.get_world_counter()
+    T = StackTables
+    lookup(r) = r isa Core.Compiler.MethodLookupResult ?
+        ([(m.method, m.spec_types, m.fully_covers) for m in r.matches],
+         r.valid_worlds.min_world, r.valid_worlds.max_world, r.ambig) :
+        r === nothing ? nothing : (lookup(r.matches), r.overlayed)
+    sup((match, worlds, rest...)) =
+        (match === nothing ? nothing : match.method, worlds.min_world, worlds.max_world, rest...)
+    for (tables, nested) in (
+            ((T.A, T.B, T.C), StackedMethodTable(world, T.A,
+                                  StackedMethodTable(world, T.B, StackedMethodTable(world, T.C)))),
+            ((T.A, T.B), StackedMethodTable(world, T.A, StackedMethodTable(world, T.B))))
+        flat = GPUCompiler.stack_method_tables(world, tables...)
+        @test isoverlayed(flat)
+        for sig in (Tuple{typeof(T.f),Int}, Tuple{typeof(T.f),Int32}, Tuple{typeof(T.f),Any},
+                    Tuple{typeof(T.f),Float64}, Tuple{typeof(T.g),Any},
+                    Tuple{typeof(T.g),Float64}, Tuple{typeof(T.h),Any}, Tuple{typeof(T.h),Int},
+                    Tuple{typeof(T.k),Int}, Tuple{typeof(T.amb),Int,Int},
+                    Tuple{typeof(T.amb),Any,Any}, Tuple{typeof(+),Any,Any}),
+            limit in (-1, 1, 3)
+            @test lookup(findall(sig, flat; limit)) == lookup(findall(sig, nested; limit))
+            @test sup(findsup(sig, flat)) == sup(findsup(sig, nested))
+        end
+    end
+    @test !isoverlayed(GPUCompiler.stack_method_tables(world))
+
+    # the comparison above covers `ambig`
+    r = findall(Tuple{typeof(T.amb),Any,Any}, GPUCompiler.stack_method_tables(world, T.A))
+    @test (r isa Core.Compiler.MethodLookupResult ? r : r.matches).ambig
+end
+
 @testset "Mock Enzyme" begin
     id = Enzyme.deferred_codegen_id(typeof(identity), Tuple{Vector{Float64}}, Val(false))
     @test id isa UInt && id >= UInt(1) << 62

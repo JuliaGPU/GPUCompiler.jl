@@ -2862,6 +2862,19 @@ end
     end
 end
 
+@testset "interpreter type doesn't depend on the method tables" begin
+    # so that the inference code that GPUCompiler precompiles serves every back-end
+    mod = @eval module $(gensym())
+        Base.Experimental.@MethodTable(method_table)
+        Base.Experimental.@MethodTable(other_method_table)
+    end
+    interpreter_type(method_table) =
+        typeof(GPUCompiler.get_interpreter(Native.create_job(identity, (Int,); method_table)[1]))
+    @test interpreter_type(mod.method_table) ==
+          interpreter_type((mod.method_table, mod.other_method_table)) ==
+          interpreter_type((mod.method_table, mod.other_method_table, mod.method_table))
+end
+
 @testset "runtime functions from overlay methods" begin
     # runtime library functions (`signal_exception`, `malloc`, ...) should be resolved
     # through the job's method table, so that back-ends can keep GPU-only code out of

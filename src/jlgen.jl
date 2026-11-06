@@ -156,11 +156,99 @@ Base.Experimental.@MethodTable(SHARED_METHOD_TABLE)
     using CompilerCaching: StackedMethodTable
 end
 
-# look up methods in each table in turn, then in Base
-stack_method_tables(world::UInt) = CC.InternalMethodTable(world)
-stack_method_tables(world::UInt, mt::Core.MethodTable) = StackedMethodTable(world, mt)
-stack_method_tables(world::UInt, mt::Core.MethodTable, rest::Core.MethodTable...) =
-    StackedMethodTable(world, mt, stack_method_tables(world, rest...))
+# Look up methods in each table in turn, then in Base. Unlike nesting `StackedMethodTable`s,
+# this has the same type for every stack depth, so `GPUInterpreter` has one concrete type for
+# all back-ends using the default `method_table_view`, and the inference specializations
+# precompiled in GPUCompiler's own image are reused by every back-end.
+struct MethodTableStack <: CC.MethodTableView
+    world::UInt
+    tables::Vector{Core.MethodTable}
+end
+
+CC.isoverlayed(table::MethodTableStack) = !isempty(table.tables)
+
+@static if VERSION >= v"1.14.0-DEV.3088"
+    stack_findall(@nospecialize(sig::Type), mt::Union{Nothing,Core.MethodTable}, world::UInt,
+                  limit::Int, include_ambiguous::Bool) =
+        CC._findall(sig, mt, world, limit, include_ambiguous)
+else
+    stack_findall(@nospecialize(sig::Type), mt::Union{Nothing,Core.MethodTable}, world::UInt,
+                  limit::Int, ::Nothing) =
+        CC._findall(sig, mt, world, limit)
+end
+
+# Equivalent to the nested `StackedMethodTable` lookup: accumulate matches from each table
+# until one fully covers `sig`, falling back to Base if none does.
+function stack_findall(@nospecialize(sig::Type), table::MethodTableStack, limit::Int,
+                       include_ambiguous)
+    acc = nothing
+    for mt in table.tables
+        result = stack_findall(sig, mt, table.world, limit, include_ambiguous)
+        result === nothing && return nothing # too many matches
+        acc = acc === nothing ? result : merge_lookup(acc, result)
+        nr = CC.length(result)
+        if nr >= 1 && CC.getindex(result, nr).fully_covers
+            return acc, true
+        end
+    end
+    result = stack_findall(sig, nothing, table.world, limit, include_ambiguous)
+    result === nothing && return nothing
+    overlayed = acc !== nothing && !CC.isempty(acc)
+    return (acc === nothing ? result : merge_lookup(acc, result)), overlayed
+end
+
+merge_lookup(a::CC.MethodLookupResult, b::CC.MethodLookupResult) =
+    CC.MethodLookupResult(
+        CC.vcat(a.matches, b.matches),
+        CC.WorldRange(CC.max(a.valid_worlds.min_world, b.valid_worlds.min_world),
+                      CC.min(a.valid_worlds.max_world, b.valid_worlds.max_world)),
+        a.ambig | b.ambig)
+
+@static if VERSION >= v"1.14.0-DEV.3088"
+    function CC.findall(@nospecialize(sig::Type), table::MethodTableStack;
+                        limit::Int=-1, include_ambiguous::Bool=false)
+        r = stack_findall(sig, table, limit, include_ambiguous)
+        r === nothing ? nothing : r[1]
+    end
+elseif HAS_INTEGRATED_CACHE
+    function CC.findall(@nospecialize(sig::Type), table::MethodTableStack; limit::Int=-1)
+        r = stack_findall(sig, table, limit, nothing)
+        r === nothing ? nothing : r[1]
+    end
+else
+    # 1.10 wraps the lookup in a `MethodMatchResult` that records overlay use
+    function CC.findall(@nospecialize(sig::Type), table::MethodTableStack; limit::Int=-1)
+        r = stack_findall(sig, table, limit, nothing)
+        r === nothing ? nothing : CC.MethodMatchResult(r[1], r[2])
+    end
+end
+
+function CC.findsup(@nospecialize(sig::Type), table::MethodTableStack)
+    min_world, max_world = typemin(UInt), typemax(UInt)
+    for mt in table.tables
+        match, valid_worlds = CC._findsup(sig, mt, table.world)
+        min_world = max(min_world, valid_worlds.min_world)
+        max_world = min(max_world, valid_worlds.max_world)
+        if match !== nothing
+            @static if HAS_INTEGRATED_CACHE
+                return match, CC.WorldRange(min_world, max_world)
+            else
+                return match, CC.WorldRange(min_world, max_world), true
+            end
+        end
+    end
+    match, valid_worlds = CC._findsup(sig, nothing, table.world)
+    min_world = max(min_world, valid_worlds.min_world)
+    max_world = min(max_world, valid_worlds.max_world)
+    @static if HAS_INTEGRATED_CACHE
+        return match, CC.WorldRange(min_world, max_world)
+    else
+        return match, CC.WorldRange(min_world, max_world), false
+    end
+end
+
+stack_method_tables(world::UInt, mts::Core.MethodTable...) =
+    MethodTableStack(world, Core.MethodTable[mts...])
 
 
 ## interpreter
