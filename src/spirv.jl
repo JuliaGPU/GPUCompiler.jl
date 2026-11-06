@@ -318,6 +318,11 @@ end
     # (after `prepare_execution!`, whose InstCombine would narrow the widened operations)
     widen_bfloat16!(job, mod)
 
+    # the LLVM back-end translates a switch on an `i1` to an OpSwitch on a boolean, which SPIR-V
+    # doesn't allow. InstCombine narrows a switch's condition to the bits it can take, so this
+    # too runs after `prepare_execution!`.
+    widen_bool_switches!(mod)
+
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
@@ -907,6 +912,38 @@ end
 
 
 ## LLVM passes
+
+# make switches on an `i1` switch on it zero-extended to an `i32`, with the same successors, so
+# that the `phi`s in those keep their incoming blocks
+function widen_bool_switches!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "widen bool switches" begin
+
+    T_int32 = LLVM.Int32Type()
+    for f in mod.functions, bb in f.blocks
+        sw = bb.terminator
+        sw isa LLVM.SwitchInst || continue
+        ops = sw.operands
+        cond, default = ops[1], ops[2]
+        cond.value_type == LLVM.Int1Type() || continue
+        @dispose builder=IRBuilder() begin
+            position!(builder, LLVM.before(sw))
+            builder.debug_location = sw.debug_location
+            cond32 = zext!(builder, cond, T_int32)
+            ncases = (length(ops) - 2) ÷ 2
+            new = switch!(builder, cond32, default, ncases)
+            for i in 1:ncases
+                val = convert(Bool, ops[2 + 2i - 1])
+                LLVM.API.LLVMAddCase(new, ConstantInt(T_int32, val), ops[2 + 2i])
+            end
+        end
+        erase!(sw)
+        changed = true
+    end
+
+    end
+    return changed
+end
 
 # flatten `insertvalue`s with multiple indices into single-index ones, extracting and
 # re-inserting the intermediate aggregates: `insertvalue %agg, %val, 1, 0` becomes

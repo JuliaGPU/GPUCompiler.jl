@@ -718,6 +718,34 @@ end
 
 end
 
+@testset "bool switch widening" begin
+    # `widen_bool_switches!` makes a switch on an `i1`, which InstCombine can leave and the LLVM
+    # back-end translates to an invalid OpSwitch on a boolean, switch on an `i32`
+    Context() do ctx
+        mod = parse(LLVM.Module, """
+            define i32 @entry(i1 %c, i32 %x) {
+            entry:
+              switch i1 %c, label %other [
+                i1 false, label %no
+                i1 true, label %join
+              ]
+            no:
+              br label %join
+            other:
+              ret i32 0
+            join:
+              %r = phi i32 [ 1, %no ], [ %x, %entry ]
+              ret i32 %r
+            }""")
+        @test GPUCompiler.widen_bool_switches!(mod)
+        verify(mod)
+        ir = string(mod)
+        @test !occursin("switch i1", ir)
+        @test occursin(r"zext i1 %c to i32\n\s+switch i32 %\d+, label %other \[\n\s+i32 0, label %no\n\s+i32 1, label %join", ir)
+        @test !GPUCompiler.widen_bool_switches!(mod)
+    end
+end
+
 @testset "min and max lowering" begin
     # `lower_minimum_maximum!` lowers every family of floating-point minimum and maximum to
     # `llvm.minnum`/`llvm.maxnum`, which the back-ends translate to OpenCL's `fmin`/`fmax`.
