@@ -781,6 +781,9 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # after the last SimplifyCFG above, which would undo it
     unify_loop_exits!(mod)
 
+    # after the exit unification, which introduces such values
+    define_undef_phi_values!(mod)
+
     # flatten chained byte GEPs that the AGX back-end miscompiles for 1-byte accesses on a
     # 2-threadgroup grid (see `merge_byte_gep_chains!`). run last, after the intrinsic-lowering
     # cleanup above, so the merged form is what reaches the AIR downgrader / back-end.
@@ -813,6 +816,27 @@ function unify_loop_exits!(mod::LLVM.Module)
             @dispose pb=PassBuilder() begin
                 add!(pb, UnifyLoopExitsPass())
                 run!(pb, f)
+            end
+        end
+    end
+    return
+end
+
+# The AGX back-end of Apple9 and later GPUs (M3 and newer) can miscompile a `phi` with an
+# undefined incoming value, even when the edge carrying it is never taken: a kernel then
+# computes with the same value in every thread instead of the defined one. KernelAbstractions
+# kernels are prone to this, as a variable assigned in one `@synchronize`-separated section of
+# a kernel and used in the next is undefined on the path that skips the out-of-range threads.
+# Define those values; any value is a valid refinement, so pick zero.
+function define_undef_phi_values!(mod::LLVM.Module)
+    for f in mod.functions, bb in f.blocks
+        for inst in bb.instructions
+            inst isa LLVM.PHIInst || break
+            ops = LLVM.operands(inst)
+            for i in 1:length(ops)
+                if ops[i] isa Union{UndefValue, PoisonValue}
+                    ops[i] = null(inst.value_type)
+                end
             end
         end
     end
