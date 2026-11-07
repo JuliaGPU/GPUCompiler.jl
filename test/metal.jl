@@ -1072,6 +1072,36 @@ end
     @test occursin("loop.exit", air)
 end
 
+@testset "undefined phi values" begin
+    # the back-end of M3 and newer GPUs can miscompile these, even on a path that is never
+    # taken (a KernelAbstractions kernel with `@synchronize` returned wrong results)
+    Context(; opaque_pointers=true) do ctx
+        mod = parse(LLVM.Module, """
+            define i64 @f(i1 %c, i64 %x, ptr %p) {
+            entry:
+              br i1 %c, label %def, label %join
+            def:
+              br label %join
+            join:
+              %v = phi i64 [ %x, %def ], [ undef, %entry ]
+              %w = phi ptr [ %p, %def ], [ poison, %entry ]
+              %u = phi { i32, float } [ zeroinitializer, %def ], [ undef, %entry ]
+              store i64 %v, ptr %w
+              ret i64 %v
+            }
+            """)
+        GPUCompiler.define_undef_phi_values!(mod)
+        @test isnothing(verify(mod))
+        phis = filter(inst -> inst isa LLVM.PHIInst,
+                      collect(LLVM.instructions(mod.functions["f"].blocks[3])))
+        @test length(phis) == 3
+        for phi in phis
+            @test !any(op -> op isa Union{UndefValue, PoisonValue}, LLVM.operands(phi))
+        end
+        dispose(mod)
+    end
+end
+
 @testset "reproducible output" begin
     # Compiling the same kernel twice in one session has to yield byte-identical AIR: the two
     # compilations see different LLVM wrapper addresses and codegen counters, so any pass that
