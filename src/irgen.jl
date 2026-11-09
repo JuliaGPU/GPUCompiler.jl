@@ -628,21 +628,6 @@ function is_immutable_datatype(T::Type)
     isa(T,DataType) && !Base.ismutabletype(T)
 end
 
-function is_inlinealloc(T::Type)
-    mayinlinealloc = (T.name.flags >> 2) & 1 == true
-    # FIXME: To simple
-    if mayinlinealloc
-        if !Base.datatype_pointerfree(T)
-            t_name(dt::DataType)=dt.name
-            if t_name(T).n_uninitialized != 0
-                return false
-            end
-        end
-        return true
-    end
-    return false
-end
-
 function is_concrete_immutable(T::Type)
     is_immutable_datatype(T) && T.layout !== C_NULL
 end
@@ -654,11 +639,14 @@ function is_pointerfree(T::Type)
     return Base.datatype_pointerfree(T)
 end
 
+# mirrors `deserves_stack` in Julia's codegen. `allocatedinline` is the same check as its
+# `jl_datatype_isinlinealloc`, which also boxes immutables with GC pointers whose field
+# descriptors need 32 bits.
 function deserves_stack(@nospecialize(T))
     if !is_concrete_immutable(T)
         return false
     end
-    return is_inlinealloc(T)
+    return allocatedinline(T)
 end
 
 deserves_argbox(T) = !deserves_stack(T)

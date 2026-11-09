@@ -32,6 +32,7 @@ end
 
 const CC = Core.Compiler
 using Core: MethodInstance, CodeInstance, CodeInfo
+using Base: allocatedinline
 
 # `HAS_INTEGRATED_CACHE` distinguishes 1.11+ (owner-keyed `Core.Compiler.InternalCodeCache`)
 # from 1.10 (per-interpreter `CodeCache` IdDict + invalidation callbacks). The two have
