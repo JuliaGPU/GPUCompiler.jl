@@ -1323,6 +1323,15 @@ end
     word = GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(a))
     @test word == GPUCompiler.resolve_relocation_target(GPUCompiler.JuliaValueRef(b))
     @test unsafe_pointer_to_objref(Ptr{Cvoid}(word)) === 1.5
+
+    # TLS slots that only Julia's JIT defines resolve to the words it stores there.
+    getter = Ref{Ptr{Cvoid}}(C_NULL)
+    key = Ref{UInt}(0)
+    ccall(:jl_pgcstack_getkey, Cvoid, (Ptr{Ptr{Cvoid}}, Ptr{UInt}), getter, key)
+    resolve_cglobal(sym) = GPUCompiler.resolve_relocation_target(GPUCompiler.CGlobalRef(sym))
+    @test resolve_cglobal(:jl_pgcstack_func_slot) == UInt(getter[])
+    @test resolve_cglobal(:jl_pgcstack_key_slot) == key[]
+    @test resolve_cglobal(:jl_image_tls_offset) == unsafe_load(cglobal(:jl_tls_offset, UInt))
 end
 
 @testset "runtime-backed boxed constants" begin
