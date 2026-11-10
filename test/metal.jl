@@ -2231,6 +2231,74 @@ end
     end
 end
 
+@testset "signed addition and subtraction with overflow lowering" begin
+    # Apple's macOS 26 back-end computes the overflow flag of `llvm.s{add,sub}.with.overflow`
+    # wrongly, so those check the signs of the operands and the result instead
+    mod = @eval module $(gensym())
+        addo(x, y) = Base.Checked.add_with_overflow(x, y)
+        subo(x, y) = Base.Checked.sub_with_overflow(x, y)
+        const V = NTuple{2, VecElement{Int32}}
+        addo_vec(x::V, y::V) = Base.llvmcall(("""
+            declare {<2 x i32>, <2 x i1>} @llvm.sadd.with.overflow.v2i32(<2 x i32>, <2 x i32>)
+            define <2 x i32> @entry(<2 x i32> %x, <2 x i32> %y) {
+              %r = call {<2 x i32>, <2 x i1>} @llvm.sadd.with.overflow.v2i32(<2 x i32> %x, <2 x i32> %y)
+              %v = extractvalue {<2 x i32>, <2 x i1>} %r, 0
+              %o = extractvalue {<2 x i32>, <2 x i1>} %r, 1
+              %z = select <2 x i1> %o, <2 x i32> zeroinitializer, <2 x i32> %v
+              ret <2 x i32> %z
+            }""", "entry"), V, Tuple{V, V}, x, y)
+    end
+
+    for (f, op) in ((mod.addo, "add"), (mod.subo, "sub")), T in (Int16, Int64)
+        @test @filecheck begin
+            @check_label "define {{.*}} @{{(julia|j)_$(op)o_[0-9]+}}"
+            @check_not "with.overflow"
+            @check "$op i$(8*sizeof(T))"
+            @check "xor i$(8*sizeof(T))"
+            Metal.code_native(f, Tuple{T, T})
+        end
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_addo_vec_[0-9]+}}"
+        @check_not "with.overflow"
+        @check "add <2 x i32>"
+        Metal.code_native(mod.addo_vec, Tuple{mod.V, mod.V})
+    end
+
+    # the back-end gets unsigned overflow checks right
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_addo_[0-9]+}}"
+        @check "@llvm.uadd.with.overflow.i64"
+        Metal.code_native(mod.addo, Tuple{UInt64, UInt64})
+    end
+
+    # the expanded overflow flags fold to Julia's, for the edge cases the back-end gets wrong
+    edge = Int16[0, 1, -1, typemax(Int16), typemin(Int16)]
+    for (op, ref) in (("sadd", Base.Checked.add_with_overflow),
+                      ("ssub", Base.Checked.sub_with_overflow)), x in edge, y in edge
+        Context() do ctx
+            ir = parse(LLVM.Module, """
+                declare {i16, i1} @llvm.$op.with.overflow.i16(i16, i16)
+                define i1 @f() {
+                  %r = call {i16, i1} @llvm.$op.with.overflow.i16(i16 $x, i16 $y)
+                  %o = extractvalue {i16, i1} %r, 1
+                  ret i1 %o
+                }""")
+            f = ir.functions["f"]
+            GPUCompiler.expand_signed_add_sub_with_overflow!(f)
+            @dispose pb=PassBuilder() begin
+                add!(pb, FunctionPassManager()) do fpm
+                    add!(fpm, InstSimplifyPass())
+                end
+                run!(pb, ir)
+            end
+            ret = only(f.blocks).terminator
+            @test !iszero(convert(Int, ret.operands[1])) == ref(x, y)[2]
+        end
+    end
+end
+
 if LLVM.version() >= v"19"
 @testset "three-way comparison lowering" begin
     # AIR has no `llvm.{s,u}cmp`, which InstCombine forms from Julia's integer `cmp`
