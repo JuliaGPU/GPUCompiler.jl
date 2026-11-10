@@ -764,6 +764,7 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     expanded = false
     for f in mod.functions
         expanded |= expand_mul_with_overflow!(f)
+        expanded |= expand_signed_add_sub_with_overflow!(f)
         expanded |= expand_three_way_compare!(f)
     end
     if expanded
@@ -3555,6 +3556,31 @@ function expand_mul_with_overflow!(fun::LLVM.Function)
         end
         overflow = icmp!(builder, LLVM.IntPredicate.NE, hi, ext)
         res = insert_value!(builder, LLVM.PoisonValue(call.value_type), lo, 0)
+        insert_value!(builder, res, overflow, 1)
+    end
+end
+
+# Signed addition and subtraction with overflow check, whose overflow flag Apple's macOS 26
+# back-end computes wrongly for 16 to 64-bit integers (e.g. `0 + -1` overflows, `typemin + -1`
+# doesn't), breaking `checked_add` and thus `Rational` arithmetic. Expanded using the sign
+# check: a sum overflowed if its sign differs from that of both addends, a difference if the
+# operands' signs differ and its sign differs from that of the minuend.
+# The operands are frozen, as an `undef` one could otherwise take different values in both.
+function expand_signed_add_sub_with_overflow!(fun::LLVM.Function)
+    sadd, ssub = LLVM.Intrinsic.(("llvm.sadd.with.overflow", "llvm.ssub.with.overflow"))
+    return lower_intrinsic_calls!(fun) do builder, call, intr
+        intr == sadd || intr == ssub || return nothing
+        typ = call.value_type.elements[1]
+        x, y = (LLVM.freeze!(builder, arg) for arg in call.arguments)
+        if intr == sadd
+            r = add!(builder, x, y)
+            signs = and!(builder, xor!(builder, x, r), xor!(builder, y, r))
+        else
+            r = sub!(builder, x, y)
+            signs = and!(builder, xor!(builder, x, y), xor!(builder, x, r))
+        end
+        overflow = icmp!(builder, LLVM.IntPredicate.SLT, signs, LLVM.null(typ))
+        res = insert_value!(builder, LLVM.PoisonValue(call.value_type), r, 0)
         insert_value!(builder, res, overflow, 1)
     end
 end
