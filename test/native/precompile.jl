@@ -110,8 +110,10 @@ precompile_test_harness("Inference caching") do load_path
 
         using NativeBackend
 
+        # precompilation without JuliaIR.jl uses Julia's C++ passes, also when the
+        # preference selects the ports
         persistent_job, _ = NativeCompiler.Native.create_job(
-            NativeBackend.persistent_kernel, (Int,); relocations=:patch)
+            NativeBackend.persistent_kernel, (Int,); relocations=:patch, julia_passes=:cpp)
         persistent_res = GPUCompiler.cached_results(NativeBackend.Results, persistent_job)
         @test persistent_res !== nothing
         if GPUCompiler.supports_relocatable_ir()

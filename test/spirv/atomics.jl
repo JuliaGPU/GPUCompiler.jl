@@ -717,7 +717,7 @@ end
     # e.g. when reflecting, which compiles without validation. the Khronos translator can exit
     # the process on what it doesn't support, so try that in another process
     script = """
-        using GPUCompiler, LLVM
+        using GPUCompiler, LLVM, JuliaIR
         include($(repr(joinpath(@__DIR__, "..", "helpers", "runtime.jl"))))
         include($(repr(joinpath(@__DIR__, "..", "helpers", "spirv.jl"))))
         import .SPIRV: Atomics

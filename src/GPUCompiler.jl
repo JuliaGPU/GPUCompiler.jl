@@ -78,6 +78,7 @@ include("deprecated.jl")
 include("jlgen.jl")
 include("irgen.jl")
 include("determinism.jl")
+include("julia_passes.jl")
 include("optim.jl")
 include("validation.jl")
 include("rtlib.jl")
@@ -105,6 +106,9 @@ function __init__()
         Tracy.@register_tracepoints()
     end
     register_deferred_codegen()
+
+    # last, as it loads other packages
+    load_julia_passes()
 end
 
 end # module
