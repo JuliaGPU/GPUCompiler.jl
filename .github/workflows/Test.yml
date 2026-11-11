@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   release_test:
-    name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }} - ${{ matrix.os }}
+    name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }} - ${{ matrix.os }}${{ matrix.arch && format(' ({0})', matrix.arch) || '' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -22,6 +22,9 @@ jobs:
         version: ['1.10', '1.11', '1.12', '1.13', 'nightly']
         os: [ubuntu-24.04, ubuntu-24.04-arm, macOS-15, windows-2025]
         llvm_args: ['']
+        # the runner's architecture by default (a dimension, so that the 32-bit jobs below
+        # are added rather than merged into the existing ones)
+        arch: ['']
         include:
           # starting with Julia 1.10, we can enable opaque pointers
           # from Julia 1.12 on, this is the default.
@@ -49,6 +52,22 @@ jobs:
           - version: '1.11'
             os: 'windows-2025'
             llvm_args: '--opaque-pointers'
+          # 32-bit hosts
+          - version: '1.10'
+            os: 'ubuntu-24.04'
+            arch: 'x86'
+          - version: '1.11'
+            os: 'ubuntu-24.04'
+            arch: 'x86'
+          - version: '1.12'
+            os: 'ubuntu-24.04'
+            arch: 'x86'
+          - version: '1.13'
+            os: 'ubuntu-24.04'
+            arch: 'x86'
+          - version: 'nightly'
+            os: 'ubuntu-24.04'
+            arch: 'x86'
     steps:
       - uses: actions/checkout@v7
 
@@ -56,6 +75,7 @@ jobs:
         uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
+          arch: ${{ matrix.arch || 'default' }}
 
       - name: Set-up cache
         uses: julia-actions/cache@v3

@@ -20,6 +20,10 @@ end
 module Runtime end
 
 NativeCompilerJob = CompilerJob{NativeCompilerTarget,CompilerParams}
+
+# the host's data layout, for hand-written IR whose pointers must be as large as the host's
+datalayout() = GPUCompiler.llvm_datalayout(NativeCompilerTarget())
+
 GPUCompiler.runtime_module(::NativeCompilerJob) = Runtime
 
 GPUCompiler.method_table(@nospecialize(job::NativeCompilerJob)) = job.config.params.method_table
