@@ -68,7 +68,22 @@ function root_relocation_target(target::JuliaValueRef)
     end
 end
 
-value_pointer(@nospecialize(value)) = UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), value))
+# Code using the Julia runtime reads the TLS offset and getter from slots that Julia's JIT
+# defines but libjulia does not export (JuliaLang/julia#64648). Resolve them to the words
+# the JIT stores there.
+function jit_slot_word(symbol::Symbol)
+    if symbol === :jl_image_tls_offset
+        return unsafe_load(cglobal(:jl_tls_offset, UInt))
+    elseif symbol === :jl_pgcstack_func_slot || symbol === :jl_pgcstack_key_slot
+        func = Ref{Ptr{Cvoid}}(C_NULL)
+        key = Ref{UInt}(0)      # `jl_pgcstack_key_t` is at most a word wide
+        ccall(:jl_pgcstack_getkey, Cvoid, (Ptr{Ptr{Cvoid}}, Ptr{UInt}), func, key)
+        return symbol === :jl_pgcstack_func_slot ? UInt(func[]) : key[]
+    end
+    return nothing
+end
+
+value_pointer(@nospecialize(value)) =UInt(ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), value))
 
 """
     resolve_relocation_target(target) -> UInt
@@ -82,6 +97,10 @@ function resolve_relocation_target(target::JuliaValueRef)
 end
 function resolve_relocation_target(target::CGlobalRef)
     if target.library === nothing
+        if target.offset == 0
+            word = jit_slot_word(target.symbol)
+            word === nothing || return word
+        end
         # `jl_cglobal` accepts the symbol directly and does the process-wide `jl_dlfind`.
         address = ccall(:jl_cglobal, Any, (Any, Any), target.symbol, UInt)::Ptr{UInt}
         return unsafe_load(address + target.offset)
