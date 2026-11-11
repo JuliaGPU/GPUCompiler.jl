@@ -410,3 +410,17 @@ end
     # Check that we can call this function from the CPU, to support deferred codegen for Enzyme.
     @test ccall("extern deferred_codegen", llvmcall, UInt, (UInt,), id) == id
 end
+
+@testset "deserves_argbox" begin
+    @test !GPUCompiler.deserves_argbox(Int)
+    @test !GPUCompiler.deserves_argbox(Tuple{Int, Vector{Int}})
+    @test GPUCompiler.deserves_argbox(Vector{Int})
+    @test GPUCompiler.deserves_argbox(Base.RefValue{Int})
+
+    # A large immutable with GC pointers needs 32-bit field descriptors, so Julia stores it
+    # boxed even though `mayinlinealloc` is set.
+    BigWithPointer = Tuple{NTuple{4100, Float64}, Vector{Float64}}
+    @test !Base.allocatedinline(BigWithPointer)
+    @test GPUCompiler.deserves_argbox(BigWithPointer)
+    @test !GPUCompiler.deserves_argbox(NTuple{4100, Float64})
+end
