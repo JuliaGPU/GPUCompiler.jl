@@ -178,6 +178,9 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     errors = IRError[]
 
     for f in mod.functions
+        # the throw functions are run-time functions, so only declarations can be them;
+        # a Julia function whose name merely contains one (e.g. `handle_jl_error`) has a body
+        isdeclaration(f) || continue
         fn = f.name
         for (throw_fn, name) in throw_functions
             occursin(throw_fn, fn) || continue
