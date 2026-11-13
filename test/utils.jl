@@ -399,6 +399,34 @@ end
     end
     @test !isoverlayed(GPUCompiler.stack_method_tables(world))
 
+    # the interpreter wraps its view, of whatever type, in one of a single type that
+    # behaves the same, so that the interpreter is concretely typed
+    @test isconcretetype(GPUCompiler.GPUInterpreter)
+    flat = GPUCompiler.stack_method_tables(world, T.A, T.B)
+    for view in (flat, GPUCompiler.maybe_cached(flat),
+                 Core.Compiler.OverlayMethodTable(world, T.A),
+                 Core.Compiler.InternalMethodTable(world))
+        wrapped = GPUCompiler.InterpreterMethodTable(view)
+        @test GPUCompiler.InterpreterMethodTable(wrapped) === wrapped
+        @test isoverlayed(wrapped) == isoverlayed(view)
+        for sig in (Tuple{typeof(T.f),Int}, Tuple{typeof(T.f),Any}, Tuple{typeof(T.g),Float64},
+                    Tuple{typeof(T.amb),Int,Int}, Tuple{typeof(+),Any,Any}),
+            limit in (-1, 1)
+            @test lookup(findall(sig, wrapped; limit)) == lookup(findall(sig, view; limit))
+            @test sup(findsup(sig, wrapped)) == sup(findsup(sig, view))
+        end
+    end
+    # lookups by the interpreter are inferred, so that Julia's inference code as compiled
+    # for the interpreter doesn't handle values of unknown type (which gets it invalidated)
+    interp_table = only(Base.return_types(Core.Compiler.method_table,
+                                          Tuple{GPUCompiler.GPUInterpreter}))
+    @test interp_table === GPUCompiler.InterpreterMethodTable
+    @test only(Base.return_types(Tuple{Type,interp_table}) do sig, table
+              findall(sig, table; limit=3)
+          end) === GPUCompiler.FindAllResult
+    @test only(Base.return_types(findsup, Tuple{Type,interp_table})) ===
+          GPUCompiler.FindSupResult
+
     # the comparison above covers `ambig`
     r = findall(Tuple{typeof(T.amb),Any,Any}, GPUCompiler.stack_method_tables(world, T.A))
     @test (r isa Core.Compiler.MethodLookupResult ? r : r.matches).ambig

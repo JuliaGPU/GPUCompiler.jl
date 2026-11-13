@@ -269,6 +269,58 @@ end
 
 get_method_table_view(world::UInt, mt::CC.MethodTable) = CC.OverlayMethodTable(world, mt)
 
+# The method table view of a `GPUInterpreter`. `method_table_view` may return any kind of
+# view, but the interpreter should not be parameterized on it: Julia's compiler also runs
+# inference code that only knows the interpreter by its type name (the callbacks it queues
+# up are called with the abstractly-typed `InferenceState.interp`, and some entry points do
+# not specialize on the interpreter), and with a type parameter the method lookups in that
+# code are not inferable. They then return `Any`, which leaves `Base` calls on abstract
+# arguments that unrelated packages invalidate by adding methods (`convert`, `similar` and
+# `:` by StaticArrays and Unitful, to name some), and with them all of inference as
+# precompiled for the interpreter. Wrapping the view gives the interpreter a single
+# concrete type instead, at the cost of a dynamic dispatch for views other than the default.
+struct InterpreterMethodTable <: CC.MethodTableView
+    view::CC.MethodTableView
+    InterpreterMethodTable(view::CC.MethodTableView) =
+        view isa InterpreterMethodTable ? view : new(view)
+end
+
+const DefaultMethodTableView = typeof(maybe_cached(MethodTableStack(UInt(0), Core.MethodTable[])))
+
+@static if HAS_INTEGRATED_CACHE
+    const FindAllResult = Union{Nothing,CC.MethodLookupResult}
+    const FindSupResult = Tuple{Union{Nothing,Core.MethodMatch},CC.WorldRange}
+else
+    const FindAllResult = Union{Nothing,CC.MethodMatchResult}
+    const FindSupResult = Tuple{Union{Nothing,Core.MethodMatch},CC.WorldRange,Bool}
+end
+
+function CC.isoverlayed(table::InterpreterMethodTable)
+    view = table.view
+    view isa DefaultMethodTableView ? CC.isoverlayed(view) : CC.isoverlayed(view)::Bool
+end
+
+@static if VERSION >= v"1.14.0-DEV.3088"
+    function CC.findall(@nospecialize(sig::Type), table::InterpreterMethodTable;
+                        limit::Int=-1, include_ambiguous::Bool=false)
+        view = table.view
+        view isa DefaultMethodTableView ? CC.findall(sig, view; limit, include_ambiguous) :
+            CC.findall(sig, view; limit, include_ambiguous)::FindAllResult
+    end
+else
+    function CC.findall(@nospecialize(sig::Type), table::InterpreterMethodTable; limit::Int=-1)
+        view = table.view
+        view isa DefaultMethodTableView ? CC.findall(sig, view; limit) :
+            CC.findall(sig, view; limit)::FindAllResult
+    end
+end
+
+function CC.findsup(@nospecialize(sig::Type), table::InterpreterMethodTable)
+    view = table.view
+    view isa DefaultMethodTableView ? CC.findsup(sig, view) :
+        CC.findsup(sig, view)::FindSupResult
+end
+
 # VERSION >= v"1.14.0-DEV.1691"
 const INFERENCE_CACHE_TYPE = isdefined(CC, :InferenceCache) ? CC.InferenceCache : Vector{CC.InferenceResult}
 
@@ -284,9 +336,9 @@ age it is all CompilerCaching needs to drive inference into the integrated
 cache. Compilation results are not attached during inference at all — they
 are attached lazily when looked up (see [`cached_results`](@ref)).
 """
-struct GPUInterpreter{MTV<:CC.MethodTableView} <: CC.AbstractInterpreter
+struct GPUInterpreter <: CC.AbstractInterpreter
     world::UInt
-    method_table_view::MTV
+    method_table_view::InterpreterMethodTable
 
 @static if HAS_INTEGRATED_CACHE
     owner::Any
@@ -312,8 +364,8 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         always_inline::Bool=false,
                         julia_ir_passes::Tuple=())
     @assert world <= Base.get_world_counter()
-    return GPUInterpreter{typeof(method_table_view)}(
-        world, method_table_view, owner, INFERENCE_CACHE_TYPE(),
+    return GPUInterpreter(
+        world, InterpreterMethodTable(method_table_view), owner, INFERENCE_CACHE_TYPE(),
         inf_params, opt_params, always_inline, julia_ir_passes)
 end
 
@@ -326,8 +378,8 @@ function GPUInterpreter(interp::GPUInterpreter;
                         opt_params::CC.OptimizationParams=interp.opt_params,
                         always_inline::Bool=interp.always_inline,
                         julia_ir_passes::Tuple=interp.julia_ir_passes)
-    return GPUInterpreter{typeof(method_table_view)}(
-        world, method_table_view, owner, inf_cache,
+    return GPUInterpreter(
+        world, InterpreterMethodTable(method_table_view), owner, inf_cache,
         inf_params, opt_params, always_inline, julia_ir_passes)
 end
 
@@ -343,8 +395,8 @@ function GPUInterpreter(world::UInt=Base.get_world_counter();
                         always_inline::Bool=false,
                         julia_ir_passes::Tuple=())
     @assert world <= Base.get_world_counter()
-    return GPUInterpreter{typeof(method_table_view)}(
-        world, method_table_view, code_cache, Vector{CC.InferenceResult}(),
+    return GPUInterpreter(
+        world, InterpreterMethodTable(method_table_view), code_cache, Vector{CC.InferenceResult}(),
         inf_params, opt_params, always_inline, julia_ir_passes)
 end
 
@@ -357,8 +409,8 @@ function GPUInterpreter(interp::GPUInterpreter;
                         opt_params::CC.OptimizationParams=interp.opt_params,
                         always_inline::Bool=interp.always_inline,
                         julia_ir_passes::Tuple=interp.julia_ir_passes)
-    return GPUInterpreter{typeof(method_table_view)}(
-        world, method_table_view, code_cache, inf_cache,
+    return GPUInterpreter(
+        world, InterpreterMethodTable(method_table_view), code_cache, inf_cache,
         inf_params, opt_params, always_inline, julia_ir_passes)
 end
 
