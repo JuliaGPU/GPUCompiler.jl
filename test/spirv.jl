@@ -233,6 +233,55 @@ end
     end
 end
 
+@testset "boxed union constants" begin
+    mod = @eval module $(gensym())
+        @noinline produce(cond::Bool, a::Int32) = cond ? a : Int64(7)
+        @noinline forward(cond::Bool, a::Int32) = produce(cond, a + Int32(1))
+        function kernel(ptr::Core.LLVMPtr{Int64,1}, cond::Bool, a::Int32)
+            x = forward(cond, a)
+            Base.unsafe_store!(ptr, x isa Int64 ? x : Int64(x))
+            return
+        end
+
+        @noinline recurse(cond::Bool, a::Int32) =
+            a > Int32(0) ? recurse(cond, a - Int32(1)) : produce(cond, a)
+        function recursive_kernel(ptr::Core.LLVMPtr{Int64,1}, cond::Bool, a::Int32)
+            x = recurse(cond, a)
+            Base.unsafe_store!(ptr, x isa Int64 ? x : Int64(x))
+            return
+        end
+    end
+
+    # `produce` returns the address of the payload of the box holding the constant. A
+    # module-scope variable cannot be in the address space of that pointer, so the box moves to
+    # the kernel's stack, which takes inlining `produce` and `forward` into the kernel.
+    # (on 1.10, codegen embeds the address of the host's box instead)
+    if LLVM.version() >= v"17"
+        job, kwargs = SPIRV.create_job(mod.kernel, (Core.LLVMPtr{Int64,1}, Bool, Int32);
+                                       kernel=true, backend)
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job; kwargs...)
+            @test all(!endswith(gv.name, "_box") for gv in ir.globals)
+            @test [f for f in ir.functions if !LLVM.isdeclaration(f)] == [meta.entry]
+            dispose(ir)
+        end
+
+        # the Khronos translator does not support reading through the pointer of an isbits
+        # `Union` returned by a function, whether or not it refers to a box
+        if backend === :llvm
+            @test SPIRV.code_execution(mod.kernel, (Core.LLVMPtr{Int64,1}, Bool, Int32);
+                                       kernel=true, backend) !== nothing
+        end
+
+        @test_throws "could not be inlined" SPIRV.code_llvm(devnull, mod.recursive_kernel,
+            (Core.LLVMPtr{Int64,1}, Bool, Int32); kernel=true, backend)
+
+        # a box cannot outlive the frame of a non-kernel entry point returning its address
+        @test_throws "may return the address of a boxed constant" SPIRV.code_llvm(devnull,
+            mod.produce, (Bool, Int32); kernel=false, backend)
+    end
+end
+
 @testset "small type tags" begin
     mod = @eval module $(gensym())
         function kernel(out::Core.LLVMPtr{UInt,1}, p::Ptr{Cvoid})
