@@ -214,6 +214,140 @@ function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     return errors
 end
 
+## boxed constants
+
+# Move the boxed constants that `materialize_box!` embeds into stack memory of the functions
+# nothing in the module calls (the kernel, typically), handing callees a pointer to it.
+#
+# An isbits `Union` return is lowered as `{ptr, i8}`, whose pointer `phi`/`select`s the payload
+# of such a box against the caller's stack buffer. Those are address space 0 pointers, i.e.
+# the Function storage class, which a module-scope variable cannot have: the Khronos
+# translator rejects the box, and the LLVM back-end emits a reference to a variable it never
+# defines. No other address space works either: OpenCL's generic one excludes constant
+# memory, and the pointers would have to change type across function boundaries.
+#
+# Unlike Metal's `demote_boxed_constants!`, a copy in every function using the box is not
+# enough: SPIR-V functions are not necessarily inlined, so the pointer a callee returns would
+# refer to its dead frame. The copy instead lives in the outermost frame, which outlives
+# every use, and is passed down as an additional argument. This is sound for the same reason
+# as on Metal: box addresses carry no identity (isbits egal is by content).
+#
+# Functions that cannot be given an argument, because not all their uses are direct calls,
+# also hold their own copy. That leaves a non-kernel entry point returning such a pointer
+# referring to its own frame, but there is no caller in the module to provide the storage.
+#
+# Runs from `finish_ir!`, i.e. on optimized IR, where a box only remains a slot's target when
+# it is `jl_true`/`jl_false` (see `box_used_only_by_instructions`), and after relocations
+# have been baked into the headers of the others.
+function hoist_boxed_constants!(mod::LLVM.Module)
+    # `replace_global_with_local!` needs LLVM.jl's `convert_users_to_instructions!`
+    LLVM.version() >= v"17" || return false
+
+    boxes = LLVM.GlobalVariable[gv for gv in mod.globals
+                                if is_boxed_constant(gv) && box_used_only_by_instructions(gv)]
+    isempty(boxes) && return false
+
+    @tracepoint "hoist boxed constants" begin
+
+    # the boxes each function needs a pointer to: the ones it uses...
+    needs = Dict{LLVM.Function, BitSet}()
+    for (i, gv) in enumerate(boxes), f in using_functions!(Set{LLVM.Function}(), gv)
+        push!(get!(BitSet, needs, f), i)
+    end
+    # ... and the ones its callees use, as far as those can take them as arguments
+    takes_arguments(f::LLVM.Function) = !isempty(f.uses) && all(f.uses) do use
+        call = use.user
+        call isa LLVM.CallInst && LLVM.called_operand(call) == f &&
+            !any(==(f), call.arguments)
+    end
+    callers(f::LLVM.Function) =
+        Set{LLVM.Function}(use.user.parent.parent for use in f.uses)
+    worklist = LLVM.Function[f for f in keys(needs) if takes_arguments(f)]
+    while !isempty(worklist)
+        f = pop!(worklist)
+        for caller in callers(f)
+            caller_needs = get!(BitSet, needs, caller)
+            issubset(needs[f], caller_needs) && continue
+            union!(caller_needs, needs[f])
+            takes_arguments(caller) && push!(worklist, caller)
+        end
+    end
+
+    # give the functions that can take them a parameter for each box they need.
+    # clones are appended in module order, so don't iterate the pointer-hashed dictionary.
+    old_fs = LLVM.Function[f for f in mod.functions if haskey(needs, f) && takes_arguments(f)]
+    pointers = Dict{Tuple{LLVM.Function,Int}, LLVM.Value}()
+    new_fs = map(old_fs) do f
+        fn = f.name
+        ft = f.function_type
+        f.name = fn * ".orig"
+        nparams = length(ft.parameters)
+        new_types = LLVMType[ft.parameters;
+                             [boxes[i].value_type for i in needs[f]]]
+        new_f = LLVM.Function(mod, fn, LLVM.FunctionType(ft.return_type, new_types))
+        new_f.linkage = f.linkage
+        for (i, param) in zip(needs[f], new_f.parameters[nparams+1:end])
+            param.name = boxes[i].name
+            pointers[(new_f, i)] = param
+        end
+        new_f
+    end
+    for (f, new_f) in zip(old_fs, new_fs)
+        # (not mapping `f` itself: recursive calls are rewritten along with the other ones)
+        value_map = Dict{LLVM.Value, LLVM.Value}(
+            param => new_param for (param, new_param) in zip(f.parameters, new_f.parameters))
+        clone_into!(new_f, f; value_map,
+                    changes=LLVM.CloneFunctionChangeType.LocalChangesOnly)
+        needs[new_f] = needs[f]
+        # keep the function for its call sites, which still need rewriting
+        empty!(f)
+    end
+
+    # the other functions hold the boxes, at the start of their frame
+    function pointer(f::LLVM.Function, i::Int)
+        get!(pointers, (f, i)) do
+            gv = boxes[i]
+            @dispose builder=IRBuilder() begin
+                position!(builder, LLVM.at_begin(f.entry))
+                # keep the box's alignment, but at least Julia's heap alignment (16 B), which
+                # is what `materialize_box!` gives these boxes and what the payload's
+                # `isbits` layout assumes
+                ptr = alloca!(builder, gv.global_value_type; align=max(gv.alignment, 16))
+                store!(builder, gv.initializer, ptr)
+                ptr
+            end
+        end
+    end
+
+    # pass the pointers on at the call sites
+    @dispose builder=IRBuilder() begin
+        for (f, new_f) in zip(old_fs, new_fs)
+            for use in collect(f.uses)
+                call = use.user::LLVM.CallInst
+                caller = call.parent.parent
+                position!(builder, LLVM.before(call))
+                new_call = call!(builder, new_f.function_type, new_f,
+                                 LLVM.Value[call.arguments;
+                                            [pointer(caller, i) for i in needs[f]]],
+                                 call.operand_bundles)
+                new_call.callconv = call.callconv
+                replace_uses!(call, new_call)
+                erase!(call)
+            end
+            replace_metadata_uses!(f, new_f)
+            erase!(f)
+        end
+    end
+
+    # and use them instead of the boxes
+    for (i, gv) in enumerate(boxes)
+        replace_global_with_local!(gv, f -> pointer(f, i))
+    end
+
+    end
+    return true
+end
+
 function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                     entry::LLVM.Function)
     # SPIR-V has no `trap` and no mechanism to abort a compute kernel (OpKill is fragment-only),
@@ -222,6 +356,10 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # guard (see `emit_exception!`), and turning `unreachable` into `ret` also avoids emitting
     # OpUnreachable (UB if reached), which PoCL and friends handle poorly.
     lower_unreachable_control_flow!(job, mod)
+
+    # a module-scope SPIR-V variable cannot live in the address space of the pointers that
+    # refer to Julia's boxed constants
+    hoist_boxed_constants!(mod)
 
     # SPIR-V cannot express atomic loads and stores of pointers, which is what Julia's
     # `unordered` heap-reference accesses are (see `demote_unordered_atomics!`)
