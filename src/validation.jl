@@ -284,12 +284,23 @@ function check_ir(job, mod::LLVM.Module, relocs::Relocations=Relocations(); comp
         end
     end
     errors = check_ir!(job, IRError[], mod, relocs, explain)
-    unique!(errors)
+    unique_errors!(errors)
     if !isempty(errors)
         throw(InvalidIRError(job, errors, explanations))
     end
 
     return
+end
+
+# `unique!`, which compares the elements of a vector whose element type isn't concrete using
+# code that isn't inferred, and that packages adding array methods invalidate
+function unique_errors!(errors::Vector{IRError})
+    seen = Set{IRError}()
+    filter!(errors) do error
+        error in seen && return false
+        push!(seen, error)
+        return true
+    end
 end
 
 function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Relocations,
@@ -300,7 +311,10 @@ function check_ir!(job, errors::Vector{IRError}, mod::LLVM.Module, relocs::Reloc
     check_constants!(job, errors, mod, relocs)
 
     # custom validation
-    append!(errors, validate_ir(job, mod))
+    # (a loop, as `append!` of a collection of unknown type isn't inferred)
+    for error in validate_ir(job, mod)
+        push!(errors, error::IRError)
+    end
 
     return errors
 end
