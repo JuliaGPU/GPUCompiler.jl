@@ -659,7 +659,7 @@ Compile the GPUCompiler job. In particular this will run inference using the for
 abstract interpreter.
 """
 function Base.precompile(@nospecialize(job::CompilerJob))
-    if job.source.def.primary_world > job.world
+    if (job.source.def::Method).primary_world > job.world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
     end
     interp = get_interpreter(job)
@@ -865,7 +865,7 @@ function merge_functions!(mod::LLVM.Module, kept, dup)
 end
 
 function compile_method_instance(@nospecialize(job::CompilerJob))
-    if job.source.def.primary_world > job.world
+    if (job.source.def::Method).primary_world > job.world
         error("Cannot compile $(job.source) for world $(job.world); method is only valid from world $(job.source.def.primary_world) onwards")
     end
 

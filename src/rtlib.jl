@@ -117,7 +117,10 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # Keep this intermediate module relocatable even when the final back-end resolves
     # relocations eagerly. The caller links a fresh copy and lowers the merged sites.
     new_mod, meta = compile_unhooked(:llvm, rt_job; resolve_relocations=false)
-    ft = meta.entry.function_type
+    # (the result of the compiler isn't inferred)
+    new_mod = new_mod::LLVM.Module
+    entry = meta.entry::LLVM.Function
+    ft = entry.function_type
     expected_ft = runtime_function_type(rt_job, method)
     if ft.return_type != expected_ft.return_type
         error("Invalid return type for runtime function '$(method.name)': expected $(expected_ft.return_type), got $(ft.return_type)")
@@ -132,12 +135,12 @@ function emit_function!(mod, relocs::Relocations, config::CompilerConfig,
     # rename to the final `gpu_*` name on the per-function module, so the cached bitcode
     # is immediately link-ready (no per-session rename pass on a cache hit).
     decl = get(new_mod.functions, name, nothing)
-    if decl !== nothing && decl != meta.entry
-        @assert decl.value_type == meta.entry.value_type
-        replace_uses!(decl, meta.entry)
+    if decl !== nothing && decl != entry
+        @assert decl.value_type == entry.value_type
+        replace_uses!(decl, entry)
         erase!(decl)
     end
-    meta.entry.name = name
+    entry.name = name
 
     io = IOBuffer()
     write(io, new_mod)

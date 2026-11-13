@@ -75,7 +75,8 @@ function irgen(@nospecialize(job::CompilerJob))
         specfunc = compiled[job.source].specfunc
     end
 
-    compiled[job.source] = (; compiled[job.source]..., func, specfunc)
+    # (asserted, as merging with a value of unknown type is invalidated by `merge` methods)
+    compiled[job.source] = (; (compiled[job.source]::NamedTuple)..., func, specfunc)
 
     # minimal required optimization
     @tracepoint "rewrite" begin

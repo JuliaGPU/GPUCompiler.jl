@@ -1190,7 +1190,7 @@ function widen_bfloat16_operation!(builder::IRBuilder, inst::LLVM.Instruction)
     widen(val) = is_bfloat16(val.value_type) ?
                  fpext!(builder, val, widened_type(val.value_type)) : val
     typ = inst.value_type
-    flags = supports_fast_math(inst) ? NamedTuple(inst.fast_math) : nothing
+    flags = supports_fast_math(inst) ? NamedTuple(inst.fast_math::LLVM.FastMathFlags) : nothing
     function keep_flags(new)
         if flags !== nothing && new isa LLVM.Instruction && supports_fast_math(new)
             new.fast_math = flags
