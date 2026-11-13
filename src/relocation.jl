@@ -495,6 +495,46 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
     return val
 end
 
+# Does `gv` look like a boxed-constant replica created by `materialize_box!`? Its `_box` name
+# and layout distinguish it from other private constants: `{ i64 header, [payload bytes] }`,
+# optionally with leading alignment padding. Relocatable boxes are external and mutable, so
+# `isconstant` excludes them (they are delivered through the relocation table instead).
+function is_boxed_constant(@nospecialize(gv::LLVM.GlobalVariable))
+    isdeclaration(gv) && return false
+    endswith(gv.name, "_box") || return false
+    gv.linkage == LLVM.Linkage.Private || return false
+    (gv.constant && gv.unnamed_addr == LLVM.UnnamedAddr.Global) || return false
+    gv.value_type.addrspace == 0 || return false
+    T = gv.global_value_type
+    T isa LLVM.StructType || return false
+    els = T.elements
+    is_hdr(t) = t isa LLVM.IntegerType && t.width == 8sizeof(UInt)
+    is_pad(t) = t isa LLVM.ArrayType && t.element_type == LLVM.Int8Type()
+    return (length(els) >= 1 && is_hdr(els[1])) ||
+           (length(els) >= 2 && is_pad(els[1]) && is_hdr(els[2]))
+end
+
+# Are all (transitive constant) users of `v` instructions, i.e. does the box escape only
+# through function bodies? A box reachable from another global's *initializer* is the
+# `jl_true`/`jl_false` slot→box indirection, which is not ours to move: lowering it would
+# strand the slot's constant pointer. Only the isbits-union interior boxes — whose payload
+# address flows through a body `phi`/`select` — need lowering by the back-ends that cannot
+# address a constant global from thread memory, and those have instruction users exclusively.
+function box_used_only_by_instructions(@nospecialize(v::LLVM.Value))
+    for u in v.users
+        if u isa LLVM.Instruction
+            # a body use: fine
+        elseif u isa LLVM.GlobalVariable
+            return false   # initializer reference (slot→box)
+        elseif u isa LLVM.Constant
+            box_used_only_by_instructions(u) || return false
+        else
+            return false
+        end
+    end
+    return true
+end
+
 # Return the byte offset added by a constant cast or GEP, or `nothing` if it is not static.
 function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::LLVM.DataLayout)
     op = ce.opcode
