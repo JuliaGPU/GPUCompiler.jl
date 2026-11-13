@@ -214,6 +214,47 @@ function validate_ir(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module)
     return errors
 end
 
+## boxed constants
+
+# Move the boxed constants that `materialize_box!` embeds onto the stack of the entry points.
+#
+# An isbits `Union` return is lowered as `{ptr, i8}`, whose pointer may refer to the payload
+# of such a box. Those are address space 0 pointers, i.e. the Function storage class, which a
+# module-scope SPIR-V variable cannot have. Copying the box to the stack is sound because box
+# addresses carry no identity (isbits egal is by content), but the copy has to outlive every
+# use of the pointer, so the functions using a box are first inlined into the entry points.
+# An entry point other than a kernel may not return such a pointer.
+#
+# Runs on optimized IR, where a box only remains a slot's target when it is
+# `jl_true`/`jl_false` (see `box_used_only_by_instructions`).
+function hoist_boxed_constants!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    # `replace_global_with_local!` needs LLVM.jl's `convert_users_to_instructions!`
+    LLVM.version() >= v"17" || return false
+
+    boxes = LLVM.GlobalVariable[gv for gv in mod.globals
+                                if is_boxed_constant(gv) && box_used_only_by_instructions(gv)]
+    isempty(boxes) && return false
+
+    inline_global_users!(job, mod, [gv.name for gv in boxes], "a boxed constant")
+
+    # a kernel returns nothing, but another entry point could return the box's address,
+    # which would then refer to its dead frame
+    has_pointer(T) = T isa LLVM.PointerType ||
+                     (T isa LLVM.StructType && any(has_pointer, T.elements)) ||
+                     (T isa LLVM.ArrayType && has_pointer(T.element_type))
+    function slot(f::LLVM.Function, gv::LLVM.GlobalVariable)
+        f in kernels(mod) || !has_pointer(f.function_type.return_type) ||
+            error("""Function `$(f.name)` may return the address of a boxed constant, which
+                     can only be kept on the stack of a kernel.""")
+        box_alloca!(f, gv)
+    end
+    for gv in boxes
+        slots = Dict{LLVM.Function, LLVM.Value}()
+        replace_global_with_local!(gv, f -> get!(() -> slot(f, gv), slots, f))
+    end
+    return true
+end
+
 function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                     entry::LLVM.Function)
     # SPIR-V has no `trap` and no mechanism to abort a compute kernel (OpKill is fragment-only),
@@ -222,6 +263,10 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # guard (see `emit_exception!`), and turning `unreachable` into `ret` also avoids emitting
     # OpUnreachable (UB if reached), which PoCL and friends handle poorly.
     lower_unreachable_control_flow!(job, mod)
+
+    # a module-scope SPIR-V variable cannot live in the address space of the pointers that
+    # refer to Julia's boxed constants
+    hoist_boxed_constants!(job, mod)
 
     # SPIR-V cannot express atomic loads and stores of pointers, which is what Julia's
     # `unordered` heap-reference accesses are (see `demote_unordered_atomics!`)
