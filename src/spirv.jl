@@ -348,7 +348,7 @@ end
             translate(input, options)
         end
     else
-        error("Unsupported SPIR-V back-end $(repr(target.backend)); expected :llvm or :khronos.")
+        error("Unsupported SPIR-V back-end :$(target.backend); expected :llvm or :khronos.")
     end
 
     dump_files(output) = join(dump_failure(".bc" => input, ".spv" => output), " and ")

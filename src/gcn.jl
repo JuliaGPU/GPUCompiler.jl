@@ -265,7 +265,7 @@ const AMDGPUObjectFile = Cint(1)
         return invoke(mcgen, Tuple{CompilerJob, LLVM.Module, typeof(format)},
                       job, mod, format)
     elseif target.backend !== :external
-        error("Unsupported GCN back-end $(repr(target.backend)); " *
+        error("Unsupported GCN back-end :$(target.backend); " *
               "expected :external or :inprocess.")
     end
 
