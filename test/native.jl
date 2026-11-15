@@ -430,6 +430,30 @@ end
         end
     end
 
+    @testset "compiled names after sanitization" begin
+        # `a+b` and `a-b` both sanitize to `a_b`, and with the module-local name
+        # counters of Julia 1.14 their functions get the same number too
+        mod = @eval module $(gensym())
+            @noinline var"a+b"(x) = x + 1
+            @noinline var"a-b"(x) = x * 3
+            outer(x) = var"a+b"(x) - var"a-b"(x)
+        end
+
+        job, _ = Native.create_job(mod.outer, (Int,); validate=false)
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job)
+
+            entry(f) = only(v for (mi, v) in meta.compiled if mi.def in methods(f))
+            plus = entry(mod.var"a+b").specfunc
+            minus = entry(mod.var"a-b").specfunc
+            @test plus != minus
+            @test haskey(ir.functions, plus)
+            @test haskey(ir.functions, minus)
+            @test occursin(" add ", string(ir.functions[plus]))
+            @test occursin(" mul ", string(ir.functions[minus]))
+        end
+    end
+
     @testset "cached compilation" begin
         mod = @eval module $(gensym())
             @noinline child(i) = i
