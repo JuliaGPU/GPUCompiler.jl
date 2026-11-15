@@ -941,6 +941,21 @@ end
     @test_throws KernelError Native.code_llvm(devnull, mod.invalid_kernel, Tuple{}; kernel=true) == nothing
 end
 
+@testset "DWARF version matches Julia's" begin
+    # host code can be linked into Julia-generated modules (e.g. via `llvmcall`),
+    # where conflicting module flags result in a warning
+    mod = @eval module $(gensym())
+        kernel(x) = x + 1
+    end
+    dwarf_version(ir) = match(r"!\"Dwarf Version\", i32 (\d+)", ir)[1]
+
+    julia_ir = sprint(io->InteractiveUtils.code_llvm(io, mod.kernel, Tuple{Int};
+                                                     dump_module=true, raw=true))
+    native_ir = sprint(io->Native.code_llvm(io, mod.kernel, Tuple{Int};
+                                            dump_module=true, raw=true))
+    @test dwarf_version(native_ir) == dwarf_version(julia_ir)
+end
+
 @testset "kernels may recurse" begin
     # unlike on GPUs, a kernel is an ordinary function that may be called from elsewhere
     mod = @eval module $(gensym())
