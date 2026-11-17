@@ -189,8 +189,10 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
         replace(match, r"_[0-9]+$" => "") * "_$(length(renames) + 1)"
     end
     normalize(str::AbstractString) = replace(str, codegen_name => deterministic)
-    rename!(value) = let str = value.name
-        occursin(codegen_name, str) && (value.name = normalize(str))
+    # (unspecialized, and with `LLVM.name` rather than the `name` property, so that this is
+    # compiled once rather than for every type of instruction)
+    rename!(@nospecialize(value)) = let str = LLVM.name(value)
+        occursin(codegen_name, str) && LLVM.name!(value, normalize(str))
     end
 
     # Metadata forms a graph (a debug location points at its subprogram, an alias scope at its
@@ -234,25 +236,27 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
     # visible in textual IR but does affect bitcode string-table order. Transformations above
     # can create the same named values through pointer-keyed worklists in different orders.
     # Reinsert every local name in IR order so equivalent modules serialize identically.
+    # (by reference, as LLVM.jl's setter would be compiled for every type of instruction)
     for f in mod.functions
-        named_values = Pair{LLVM.Value,String}[]
+        named_values = Pair{LLVM.API.LLVMValueRef,String}[]
+        record!(@nospecialize(value)) = let name = LLVM.name(value)
+            isempty(name) ||
+                push!(named_values, Base.unsafe_convert(LLVM.API.LLVMValueRef, value) => name)
+        end
         for value in f.parameters
-            name = value.name
-            isempty(name) || push!(named_values, value => name)
+            record!(value)
         end
         for bb in f.blocks
-            name = bb.name
-            isempty(name) || push!(named_values, bb => name)
+            record!(bb)
             for inst in bb.instructions
-                name = inst.name
-                isempty(name) || push!(named_values, inst => name)
+                record!(inst)
             end
         end
-        for (value, _) in named_values
-            value.name = ""
+        for (ref, _) in named_values
+            LLVM.API.LLVMSetValueName(ref, "")
         end
-        for (value, name) in named_values
-            value.name = name
+        for (ref, name) in named_values
+            LLVM.API.LLVMSetValueName(ref, name)
         end
     end
     return
