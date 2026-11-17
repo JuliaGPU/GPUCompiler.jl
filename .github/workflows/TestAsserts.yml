@@ -6,6 +6,10 @@ name: TestAsserts
 # The real GetAsserts never runs on `pull_request`, so a same-named workflow added by a
 # fork PR cannot be used to feed this workflow an attacker-built artifact.
 
+# Every run of this workflow is listed as running on the default branch, so name it after
+# what triggered GetAsserts (the PR title or commit message, and the branch).
+run-name: "${{ github.event.workflow_run.display_title }} (${{ github.event.workflow_run.head_branch }})"
+
 on:
   workflow_run:
     workflows: ["GetAsserts"]
@@ -60,8 +64,11 @@ jobs:
         env:
           VERSIONS: ${{ needs.versions.outputs.versions }}
         with:
+          # GitHub ignores `details_url` on check runs created with GITHUB_TOKEN, so the
+          # check's "Details" page only shows its output; link the logs from there.
           script: |
             const versions = JSON.parse(process.env.VERSIONS);
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             await Promise.all(versions.map(version =>
               github.rest.checks.create({
                 owner: context.repo.owner,
@@ -69,7 +76,10 @@ jobs:
                 head_sha: '${{ github.event.workflow_run.head_sha }}',
                 name: `Julia ${version} (assert) - Linux`,
                 status: 'in_progress',
-                details_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                output: {
+                  title: 'Assert build test in progress',
+                  summary: `Testing against the \`x86_64-linux-gnuassert\` build of Julia ${version}: [workflow run](${url}).`
+                }
               })
             ));
 
@@ -136,10 +146,59 @@ jobs:
               attempt_number: Number(process.env.GITHUB_RUN_ATTEMPT),
               per_page: 100,
             });
-            await Promise.all(versions.map(version => {
+            // the end of a failed job's log, up to the step that failed: from the first error
+            // or test summary near the end, which covers both precompilation failures (often
+            // several long stack traces) and the test summary followed by its failures
+            const excerpt = async job => {
+              let log;
+              try {
+                const {data} = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  job_id: job.id,
+                });
+                log = typeof data === 'string' ? data : Buffer.from(data).toString();
+              } catch (err) {
+                core.warning(`Could not download the log of ${job.name}: ${err.message}`);
+                return null;
+              }
+              let lines = log.split('\n').map(line => line
+                .replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z ?/, '')
+                .replace(/\x1b\[[0-9;]*m/g, ''));
+              const failed = lines.findLastIndex(line => line.startsWith('##[error]'));
+              if (failed !== -1)
+                lines = lines.slice(0, failed);
+              lines = lines
+                .filter(line => !/^##\[(end)?group\]/.test(line))
+                .slice(-400)
+                .map(line => line.length > 500 ? line.slice(0, 500) + '…' : line);
+              const start = lines.findIndex(line => /^(ERROR:|Test Summary:)/.test(line));
+              lines = lines.slice(start === -1 ? -100 : start);
+              // check run text is limited to 65535 characters
+              while (lines.join('\n').length > 60000)
+                lines.shift();
+              // the log is untrusted, so make sure it cannot close the code block
+              const ticks = Math.max(3, ...lines.map(line =>
+                Math.max(0, ...(line.match(/`+/g) || []).map(run => run.length + 1))));
+              const fence = '`'.repeat(ticks);
+              return `${fence}\n${lines.join('\n')}\n${fence}`;
+            };
+
+            await Promise.all(versions.map(async version => {
               const name = `Julia ${version} (assert) - Linux`;
               const job = jobs.find(job => job.name === name);
               const conclusion = job?.conclusion || 'failure';
+              const url = job?.html_url ||
+                `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+              const output = {
+                title: `Assert build test ${conclusion}`,
+                summary: `Tested against the \`x86_64-linux-gnuassert\` build of Julia ${version}: [job log](${url}).`
+              };
+              if (job && conclusion === 'failure') {
+                const text = await excerpt(job);
+                if (text)
+                  output.text = `End of the job log:\n\n${text}`;
+              }
               return github.rest.checks.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -147,11 +206,7 @@ jobs:
                 name,
                 status: 'completed',
                 conclusion,
-                details_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-                output: {
-                  title: `Assert build test ${conclusion}`,
-                  summary: `Tested against \`x86_64-linux-gnuassert\` build of Julia ${version}.`
-                }
+                output,
               });
             }));
 
@@ -178,10 +233,9 @@ jobs:
                 name: `Julia ${version} (assert) - Linux`,
                 status: 'completed',
                 conclusion: 'failure',
-                details_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${{ github.event.workflow_run.id }}`,
                 output: {
                   title: 'Assert build download failed',
-                  summary: 'The GetAsserts workflow failed to download the Julia build.'
+                  summary: `The [GetAsserts workflow](${{ github.event.workflow_run.html_url }}) failed to download the Julia build.`
                 }
               })
             ));
