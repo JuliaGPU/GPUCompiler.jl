@@ -174,7 +174,7 @@ end
 # names, value names, and metadata strings. A subprogram belonging to a function instead
 # adopts that function's current name, so an entry that `irgen.jl` already renamed to a
 # stable mangled symbol keeps a `linkageName` matching the symbol it describes.
-# The Metal back-end runs it in `mcgen`, before writing the module to bitcode.
+# The Metal and SPIR-V back-ends run it in `mcgen`, before writing the module to bitcode.
 function normalize_julia_symbol_names!(mod::LLVM.Module)
     # The counter is the trailing digit group, so match the name part lazily. The word
     # boundaries keep the pattern from biting into a longer token: `myjulia_foo_1` is a user

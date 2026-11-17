@@ -428,6 +428,21 @@ end
     @test occursin(r"OpEntryPoint Kernel %\w+ \"_Z6kernel\"", asm)
 end
 
+@testset "reproducible output" begin
+    # Compiling the same kernel twice in one session has to yield the same SPIR-V: up to
+    # Julia 1.13, a second compilation draws new codegen counters for the callees' names
+    mod = @eval module $(gensym())
+        @noinline child(x) = x * 2f0 + 1f0
+        function kernel(ptr, x)
+            unsafe_store!(ptr, child(x), 1)
+            return
+        end
+    end
+    asm() = first(SPIRV.code_execution(mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Float32};
+                                       backend))
+    @test asm() == asm()
+end
+
 @testset "min and max" begin
     # Julia's `min` and `max` propagate NaNs and order -0.0 before +0.0, which OpenCL's `fmin`
     # and `fmax` don't do, so the back-ends expand `llvm.minimum` and `llvm.maximum` around
