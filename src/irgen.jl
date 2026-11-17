@@ -147,6 +147,31 @@ end
 
 ## exception handling
 
+# the exception names reported for the run-time functions that codegen calls to throw;
+# others are reported as a generic exception
+const throw_function_names = Dict(
+    "jl_error"                      => "error",
+    "jl_argument_error"             => "argument error",
+    "jl_atomic_error"               => "atomic error",
+    "jl_type_error"                 => "type error",
+    "jl_type_error_global"          => "type error",
+    "jl_undefined_var_error"        => "undefined variable error",
+    "jl_has_no_field_error"         => "field error",
+    "jl_bounds_error_int"           => "bounds error",
+    "jl_bounds_error_ints"          => "bounds error",
+    "jl_bounds_error_tuple_int"     => "bounds error",
+    "jl_bounds_error_unboxed_int"   => "bounds error",
+)
+
+# codegen declares the run-time functions it calls to throw as `noreturn`. identify them by
+# that rather than by name, which a Julia function (e.g. `handle_jl_error`) can share.
+function is_throw_function(f::LLVM.Function)
+    isdeclaration(f) || return false
+    fn = f.name
+    startswith(fn, "jl_") || startswith(fn, "ijl_") || return false
+    return haskey(f.function_attributes, :noreturn)
+end
+
 # this pass lowers `jl_throw` and friends to GPU-compatible exceptions, reporting the kind of
 # exception and faking debug information (lacking a stack unwinder). the thrown values are not
 # used: throws in Julia code already throw `nothing` (see `drop_throw_arguments!`), and what
@@ -155,55 +180,34 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "lower throw" begin
 
-    throw_functions = [
-        # unsupported runtime functions that are used to throw specific exceptions
-        "jl_throw"                      => "exception",
-        "jl_error"                      => "error",
-        "jl_too_few_args"               => "too few arguments exception",
-        "jl_too_many_args"              => "too many arguments exception",
-        "jl_type_error"                 => "type error",
-        "jl_type_error_rt"              => "type error",
-        "jl_undefined_var_error"        => "undefined variable error",
-        "jl_bounds_error"               => "bounds error",
-        "jl_bounds_error_v"             => "bounds error",
-        "jl_bounds_error_int"           => "bounds error",
-        "jl_bounds_error_tuple_int"     => "bounds error",
-        "jl_bounds_error_unboxed_int"   => "bounds error",
-        "jl_bounds_error_ints"          => "bounds error",
-        "jl_eof_error"                  => "EOF error",
-    ]
-
     # Julia's codegen replaces an `llvmcall` of an intrinsic it doesn't know (e.g. one
     # removed from LLVM) by a run-time `jl_error`. report those at compile time instead.
     errors = IRError[]
 
     for f in mod.functions
-        fn = f.name
-        for (throw_fn, name) in throw_functions
-            occursin(throw_fn, fn) || continue
+        is_throw_function(f) || continue
+        name = get(throw_function_names, chopprefix(f.name, "i"), "exception")
 
-            for use in collect(f.uses)
-                call = use.user::LLVM.CallInst
-                if is_unknown_intrinsic_error(call)
-                    push!(errors, (UNKNOWN_INTRINSIC, backtrace(call), nothing))
-                end
-
-                # replace the throw with a PTX-compatible exception
-                @dispose builder=IRBuilder() begin
-                    position!(builder, LLVM.before(call))
-                    emit_exception!(job, builder, name, call)
-                end
-
-                # remove the call
-                erase!(call)
-
-                changed = true
+        for use in collect(f.uses)
+            call = use.user::LLVM.CallInst
+            if is_unknown_intrinsic_error(call)
+                push!(errors, (UNKNOWN_INTRINSIC, backtrace(call), nothing))
             end
 
-            @compiler_assert isempty(f.uses) job
-            break
-         end
-     end
+            # replace the throw with a PTX-compatible exception
+            @dispose builder=IRBuilder() begin
+                position!(builder, LLVM.before(call))
+                emit_exception!(job, builder, name, call)
+            end
+
+            # remove the call
+            erase!(call)
+
+            changed = true
+        end
+
+        @compiler_assert isempty(f.uses) job
+    end
 
     end
     isempty(errors) || throw(InvalidIRError(job, errors))

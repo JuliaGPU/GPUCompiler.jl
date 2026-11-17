@@ -10,6 +10,38 @@
     end
 end
 
+@testset "functions named like throw functions" begin
+    # only calls to the run-time's throw functions are lowered, not calls to a
+    # Julia function whose name happens to contain one of their names
+    mod = @eval module $(gensym())
+        @noinline handle_jl_error(x) = x > 0 ? x + 1 : x - 1
+        kernel(p, x) = (unsafe_store!(p, handle_jl_error(x)); nothing)
+    end
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_kernel[0-9_]*}}"
+        @check "call {{.*}}handle_jl_error"
+        @check "store"
+        @check_not "gpu_report_exception"
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int},Int})
+    end
+end
+
+@testset "atomic errors" begin
+    # `jl_atomic_error` is one of codegen's throw functions too
+    mod = @eval module $(gensym())
+        mutable struct Atomic
+            @atomic x::Int
+        end
+        kernel(p, a) = (unsafe_store!(p, getfield(a, :x, :not_atomic)); nothing)
+    end
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_kernel[0-9_]*}}"
+        @check_not "atomic_error"
+        @check "gpu_report_exception"
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int},mod.Atomic})
+    end
+end
+
 LLVM.version() >= v"17" && @testset "alignment inference" begin
     # accesses get the alignment that can be proven, here from that of a global, which the
     # back-end needs to vectorize them
