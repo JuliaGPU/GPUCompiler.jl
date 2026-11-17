@@ -86,6 +86,10 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     add!(mpm, FunctionPassManager()) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
+        if opt_level >= 2
+            add!(fpm, Float2IntPass())
+            add!(fpm, LowerConstantIntrinsicsPass())
+        end
         if (can_vectorize(job)) && opt_level >= 2
             buildVectorPipeline(fpm, job, opt_level)
         end
@@ -131,7 +135,6 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
         add!(mpm, PipelineStartCallbacks(; opt_level))
     end
     add!(mpm, Annotation2MetadataPass())
-    add!(mpm, InferFunctionAttrsPass())
     add!(mpm, ConstantMergePass())
     add!(mpm, FunctionPassManager()) do fpm
         add!(fpm, LowerExpectIntrinsicPass())
@@ -170,8 +173,6 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
         if opt_level >= 2
             add!(cgpm, FunctionPassManager()) do fpm
                 add!(fpm, AllocOptPass())
-                add!(fpm, Float2IntPass())
-                add!(fpm, LowerConstantIntrinsicsPass())
             end
         end
     end
@@ -185,6 +186,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
                 add!(fpm, aggressiveinstcombine_pass(job))
                 add!(fpm, JumpThreadingPass())
                 add!(fpm, CorrelatedValuePropagationPass())
+                # (Julia no longer runs this, but it helps PTX code that calls libdevice)
                 add!(fpm, LibCallsShrinkWrapPass())
                 add!(fpm, ReassociatePass())
                 add!(fpm, ConstraintEliminationPass())
@@ -302,11 +304,7 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
         add!(fpm, instcombine_pass(job))
         add!(fpm, ADCEPass())
     end
-    if opt_level >= 3
-        add!(fpm, GVNPass())
-    end
     if opt_level >= 2
-        add!(fpm, DSEPass())
         if LLVM.version() >= v"17"
             add!(fpm, PeepholeCallbacks(; opt_level))
         end
@@ -335,6 +333,9 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, LoopDistributePass())
     add!(fpm, InjectTLIMappings())
     add!(fpm, LoopVectorizePass())
+    if LLVM.version() >= v"18"
+        add!(fpm, "infer-alignment")
+    end
     add!(fpm, LoopLoadEliminationPass())
     add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
     add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
@@ -359,6 +360,9 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
         add!(fpm, SROAPass(; preserve_cfg=true))
     else
         add!(fpm, SROAPass())
+    end
+    if LLVM.version() >= v"18"
+        add!(fpm, "infer-alignment")
     end
     add!(fpm, InstSimplifyPass())
 end
