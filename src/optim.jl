@@ -61,7 +61,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             register!(pb, GPULowerPTLSPass(job))
             register!(pb, GPULowerGCFramePass(job, relocs))
             register!(pb, GPUInternalizeRuntimePass(job))
-            register!(pb, GPULinkLibrariesPass(job))
+            register!(pb, GPULinkLibrariesPass(job, relocs))
             register!(pb, GPUFinishRuntimeIntrinsicsPass(job))
             register!(pb, AddKernelStatePass(job))
             register!(pb, LowerKernelStatePass(job))
@@ -428,11 +428,13 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
             # Use the registered pass because it owns `relocs`.
             add!(fpm, "GPULowerGCFrame")
         end
-        if job.config.libraries
-            add!(mpm, GPUInternalizeRuntimePass(job))
-            add!(mpm, GPULinkLibrariesPass(job))
-            add!(mpm, GPUFinishRuntimeIntrinsicsPass(job))
-        end
+    end
+
+    if job.config.libraries
+        add!(mpm, GPUInternalizeRuntimePass(job))
+        # Use the registered pass because it owns `relocs`.
+        add!(mpm, "GPULinkLibraries")
+        add!(mpm, GPUFinishRuntimeIntrinsicsPass(job))
     end
 
     # lower kernel state intrinsics
@@ -631,19 +633,18 @@ GPUInternalizeRuntimePass(job) = ModulePass("GPUInternalizeRuntime", Internalize
 
 struct LinkLibraries
     job::CompilerJob
+    relocs::Relocations
 end
 function (self::LinkLibraries)(mod::LLVM.Module)
     self.job.config.libraries || return false
 
-    # The runtime library, which is linked after the target libraries, and optimization
-    # can introduce target-library references after the normal library-linking phase has
-    # run. Give back-ends a second chance to resolve those references before they lower
-    # their own runtime intrinsics. This is a no-op for back-ends without a
-    # link_libraries! override.
-    link_libraries!(self.job, mod)
-    return true
+    # Optimization can introduce references to device-library functions after the
+    # libraries were linked. Import those before back-ends lower their own runtime
+    # intrinsics.
+    return link_device_libraries_late!(self.job, mod, self.relocs)
 end
-GPULinkLibrariesPass(job) = ModulePass("GPULinkLibraries", LinkLibraries(job))
+GPULinkLibrariesPass(job, relocs::Relocations) =
+    ModulePass("GPULinkLibraries", LinkLibraries(job, relocs))
 
 struct FinishRuntimeIntrinsics
     job::CompilerJob
