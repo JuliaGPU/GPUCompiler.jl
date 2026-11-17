@@ -428,7 +428,8 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     if opt_level >= 2
         add!(mpm, FunctionPassManager()) do fpm
-            add!(fpm, GVNPass())
+            add!(fpm, DSEPass())
+            add!(fpm, EarlyCSEPass(; memssa=true))
             add!(fpm, SCCPPass())
             add!(fpm, DCEPass())
         end
@@ -481,9 +482,6 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     end
     add!(mpm, FunctionPassManager()) do fpm
         add!(fpm, DemoteFloat16Pass())
-        if opt_level >= 2
-            add!(fpm, GVNPass())
-        end
     end
 end
 
