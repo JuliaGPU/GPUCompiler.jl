@@ -341,31 +341,7 @@ const __llvm_initialized = Ref(false)
     entrypoints = filter(((job′, _),) -> job′ === job || job′.config.kernel, jobs)
 
     if job.config.toplevel && job.config.libraries
-        # load the runtime outside of a timing block (because it recurses into the compiler)
-        if !uses_julia_runtime(job)
-            runtime, runtime_relocs = load_runtime(job)
-        end
-
-        @tracepoint "Library linking" begin
-            # target-specific libraries
-            @tracepoint "target libraries" link_libraries!(job, ir)
-
-            # GPU run-time library
-            if !uses_julia_runtime(job)
-                @tracepoint "runtime library" begin
-                    declare_late_runtime_functions!(job, ir)
-                    link_relocatable!(ir, relocations, runtime, runtime_relocs;
-                                      only_needed=true)
-                    # the linked runtime may itself allocate. import what that requires
-                    # before internalization, so that linking again reuses the rest.
-                    if declare_late_runtime_functions!(job, ir)
-                        runtime, runtime_relocs = load_runtime(job)
-                        link_relocatable!(ir, relocations, runtime, runtime_relocs;
-                                          only_needed=true)
-                    end
-                end
-            end
-        end
+        @tracepoint "Library linking" link_device_libraries_early!(job, ir, relocations)
     end
 
     exception_sites = ExceptionSite[]
@@ -436,6 +412,12 @@ const __llvm_initialized = Ref(false)
                         end
                     end
                 end
+            end
+
+            # Device-library imports during optimization can add relocations.
+            if resolve_early && !isempty(relocations)
+                prune_dead_relocations!(ir, relocations)
+                bake_relocations!(ir, relocations)
             end
 
             if job.config.cleanup

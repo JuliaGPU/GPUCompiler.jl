@@ -574,6 +574,8 @@ end
     end
     # `gpu_gc_pool_alloc` is inlined, so the kernel takes the input its `report_oom` reads
     @test occursin(r"define void @\S+\(.*<3 x i32> %thread_position_in_grid\)", ir)
+    @test !occursin("julia.air.thread_position_in_grid", ir)
+    @test occursin(r"call .*@gpu_report_oom\([^)]*<3 x i32>", ir)
     @test !occursin(r"declare .*@gpu_gc_pool_alloc\(", ir)
 
     # Make sure moving Metal's input-argument threading after GC lowering does not force
