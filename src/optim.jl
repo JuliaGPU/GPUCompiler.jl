@@ -221,6 +221,15 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
         end
     end
     if opt_level >= 2
+        # IRCE judges a loop by its estimated trip count, so it also splits short loops
+        # with a constant trip count into pre-, main and post-loops, which can then no
+        # longer be unrolled. Unroll those first. (IRCE itself has to stay ahead of
+        # IndVarSimplify, after which it no longer recognizes many loops.) On Metal, where
+        # every bounds check is a loop exit, the split loops made the back-end take seconds
+        # to compile, or hang (Metal.jl#1127).
+        add!(fpm, LoopPassManager()) do lpm
+            add!(lpm, LoopFullUnrollPass())
+        end
         add!(fpm, IRCEPass())
     end
     add!(fpm, simplifycfg_pass(job, BasicSimplifyCFGOptions))
