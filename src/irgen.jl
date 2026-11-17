@@ -52,12 +52,34 @@ function irgen(@nospecialize(job::CompilerJob))
     end
 
     # sanitize defined functions (Julia doesn't when using the external codegen policy)
+    #
+    # `safe_name` is not injective, e.g. `julia_+_0` and `julia_-_0` both become
+    # `julia___0`, and since Julia 1.14 function names carry counters that are local to
+    # the module (JuliaLang/julia#60031), so such collisions are common. LLVM would unique
+    # the second name with a `.N` suffix, which isn't safe, so pick a `_N` suffix instead.
+    # Record the name each function gets, so that `compiled` keeps pointing at the right
+    # functions, with names that `safe_name` leaves unchanged.
+    renamed = Dict{String, String}()
     for val in collect(mod.functions)
         isdeclaration(val) && continue
         old_name = val.name
-        new_name = safe_name(old_name)
-        if old_name != new_name
+        base_name = safe_name(old_name)
+        old_name == base_name && continue
+        new_name = base_name
+        i = 0
+        while true
             val.name = new_name
+            val.name == new_name && break
+            i += 1
+            new_name = "$(base_name)_$i"
+        end
+        renamed[old_name] = new_name
+    end
+    if !isempty(renamed)
+        for (mi, entry) in compiled
+            # `func` and `specfunc` are `nothing` for a function that wasn't emitted
+            compiled[mi] = (; entry..., func = get(renamed, entry.func, entry.func),
+                              specfunc = get(renamed, entry.specfunc, entry.specfunc))
         end
     end
 
