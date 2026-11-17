@@ -654,6 +654,10 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
     # memory, neither of which AIR has atomics for (see `demote_unordered_atomics!`)
     demote_unordered_atomics!(mod)
 
+    # `lower_air!` inlines throwing code into kernels, which duplicates throw sites. do it
+    # before the sites get their ids, so that each copy gets its own (with its own backtrace)
+    uses_exception_sites(job) && inline_unreachable_control_flow!(job, mod)
+
     # convert the kernel state argument to a reference
     if job.config.kernel && kernel_state_type(job) !== Nothing
         entry = kernel_state_to_reference!(job, mod, entry)

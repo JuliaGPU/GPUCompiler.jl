@@ -439,6 +439,21 @@ end
 # (see `drop_throw_arguments!`)
 can_throw(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)
 
+"""
+    uses_exception_sites(job::CompilerJob)
+
+Whether device code reports exceptions by calling the runtime function
+`exception_site(id::Int32)`, instead of `report_exception`, `report_exception_name`,
+`report_exception_frame` and `signal_exception`. The id identifies the throw site in the
+table that compilation returns as `meta.exception_sites` (see [`ExceptionSite`](@ref)), or
+is 0 at debug level 0. Back-ends opt in by returning `true`; the next breaking release will
+drop the other runtime functions.
+
+`exception_site` must not throw, and must accept being called by several work-items at
+once. Execution doesn't continue after it returns.
+"""
+uses_exception_sites(@nospecialize(job::CompilerJob)) = false
+
 # does this target support loading from Julia safepoints?
 # if not, safepoints at function entry will not be emitted
 can_safepoint(@nospecialize(job::CompilerJob)) = uses_julia_runtime(job)

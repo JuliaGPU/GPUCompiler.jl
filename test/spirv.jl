@@ -113,6 +113,78 @@ end
     end
 end
 
+@testset "exception sites" begin
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+        @noinline function helper(i)
+            i == 1 && GPUCompiler.@gputhrow "FirstError" "first reason"
+            return i
+        end
+        function kernel(p, i)
+            unsafe_store!(p, helper(i))
+            i == 2 && GPUCompiler.@gputhrow "SecondError" "second reason"
+            unsafe_store!(p, helper(i + 1))
+            return
+        end
+    end
+    types = Tuple{Ptr{Int},Int}
+    line = first(methods(mod.kernel)).line
+
+    # throwing code is inlined into the kernel, duplicating the helper's site, before all
+    # sites branch to a single report and the trap is removed
+    @test @filecheck begin
+        @check_label "define spir_kernel void"
+        @check_label "exception:"
+        @check "phi i32 [ {{[1-3]}}, %{{.*}} ], [ {{[1-3]}}, %{{.*}} ], [ {{[1-3]}}, %{{.*}} ]"
+        @check "store i32"
+        @check_not "trap"
+        SPIRV.code_llvm(mod.kernel, types; backend, exception_sites=true, kernel=true,
+                        debug_level=2)
+    end
+
+    # the copies are the same site, unless their backtraces tell them apart
+    for debug_level in (1, 2)
+        job, _ = SPIRV.create_job(mod.kernel, types; backend, exception_sites=true,
+                                  kernel=true, debug_level)
+        sites = JuliaContext() do ctx
+            _, meta = GPUCompiler.compile(:asm, job)
+            dispose(meta.ir)
+            meta.exception_sites
+        end
+        firsts = filter(site -> site.name == "FirstError", sites)
+        @test length(sites) == debug_level + 1
+        @test all(site -> site.reason == "first reason", firsts)
+        if debug_level == 2
+            @test all(site -> first(site.frames).func == "helper", firsts)
+            @test sort([site.frames[2].line for site in firsts]) == [line + 1, line + 3]
+        end
+    end
+
+    # sites in runtime functions that optimization introduces calls to (`gc_pool_alloc`,
+    # which reports running out of memory) are numbered along with the kernel's
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+        mutable struct Box
+            x::Int
+        end
+        @noinline value(b) = b.x
+        function kernel(p, i)
+            unsafe_store!(p, value(Box(i)))
+            i == 0 && GPUCompiler.@gputhrow "Error" "reason"
+            return
+        end
+    end
+    job, _ = SPIRV.create_job(mod.kernel, Tuple{Core.LLVMPtr{Int,1},Int}; backend,
+                              exception_sites=true, kernel=true, debug_level=1)
+    sites = JuliaContext() do ctx
+        _, meta = GPUCompiler.compile(:asm, job)
+        dispose(meta.ir)
+        meta.exception_sites
+    end
+    @test length(sites) == 2
+    @test GPUCompiler.ExceptionSite("Error", "reason", []) in sites
+end
+
 @testset "failed runtime boxing" begin
     mod = @eval module $(gensym())
         import ..GPUCompiler
@@ -404,6 +476,27 @@ end
             SPIRV.code_native(mod.fast_kernel, Tuple{Ptr{Float32}, Float32, Float32};
                               backend, kernel=true)
         end
+    end
+end
+
+@testset "runtime functions called by GC lowering" begin
+    mod = @eval module $(gensym())
+        mutable struct Box
+            x::Int
+        end
+        @noinline value(b) = b.x
+        function kernel(p, i)
+            unsafe_store!(p, value(Box(i)))
+            i == 0 && throw(nothing)
+            return
+        end
+    end
+
+    # `gc_pool_alloc` and the reporting functions it calls are linked once, and internalized
+    @test @filecheck begin
+        @check_not "LinkageAttributes \"gpu_"
+        SPIRV.code_native(mod.kernel, Tuple{Core.LLVMPtr{Int,1},Int}; backend, kernel=true,
+                          dump_module=true)
     end
 end
 

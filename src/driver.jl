@@ -352,12 +352,23 @@ const __llvm_initialized = Ref(false)
 
             # GPU run-time library
             if !uses_julia_runtime(job)
-                @tracepoint "runtime library" link_relocatable!(
-                    ir, relocations, runtime, runtime_relocs; only_needed=true)
+                @tracepoint "runtime library" begin
+                    declare_late_runtime_functions!(job, ir)
+                    link_relocatable!(ir, relocations, runtime, runtime_relocs;
+                                      only_needed=true)
+                    # the linked runtime may itself allocate. import what that requires
+                    # before internalization, so that linking again reuses the rest.
+                    if declare_late_runtime_functions!(job, ir)
+                        runtime, runtime_relocs = load_runtime(job)
+                        link_relocatable!(ir, relocations, runtime, runtime_relocs;
+                                          only_needed=true)
+                    end
+                end
             end
         end
     end
 
+    exception_sites = ExceptionSite[]
     @tracepoint "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
@@ -382,6 +393,10 @@ const __llvm_initialized = Ref(false)
                 if gvar.linkage == LLVM.Linkage.External
                     push!(preserved_gvs, gvar.name)
                 end
+            end
+            # until `GPUInternalizeRuntimePass` (see `late_runtime_functions`)
+            for rt in late_runtime_functions(job, ir)
+                push!(preserved_gvs, rt.llvm_name)
             end
             with_llvm_machine(job.config.target) do tm
                 run!(InternalizePass(; preserved_gvs), ir, tm)
@@ -423,12 +438,6 @@ const __llvm_initialized = Ref(false)
                 end
             end
 
-            # Runtime linking during optimization can add relocations.
-            if resolve_early && !isempty(relocations)
-                prune_dead_relocations!(ir, relocations)
-                bake_relocations!(ir, relocations)
-            end
-
             if job.config.cleanup
                 @tracepoint "clean-up" begin
                     @dispose pb=PassBuilder() begin
@@ -459,6 +468,13 @@ const __llvm_initialized = Ref(false)
             for (job′, fn′) in entrypoints
                 job′ === job && continue
                 finish_ir!(job′, ir, ir.functions[fn′])
+            end
+
+            # back-ends that inline throwing code into kernels did this during `finish_ir!`
+            if uses_exception_sites(job)
+                finalize_exception_sites!(job, ir)
+                merge_exception_sites!(job, ir)
+                exception_sites = take_exception_sites!(ir)
             end
         end
 
@@ -498,6 +514,9 @@ const __llvm_initialized = Ref(false)
         @tracepoint "verification" verify(ir)
     end
 
+    if job.config.toplevel && uses_exception_sites(job)
+        return ir, (; entry, compiled, relocations, exception_sites)
+    end
     return ir, (; entry, compiled, relocations)
 end
 

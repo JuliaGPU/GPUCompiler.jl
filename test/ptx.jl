@@ -42,6 +42,85 @@ end
     end
 end
 
+@testset "exception sites" begin
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+        function kernel(p, i)
+            i == 1 && GPUCompiler.@gputhrow "FirstError" "first reason"
+            i == 2 && GPUCompiler.@gputhrow "SecondError" "second reason"
+            unsafe_store!(p, i)
+            return
+        end
+    end
+    types = Tuple{Ptr{Int},Int}
+    line = first(methods(mod.kernel)).line
+
+    # the sites share a single report of their id, which the test runtime stores
+    @test @filecheck begin
+        @check_label "define ptx_kernel void @{{.*}}kernel"
+        @check_not "julia.gpu.exception_site_id"
+        @check_not "gpu_report_exception"
+        @check_label "exception:"
+        @check "phi i32 [ {{[12]}}, %{{.*}} ], [ {{[12]}}, %{{.*}} ]"
+        @check "store i32"
+        @check "trap"
+        PTX.code_llvm(mod.kernel, types; exception_sites=true, kernel=true, debug_level=1)
+    end
+
+    _, meta = PTX.code_execution(mod.kernel, types; exception_sites=true, debug_level=1)
+    @test sort(meta.exception_sites; by=site -> site.name) ==
+          [GPUCompiler.ExceptionSite("FirstError", "first reason", []),
+           GPUCompiler.ExceptionSite("SecondError", "second reason", [])]
+
+    # with backtraces, which start at the caller of `@gputhrow`
+    _, meta = PTX.code_execution(mod.kernel, types; exception_sites=true, debug_level=2)
+    @test length(meta.exception_sites) == 2
+    for site in meta.exception_sites
+        frame = only(site.frames)
+        @test frame.func == "kernel"
+        @test frame.line == line + (site.name == "FirstError" ? 1 : 2)
+    end
+
+    # at debug level 0, nothing is known about the exception
+    @test @filecheck begin
+        @check_label "define ptx_kernel void @{{.*}}kernel"
+        @check_not "phi i32"
+        @check "store i32 0"
+        PTX.code_llvm(mod.kernel, types; exception_sites=true, kernel=true, debug_level=0)
+    end
+    _, meta = PTX.code_execution(mod.kernel, types; exception_sites=true, debug_level=0)
+    @test isempty(meta.exception_sites)
+
+    # back-ends that don't opt in are unaffected (the test runtime's `signal_exception`
+    # doesn't validate)
+    _, meta = PTX.code_execution(mod.kernel, types; debug_level=1, validate=false)
+    @test !haskey(meta, :exception_sites)
+    @test @filecheck begin
+        @check "gpu_report_exception"
+        @check_not "gpu_exception_site"
+        PTX.code_llvm(mod.kernel, types; kernel=true, debug_level=1)
+    end
+
+    # sites in runtime functions that optimization introduces calls to (`gc_pool_alloc`,
+    # which reports running out of memory) are numbered along with the kernel's
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+        mutable struct Box
+            x::Int
+        end
+        @noinline value(b) = b.x
+        function kernel(p, i)
+            unsafe_store!(p, value(Box(i)))
+            i == 0 && GPUCompiler.@gputhrow "Error" "reason"
+            return
+        end
+    end
+    _, meta = PTX.code_execution(mod.kernel, Tuple{Ptr{Int},Int};
+                                 exception_sites=true, debug_level=1)
+    @test length(meta.exception_sites) == 2
+    @test GPUCompiler.ExceptionSite("Error", "reason", []) in meta.exception_sites
+end
+
 LLVM.version() >= v"17" && @testset "alignment inference" begin
     # accesses get the alignment that can be proven, here from that of a global, which the
     # back-end needs to vectorize them
@@ -755,6 +834,70 @@ end
     end
     PTX.code_native(devnull, mod.kernel, Tuple{Ptr{Float64}})
     @test "We did not crash!" != ""
+end
+
+@testset "runtime functions called by GC lowering" begin
+    mod = @eval module $(gensym())
+        mutable struct Box
+            x::Int
+        end
+        @noinline value(b) = b.x
+        function kernel(p, i)
+            unsafe_store!(p, value(Box(i)))
+            i == 0 && throw(nothing)
+            return
+        end
+    end
+    types = Tuple{Ptr{Int},Int}
+
+    # `gc_pool_alloc` and the reporting functions it calls are linked once, and internalized
+    @test @filecheck begin
+        @check_not ".visible .func"
+        @check ".visible .entry"
+        @check_not ".visible .func"
+        PTX.code_native(mod.kernel, types; kernel=true, dump_module=true)
+    end
+end
+
+@testset "runtime functions that allocate" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+
+        # a runtime whose `signal_exception` allocates, so needs `gc_pool_alloc` too
+        module AllocatingRuntime
+            mutable struct Box
+                x::Int
+            end
+            @noinline value(b) = b.x
+            function signal_exception()
+                unsafe_store!(Ptr{Int}(Int(0xDEADBEEF)), value(Box(42)))
+                return
+            end
+            malloc(sz) = ccall("extern test_malloc", llvmcall, Ptr{Cvoid}, (Csize_t,), sz)
+            report_oom(sz) = return
+            report_exception(ex) = return
+            report_exception_name(ex) = return
+            report_exception_frame(idx, func, file, line) = return
+        end
+
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = AllocatingRuntime
+
+        function kernel(i)
+            i == 0 && throw(nothing)
+            return
+        end
+    end
+
+    source = methodinstance(typeof(mod.kernel), Tuple{Int}, Base.get_world_counter())
+    job = CompilerJob(source, CompilerConfig(PTXCompilerTarget(; cap=v"7.0"), mod.Params();
+                                             kernel=true, validate=false))
+    @test @filecheck begin
+        @check_not "declare {{.*}}@gpu_gc_pool_alloc"
+        @check "call {{.*}}@test_malloc"
+        @check_not "declare {{.*}}@gpu_gc_pool_alloc"
+        GPUCompiler.code_llvm(stdout, job; dump_module=true)
+    end
 end
 
 @testset "GC and TLS lowering" begin

@@ -152,6 +152,7 @@ function irgen(@nospecialize(job::CompilerJob))
         end
 
         can_throw(job) || lower_throw!(job, mod)
+        erase_exception_info!(mod)
 
         # resolve the `julia.gpu.debug_level` intrinsic (see `kernel_debug_level_value`) to
         # the job's configured level, so device code can branch on it as a compile-time
@@ -217,9 +218,10 @@ function lower_throw!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
             end
 
             # replace the throw with a PTX-compatible exception
+            site_name, reason = something(thrown_exception_info(call), (name, ""))
             @dispose builder=IRBuilder() begin
                 position!(builder, LLVM.before(call))
-                emit_exception!(job, builder, name, call)
+                emit_exception!(job, builder, site_name, call; reason)
             end
 
             # remove the call
@@ -240,7 +242,9 @@ end
 #
 # the exact behavior depends on the debug level. in all cases, a `trap` is emitted. on debug
 # level 1, the exception name is printed, and on debug level 2 the individual stack frames (as
-# recovered from the LLVM debug information) are printed as well.
+# recovered from the LLVM debug information) are printed as well. back-ends that
+# `uses_exception_sites` only get the id of the throw site (see exception_sites.jl), which
+# also identifies the `reason`.
 #
 # the `trap` here is *not* the final lowering of the exception: some targets cannot tolerate a
 # hardware trap (on Apple M1 compute a `trap` wedges the whole GPU, JuliaGPU/Metal.jl#433; and
@@ -251,10 +255,17 @@ end
 # while `!mayThrow() && willReturn()`) from deleting the `signal_exception` call below and
 # folding away the guarding bounds-check branch. so the trap is the optimizer-correctness guard;
 # do not move its removal earlier than post-`optimize!`.
-function emit_exception!(@nospecialize(job::CompilerJob), builder, name, inst)
+function emit_exception!(@nospecialize(job::CompilerJob), builder, name, inst;
+                         reason::String="")
     bb = builder.insert_block
     fun = bb.parent
     mod = fun.parent
+
+    if uses_exception_sites(job)
+        emit_exception_site!(job, builder, String(name), reason, inst)
+        emit_trap!(job, builder, mod, inst)
+        return
+    end
 
     # report the exception
     if job.config.debug_level >= 1
@@ -396,6 +407,14 @@ function lower_unreachable_control_flow!(@nospecialize(job::CompilerJob), mod::L
     # hoist every throwing function up into its kernel(s) first, so that each `unreachable` we
     # rewrite below belongs to a kernel whose `ret` is a genuine exit (see the comment above).
     changed |= inline_unreachable_control_flow!(job, mod)
+
+    # this inlining duplicated throw sites, and is the last change to the code that reports
+    # exceptions, so give them their ids. merging them needs to happen before the traps that
+    # end them are removed.
+    if uses_exception_sites(job)
+        changed |= finalize_exception_sites!(job, mod)
+        changed |= merge_exception_sites!(job, mod)
+    end
 
     # defensively drop any dead leftovers before the back-end sees them. `AlwaysInlinerPass` already
     # erases the throwing helpers it fully inlines (they are `internal`, hence discardable), so in
@@ -1013,6 +1032,7 @@ function rewrite_state_uses!(f, ft, state_intr, state_intr_ft)
                     error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
                 end
                 new_val.callconv = val.callconv
+                copy_call_attributes!(new_val, val)
 
                 replace_uses!(val, new_val)
                 @assert isempty(val.uses)
@@ -1044,6 +1064,16 @@ function rewrite_state_uses!(f, ft, state_intr, state_intr_ft)
                 error("Cannot rewrite $(typeof(val)) use of function: $val")
             end
         end
+    end
+end
+
+# keep the attributes that keep the report of a throw site out of line until it is
+# finalized (see `emit_exception_site!`). others may refer to arguments by index, which the
+# rewrites above shift.
+function copy_call_attributes!(new_call::LLVM.CallInst, call::LLVM.CallInst)
+    for kind in (:noinline, :nomerge)
+        haskey(call.function_attributes, kind) &&
+            push!(new_call.function_attributes, EnumAttribute(String(kind)))
     end
 end
 
@@ -1499,6 +1529,7 @@ function rewrite_input_uses!(f, new_f, nargs)
                     error("Rewrite of $(typeof(val))-based calls is not implemented: $val")
                 end
                 new_val.callconv = val.callconv
+                copy_call_attributes!(new_val, val)
 
                 replace_uses!(val, new_val)
                 @assert isempty(val.uses)
