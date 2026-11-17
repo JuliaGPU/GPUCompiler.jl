@@ -6,10 +6,18 @@ import ..TestRuntime
 
 struct CompilerParams <: AbstractCompilerParams
     patch::Bool
-    CompilerParams(patch::Bool=false) = new(patch)
+    alias_classes::Any
+    invariant_loads::Bool
+    CompilerParams(patch::Bool=false, alias_classes=nothing, invariant_loads::Bool=false) =
+        new(patch, alias_classes, invariant_loads)
 end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
+
+GPUCompiler.kernel_argument_alias_classes(@nospecialize(job::PTXCompilerJob)) =
+    job.config.params.alias_classes
+GPUCompiler.kernel_argument_invariant_loads(@nospecialize(job::PTXCompilerJob)) =
+    job.config.params.invariant_loads
 
 # `patch=true` keeps relocations symbolic (as CUDA.jl does); plain jobs resolve them in IR.
 GPUCompiler.relocation_lowering(@nospecialize(job::PTXCompilerJob)) =
@@ -48,13 +56,13 @@ function create_job(@nospecialize(func), @nospecialize(types);
                     minthreads=nothing, maxthreads=nothing,
                     blocks_per_sm=nothing, maxregs=nothing,
                     fastmath=false, system_atomics=true, patch::Bool=false,
-                    kwargs...)
+                    alias_classes=nothing, invariant_loads::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = PTXCompilerTarget(; cap, ptx, feature_set,
                                  minthreads, maxthreads, blocks_per_sm, maxregs,
                                  fastmath, system_atomics)
-    params = CompilerParams(patch)
+    params = CompilerParams(patch, alias_classes, invariant_loads)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end
