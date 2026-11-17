@@ -245,6 +245,13 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
         add!(fpm, LoopPassManager()) do lpm
             add!(lpm, LoopFullUnrollPass())
         end
+        # Forward stores into the loads LICM just hoisted (the sizes of an array allocated
+        # before the loop), so IndVarSimplify sees the loop bound and a bounds check as the
+        # same value; GVN only runs after it. MemorySSA is built afresh: a load LICM hoisted
+        # keeps the clobber it was given inside the loop, which can stop at an unrelated
+        # store before the loop.
+        add!(fpm, "invalidate<memoryssa>")
+        add!(fpm, EarlyCSEPass(; memssa=true))
     end
     add!(fpm, simplifycfg_pass(job, BasicSimplifyCFGOptions))
     add!(fpm, instcombine_pass(job))

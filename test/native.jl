@@ -1064,6 +1064,27 @@ end
     end
 end
 
+@testset "bounds checks against a fresh array" begin
+    # the bound of a loop over a fresh array is the product of the sizes its constructor
+    # stored; those have to be forwarded into the bounds checks before IndVarSimplify
+    mod = @eval module $(gensym())
+        function fill_fresh_matrix(m, n)
+            A = Matrix{Float64}(undef, m, n)
+            for i in eachindex(A)
+                A[i] = 0.0
+            end
+            return A
+        end
+    end
+    # (before LLVM 20, this check stays)
+    if LLVM.version() >= v"20"
+        @test @filecheck begin
+            @check_not "throw_boundserror"
+            Native.code_llvm(mod.fill_fresh_matrix, Tuple{Int, Int})
+        end
+    end
+end
+
 @testset "child functions" begin
     # we often test using `@noinline sink` child functions, so test whether these survive
     mod = @eval module $(gensym())
