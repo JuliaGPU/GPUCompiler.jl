@@ -547,6 +547,51 @@ function box_alloca!(f::LLVM.Function, gv::LLVM.GlobalVariable)
     end
 end
 
+# The boxed constants embedded by `materialize_box!` whose address escapes into function bodies.
+boxed_constants(mod::LLVM.Module) =
+    LLVM.GlobalVariable[gv for gv in mod.globals
+                        if is_boxed_constant(gv) && box_used_only_by_instructions(gv)]
+
+has_pointer(T::LLVMType) =
+    T isa LLVM.PointerType ||
+    (T isa LLVM.StructType && any(has_pointer, T.elements)) ||
+    (T isa LLVM.ArrayType && has_pointer(T.element_type))
+
+# Move the boxed constants that `materialize_box!` embeds onto the stack of the entry points,
+# for back-ends whose thread-private pointers (address space 0) cannot refer to a constant
+# global. An isbits `Union` return is lowered as `{ptr, i8}`, whose pointer may refer to the
+# payload of such a box.
+#
+# Copying the box is sound because box addresses carry no identity (isbits egal is by
+# content), but the copy has to outlive every use of the pointer: a callee returning the
+# address of its own copy would leave the caller reading a dead frame. So the functions using
+# a box are first inlined into the entry points. An entry point other than a kernel may not
+# return such a pointer.
+#
+# Runs on optimized IR, where a box only remains a slot's target when it is
+# `jl_true`/`jl_false` (see `box_used_only_by_instructions`). Relocatable boxes are external,
+# and demoted by the `:table` lowering instead. Needs LLVM.jl's `convert_users_to_instructions!`
+# (LLVM 17+).
+function demote_boxed_constants!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    boxes = boxed_constants(mod)
+    isempty(boxes) && return false
+
+    inline_global_users!(job, mod, [gv.name for gv in boxes], "a boxed constant")
+
+    # a kernel returns nothing, but another entry point could return the box's address
+    function slot(f::LLVM.Function, gv::LLVM.GlobalVariable)
+        f in kernels(mod) || !has_pointer(f.function_type.return_type) ||
+            error("""Function `$(f.name)` may return the address of a boxed constant, which
+                     can only be kept on the stack of a kernel.""")
+        box_alloca!(f, gv)
+    end
+    for gv in boxes
+        slots = Dict{LLVM.Function, LLVM.Value}()
+        replace_global_with_local!(gv, f -> get!(() -> slot(f, gv), slots, f))
+    end
+    return true
+end
+
 # Return the byte offset added by a constant cast or GEP, or `nothing` if it is not static.
 function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::LLVM.DataLayout)
     op = ce.opcode
