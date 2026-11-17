@@ -490,9 +490,7 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
 
     idx(i) = ConstantInt(LLVM.Int32Type(), i)
     payload = const_gep(boxty, box, LLVM.Constant[idx(0), idx(payload_idx)])
-    slotty = gv.global_value_type
-    val = payload.value_type == slotty ? payload : const_addrspacecast(payload, slotty)
-    return val
+    return const_pointercast(payload, gv.global_value_type)
 end
 
 # Return the byte offset added by a constant cast or GEP, or `nothing` if it is not static.
