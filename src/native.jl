@@ -12,6 +12,10 @@ Base.@kwdef struct NativeCompilerTarget <: AbstractCompilerTarget
 end
 llvm_triple(::NativeCompilerTarget) = Sys.MACHINE
 
+# match the DWARF version of Julia's own codegen (JuliaLang/julia#63639), so that host code
+# can be linked into Julia-generated modules (e.g. via `llvmcall`) without a module flag conflict
+dwarf_version(::NativeCompilerTarget) = VERSION >= v"1.14.0-DEV.3562" ? Int32(5) : Int32(4)
+
 function llvm_machine(target::NativeCompilerTarget)
     triple = llvm_triple(target)
 
