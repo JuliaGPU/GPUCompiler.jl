@@ -6,10 +6,14 @@ import ..TestRuntime
 
 struct CompilerParams <: AbstractCompilerParams
     patch::Bool
-    CompilerParams(patch::Bool=false) = new(patch)
+    exception_sites::Bool
+    CompilerParams(patch::Bool=false, exception_sites::Bool=false) = new(patch, exception_sites)
 end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
+
+GPUCompiler.uses_exception_sites(@nospecialize(job::PTXCompilerJob)) =
+    job.config.params.exception_sites
 
 # `patch=true` keeps relocations symbolic (as CUDA.jl does); plain jobs resolve them in IR.
 GPUCompiler.relocation_lowering(@nospecialize(job::PTXCompilerJob)) =
@@ -32,6 +36,13 @@ module PTXTestRuntime
         return
     end
 
+    # loads the kernel state too, and stores the id where tests can find it in the IR
+    import ..kernel_state as get_kernel_state
+    function exception_site(id)
+        unsafe_store!(reinterpret(Ptr{Int32}, get_kernel_state().data), id)
+        return
+    end
+
     # dummy methods
     # HACK: if malloc returns 0 or traps, all calling functions (like jl_box_*)
     #       get reduced to a trap, which really messes with our test suite.
@@ -48,13 +59,13 @@ function create_job(@nospecialize(func), @nospecialize(types);
                     minthreads=nothing, maxthreads=nothing,
                     blocks_per_sm=nothing, maxregs=nothing,
                     fastmath=false, system_atomics=true, patch::Bool=false,
-                    kwargs...)
+                    exception_sites::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = PTXCompilerTarget(; cap, ptx, feature_set,
                                  minthreads, maxthreads, blocks_per_sm, maxregs,
                                  fastmath, system_atomics)
-    params = CompilerParams(patch)
+    params = CompilerParams(patch, exception_sites)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end

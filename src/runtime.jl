@@ -169,6 +169,10 @@ compile(:report_oom, Nothing, (Csize_t,))
 compile(:report_exception_frame, Nothing, (Cint, StringPointer, StringPointer, Cint))
 compile(:report_exception_name, Nothing, (StringPointer,))
 
+# replaces the functions above, except `report_oom`, for back-ends that opt into
+# `uses_exception_sites`
+compile(:exception_site, Nothing, (Int32,))
+
 # NOTE: no throw functions are provided here, but replaced by an LLVM pass instead
 #       in order to provide some debug information without stack unwinding.
 

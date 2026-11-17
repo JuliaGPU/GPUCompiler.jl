@@ -4,18 +4,24 @@ using ..GPUCompiler
 import LLVM
 import ..TestRuntime
 
-struct CompilerParams <: AbstractCompilerParams end
+struct CompilerParams <: AbstractCompilerParams
+    exception_sites::Bool
+    CompilerParams(exception_sites::Bool=false) = new(exception_sites)
+end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
+GPUCompiler.uses_exception_sites(@nospecialize(job::CompilerJob{<:Any,CompilerParams})) =
+    job.config.params.exception_sites
 
 function create_job(@nospecialize(func), @nospecialize(types);
                    supports_fp16=true, supports_fp64=true, supports_bfloat16=false,
                    backend::Symbol, driver::Symbol=:generic, extensions::String="",
-                   atomics::SPIRVAtomics=SPIRVAtomics(), kwargs...)
+                   atomics::SPIRVAtomics=SPIRVAtomics(), exception_sites::Bool=false,
+                   kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = SPIRVCompilerTarget(; backend, validate=true, optimize=true, extensions, atomics,
                                    supports_fp16, supports_fp64, supports_bfloat16, driver)
-    params = CompilerParams()
+    params = CompilerParams(exception_sites)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end

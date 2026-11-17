@@ -4,10 +4,20 @@ using ..GPUCompiler
 import LLVM
 import ..TestRuntime
 
-struct CompilerParams <: AbstractCompilerParams end
+struct CompilerParams <: AbstractCompilerParams
+    exception_sites::Bool
+    CompilerParams(exception_sites::Bool=false) = new(exception_sites)
+end
 GPUCompiler.runtime_module(::CompilerJob{<:Any,CompilerParams}) = TestRuntime
 
-struct ThreadedRuntimeCompilerParams <: AbstractCompilerParams end
+struct ThreadedRuntimeCompilerParams <: AbstractCompilerParams
+    exception_sites::Bool
+    ThreadedRuntimeCompilerParams(exception_sites::Bool=false) = new(exception_sites)
+end
+
+GPUCompiler.uses_exception_sites(@nospecialize(job::CompilerJob{MetalCompilerTarget,
+        <:Union{CompilerParams,ThreadedRuntimeCompilerParams}})) =
+    job.config.params.exception_sites
 
 module ThreadedRuntime
     using ..GPUCompiler
@@ -22,6 +32,13 @@ module ThreadedRuntime
     report_exception(ex) = return
     report_exception_name(ex) = return
     report_exception_frame(idx, func, file, line) = return
+    # records the position, which takes a kernel input
+    function exception_site(id)
+        pos = ccall("extern julia.air.thread_position_in_grid.v3i32", llvmcall,
+                    NTuple{3, VecElement{UInt32}}, ())
+        unsafe_store!(Ptr{UInt32}(UInt(0xdeadbeef)), pos[1].value, id)
+        return
+    end
 end
 
 ThreadedRuntimeCompilerJob = CompilerJob{MetalCompilerTarget,ThreadedRuntimeCompilerParams}
@@ -58,20 +75,22 @@ end
 code_native_table(@nospecialize(func), @nospecialize(types); kwargs...) =
     code_native_table(stdout, func, types; kwargs...)
 
-function create_job(@nospecialize(func), @nospecialize(types); minthreads=nothing, maxthreads=nothing, kwargs...)
+function create_job(@nospecialize(func), @nospecialize(types); minthreads=nothing, maxthreads=nothing,
+                    exception_sites::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0", minthreads, maxthreads)
-    params = CompilerParams()
+    params = CompilerParams(exception_sites)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end
 
-function create_threaded_runtime_job(@nospecialize(func), @nospecialize(types); kwargs...)
+function create_threaded_runtime_job(@nospecialize(func), @nospecialize(types);
+                                     exception_sites::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
-    params = ThreadedRuntimeCompilerParams()
+    params = ThreadedRuntimeCompilerParams(exception_sites)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
 end

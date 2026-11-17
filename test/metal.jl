@@ -586,6 +586,45 @@ end
     @test !occursin("gpu_gc_pool_alloc", ir)
 end
 
+@testset "exception sites" begin
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+        @noinline function helper(i)
+            i == 1 && GPUCompiler.@gputhrow "FirstError" "first reason"
+            return i
+        end
+        function kernel(p, i)
+            unsafe_store!(p, helper(i))
+            i == 2 && GPUCompiler.@gputhrow "SecondError" "second reason"
+            unsafe_store!(p, helper(i + 1))
+            return
+        end
+    end
+    types = Tuple{Core.LLVMPtr{Int,1},Int}
+
+    # throwing code is inlined into the kernel before the sites get their ids, and the
+    # single report gets the kernel input that the runtime's reporting function needs
+    @test @filecheck begin
+        @check_label "define void @{{.*}}kernel{{.*}}<3 x i32> %thread_position_in_grid"
+        @check_label "exception:"
+        @check "phi i32 [ {{[1-3]}}, %{{.*}} ], [ {{[1-3]}}, %{{.*}} ], [ {{[1-3]}}, %{{.*}} ]"
+        @check "extractelement <3 x i32> %thread_position_in_grid"
+        Metal.code_llvm_threaded_runtime(mod.kernel, types; exception_sites=true,
+                                         kernel=true, debug_level=2)
+    end
+
+    # and the trap becomes a return
+    job, _ = Metal.create_threaded_runtime_job(mod.kernel, types; exception_sites=true,
+                                               kernel=true, debug_level=2)
+    asm, sites = JuliaContext() do ctx
+        asm, meta = GPUCompiler.compile(:asm, job)
+        dispose(meta.ir)
+        asm, meta.exception_sites
+    end
+    @test !occursin("llvm.trap", asm)
+    @test length(sites) == 3
+end
+
 @testset "vector intrinsics" begin
     mod = @eval module $(gensym())
         foo(x, y) = ccall("llvm.smax.v2i64", llvmcall, NTuple{2, VecElement{Int64}},

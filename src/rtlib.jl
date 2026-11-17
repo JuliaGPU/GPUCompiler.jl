@@ -39,11 +39,11 @@ function LLVM.call!(builder, rt::Runtime.RuntimeMethodInstance, args=LLVM.Value[
         LLVM.Function(mod, rt.llvm_name, ft)
     end::LLVM.Function
     ft = f.function_type
-    if !isdeclaration(f) && (rt.name !== :gc_pool_alloc && rt.name !== :report_exception)
+    if !isdeclaration(f) && !(rt.name in (:gc_pool_alloc, :report_exception, :exception_site))
         # NOTE: GC lowering calls gc_pool_alloc, which was linked before optimization
         #       (see `late_runtime_functions`).
-        # XXX: report_exception can also be used after the runtime is linked during
-        #      CUDA/Enzyme nested compilation
+        # XXX: report_exception and exception_site can also be used after the runtime is
+        #      linked during CUDA/Enzyme nested compilation
         error("Calling an intrinsic function that clashes with an existing definition: ",
                string(ft), " ", rt.name)
     end

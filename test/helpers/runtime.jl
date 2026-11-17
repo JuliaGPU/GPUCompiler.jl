@@ -6,6 +6,8 @@ module TestRuntime
     report_exception(ex) = return
     report_exception_name(ex) = return
     report_exception_frame(idx, func, file, line) = return
+    # stores the id where tests can find it in the IR
+    exception_site(id) = (unsafe_store!(Ptr{Int32}(UInt(0xdeadbeef)), id); return)
 end
 
 # a runtime with an external allocator, keeping allocations visible to LLVM (with a

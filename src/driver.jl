@@ -368,6 +368,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
+    exception_sites = ExceptionSite[]
     @tracepoint "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
@@ -468,6 +469,13 @@ const __llvm_initialized = Ref(false)
                 job′ === job && continue
                 finish_ir!(job′, ir, ir.functions[fn′])
             end
+
+            # back-ends that inline throwing code into kernels did this during `finish_ir!`
+            if uses_exception_sites(job)
+                finalize_exception_sites!(job, ir)
+                merge_exception_sites!(job, ir)
+                exception_sites = take_exception_sites!(ir)
+            end
         end
 
         # replace non-entry function definitions with a declaration
@@ -506,6 +514,9 @@ const __llvm_initialized = Ref(false)
         @tracepoint "verification" verify(ir)
     end
 
+    if job.config.toplevel && uses_exception_sites(job)
+        return ir, (; entry, compiled, relocations, exception_sites)
+    end
     return ir, (; entry, compiled, relocations)
 end
 
