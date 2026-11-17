@@ -209,40 +209,6 @@ function promote_bf16_intrinsics!(mod::LLVM.Module)
     return changed
 end
 
-# Demote materialized boxed-constant globals to per-function stack allocas.
-#
-# Motivation: an isbits `Union` return is lowered as `{ptr, i8}` whose payload pointer
-# `phi`/`select`s the box global against the caller's `sret` alloca. AIR has no generic
-# address space — AS 0 *is* thread memory — so once `add_global_address_spaces!` sinks the
-# box into AS 2 (constant), the `addrspacecast` back to AS 0 at the use only works where the
-# back-end can statically fold it away; across the union's call return or aggregate phi it
-# cannot, and the load silently reads thread memory instead of the constant. Copying the box
-# to a thread `alloca` is the sanctioned lowering (MSL rejects mixing `thread` and `constant`
-# pointers outright); it is sound because box addresses carry no identity (isbits egal is by
-# content) and Metal fully inlines device functions.
-#
-# Runs from `finish_ir!`: post-opt (the box only escapes its `materialize_box!` pointer slot
-# once GlobalOpt folds it — still-slotted boxes like `jl_true`/`jl_false` are skipped and
-# stay in constant space) and pre-`add_global_address_spaces!`. Relocatable boxes (external
-# + `extinit`) are demoted by the `:table` lowering instead, which also fills their header.
-function demote_boxed_constants!(mod::LLVM.Module)
-    changed = false
-    for gv in collect(mod.globals)
-        (is_boxed_constant(gv) && box_used_only_by_instructions(gv)) || continue
-        if LLVM.version() < v"17"
-            # `replace_global_with_local!` needs LLVM.jl's `convert_users_to_instructions!`
-            # (LLVM 17+). Without demotion the kernel would compile but read thread memory
-            # instead of the boxed constant, so refuse loudly rather than miscompile.
-            error("Metal kernels embedding boxed union constants require Julia 1.12 or later")
-        end
-        slots = Dict{LLVM.Function, LLVM.Value}()
-        replace_global_with_local!(gv, f -> get!(() -> box_alloca!(f, gv), slots, f))
-        changed = true
-    end
-    return changed
-end
-
-
 ## relocations as a kernel-state word table
 #
 # Metal gives a loader no access at all to loaded code: there is no post-load symbol patching
@@ -275,8 +241,8 @@ function relocation_table_pointer(@nospecialize(job::CompilerJob{MetalCompilerTa
 
     # The state arrives as the leading by-reference argument (`kernel_state_to_reference!`,
     # then `add_parameter_address_spaces!`), so it is available on entry and dominates every
-    # use. Only a kernel has one, and Metal fully inlines device code, so only the kernel can
-    # be holding a relocation by now; insist on that rather than mistaking some other
+    # use. Only a kernel has one, and `inline_relocation_users!` has inlined every other
+    # function holding a relocation into it; insist on that rather than mistaking some other
     # function's first pointer argument for the state.
     (job.config.kernel && fun in kernels(fun.parent)) ||
         error("""Metal delivers relocations through the kernel state, which only a kernel has.
@@ -610,10 +576,16 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
 
     # add kernel metadata
     if job.config.kernel
-        # demote escaped boxed-constant globals to stack allocas before the address-space
-        # passes move constants into AS 2 (which would produce downgrade-incompatible IR for
-        # the ones whose address escapes an isbits union return; see above)
-        demote_boxed_constants!(mod)
+        # Move boxed constants to the stack before the address-space passes move constants
+        # into AS 2. AIR has no generic address space, so the AS 0 pointer of an isbits union
+        # return cannot refer to the constant space: across a call return or aggregate phi,
+        # the cast back to AS 0 cannot be folded away, and the load would read thread memory.
+        if LLVM.version() < v"17"
+            isempty(boxed_constants(mod)) ||
+                error("Metal kernels embedding boxed union constants require Julia 1.12 or later")
+        else
+            demote_boxed_constants!(job, mod)
+        end
 
         entry = add_parameter_address_spaces!(job, mod, entry)
         entry = add_global_address_spaces!(job, mod, entry)
