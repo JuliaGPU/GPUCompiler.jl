@@ -271,6 +271,25 @@ end
     end
 end
 
+@testset "exception sites in throw function overrides" begin
+    # back-ends override `throw_boundserror` to name the exception with `@gputhrow`, which
+    # must not be replaced by a site named after the function
+    mod = @eval module $(gensym())
+        import ..GPUCompiler
+        @noinline throw_boundserror(i) =
+            GPUCompiler.@gputhrow "BoundsError" "Out-of-bounds array access"
+        function kernel(p, i)
+            i > 1 && throw_boundserror(i)
+            unsafe_store!(p, i)
+            return
+        end
+    end
+    _, meta = GCN.code_execution(mod.kernel, Tuple{Ptr{Int},Int};
+                                 exception_sites=true, debug_level=1)
+    @test meta.exception_sites ==
+          [GPUCompiler.ExceptionSite("BoundsError", "Out-of-bounds array access", [])]
+end
+
 @testset "kernarg address space for byref parameters" begin
     mod = @eval module $(gensym())
         struct MyStruct

@@ -432,6 +432,17 @@ function needs_cmpxchg_expansion(target::GCNCompilerTarget, version::VersionNumb
     return false
 end
 
+# whether `f` reports an exception site of its own, see `emit_exception_site!`
+function reports_exception_site(f::LLVM.Function)
+    isdeclaration(f) && return false
+    for bb in f.blocks, inst in bb.instructions
+        inst isa LLVM.CallInst || continue
+        callee = inst.called_operand
+        callee isa LLVM.Function && LLVM.name(callee) == EXCEPTION_SITE_ID && return true
+    end
+    return false
+end
+
 function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     changed = false
     @tracepoint "lower throw (extra)" begin
@@ -445,6 +456,8 @@ function lower_throw_extra!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     ]
 
     for f in mod.functions
+        # an override that throws with `@gputhrow` reports what it throws itself
+        uses_exception_sites(job) && reports_exception_site(f) && continue
         f_name = f.name
         for fn in throw_functions
             if occursin(fn, f_name)
