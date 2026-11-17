@@ -173,11 +173,17 @@ end
 
     # Julia looks up the type of a boxed value in `jl_small_typeof`, a global in the
     # cross-workgroup address space, which older versions cast with a `bitcast`.
-    job, _ = SPIRV.create_job(mod.kernel, (Core.LLVMPtr{UInt,1}, Ptr{Cvoid});
-                              backend, kernel=true)
-    JuliaContext() do ctx
-        ir, _ = GPUCompiler.compile(:llvm, job)
-        @test (verify(ir); true)
+    # With LLVM assertions, those versions abort while emitting that cast, before we can
+    # fix it up.
+    if VERSION < v"1.12" && LLVM.is_asserts()
+        @test_skip false
+    else
+        job, _ = SPIRV.create_job(mod.kernel, (Core.LLVMPtr{UInt,1}, Ptr{Cvoid});
+                                  backend, kernel=true)
+        JuliaContext() do ctx
+            ir, _ = GPUCompiler.compile(:llvm, job)
+            @test (verify(ir); true)
+        end
     end
 end
 end
