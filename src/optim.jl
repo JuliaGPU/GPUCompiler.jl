@@ -66,6 +66,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             register!(pb, AddKernelStatePass(job))
             register!(pb, LowerKernelStatePass(job))
             register!(pb, CleanupKernelStatePass(job))
+            register!(pb, IRCEWithCleanupPass(job))
 
             add!(pb, ModulePassManager()) do mpm
                 buildNewPMPipeline!(mpm, job, opt_level)
@@ -201,6 +202,21 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
     add!(mpm, GlobalDCEPass())
 end
 
+# IRCE, followed by the SimplifyCFG + InstCombine cleanup its output needs, but only if it
+# changed the function, so that functions IRCE leaves alone see the same passes as without
+# it (as in Julia's pipeline)
+function irce_with_cleanup!(job, f::LLVM.Function, am::LLVM.FunctionAnalysisManager)
+    preserved = run!(IRCEPass(), f, am)
+    preserved == PreservedAnalyses(AllAnalyses) && return preserved
+    @dispose pb=PassBuilder() begin
+        add!(pb, simplifycfg_pass(job, BasicSimplifyCFGOptions))
+        add!(pb, instcombine_pass(job))
+        return intersect(preserved, run!(pb, f, am))
+    end
+end
+IRCEWithCleanupPass(job) =
+    FunctionPass("GPUIRCEWithCleanup", (f, am) -> irce_with_cleanup!(job, f, am); analyses=true)
+
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
         add!(lpm, LowerSIMDLoopPass())
@@ -223,17 +239,20 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
     if opt_level >= 2
         # IRCE judges a loop by its estimated trip count, so it also splits short loops
         # with a constant trip count into pre-, main and post-loops, which can then no
-        # longer be unrolled. Unroll those first. (IRCE itself has to stay ahead of
-        # IndVarSimplify, after which it no longer recognizes many loops.) On Metal, where
-        # every bounds check is a loop exit, the split loops made the back-end take seconds
-        # to compile, or hang (Metal.jl#1127).
+        # longer be unrolled. Unroll those first. On Metal, where every bounds check is a
+        # loop exit, the split loops made the back-end take seconds to compile, or hang
+        # (Metal.jl#1127).
         add!(fpm, LoopPassManager()) do lpm
             add!(lpm, LoopFullUnrollPass())
         end
-        add!(fpm, IRCEPass())
     end
     add!(fpm, simplifycfg_pass(job, BasicSimplifyCFGOptions))
     add!(fpm, instcombine_pass(job))
+    if opt_level >= 2
+        # IRCE needs the loops cleaned up to recognize their checks, and has to come before
+        # IndVarSimplify, whose LFTR can turn the latch into an equality test it doesn't handle
+        add!(fpm, IRCEWithCleanupPass(job))
+    end
     add!(fpm, LoopPassManager()) do lpm
         if opt_level >= 2
             add!(lpm, LoopIdiomRecognizePass())
@@ -317,6 +336,9 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, EarlyCSEPass())
     add!(fpm, CorrelatedValuePropagationPass())
     add!(fpm, instcombine_pass(job))
+    # CVP can fold branch conditions here (e.g. bounds checks made redundant by the loop
+    # passes); fold those branches and hoist the code they guarded before SLP looks at it
+    add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
     add!(fpm, SLPVectorizerPass())
     add!(fpm, VectorCombinePass())
     if LLVM.version() >= v"17"

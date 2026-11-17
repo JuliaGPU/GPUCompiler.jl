@@ -1030,6 +1030,16 @@ end
             end
             return acc
         end
+        # a loop over a view, whose checks IRCE only recognizes once the loop is cleaned up
+        function zero_slices(A)
+            for e in axes(A, 3)
+                v = view(A, :, :, e)
+                for i in eachindex(v)
+                    v[i] = 0.0
+                end
+            end
+            return
+        end
     end
 
     @test @filecheck begin
@@ -1042,6 +1052,14 @@ end
         @test @filecheck begin
             @check "postloop"
             Native.code_llvm(mod.long, Tuple{Ptr{Float32}, Int, Int})
+        end
+    end
+    # (before LLVM 20, this check stays; with --check-bounds=yes, as Pkg.test uses, the
+    # accesses Base marks `@inbounds` are checked too, and Julia's pipeline keeps them)
+    if LLVM.version() >= v"20" && Base.JLOptions().check_bounds != 1
+        @test @filecheck begin
+            @check_not "throw_boundserror"
+            Native.code_llvm(mod.zero_slices, Tuple{Array{Float64,3}})
         end
     end
 end
