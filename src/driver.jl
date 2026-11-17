@@ -352,8 +352,18 @@ const __llvm_initialized = Ref(false)
 
             # GPU run-time library
             if !uses_julia_runtime(job)
-                @tracepoint "runtime library" link_relocatable!(
-                    ir, relocations, runtime, runtime_relocs; only_needed=true)
+                @tracepoint "runtime library" begin
+                    declare_late_runtime_functions!(job, ir)
+                    link_relocatable!(ir, relocations, runtime, runtime_relocs;
+                                      only_needed=true)
+                    # the linked runtime may itself allocate. import what that requires
+                    # before internalization, so that linking again reuses the rest.
+                    if declare_late_runtime_functions!(job, ir)
+                        runtime, runtime_relocs = load_runtime(job)
+                        link_relocatable!(ir, relocations, runtime, runtime_relocs;
+                                          only_needed=true)
+                    end
+                end
             end
         end
     end
@@ -382,6 +392,10 @@ const __llvm_initialized = Ref(false)
                 if gvar.linkage == LLVM.Linkage.External
                     push!(preserved_gvs, gvar.name)
                 end
+            end
+            # until `GPUInternalizeRuntimePass` (see `late_runtime_functions`)
+            for rt in late_runtime_functions(job, ir)
+                push!(preserved_gvs, rt.llvm_name)
             end
             with_llvm_machine(job.config.target) do tm
                 run!(InternalizePass(; preserved_gvs), ir, tm)
@@ -421,12 +435,6 @@ const __llvm_initialized = Ref(false)
                         end
                     end
                 end
-            end
-
-            # Runtime linking during optimization can add relocations.
-            if resolve_early && !isempty(relocations)
-                prune_dead_relocations!(ir, relocations)
-                bake_relocations!(ir, relocations)
             end
 
             if job.config.cleanup

@@ -401,6 +401,27 @@ end
     end
 end
 
+@testset "runtime functions called by GC lowering" begin
+    mod = @eval module $(gensym())
+        mutable struct Box
+            x::Int
+        end
+        @noinline value(b) = b.x
+        function kernel(p, i)
+            unsafe_store!(p, value(Box(i)))
+            i == 0 && throw(nothing)
+            return
+        end
+    end
+
+    # `gc_pool_alloc` and the reporting functions it calls are linked once, and internalized
+    @test @filecheck begin
+        @check_not "LinkageAttributes \"gpu_"
+        SPIRV.code_native(mod.kernel, Tuple{Core.LLVMPtr{Int,1},Int}; backend, kernel=true,
+                          dump_module=true)
+    end
+end
+
 @testset "exception allocations" begin
     # a thrown exception's construction is dead once `throw` is lowered, but it used to survive
     # (e.g. as an un-inlined constructor call), allocating through the device allocator, with

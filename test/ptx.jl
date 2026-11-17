@@ -757,6 +757,70 @@ end
     @test "We did not crash!" != ""
 end
 
+@testset "runtime functions called by GC lowering" begin
+    mod = @eval module $(gensym())
+        mutable struct Box
+            x::Int
+        end
+        @noinline value(b) = b.x
+        function kernel(p, i)
+            unsafe_store!(p, value(Box(i)))
+            i == 0 && throw(nothing)
+            return
+        end
+    end
+    types = Tuple{Ptr{Int},Int}
+
+    # `gc_pool_alloc` and the reporting functions it calls are linked once, and internalized
+    @test @filecheck begin
+        @check_not ".visible .func"
+        @check ".visible .entry"
+        @check_not ".visible .func"
+        PTX.code_native(mod.kernel, types; kernel=true, dump_module=true)
+    end
+end
+
+@testset "runtime functions that allocate" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+
+        # a runtime whose `signal_exception` allocates, so needs `gc_pool_alloc` too
+        module AllocatingRuntime
+            mutable struct Box
+                x::Int
+            end
+            @noinline value(b) = b.x
+            function signal_exception()
+                unsafe_store!(Ptr{Int}(Int(0xDEADBEEF)), value(Box(42)))
+                return
+            end
+            malloc(sz) = ccall("extern test_malloc", llvmcall, Ptr{Cvoid}, (Csize_t,), sz)
+            report_oom(sz) = return
+            report_exception(ex) = return
+            report_exception_name(ex) = return
+            report_exception_frame(idx, func, file, line) = return
+        end
+
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = AllocatingRuntime
+
+        function kernel(i)
+            i == 0 && throw(nothing)
+            return
+        end
+    end
+
+    source = methodinstance(typeof(mod.kernel), Tuple{Int}, Base.get_world_counter())
+    job = CompilerJob(source, CompilerConfig(PTXCompilerTarget(; cap=v"7.0"), mod.Params();
+                                             kernel=true, validate=false))
+    @test @filecheck begin
+        @check_not "declare {{.*}}@gpu_gc_pool_alloc"
+        @check "call {{.*}}@test_malloc"
+        @check_not "declare {{.*}}@gpu_gc_pool_alloc"
+        GPUCompiler.code_llvm(stdout, job; dump_module=true)
+    end
+end
+
 @testset "GC and TLS lowering" begin
     mod = @eval module $(gensym())
         import ..sink

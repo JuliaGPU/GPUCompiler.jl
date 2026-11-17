@@ -60,7 +60,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             register!(pb, GPULowerCPUFeaturesPass(job))
             register!(pb, GPULowerPTLSPass(job))
             register!(pb, GPULowerGCFramePass(job, relocs))
-            register!(pb, GPULinkRuntimePass(job, relocs))
+            register!(pb, GPUInternalizeRuntimePass(job))
             register!(pb, GPULinkLibrariesPass(job))
             register!(pb, GPUFinishRuntimeIntrinsicsPass(job))
             register!(pb, AddKernelStatePass(job))
@@ -335,8 +335,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
             add!(fpm, "GPULowerGCFrame")
         end
         if job.config.libraries
-            # Use the registered pass because it owns `relocs`; the others only capture `job`.
-            add!(mpm, "GPULinkRuntime")
+            add!(mpm, GPUInternalizeRuntimePass(job))
             add!(mpm, GPULinkLibrariesPass(job))
             add!(mpm, GPUFinishRuntimeIntrinsicsPass(job))
         end
@@ -500,27 +499,43 @@ function (self::CPUFeatures)(mod::LLVM.Module)
 end
 GPULowerCPUFeaturesPass(job) = ModulePass("GPULowerCPUFeatures", CPUFeatures(job))
 
-struct LinkRuntime
-    job::CompilerJob
-    relocs::Relocations
+# GC lowering introduces calls to `gc_pool_alloc` during optimization, long after the runtime
+# library was linked and internalized. linking it again then would import fresh copies of
+# the runtime functions it calls, as the existing ones are internal (and possibly optimized
+# to a different ABI). instead, `emit_llvm` links it up front and preserves its external
+# linkage, so that its definition survives and its callable ABI remains intact, until
+# `GPUInternalizeRuntimePass` runs after GC lowering.
+function late_runtime_functions(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    rts = Runtime.RuntimeMethodInstance[]
+    if job.config.optimize && !uses_julia_runtime(job) &&
+       haskey(mod.functions, "julia.gc_alloc_obj")
+        push!(rts, Runtime.get(:gc_pool_alloc))
+    end
+    return rts
 end
-function (self::LinkRuntime)(mod::LLVM.Module)
-    self.job.config.libraries || return false
-    uses_julia_runtime(self.job) && return false
 
-    # GC lowering can introduce new calls to GPU runtime functions after the runtime
-    # was linked initially. Link again now so those calls resolve to definitions before
-    # later intrinsic-lowering passes inspect or rewrite the runtime call graph.
-    runtime, runtime_relocs = load_runtime(self.job)
-    # `RemoveNIPass` stripped non-integral address spaces from `mod`'s datalayout, but the
-    # cached runtime kept them; align it (as with target libraries) to avoid a warning.
-    runtime.triple = mod.triple
-    runtime.datalayout = mod.datalayout
-    link_relocatable!(mod, self.relocs, runtime, runtime_relocs; only_needed=true)
+# declare the late runtime functions `mod` needs but lacks, returning whether there were any
+function declare_late_runtime_functions!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    declared = false
+    for rt in late_runtime_functions(job, mod)
+        haskey(mod.functions, rt.llvm_name) && continue
+        LLVM.Function(mod, rt.llvm_name, runtime_function_type(job, rt))
+        declared = true
+    end
+    return declared
+end
+
+struct InternalizeRuntime
+    job::CompilerJob
+end
+function (self::InternalizeRuntime)(mod::LLVM.Module)
+    self.job.config.toplevel || return false
+    f = get(mod.functions, Runtime.get(:gc_pool_alloc).llvm_name, nothing)
+    (f === nothing || isdeclaration(f) || f.linkage == LLVM.Linkage.Internal) && return false
+    f.linkage = LLVM.Linkage.Internal
     return true
 end
-GPULinkRuntimePass(job, relocs::Relocations) =
-    ModulePass("GPULinkRuntime", LinkRuntime(job, relocs))
+GPUInternalizeRuntimePass(job) = ModulePass("GPUInternalizeRuntime", InternalizeRuntime(job))
 
 struct LinkLibraries
     job::CompilerJob
@@ -528,10 +543,11 @@ end
 function (self::LinkLibraries)(mod::LLVM.Module)
     self.job.config.libraries || return false
 
-    # Runtime functions materialized by GC lowering can introduce target-library
-    # references after the normal library-linking phase has run. Give back-ends a
-    # second chance to resolve those references before they lower their own runtime
-    # intrinsics. This is a no-op for back-ends without a link_libraries! override.
+    # The runtime library, which is linked after the target libraries, and optimization
+    # can introduce target-library references after the normal library-linking phase has
+    # run. Give back-ends a second chance to resolve those references before they lower
+    # their own runtime intrinsics. This is a no-op for back-ends without a
+    # link_libraries! override.
     link_libraries!(self.job, mod)
     return true
 end
