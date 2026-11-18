@@ -12,6 +12,8 @@ const init_code = quote
     using LLVMDowngrader_jll
     using NVPTX_LLVM_Backend_jll
     using AMDGPU_LLVM_Backend_jll
+    using CUDA_Compiler_jll
+    import NVVM
     using ScopedValues: with
 
     # include all helpers

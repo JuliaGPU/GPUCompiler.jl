@@ -3,6 +3,9 @@
 const NVPTX_LLVM_Backend_jll =
     LazyModule("NVPTX_LLVM_Backend_jll",
                UUID("ef6e0fe3-e6ef-59c0-bde6-4989574699e0"))
+const NVVM =
+    LazyModule("NVVM",
+               UUID("423072a2-8eda-41a8-b560-ab106c23935b"))
 
 
 ## target
@@ -18,6 +21,11 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     #   :family   ('f' suffix)  - same-major-family-portable; gates 'f'-tier intrinsics
     #   :arch     ('a' suffix)  - locked to one exact CC; unlocks all arch-accel intrinsics
     feature_set::Symbol = :baseline
+
+    # the back-end generating PTX from the optimized LLVM IR:
+    #   :nvptx  - LLVM's NVPTX back-end
+    #   :nvvm   - NVIDIA's libNVVM, through NVVM.jl, which has to be loaded
+    backend::Symbol = :nvptx
 
     # codegen quirks
     ## can we emit debug info in the PTX assembly?
@@ -45,6 +53,7 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.cap, h)
     h = hash(target.ptx, h)
     h = hash(target.feature_set, h)
+    h = hash(target.backend, h)
 
     h = hash(target.debuginfo, h)
 
@@ -94,7 +103,18 @@ end
 # disagree with the final layout. this notably affects i128, which Julia did not even
 # align to 16 bytes before 1.12 (users may have to reject affected types, as kernel
 # argument layouts will differ between such hosts and the device).
-llvm_datalayout(target::PTXCompilerTarget) =
+function llvm_datalayout(target::PTXCompilerTarget)
+    if target.backend === :nvptx
+        nvptx_datalayout()
+    elseif target.backend === :nvvm
+        Int === Int64 || error("The NVVM back-end only supports 64-bit hosts")
+        nvvm_datalayout()
+    else
+        error("PTXCompilerTarget.backend must be one of :nvptx, :nvvm; got $(repr(target.backend))")
+    end
+end
+
+nvptx_datalayout() =
     # little endian
     "e-" *
     # on 32-bit systems, use 32-bit pointers, including for distributed shared
@@ -108,6 +128,12 @@ llvm_datalayout(target::PTXCompilerTarget) =
     "v16:16-v32:32-" *
     # native integer widths
     "n16:32:64"
+
+# libNVVM rejects modules whose layout differs from its own in any way, including in
+# spelling out the defaults. it differs from NVPTX's in not aligning i256 to 32 bytes.
+nvvm_datalayout() =
+    "e-p:64:64:64-p6:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-" *
+    "f32:32:32-f64:64:64-f128:128:128-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64-a:8:8"
 
 have_fma(@nospecialize(target::PTXCompilerTarget), T::Type) = true
 
@@ -125,6 +151,7 @@ llvm_syncscope(::PTXCompilerTarget, name::String) =
 function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
     print(io, "PTX CompilerJob of ", job.source)
     print(io, " for ", cpu_name(job.config.target))
+    job.config.target.backend === :nvptx || print(io, " using ", job.config.target.backend)
 
     job.config.target.minthreads !== nothing && print(io, ", minthreads=$(job.config.target.minthreads)")
     job.config.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.config.target.maxthreads)")
@@ -324,11 +351,16 @@ end
 
 @unlocked function mcgen(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                          mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
+    if format != LLVM.CodeGenFileType.Assembly
+        error("Unsupported PTX output format $format; the PTX back-ends only emit PTX assembly.")
+    end
+    target = job.config.target
+    if target.backend === :nvvm
+        return String(nvvm_codegen(job, mod))
+    end
+
     if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
         error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
-    end
-    if format != LLVM.CodeGenFileType.Assembly
-        error("Unsupported PTX output format $format; the NVPTX back-end only emits PTX assembly.")
     end
     backend = ExternalBackend(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX")
 
@@ -336,7 +368,6 @@ end
     # it rejects unknown processors and PTX versions instead of silently falling back.
     # FMA contraction is requested as `-nvptx-fma-level=1` was: match nvcc by leaving
     # eligible multiply-add pairs contractible for ptxas.
-    target = job.config.target
     cpu = cpu_name(target)
     ptx = GC.@preserve cpu begin
         options = Ref(NVPTXCompileOptions(Base.unsafe_convert(Cstring, cpu),
@@ -347,6 +378,79 @@ end
                          "Failed to compile to PTX with the NVPTX back-end")
     end
     return String(ptx)
+end
+
+
+## NVVM back-end
+
+# the options for a job, and the architecture they target
+function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
+    target = job.config.target
+    arch = replace(cpu_name(target), "sm_" => "compute_")
+
+    # libNVVM reads bitcode from LLVM 7 for older architectures, unless `-nvvm-latest`
+    # (CUDA 13.5+) selects its current LLVM, which Blackwell and later use by default.
+    # older readers would need the bitcode to be downgraded, which isn't supported.
+    options = ["-arch=$arch"]
+    reader = NVVM.llvm_version(arch)
+    if reader === nothing
+        error("libNVVM does not support $arch, or predates CUDA 13.2, which the NVVM back-end requires.")
+    elseif reader < LLVM.version().major
+        push!(options, "-nvvm-latest")
+    end
+
+    # libNVVM defaults to IEEE division and square roots, preserving denormals. fast math
+    # relaxes these in the IR already, but libdevice's implementation is selected here.
+    if target.fastmath
+        append!(options, ["-ftz=1", "-prec-div=0", "-prec-sqrt=0"])
+    end
+    return options, arch
+end
+
+function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
+    legalize_nvvm!(mod)
+    options, arch = nvvm_options(job)
+
+    input = bitcode(mod)
+    prog = NVVM.Program()
+    output = try
+        NVVM.add!(prog, input)
+        NVVM.compile(prog, options)
+    catch err
+        err isa NVVM.NVVMError || rethrow()
+        if err.code == NVVM.NVVM_ERROR_INVALID_OPTION && "-nvvm-latest" in options
+            error("""libNVVM does not support compiling bitcode from LLVM $(LLVM.version().major) for $arch.
+                     This requires CUDA 13.5 or later, or a Blackwell (sm_100) or newer GPU.""")
+        end
+        path, = dump_failure(".bc" => input)
+        error(sprint(showerror, err) *
+              "\nIf you think this is a bug, please file an issue and attach $(path).")
+    finally
+        finalize(prog)
+    end
+
+    # libNVVM silently turns calls to intrinsics it doesn't know into calls to external
+    # functions, which then fail to link
+    unknown = unique(m.captures[1] for m in eachmatch(r"\.extern \.func[^\n]*?\b(llvm\.[\w.]+)",
+                                                     String(copy(output))))
+    if !isempty(unknown)
+        path, = dump_failure(".bc" => input)
+        error("libNVVM does not support the intrinsics $(join(unknown, ", ")).\n" *
+              "If you think this is a bug, please file an issue and attach $(path).")
+    end
+
+    return output
+end
+
+# make a module acceptable to libNVVM, which otherwise accepts the same IR as NVPTX
+function legalize_nvvm!(mod::LLVM.Module)
+    # libNVVM requires a version, which libraries like libdevice carry, possibly repeatedly
+    versions = get!(mod.metadata, "nvvmir.version")
+    if isempty(versions.operands)
+        push!(versions.operands,
+              MDNode(Metadata[ConstantInt(Int32(2)), ConstantInt(Int32(0))]))
+    end
+    return mod
 end
 
 function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))

@@ -55,14 +55,14 @@ end
 GPUCompiler.runtime_module(::PTXCompilerJob) = PTXTestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types);
-                    cap=v"7.0", ptx=v"6.0", feature_set=:baseline,
+                    cap=v"7.0", ptx=v"6.0", feature_set=:baseline, backend=:nvptx,
                     minthreads=nothing, maxthreads=nothing,
                     blocks_per_sm=nothing, maxregs=nothing,
                     fastmath=false, system_atomics=true, patch::Bool=false,
                     exception_sites::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = PTXCompilerTarget(; cap, ptx, feature_set,
+    target = PTXCompilerTarget(; cap, ptx, feature_set, backend,
                                  minthreads, maxthreads, blocks_per_sm, maxregs,
                                  fastmath, system_atomics)
     params = CompilerParams(patch, exception_sites)
