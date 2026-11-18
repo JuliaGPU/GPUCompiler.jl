@@ -223,6 +223,10 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     # OpUnreachable (UB if reached), which PoCL and friends handle poorly.
     lower_unreachable_control_flow!(job, mod)
 
+    # a module-scope SPIR-V variable cannot live in the address space of the pointers that
+    # refer to Julia's boxed constants (the Function storage class)
+    LLVM.version() >= v"17" && demote_boxed_constants!(job, mod)
+
     # SPIR-V cannot express atomic loads and stores of pointers, which is what Julia's
     # `unordered` heap-reference accesses are (see `demote_unordered_atomics!`)
     demote_unordered_atomics!(mod)

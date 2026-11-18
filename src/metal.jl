@@ -209,95 +209,6 @@ function promote_bf16_intrinsics!(mod::LLVM.Module)
     return changed
 end
 
-# Does `gv` look like a boxed-constant replica created by `materialize_box!`? Its `_box` name
-# and layout distinguish it from other private constants: `{ i64 header, [payload bytes] }`,
-# optionally with leading alignment padding. Relocatable boxes are external and mutable, so
-# `isconstant` excludes them (they are delivered through the relocation table instead).
-function is_boxed_constant(@nospecialize(gv::LLVM.GlobalVariable))
-    isdeclaration(gv) && return false
-    endswith(gv.name, "_box") || return false
-    gv.linkage == LLVM.Linkage.Private || return false
-    (gv.constant && gv.unnamed_addr == LLVM.UnnamedAddr.Global) || return false
-    gv.value_type.addrspace == 0 || return false
-    T = gv.global_value_type
-    T isa LLVM.StructType || return false
-    els = T.elements
-    is_hdr(t) = t isa LLVM.IntegerType && t.width == 8sizeof(UInt)
-    is_pad(t) = t isa LLVM.ArrayType && t.element_type == LLVM.Int8Type()
-    return (length(els) >= 1 && is_hdr(els[1])) ||
-           (length(els) >= 2 && is_pad(els[1]) && is_hdr(els[2]))
-end
-
-# Are all (transitive constant) users of `v` instructions, i.e. does the box escape only
-# through function bodies? A box reachable from another global's *initializer* is the
-# `jl_true`/`jl_false` slot→box indirection, which lives fine in the constant space
-# (`add_global_address_spaces!`); demoting it would strand the slot's constant pointer. Only
-# the isbits-union interior boxes — whose payload address flows through a body `phi`/`select`
-# — need demotion, and those have instruction users exclusively.
-function box_used_only_by_instructions(@nospecialize(v::LLVM.Value))
-    for u in v.users
-        if u isa LLVM.Instruction
-            # a body use: fine
-        elseif u isa LLVM.GlobalVariable
-            return false   # initializer reference (slot→box)
-        elseif u isa LLVM.Constant
-            box_used_only_by_instructions(u) || return false
-        else
-            return false
-        end
-    end
-    return true
-end
-
-# Demote materialized boxed-constant globals to per-function stack allocas.
-#
-# Motivation: an isbits `Union` return is lowered as `{ptr, i8}` whose payload pointer
-# `phi`/`select`s the box global against the caller's `sret` alloca. AIR has no generic
-# address space — AS 0 *is* thread memory — so once `add_global_address_spaces!` sinks the
-# box into AS 2 (constant), the `addrspacecast` back to AS 0 at the use only works where the
-# back-end can statically fold it away; across the union's call return or aggregate phi it
-# cannot, and the load silently reads thread memory instead of the constant. Copying the box
-# to a thread `alloca` is the sanctioned lowering (MSL rejects mixing `thread` and `constant`
-# pointers outright); it is sound because box addresses carry no identity (isbits egal is by
-# content) and Metal fully inlines device functions.
-#
-# Runs from `finish_ir!`: post-opt (the box only escapes its `materialize_box!` pointer slot
-# once GlobalOpt folds it — still-slotted boxes like `jl_true`/`jl_false` are skipped and
-# stay in constant space) and pre-`add_global_address_spaces!`. Relocatable boxes (external
-# + `extinit`) are demoted by the `:table` lowering instead, which also fills their header.
-function demote_boxed_constants!(mod::LLVM.Module)
-    changed = false
-    for gv in collect(mod.globals)
-        (is_boxed_constant(gv) && box_used_only_by_instructions(gv)) || continue
-        if LLVM.version() < v"17"
-            # `replace_global_with_local!` needs LLVM.jl's `convert_users_to_instructions!`
-            # (LLVM 17+). Without demotion the kernel would compile but read thread memory
-            # instead of the boxed constant, so refuse loudly rather than miscompile.
-            error("Metal kernels embedding boxed union constants require Julia 1.12 or later")
-        end
-        boxty = gv.global_value_type
-        init = gv.initializer
-        # keep the box's alignment, but at least Julia's heap alignment (16 B), which is what
-        # `materialize_box!` gives these boxes and what the payload's `isbits` layout assumes
-        align = max(gv.alignment, 16)
-        slots = Dict{LLVM.Function, LLVM.Value}()
-        function slot(f::LLVM.Function)
-            get!(slots, f) do
-                @dispose builder=IRBuilder() begin
-                    position!(builder, LLVM.at_begin(f.entry))
-                    ptr = alloca!(builder, boxty; align)
-                    store!(builder, init, ptr)
-                    ptr
-                end
-            end
-        end
-        replace_global_with_local!(gv, slot)
-        changed = true
-    end
-    return changed
-end
-
-
 ## relocations as a kernel-state word table
 #
 # Metal gives a loader no access at all to loaded code: there is no post-load symbol patching
@@ -330,8 +241,8 @@ function relocation_table_pointer(@nospecialize(job::CompilerJob{MetalCompilerTa
 
     # The state arrives as the leading by-reference argument (`kernel_state_to_reference!`,
     # then `add_parameter_address_spaces!`), so it is available on entry and dominates every
-    # use. Only a kernel has one, and Metal fully inlines device code, so only the kernel can
-    # be holding a relocation by now; insist on that rather than mistaking some other
+    # use. Only a kernel has one, and `inline_relocation_users!` has inlined every other
+    # function holding a relocation into it; insist on that rather than mistaking some other
     # function's first pointer argument for the state.
     (job.config.kernel && fun in kernels(fun.parent)) ||
         error("""Metal delivers relocations through the kernel state, which only a kernel has.
@@ -665,10 +576,16 @@ function finish_ir!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
 
     # add kernel metadata
     if job.config.kernel
-        # demote escaped boxed-constant globals to stack allocas before the address-space
-        # passes move constants into AS 2 (which would produce downgrade-incompatible IR for
-        # the ones whose address escapes an isbits union return; see above)
-        demote_boxed_constants!(mod)
+        # Move boxed constants to the stack before the address-space passes move constants
+        # into AS 2. AIR has no generic address space, so the AS 0 pointer of an isbits union
+        # return cannot refer to the constant space: across a call return or aggregate phi,
+        # the cast back to AS 0 cannot be folded away, and the load would read thread memory.
+        if LLVM.version() < v"17"
+            isempty(boxed_constants(mod)) ||
+                error("Metal kernels embedding boxed union constants require Julia 1.12 or later")
+        else
+            demote_boxed_constants!(job, mod)
+        end
 
         entry = add_parameter_address_spaces!(job, mod, entry)
         entry = add_global_address_spaces!(job, mod, entry)

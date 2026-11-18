@@ -1411,6 +1411,13 @@ end
         end
         @test occursin("alloca", air)
         @test !occursin("addrspace(2) constant", air)
+
+        # in the kernel's frame: a copy in `produce` would be returned as a dangling pointer
+        ir = sprint() do io
+            Metal.code_llvm(io, mod.kernel, (Core.LLVMPtr{Int64,1}, Bool, Int32);
+                            dump_module=true, kernel=true)
+        end
+        @test !occursin(r"define .*@julia_produce", ir)
     elseif GPUCompiler.supports_relocatable_ir()
         # demotion needs LLVM.jl's `convert_users_to_instructions!` (LLVM 17+); the kernel
         # must be rejected rather than silently miscompiled

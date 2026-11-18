@@ -493,6 +493,105 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
     return const_pointercast(payload, gv.global_value_type)
 end
 
+# Does `gv` look like a boxed-constant replica created by `materialize_box!`? Its `_box` name
+# and layout distinguish it from other private constants: `{ i64 header, [payload bytes] }`,
+# optionally with leading alignment padding. Relocatable boxes are external and mutable, so
+# `isconstant` excludes them (they are delivered through the relocation table instead).
+function is_boxed_constant(@nospecialize(gv::LLVM.GlobalVariable))
+    isdeclaration(gv) && return false
+    endswith(gv.name, "_box") || return false
+    gv.linkage == LLVM.Linkage.Private || return false
+    (gv.constant && gv.unnamed_addr == LLVM.UnnamedAddr.Global) || return false
+    gv.value_type.addrspace == 0 || return false
+    T = gv.global_value_type
+    T isa LLVM.StructType || return false
+    els = T.elements
+    is_hdr(t) = t isa LLVM.IntegerType && t.width == 8sizeof(UInt)
+    is_pad(t) = t isa LLVM.ArrayType && t.element_type == LLVM.Int8Type()
+    return (length(els) >= 1 && is_hdr(els[1])) ||
+           (length(els) >= 2 && is_pad(els[1]) && is_hdr(els[2]))
+end
+
+# Are all (transitive constant) users of `v` instructions, i.e. does the box escape only
+# through function bodies? A box reachable from another global's *initializer* is the
+# `jl_true`/`jl_false` slot→box indirection, which is not ours to move: lowering it would
+# strand the slot's constant pointer. Only the isbits-union interior boxes — whose payload
+# address flows through a body `phi`/`select` — need lowering by the back-ends that cannot
+# address a constant global from thread memory, and those have instruction users exclusively.
+function box_used_only_by_instructions(@nospecialize(v::LLVM.Value))
+    for u in v.users
+        if u isa LLVM.Instruction
+            # a body use: fine
+        elseif u isa LLVM.GlobalVariable
+            return false   # initializer reference (slot→box)
+        elseif u isa LLVM.Constant
+            box_used_only_by_instructions(u) || return false
+        else
+            return false
+        end
+    end
+    return true
+end
+
+# Copy the boxed constant `gv` into a stack slot at the start of `f`, for back-ends that cannot
+# address a constant global from thread memory. Sound because box addresses carry no identity
+# (isbits egal is by content). Keeps the box's alignment, but at least Julia's heap alignment
+# (16 B), which is what `materialize_box!` gives these boxes and what the payload's `isbits`
+# layout assumes.
+function box_alloca!(f::LLVM.Function, gv::LLVM.GlobalVariable)
+    @dispose builder=IRBuilder() begin
+        position!(builder, LLVM.at_begin(f.entry))
+        ptr = alloca!(builder, gv.global_value_type; align=max(gv.alignment, 16))
+        store!(builder, gv.initializer, ptr)
+        ptr
+    end
+end
+
+# The boxed constants embedded by `materialize_box!` whose address escapes into function bodies.
+boxed_constants(mod::LLVM.Module) =
+    LLVM.GlobalVariable[gv for gv in mod.globals
+                        if is_boxed_constant(gv) && box_used_only_by_instructions(gv)]
+
+has_pointer(T::LLVMType) =
+    T isa LLVM.PointerType ||
+    (T isa LLVM.StructType && any(has_pointer, T.elements)) ||
+    (T isa LLVM.ArrayType && has_pointer(T.element_type))
+
+# Move the boxed constants that `materialize_box!` embeds onto the stack of the entry points,
+# for back-ends whose thread-private pointers (address space 0) cannot refer to a constant
+# global. An isbits `Union` return is lowered as `{ptr, i8}`, whose pointer may refer to the
+# payload of such a box.
+#
+# Copying the box is sound because box addresses carry no identity (isbits egal is by
+# content), but the copy has to outlive every use of the pointer: a callee returning the
+# address of its own copy would leave the caller reading a dead frame. So the functions using
+# a box are first inlined into the entry points. An entry point other than a kernel may not
+# return such a pointer.
+#
+# Runs on optimized IR, where a box only remains a slot's target when it is
+# `jl_true`/`jl_false` (see `box_used_only_by_instructions`). Relocatable boxes are external,
+# and demoted by the `:table` lowering instead. Needs LLVM.jl's `convert_users_to_instructions!`
+# (LLVM 17+).
+function demote_boxed_constants!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    boxes = boxed_constants(mod)
+    isempty(boxes) && return false
+
+    inline_global_users!(job, mod, [gv.name for gv in boxes], "a boxed constant")
+
+    # a kernel returns nothing, but another entry point could return the box's address
+    function slot(f::LLVM.Function, gv::LLVM.GlobalVariable)
+        f in kernels(mod) || !has_pointer(f.function_type.return_type) ||
+            error("""Function `$(f.name)` may return the address of a boxed constant, which
+                     can only be kept on the stack of a kernel.""")
+        box_alloca!(f, gv)
+    end
+    for gv in boxes
+        slots = Dict{LLVM.Function, LLVM.Value}()
+        replace_global_with_local!(gv, f -> get!(() -> slot(f, gv), slots, f))
+    end
+    return true
+end
+
 # Return the byte offset added by a constant cast or GEP, or `nothing` if it is not static.
 function constexpr_byte_offset(ce::LLVM.ConstantExpr, dl::LLVM.DataLayout)
     op = ce.opcode
@@ -805,32 +904,30 @@ function using_functions!(fns::Set{LLVM.Function}, @nospecialize(value))
     return fns
 end
 
-# A relocation word comes out of a table whose base the back-end derives from per-dispatch
-# state, which only an entry point can reach (a kernel's state argument, typically). So hoist
-# every *other* function still holding a relocation use into its caller(s): mark it
-# `alwaysinline` and run the inliner, until only entry points hold one. Mirrors
-# `inline_unreachable_control_flow!`, and handles the `entry → A → B` case for the same reason:
-# `A` gets marked on the next round, once `B` has been inlined into it.
-function inline_relocation_users!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                 relocs::Relocations)
+# Inline every function other than an entry point that uses one of the globals `names`, which
+# stand for something only an entry point can provide, until only entry points use them: mark it
+# `alwaysinline` and run the inliner. Mirrors `inline_unreachable_control_flow!`, and handles the
+# `entry → A → B` case for the same reason: `A` gets marked on the next round, once `B` has been
+# inlined into it.
+function inline_global_users!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                              names, what::String)
     # by name: a function we mark may well be gone by the next round
     hoisted = Set{String}()
     while true
         users = Set{LLVM.Function}()
-        for rec in relocs.records
-            gv = get(mod.globals, rec.name, nothing)
+        for name in names
+            gv = get(mod.globals, name, nothing)
             gv === nothing || using_functions!(users, gv)
         end
 
         marked = false
         for f in users
-            # an entry point has no call sites, and is where the state arrives
+            # an entry point has no call sites
             isempty(f.uses) && continue
             fn = f.name
             fn in hoisted &&
-                error("""Function `$fn` uses a relocation but could not be inlined into an
-                         entry point (it is likely recursive or address-taken), so it cannot
-                         reach the relocation table.""")
+                error("""Function `$fn` uses $what but could not be inlined into an entry
+                         point (it is likely recursive or address-taken).""")
             push!(hoisted, fn)
             attrs = f.function_attributes
             delete!(attrs, :noinline)
@@ -848,6 +945,12 @@ function inline_relocation_users!(@nospecialize(job::CompilerJob), mod::LLVM.Mod
     end
     return
 end
+
+# A relocation word comes out of a table whose base the back-end derives from per-dispatch
+# state, which only an entry point can reach (a kernel's state argument, typically).
+inline_relocation_users!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
+                         relocs::Relocations) =
+    inline_global_users!(job, mod, (rec.name for rec in relocs.records), "a relocation")
 
 """
     emit_table_relocations!(job, mod, relocs)
