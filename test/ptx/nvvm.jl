@@ -164,6 +164,32 @@ end
     end
 end
 
+@testset "debug info" begin
+    # line tables at debug level 1, full debug info at level 2, as with NVPTX
+    for (debug_level, ptxas_flag) in ((1, "--generate-line-info"), (2, "--device-debug"))
+        asm, _ = PTX.code_execution(mod.kernel, Tuple{Ptr{Float32},Float32};
+                                    backend=:nvvm, cap=v"10.0", target_debuginfo=true,
+                                    debug_level)
+        @test @filecheck begin
+            @check ".target sm_100, debug"
+            @check ".loc"
+            @check ".file {{[0-9]+}} \"{{.*}}pointer.jl\""
+            @check ".section .debug_info"
+            asm
+        end
+
+        # ptxas accepts it with the flags CUDA.jl passes at that level
+        path = tempname() * ".ptx"
+        write(path, asm)
+        try
+            @test success(`$(CUDA_Compiler_jll.ptxas()) -arch=sm_100 $ptxas_flag $path -o $path.cubin`)
+        finally
+            rm(path; force=true)
+            rm("$path.cubin"; force=true)
+        end
+    end
+end
+
 @testset "loops with bounds checks" begin
     # libNVVM's code generator doesn't strength-reduce or sink like NVPTX's (see
     # `optimize_nvvm!`), which matters for loops that exit through bounds checks
