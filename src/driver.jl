@@ -368,7 +368,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    exception_sites = ExceptionSite[]
+    resolve_early = false
     @tracepoint "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
@@ -452,7 +452,20 @@ const __llvm_initialized = Ref(false)
                     end
                 end
             end
+        end
+    end
 
+    return finish_llvm!(job, ir, entry_fn, entry, entrypoints, compiled, relocations,
+                        resolve_early)
+end
+
+# finalize the IR for the target, validate it and collect its relocations
+function finish_llvm!(@nospecialize(job::CompilerJob), ir::LLVM.Module, entry_fn::String,
+                      entry::LLVM.Function, entrypoints, compiled, relocations::Relocations,
+                      resolve_early::Bool)
+    exception_sites = ExceptionSite[]
+    @tracepoint "IR finalization" begin
+        if job.config.toplevel
             # Do not expose dead sites to loaders.
             resolve_early || prune_dead_relocations!(ir, relocations)
 
@@ -550,4 +563,13 @@ emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
     end
 
     return code, (;)
+end
+
+function backend_codegen(@nospecialize(job::CompilerJob), ir::LLVM.Module,
+                         relocs::Relocations, format::LLVM.CodeGenFileType.T)
+    @tracepoint "LLVM back-end" begin
+        @tracepoint "preparation" prepare_execution!(job, ir, relocs)
+
+        @tracepoint "machine-code generation" mcgen(job, ir, format)
+    end
 end
