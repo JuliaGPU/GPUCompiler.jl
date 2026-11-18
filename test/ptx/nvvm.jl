@@ -86,6 +86,41 @@ end
     end
 end
 
+@testset "fast math" begin
+    # libNVVM ignores `afn`, so the approximate instructions are selected before
+    mod = @eval module $(gensym())
+        sqrt_fast(ptr, x) = (unsafe_store!(ptr, @fastmath sqrt(x)); nothing)
+        div_fast(ptr, x, y) = (unsafe_store!(ptr, @fastmath x / y); nothing)
+        inv_fast(ptr, x) = (unsafe_store!(ptr, @fastmath 1f0 / x); nothing)
+    end
+    for (f, types, instr) in ((mod.sqrt_fast, Tuple{Ptr{Float32},Float32}, "sqrt"),
+                              (mod.div_fast, Tuple{Ptr{Float32},Float32,Float32}, "div"),
+                              (mod.inv_fast, Tuple{Ptr{Float32},Float32}, "rcp"))
+        @test @filecheck begin
+            @check "$instr.approx.f32"
+            PTX.code_native(f, types; backend=:nvvm, cap=v"10.0")
+        end
+        @test @filecheck begin
+            @check "$instr.approx.ftz.f32"
+            PTX.code_native(f, types; backend=:nvvm, cap=v"10.0", fastmath=true)
+        end
+    end
+end
+
+@testset "fast math on vectors" begin
+    mod = @eval module $(gensym())
+        const V = NTuple{2,VecElement{Float32}}
+        div_fast(ptr, x, y) = unsafe_store!(ptr, Base.llvmcall("""
+            %r = fdiv afn <2 x float> %0, %1
+            ret <2 x float> %r""", V, Tuple{V,V}, x, y))
+    end
+    @test @filecheck begin
+        @check "div.approx.f32"
+        @check "div.approx.f32"
+        PTX.code_native(mod.div_fast, Tuple{Ptr{mod.V},mod.V,mod.V}; backend=:nvvm, cap=v"10.0")
+    end
+end
+
 @testset "older architectures" begin
     # libNVVM only reads current bitcode for these with `-nvvm-latest`, added in CUDA 13.5
     if CUDA_Compiler_jll.cuda_version >= v"13.5"

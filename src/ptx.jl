@@ -407,8 +407,8 @@ function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
         push!(options, "-nvvm-latest")
     end
 
-    # libNVVM defaults to IEEE division and square roots, preserving denormals. fast math
-    # relaxes these in the IR already, but libdevice's implementation is selected here.
+    # libNVVM only flushes f32 denormals, as fast math does, when asked to for the whole
+    # module (approximate division and square roots are selected by `lower_approx_math!`)
     if target.fastmath
         append!(options, ["-ftz=1", "-prec-div=0", "-prec-sqrt=0"])
     end
@@ -456,6 +456,8 @@ end
 
 # make a module acceptable to libNVVM, which otherwise accepts the same IR as NVPTX
 function legalize_nvvm!(mod::LLVM.Module; lto::Bool=false)
+    lower_approx_math!(mod)
+
     # libNVVM requires a version, which libraries like libdevice carry, possibly repeatedly
     versions = get!(mod.metadata, "nvvmir.version")
     if isempty(versions.operands)
@@ -1035,3 +1037,77 @@ function ptx_fsqrt_fast!(mod::LLVM.Module)
     return changed
 end
 PTXFSqrtFastPass() = ModulePass("ptx-fsqrt-fast", ptx_fsqrt_fast!)
+
+# libNVVM ignores the `afn` flag, only approximating f32 division and square roots when
+# asked to for the entire module (`-prec-div=0`, `-prec-sqrt=0`, and then with the slower
+# `div.full`), so select the approximate instructions as NVPTX does
+function lower_approx_math!(mod::LLVM.Module)
+    f32 = LLVM.FloatType()
+    is_f32(T) = T == f32 || (T isa LLVM.VectorType && T.element_type == f32)
+    to_replace = LLVM.Instruction[]
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        if inst isa LLVM.FDivInst
+            is_f32(inst.value_type) && inst.fast_math.afn && push!(to_replace, inst)
+        elseif inst isa LLVM.CallInst
+            callee = inst.called_operand
+            callee isa LLVM.Function && startswith(callee.name, "llvm.sqrt.") &&
+                is_f32(inst.value_type) && inst.fast_math.afn && push!(to_replace, inst)
+        end
+    end
+    isempty(to_replace) && return false
+
+    fns = mod.functions
+    declare(name, ft) = get!(() -> LLVM.Function(mod, name, ft), fns, name)
+    unary = LLVM.FunctionType(f32, [f32])
+    binary = LLVM.FunctionType(f32, [f32, f32])
+    @dispose builder=IRBuilder() begin
+        for inst in to_replace
+            suffix = flushes_f32_denormals(LLVM.parent(LLVM.parent(inst))) ? ".ftz.f" : ".f"
+            position!(builder, LLVM.before(inst))
+            # the intrinsics are scalar
+            function lower(operands)
+                if inst isa LLVM.FDivInst
+                    lhs, rhs = operands
+                    if lhs isa LLVM.ConstantFP && convert(Float32, lhs) == 1f0
+                        call!(builder, unary, declare("llvm.nvvm.rcp.approx$suffix", unary),
+                              [rhs])
+                    else
+                        call!(builder, binary, declare("llvm.nvvm.div.approx$suffix", binary),
+                              [lhs, rhs])
+                    end
+                else
+                    call!(builder, unary, declare("llvm.nvvm.sqrt.approx$suffix", unary),
+                          operands)
+                end
+            end
+            operands = inst isa LLVM.FDivInst ? inst.operands[1:2] : inst.operands[1:1]
+            T = inst.value_type
+            replacement = if T isa LLVM.VectorType
+                vec = LLVM.UndefValue(T)
+                for i in 0:T.length-1
+                    idx = ConstantInt(Int32(i))
+                    lane = lower([extract_element!(builder, op, idx) for op in operands])
+                    vec = insert_element!(builder, vec, lane, idx)
+                end
+                vec
+            else
+                lower(operands)
+            end
+            replace_uses!(inst, replacement)
+            erase!(inst)
+        end
+    end
+    return true
+end
+
+# does a function flush f32 denormals, per its denormal mode attributes?
+function flushes_f32_denormals(f::LLVM.Function)
+    attrs = f.function_attributes
+    for kind in ("denormal-fp-math-f32", "denormal-fp-math")
+        attr = get(attrs, kind, nothing)
+        attr === nothing && continue
+        output = first(split(LLVM.value(attr), ','))
+        return output in ("preserve-sign", "positive-zero")
+    end
+    return false
+end
