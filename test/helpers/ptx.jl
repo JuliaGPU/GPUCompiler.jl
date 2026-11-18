@@ -2,6 +2,7 @@ module PTX
 
 using ..GPUCompiler
 import LLVM
+import NVVM
 import ..TestRuntime
 
 struct CompilerParams <: AbstractCompilerParams
@@ -11,6 +12,11 @@ struct CompilerParams <: AbstractCompilerParams
 end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
+
+# the NVVM back-end needs libNVVM from CUDA 13.2+, which only reads current bitcode for
+# Blackwell (sm_100) and later without `-nvvm-latest`, so jobs target that by default
+nvvm_available() = NVVM.is_available() && NVVM.llvm_version("compute_100") !== nothing
+default_cap(backend) = backend === :nvvm ? v"10.0" : v"7.0"
 
 GPUCompiler.uses_exception_sites(@nospecialize(job::PTXCompilerJob)) =
     job.config.params.exception_sites
@@ -55,7 +61,8 @@ end
 GPUCompiler.runtime_module(::PTXCompilerJob) = PTXTestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types);
-                    cap=v"7.0", ptx=v"6.0", feature_set=:baseline, backend=:nvptx,
+                    backend=:nvptx, cap=default_cap(backend), ptx=v"6.0",
+                    feature_set=:baseline,
                     minthreads=nothing, maxthreads=nothing,
                     blocks_per_sm=nothing, maxregs=nothing,
                     fastmath=false, system_atomics=true, patch::Bool=false,
