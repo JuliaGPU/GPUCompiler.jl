@@ -121,10 +121,15 @@ end
         div_fast(ptr, x, y) = unsafe_store!(ptr, Base.llvmcall("""
             %r = fdiv afn <2 x float> %0, %1
             ret <2 x float> %r""", V, Tuple{V,V}, x, y))
-        rsqrt_fast(ptr, x) = unsafe_store!(ptr, Base.llvmcall("""
-            %s = call afn <2 x float> @llvm.sqrt.v2f32(<2 x float> %0)
-            %r = fdiv afn <2 x float> <float 1.0, float 1.0>, %s
-            ret <2 x float> %r""", V, Tuple{V}, x))
+        # a full module, as Julia 1.10 does not declare intrinsics used by `llvmcall`
+        rsqrt_fast(ptr, x) = unsafe_store!(ptr, Base.llvmcall(("""
+            define <2 x float> @entry(<2 x float> %0) #0 {
+              %s = call afn <2 x float> @llvm.sqrt.v2f32(<2 x float> %0)
+              %r = fdiv afn <2 x float> <float 1.0, float 1.0>, %s
+              ret <2 x float> %r
+            }
+            declare <2 x float> @llvm.sqrt.v2f32(<2 x float>)
+            attributes #0 = { alwaysinline }""", "entry"), V, Tuple{V}, x))
     end
     @test @filecheck begin
         @check "div.approx.f32"
@@ -230,14 +235,15 @@ end
 
 @testset "atomics" begin
     # libNVVM before CUDA 13.5 ignored the scope and ordering of `atomicrmw`
+    # (typed-pointer IR, which also parses with opaque pointers)
     mod = @eval module $(gensym())
         system(p) = Base.llvmcall("""
-            %p = inttoptr i64 %0 to ptr
-            %o = atomicrmw add ptr %p, i64 1 monotonic, align 8
+            %p = inttoptr i64 %0 to i64*
+            %o = atomicrmw add i64* %p, i64 1 monotonic, align 8
             ret void""", Cvoid, Tuple{Ptr{Int}}, p)
         device_seq_cst(p) = Base.llvmcall("""
-            %p = inttoptr i64 %0 to ptr
-            %o = atomicrmw add ptr %p, i64 1 syncscope("device") seq_cst, align 8
+            %p = inttoptr i64 %0 to i64*
+            %o = atomicrmw add i64* %p, i64 1 syncscope("device") seq_cst, align 8
             ret void""", Cvoid, Tuple{Ptr{Int}}, p)
     end
     @test @filecheck begin
