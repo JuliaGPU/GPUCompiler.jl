@@ -180,7 +180,7 @@ Several keyword arguments can be used to customize the compilation process:
 - `strip`: strip non-functional metadata and debug information (default: false)
 - `julia_passes`: the implementation of Julia's LLVM passes (e.g. GC lowering) that
    optimization uses: `:cpp` for the passes of Julia's code generator, or `:ports` for
-   their ports in JuliaIR.jl, which must then be loaded. The default comes from the
+   their ports in JuliaIR.jl. The default comes from the
    `julia_passes` preference of GPUCompiler (`:cpp` if unset). See
    [`GPUCompiler.julia_pass`](@ref) for which passes are ported.
 """
@@ -213,7 +213,7 @@ struct CompilerConfig{T,P}
                             always_inline=false, opt_level=2,
                             debug_level=Base.JLOptions().debug_level, optimize=toplevel,
                             libraries=toplevel, cleanup=toplevel, validate=toplevel,
-                            strip=false, julia_passes=default_julia_passes(),
+                            strip=false, julia_passes=JULIA_PASSES,
                             only_entry=false)
         if entry_abi ∉ (:specfunc, :func)
             error("Unknown entry_abi=$entry_abi")

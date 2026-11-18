@@ -6,46 +6,8 @@ const JULIA_PASSES = Symbol(@load_preference("julia_passes", "cpp"))
 JULIA_PASSES in (:cpp, :ports) ||
     error("Invalid julia_passes preference $(repr(String(JULIA_PASSES))); expected \"cpp\" or \"ports\"")
 
-# The ports of Julia's passes, supplied by the JuliaIRExt extension: a function registering
-# them with a `PassBuilder`, and the pipeline name of the port of each of Julia's passes by
-# the name of the `LLVM.Interop` constructor of the C++ pass.
-struct PassPorts
-    register!::Function
-    names::Dict{Symbol,String}
-end
-const pass_ports = Ref{Union{Nothing,PassPorts}}(nothing)
-
-# The default of `CompilerConfig`'s `julia_passes`: the preference, except while
-# precompiling without JuliaIR.jl loaded, e.g., in the workload of a package that does not
-# depend on it. That uses the C++ passes; since the setting is part of the configuration,
-# what it caches is not used for configurations that select the ports.
-function default_julia_passes()
-    if JULIA_PASSES === :ports && pass_ports[] === nothing &&
-       ccall(:jl_generating_output, Cint, ()) == 1
-        return :cpp
-    end
-    return JULIA_PASSES
-end
-
-const JULIAIR = Base.PkgId(Base.UUID("3913dba9-7ba9-44aa-bf76-1cfa3b3073b1"), "JuliaIR")
-
-# When the preference selects the ports, load JuliaIR.jl if the environment provides it,
-# so that code using GPUCompiler through other packages (e.g. their test suites) gets the
-# ports without loading JuliaIR.jl itself. Its extension then registers the ports, once
-# GPUCompiler has finished loading.
-function load_julia_passes()
-    JULIA_PASSES === :ports || return
-    ccall(:jl_generating_output, Cint, ()) == 1 && return
-    haskey(Base.loaded_modules, JULIAIR) && return
-    Base.locate_package(JULIAIR) === nothing && return
-    Base.require(JULIAIR)
-    return
-end
-
 function check_julia_passes(@nospecialize(job::CompilerJob))
     job.config.julia_passes === :ports || return
-    pass_ports[] === nothing &&
-        error("julia_passes=:ports requires JuliaIR.jl to be loaded (`using JuliaIR`)")
     supports_typed_pointers(context()) &&
         error("julia_passes=:ports requires a context with opaque pointers; create it with `JuliaContext(; opaque_pointers=true)`")
     return
@@ -54,6 +16,26 @@ end
 # The `opaque_pointers` argument for contexts to compile in with `julia_passes`: the ports
 # only support opaque pointers, which Julia 1.10 and 1.11 do not use by default.
 context_opaque_pointers(julia_passes::Symbol) = julia_passes === :ports ? true : nothing
+
+# The port of each of Julia's passes in the pipeline, by the name of the `LLVM.Interop`
+# constructor of the C++ pass (or the name it would have, see `CPP_PASS_NAMES`).
+const PASS_PORTS = Dict{Symbol,String}(
+    :AllocOptPass                 => "jl-alloc-opt",
+    :CancellationLoweringPass     => "jl-cancellation-lowering",
+    :CombineMulAddPass            => "jl-combine-muladd",
+    :DemoteFloat16Pass            => "jl-demote-float16",
+    :ExpandAtomicModifyPass       => "jl-expand-atomic-modify",
+    :FinalLowerGCPass             => "jl-final-lower-gc",
+    :GCInvariantVerifierPass      => "jl-gc-invariant-verifier",
+    :JuliaLICMPass                => "jl-licm",
+    :LateLowerGCPass              => "jl-late-lower-gc-frame",
+    :LowerExcHandlersPass         => "jl-lower-exc-handlers",
+    :LowerPTLSPass                => "jl-lower-ptls",
+    :LowerSIMDLoopPass            => "jl-lower-simdloop",
+    :PropagateJuliaAddrspacesPass => "jl-propagate-addrspaces",
+    :RemoveJuliaAddrspacesPass    => "jl-remove-addrspaces",
+    :RemoveNIPass                 => "jl-remove-ni",
+)
 
 """
     julia_pass(job, name::Symbol)
@@ -65,9 +47,8 @@ no constructor for are named as if it had one, e.g. `:CancellationLoweringPass`.
 """
 function julia_pass(@nospecialize(job::CompilerJob), name::Symbol)
     if job.config.julia_passes === :ports
-        ports = pass_ports[]::PassPorts
-        haskey(ports.names, name) || error("Unknown Julia pass $name")
-        return ports.names[name]
+        haskey(PASS_PORTS, name) || error("Unknown Julia pass $name")
+        return PASS_PORTS[name]
     end
     isdefined(LLVM.Interop, name) && return getfield(LLVM.Interop, name)()
     haskey(CPP_PASS_NAMES, name) || error("Unknown Julia pass $name")
@@ -83,6 +64,6 @@ const CPP_PASS_NAMES = Dict{Symbol,String}(
 # make the ports usable by name in the pipeline of `pb`
 function register_julia_passes!(pb::PassBuilder, @nospecialize(job::CompilerJob))
     job.config.julia_passes === :ports || return
-    Base.invokelatest((pass_ports[]::PassPorts).register!, pb)
+    JuliaIR.register!(pb)
     return
 end

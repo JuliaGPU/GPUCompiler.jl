@@ -31,22 +31,13 @@ end
     @test GPUCompiler.julia_pass(ports, :LowerPTLSPass) == "jl-lower-ptls"
     @test GPUCompiler.julia_pass(ports, :RemoveJuliaAddrspacesPass) == "jl-remove-addrspaces"
     @test GPUCompiler.julia_pass(ports, :CancellationLoweringPass) == "jl-cancellation-lowering"
-    @test length(GPUCompiler.pass_ports[].names) == 15
+    @test length(GPUCompiler.PASS_PORTS) == 15
+    @test all(in(JuliaIR.passes()), values(GPUCompiler.PASS_PORTS))
 end
 
 @testset "requirements" begin
     kernel() = nothing
     job, _ = PTX.create_job(kernel, (); julia_passes=:ports)
-
-    ports = GPUCompiler.pass_ports[]
-    try
-        GPUCompiler.pass_ports[] = nothing
-        JuliaContext(; opaque_pointers=true) do ctx
-            @test_throws "requires JuliaIR.jl to be loaded" GPUCompiler.compile(:llvm, job)
-        end
-    finally
-        GPUCompiler.pass_ports[] = ports
-    end
 
     if VERSION < v"1.12"
         JuliaContext(; opaque_pointers=false) do ctx
@@ -58,17 +49,9 @@ end
     @test occursin("define", sprint(io -> GPUCompiler.code_llvm(io, job)))
 end
 
-@testset "loading" begin
-    # with the preference selecting the ports, loading GPUCompiler loads JuliaIR.jl from
-    # the environment, and the extension registers the ports
-    code = "import GPUCompiler; print(GPUCompiler.pass_ports[] !== nothing)"
-    out = read(`$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project()) -e $code`, String)
-    @test out == string(GPUCompiler.JULIA_PASSES === :ports)
-end
-
-# Packages that do not depend on JuliaIR.jl may compile code while precompiling, e.g., in
-# their workload, in a process without it.
-VERSION >= v"1.11" && precompile_test_harness("precompilation without JuliaIR.jl") do load_path
+# Workloads compile with the preference's provider, so that what they cache is used in a
+# session with the same preference (test/native/precompile.jl checks that it is).
+VERSION >= v"1.11" && precompile_test_harness("precompilation") do load_path
     # not named like the package of test/native/precompile.jl, which a worker may have
     # loaded already, so that the cache of the workload would not match it
     create_standalone(load_path, "PortsCompiler", "native.jl")
@@ -88,10 +71,8 @@ VERSION >= v"1.11" && precompile_test_harness("precompilation without JuliaIR.jl
         end) |> string)
     Base.compilecache(Base.PkgId("PortsWorkload"))
 
-    # such compilations use the C++ passes; that is part of their configuration, so
-    # results cached for them are not used for configurations with the ports
     mod = Base.require(Base.PkgId("PortsWorkload"))
-    @test Base.invokelatest(getglobal, mod, :julia_passes) === :cpp
+    @test Base.invokelatest(getglobal, mod, :julia_passes) === GPUCompiler.JULIA_PASSES
 end
 
 ## differential: the C++ passes and the ports give the same IR

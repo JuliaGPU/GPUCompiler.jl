@@ -66,12 +66,9 @@ using Preferences, GPUCompiler
 set_preferences!(GPUCompiler, "julia_passes" => "ports")
 ```
 
-The preference takes effect after restarting Julia. While precompiling packages that do not
-load JuliaIR.jl, configurations keep using the C++ passes.
-
-The ports require JuliaIR.jl to be loaded. When the preference selects them, loading
-GPUCompiler also loads JuliaIR.jl if the active environment provides it; otherwise, load it
-with `using JuliaIR`. They also require opaque pointers: on Julia 1.10 and 1.11, contexts
+The preference takes effect after restarting Julia, and also applies to the code that
+packages compile in their precompilation workloads, so that a session with the same
+preference uses it. The ports require opaque pointers: on Julia 1.10 and 1.11, contexts
 created by `JuliaContext()` use them when the preference selects the ports, and other
 contexts must be created with `JuliaContext(; opaque_pointers=true)`.
 

@@ -580,7 +580,7 @@ end
 
     # the back-end crashes the process, so generate code in another one
     script = """
-        using GPUCompiler, LLVM, JuliaIR
+        using GPUCompiler, LLVM
         include($(repr(joinpath(@__DIR__, "helpers", "runtime.jl"))))
         include($(repr(joinpath(@__DIR__, "helpers", "gcn.jl"))))
         kernel_i8(p::Core.LLVMPtr{Int8,1}, x::Int8) =

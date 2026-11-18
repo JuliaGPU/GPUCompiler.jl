@@ -8,7 +8,7 @@
 
 helpers = joinpath(@__DIR__, "..", "helpers")
 script = """
-    using GPUCompiler, LLVM, LLVMDowngrader_jll, JuliaIR
+    using GPUCompiler, LLVM, LLVMDowngrader_jll
     include(joinpath($(repr(helpers)), "runtime.jl"))
     include(joinpath($(repr(helpers)), "metal.jl"))
 

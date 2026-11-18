@@ -9,8 +9,7 @@
 #
 # Develops GPUCompiler and the downstream PACKAGE (and further PACKAGES, e.g. packages of
 # PACKAGE's repository) into the active environment, for `Pkg.test(PACKAGE)` with the
-# ports: JuliaIR.jl is added too, and to PACKAGE's test environment, where GPUCompiler
-# loads it. The preference goes into the active environment (in CI, a temporary one),
+# ports. The preference goes into the active environment (in CI, a temporary one),
 # which `Pkg.test` passes on to the test environment; GPUCompiler is added to PACKAGE's
 # test dependencies so that it applies there. `--workspace` also instantiates PACKAGE's
 # workspace against GPUCompiler (Metal.jl's tests run examples in its workspace
@@ -25,7 +24,6 @@ using Pkg, TOML
 
 const ROOT = dirname(@__DIR__)
 const GPUCOMPILER_UUID = "61eb1bfa-7361-4325-ad38-22787b887f55"
-const JULIAIR_UUID = "3913dba9-7ba9-44aa-bf76-1cfa3b3073b1"
 
 function write_preferences(dir, mode)
     # an environment that doesn't exist yet (Pkg creates it on the first change)
@@ -52,14 +50,13 @@ function downstream(packages, workspace)
     write_preferences(env, "ports")
 
     Pkg.develop(path=ROOT)
-    Pkg.add(PackageSpec(name="JuliaIR", version="0.1"))
     Pkg.develop([PackageSpec(name=name) for name in packages])
 
     checkout = joinpath(Pkg.devdir(), package)
     if workspace
-        # before adding JuliaIR.jl to the test environment, which is part of the workspace
-        # and could then not be resolved; the examples that need the workspace run in the
-        # test process, which has loaded GPUCompiler and JuliaIR.jl already
+        # before editing the test environment, which is part of the workspace and could
+        # then not be resolved; the examples that need the workspace run in the test
+        # process, which has loaded GPUCompiler already
         Pkg.activate(checkout)
         Pkg.develop(path=ROOT)
         Pkg.instantiate(workspace=true)
@@ -67,7 +64,7 @@ function downstream(packages, workspace)
     end
     test_project = joinpath(checkout, "test", "Project.toml")
     isfile(test_project) || error("$package has no test/Project.toml")
-    add = Dict("GPUCompiler" => GPUCOMPILER_UUID, "JuliaIR" => JULIAIR_UUID)
+    add = Dict("GPUCompiler" => GPUCOMPILER_UUID)
     # by editing the text, as rewriting it with TOML.print reorders the file
     deps = get(TOML.parsefile(test_project), "deps", Dict())
     lines = [k * " = \"" * v * "\"" for (k, v) in add if !haskey(deps, k)]

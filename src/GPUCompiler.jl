@@ -3,6 +3,8 @@ module GPUCompiler
 using LLVM, LLVM.IR, LLVM.Build, LLVM.Passes, LLVM.ORC
 using LLVM.Interop
 
+import JuliaIR
+
 
 using ExprTools: splitdef, combinedef
 
@@ -107,9 +109,6 @@ function __init__()
         Tracy.@register_tracepoints()
     end
     register_deferred_codegen()
-
-    # last, as it loads other packages
-    load_julia_passes()
 end
 
 end # module

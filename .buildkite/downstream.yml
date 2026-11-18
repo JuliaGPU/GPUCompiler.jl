@@ -7,8 +7,8 @@
 #
 # Every package also gets a "(ports)" step,
 # which runs its tests with the ports of Julia's passes (the `julia_passes = "ports"`
-# preference, with JuliaIR.jl set up by `.ci/juliair.jl` in an environment of its own,
-# as the default one persists on some agents) and fails unless JuliaIR.jl's
+# preference, set up by `.ci/juliair.jl` in an environment of its own, as the default one
+# persists on some agents) and fails unless JuliaIR.jl's
 # ledger shows that they ran. `[only ports]` selects only the ports steps and
 # `[skip ports]` skips them; a package's own tags (e.g. `[only cuda]`) select both of its
 # steps. Steps are skipped on draft pull requests unless a tag selects them.
