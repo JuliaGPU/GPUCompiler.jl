@@ -1,4 +1,4 @@
-# Reproducibility fixes for LLVM modules assembled from multiple codegen units.
+# Reproducibility fixes for the LLVM modules GPUCompiler generates.
 
 
 ## module layout workaround
@@ -135,4 +135,129 @@ function dedup_compile_units!(mod::LLVM.Module)
         push!(nmd.operands, cu)
     end
     return true
+end
+
+
+## codegen name normalization
+
+# Replace the names matching `codegen_name` in the strings of the metadata graph rooted at
+# `md`, by `normalize`d names or, in the root node itself, by `replacement`.
+function normalize_metadata!(@nospecialize(md), visited::Set{LLVM.MDNode}, codegen_name::Regex,
+                             normalize, replacement=nothing)
+    md isa LLVM.MDNode || return
+    md in visited && return
+    push!(visited, md)
+    # (a copy, as replacing an operand can re-unique the node)
+    for (i, op) in enumerate(collect(md.operands))
+        if op isa LLVM.MDString
+            str = convert(String, op)
+            occursin(codegen_name, str) || continue
+            new = replacement === nothing ? normalize(str) : replacement
+            new == str || (md.operands[i] = LLVM.MDString(new))
+        elseif op isa LLVM.MDNode
+            normalize_metadata!(op, visited, codegen_name, normalize)
+        end
+    end
+end
+
+# Julia names each generated LLVM function `julia_<name>_<counter>`. Up to Julia 1.13, the
+# counter is drawn from a process-global codegen sequence and so differs from one session to
+# the next. Left anywhere in the emitted bitcode it makes a back-end's output (e.g., the AIR
+# and the metallib wrapping it) non-reproducible across sessions, defeating byte-stable
+# caching and content-keyed binary archives. And a symbol name is not the only place it
+# appears: inlining a Julia function leaves its name behind in the block labels the inliner
+# synthesizes, in the (now orphaned) `DISubprogram` its debug locations still point at, and
+# in the alias-scope strings LLVM's inliner derives from it.
+#
+# So rewrite each of these occurrences: map each distinct codegen name to a deterministic
+# module-local form (its rank in a fixed traversal), then substitute that map into symbol
+# names, value names, and metadata strings. A subprogram belonging to a function instead
+# adopts that function's current name, so an entry that `irgen.jl` already renamed to a
+# stable mangled symbol keeps a `linkageName` matching the symbol it describes.
+# The Metal and SPIR-V back-ends run it in `mcgen`, before writing the module to bitcode.
+function normalize_julia_symbol_names!(mod::LLVM.Module)
+    # The counter is the trailing digit group, so match the name part lazily. The word
+    # boundaries keep the pattern from biting into a longer token: `myjulia_foo_1` is a user
+    # symbol that merely ends this way, and `julia_foo_12bar` is one that merely contains it.
+    # The name part must cover more than `\w`: mutating functions carry `!`
+    # (`julia_record_exception!_18521`) and closures carry `#` (`julia_#kernel#123_456`),
+    # and a missed name leaks the per-session counter into the bitcode — exactly the
+    # byte-instability this pass exists to prevent.
+    codegen_name = r"(?<!\w)julia_[\w!#]*?_[0-9]+(?!\w)"
+    renames = Dict{String,String}()
+    deterministic(match::AbstractString) = get!(renames, match) do
+        replace(match, r"_[0-9]+$" => "") * "_$(length(renames) + 1)"
+    end
+    normalize(str::AbstractString) = replace(str, codegen_name => deterministic)
+    # (unspecialized, and with `LLVM.name` rather than the `name` property, so that this is
+    # compiled once rather than for every type of instruction)
+    rename!(@nospecialize(value)) = let str = LLVM.name(value)
+        occursin(codegen_name, str) && LLVM.name!(value, normalize(str))
+    end
+
+    # Metadata forms a graph (a debug location points at its subprogram, an alias scope at its
+    # domain), so walk it, replacing every string that carries a name. Only nodes reachable
+    # from a function or an instruction are visited, which is where inlining leaves its traces.
+    visited = Set{LLVM.MDNode}()
+
+    # the instruction metadata that can name a function: a debug location points at the
+    # subprogram it came from (orphaned once that function is inlined away), and the alias
+    # scopes the inliner creates are labelled with the function it inlined
+    md_kinds = (MD_dbg, MD_alias_scope, MD_noalias, MD_tbaa, MD_tbaa_struct, MD_loop)
+
+    # Symbols first, so that a subprogram can adopt its function's final name...
+    for f in mod.functions
+        isdeclaration(f) || rename!(f)
+    end
+    # ...and every surviving function adopts before any instruction walk runs, since a walk
+    # can reach another function's subprogram through an inlined debug location and would
+    # otherwise give it a rank name instead of that function's symbol.
+    for f in mod.functions
+        isdeclaration(f) && continue
+        sp = f.subprogram
+        sp === nothing || normalize_metadata!(sp, visited, codegen_name, normalize, f.name)
+    end
+    for f in mod.functions
+        isdeclaration(f) && continue
+        for bb in f.blocks
+            rename!(bb)
+            for inst in bb.instructions
+                rename!(inst)
+                md = inst.metadata
+                for kind in md_kinds
+                    haskey(md, kind) &&
+                        normalize_metadata!(md[kind], visited, codegen_name, normalize)
+                end
+            end
+        end
+    end
+
+    # LLVM's function-local value symbol table preserves insertion history, which is not
+    # visible in textual IR but does affect bitcode string-table order. Transformations above
+    # can create the same named values through pointer-keyed worklists in different orders.
+    # Reinsert every local name in IR order so equivalent modules serialize identically.
+    # (by reference, as LLVM.jl's setter would be compiled for every type of instruction)
+    for f in mod.functions
+        named_values = Pair{LLVM.API.LLVMValueRef,String}[]
+        record!(@nospecialize(value)) = let name = LLVM.name(value)
+            isempty(name) ||
+                push!(named_values, Base.unsafe_convert(LLVM.API.LLVMValueRef, value) => name)
+        end
+        for value in f.parameters
+            record!(value)
+        end
+        for bb in f.blocks
+            record!(bb)
+            for inst in bb.instructions
+                record!(inst)
+            end
+        end
+        for (ref, _) in named_values
+            LLVM.API.LLVMSetValueName(ref, "")
+        end
+        for (ref, name) in named_values
+            LLVM.API.LLVMSetValueName(ref, name)
+        end
+    end
+    return
 end

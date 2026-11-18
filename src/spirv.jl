@@ -325,6 +325,10 @@ end
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
+    # scrub the process-global codegen counters of Julia 1.13 and earlier from symbol names,
+    # so that they do not differ between sessions (e.g., for PoCL's on-disk kernel cache)
+    normalize_julia_symbol_names!(mod)
+
     # translate to SPIR-V
     input = bitcode(mod)
     spirv = if target.backend === :llvm
