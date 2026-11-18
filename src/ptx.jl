@@ -461,22 +461,18 @@ function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::L
     return output
 end
 
-# Transforms that NVPTX's `llc` performs as part of code generation, but libNVVM does not.
+# IR passes that compensate for observed differences between the PTX of NVPTX and libNVVM.
 #
-# LLVM's code generator runs a few IR passes before instruction selection; libNVVM's
-# equivalent omits two of them that matter for Julia code, whose loops typically exit
-# through bounds checks that branch to `noreturn` error-reporting code:
+# Julia's loops typically exit through bounds checks that branch to `noreturn` error
+# reporting code. In such loops NVPTX's code generator strength-reduces the address computed
+# from the induction variable (`base + i * stride`, a 64-bit multiply) into an incremented
+# pointer, and sinks instructions only used after a bounds check, loads among them, past it.
+# libNVVM's output does neither. Running loop strength reduction (which NVPTX's codegen
+# pipeline also runs) and IR sinking before libNVVM recovers most of that, up to 15% on a
+# bounds-checked matrix multiplication.
 #
-# - loop strength reduction, which turns the 64-bit address computed from the induction
-#   variable in each iteration (`base + i * stride`, a 64-bit multiply) into a pointer
-#   that is incremented. libNVVM keeps the multiplication when the loop has a second
-#   exit, e.g. a bounds check, costing several instructions per iteration;
-# - sinking, which moves instructions that are only used after a bounds check, loads
-#   among them, past the check and into the block that uses them.
-#
-# Running these on the optimized IR closes the gap with NVPTX (up to 15% on a
-# bounds-checked matrix multiplication). They use LLVM's default cost model, so they
-# don't need NVPTX's target machine, which libNVVM doesn't use.
+# Without NVPTX's target machine, LSR uses LLVM's default cost model. It is a heuristic
+# that could raise register pressure, but it measured as a net win.
 function optimize_nvvm!(mod::LLVM.Module)
     @dispose pb=PassBuilder() begin
         add!(pb, FunctionPassManager()) do fpm
