@@ -122,6 +122,34 @@ end
     end
 end
 
+@testset "loops with bounds checks" begin
+    # libNVVM's code generator doesn't strength-reduce loops that exit through bounds checks
+    # like NVPTX's does (see `optimize_nvvm!`)
+    mod = @eval module $(gensym())
+        # strided accesses: the address is a multiplication of the induction variable
+        function strided(out::Ptr{Float32}, a::Ptr{Float32}, stride::Int, n::Int, len::Int)
+            acc = 0f0
+            for i in 1:n
+                idx = (i - 1) * stride + 1
+                idx <= len || throw(BoundsError())
+                acc += unsafe_load(a, idx)
+            end
+            unsafe_store!(out, acc)
+            return
+        end
+    end
+
+    # the address is incremented by the stride instead of recomputed, with or without
+    # a multiply-add: the kernel has no other integer multiplications
+    @test @filecheck begin
+        @check_label ".entry"
+        @check_not "{{(mul|mad)\\.(lo|wide)}}"
+        @check "ret;"
+        PTX.code_native(mod.strided, Tuple{Ptr{Float32},Ptr{Float32},Int,Int,Int};
+                        backend=:nvvm, cap=v"10.0", kernel=true)
+    end
+end
+
 @testset "older architectures" begin
     # libNVVM only reads current bitcode for these with `-nvvm-latest`, added in CUDA 13.5
     if CUDA_Compiler_jll.cuda_version >= v"13.5"

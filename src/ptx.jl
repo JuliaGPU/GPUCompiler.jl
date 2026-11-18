@@ -407,6 +407,10 @@ function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
         push!(options, "-nvvm-latest")
     end
 
+    # options that tune libNVVM's passes (`-Xopt`, `-Xllc`, `-aggressive-inline`, ...) must
+    # never be passed here: libNVVM keeps them for the rest of the process, so they would
+    # leak into the compilation of every later job.
+
     # libNVVM only flushes f32 denormals, as fast math does, when asked to for the whole
     # module (approximate division and square roots are selected by `lower_approx_math!`)
     if target.fastmath
@@ -417,6 +421,9 @@ end
 
 function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module;
                       lto::Bool)
+    if job.config.optimize && job.config.opt_level >= 1
+        optimize_nvvm!(mod)
+    end
     legalize_nvvm!(mod; lto)
     options, arch = nvvm_options(job)
     lto && push!(options, "-gen-lto")
@@ -452,6 +459,29 @@ function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::L
     end
 
     return output
+end
+
+# Julia's loops typically have bounds checks, which add an exit to `noreturn` error
+# reporting code. In loops with such an extra exit, libNVVM can keep computing the address
+# from the induction variable (`base + i * stride`, a 64-bit multiply) in every iteration,
+# where NVPTX's code generator strength-reduces it into an incremented pointer. Running
+# LLVM's loop strength reduction before libNVVM recovers that. Without NVPTX's target
+# machine it uses LLVM's default cost model, which measured as a net win.
+#
+# IR sinking would gain a few percent more on some kernels, but is deliberately not run: it
+# can move many instructions into the join after a branch (e.g. an inlined `sin` with a slow
+# path), keeping their operands live across both paths, and raise register use enough that
+# launches of large blocks that work with NVPTX fail.
+function optimize_nvvm!(mod::LLVM.Module)
+    @dispose pb=PassBuilder() begin
+        add!(pb, FunctionPassManager()) do fpm
+            add!(fpm, LoopPassManager()) do lpm
+                add!(lpm, LoopStrengthReducePass())
+            end
+        end
+        run!(pb, mod)
+    end
+    return mod
 end
 
 # make a module acceptable to libNVVM, which otherwise accepts the same IR as NVPTX
