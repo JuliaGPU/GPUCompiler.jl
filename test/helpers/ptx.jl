@@ -65,13 +65,16 @@ function create_job(@nospecialize(func), @nospecialize(types);
                     feature_set=:baseline,
                     minthreads=nothing, maxthreads=nothing,
                     blocks_per_sm=nothing, maxregs=nothing,
-                    fastmath=false, system_atomics=true, patch::Bool=false,
+                    fastmath=false, system_atomics=true, target_debuginfo::Bool=false,
+                    patch::Bool=false,
                     exception_sites::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
     target = PTXCompilerTarget(; cap, ptx, feature_set, backend,
                                  minthreads, maxthreads, blocks_per_sm, maxregs,
-                                 fastmath, system_atomics)
+                                 fastmath, system_atomics,
+                                 # `debuginfo` is the reflection keyword (`code_llvm`)
+                                 debuginfo=target_debuginfo)
     params = CompilerParams(patch, exception_sites)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs

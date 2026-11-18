@@ -423,6 +423,15 @@ function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     if target.fastmath
         append!(options, ["-ftz=1", "-prec-div=0", "-prec-sqrt=0"])
     end
+
+    # the debug info itself comes from the module's metadata (see `llvm_debug_info`), so
+    # these flags only mirror what `nvcc -lineinfo` and `nvcc -G` pass to libNVVM's `cicc`.
+    # unlike `-G`, we don't add `-opt=0`: NVPTX also emits debug info for optimized code.
+    if job.config.debug_level == 1
+        push!(options, "-generate-line-info")
+    elseif job.config.debug_level >= 2
+        push!(options, "-g")
+    end
     return options, arch
 end
 
