@@ -24,7 +24,11 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
 
     # the back-end generating PTX from the optimized LLVM IR:
     #   :nvptx  - LLVM's NVPTX back-end
-    #   :nvvm   - NVIDIA's libNVVM, through NVVM.jl, which has to be loaded
+    #   :nvvm   - NVIDIA's libNVVM, through NVVM.jl, which has to be loaded. It also
+    #             generates LTO-IR as object code (`compile(:obj, job)`). nvJitLink links
+    #             it as a whole program, so kernels are kept in `llvm.used`. LTO-IR for
+    #             architectures before Blackwell (sm_100) uses libNVVM's `-nvvm-latest`
+    #             reader, which nvJitLink then has to be passed as well.
     backend::Symbol = :nvptx
 
     # codegen quirks
@@ -351,12 +355,16 @@ end
 
 @unlocked function mcgen(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                          mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
-    if format != LLVM.CodeGenFileType.Assembly
-        error("Unsupported PTX output format $format; the PTX back-ends only emit PTX assembly.")
-    end
     target = job.config.target
     if target.backend === :nvvm
-        return String(nvvm_codegen(job, mod))
+        if format == LLVM.CodeGenFileType.Object
+            return nvvm_codegen(job, mod; lto=true)
+        end
+        return String(nvvm_codegen(job, mod; lto=false))
+    end
+    if format != LLVM.CodeGenFileType.Assembly
+        error("""The NVPTX back-end only emits PTX assembly;
+                 object code (LTO-IR) requires the NVVM back-end (`backend=:nvvm`).""")
     end
 
     if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
@@ -407,9 +415,11 @@ function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     return options, arch
 end
 
-function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module)
-    legalize_nvvm!(mod)
+function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module;
+                      lto::Bool)
+    legalize_nvvm!(mod; lto)
     options, arch = nvvm_options(job)
+    lto && push!(options, "-gen-lto")
 
     input = bitcode(mod)
     prog = NVVM.Program()
@@ -429,26 +439,35 @@ function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::L
         finalize(prog)
     end
 
-    # libNVVM silently turns calls to intrinsics it doesn't know into calls to external
-    # functions, which then fail to link
-    unknown = unique(m.captures[1] for m in eachmatch(r"\.extern \.func[^\n]*?\b(llvm\.[\w.]+)",
-                                                     String(copy(output))))
-    if !isempty(unknown)
-        path, = dump_failure(".bc" => input)
-        error("libNVVM does not support the intrinsics $(join(unknown, ", ")).\n" *
-              "If you think this is a bug, please file an issue and attach $(path).")
+    if !lto
+        # libNVVM silently turns calls to intrinsics it doesn't know into calls to external
+        # functions, which then fail to link
+        unknown = unique(m.captures[1] for m in eachmatch(r"\.extern \.func[^\n]*?\b(llvm\.[\w.]+)",
+                                                         String(copy(output))))
+        if !isempty(unknown)
+            path, = dump_failure(".bc" => input)
+            error("libNVVM does not support the intrinsics $(join(unknown, ", ")).\n" *
+                  "If you think this is a bug, please file an issue and attach $(path).")
+        end
     end
 
     return output
 end
 
 # make a module acceptable to libNVVM, which otherwise accepts the same IR as NVPTX
-function legalize_nvvm!(mod::LLVM.Module)
+function legalize_nvvm!(mod::LLVM.Module; lto::Bool=false)
     # libNVVM requires a version, which libraries like libdevice carry, possibly repeatedly
     versions = get!(mod.metadata, "nvvmir.version")
     if isempty(versions.operands)
         push!(versions.operands,
               MDNode(Metadata[ConstantInt(Int32(2)), ConstantInt(Int32(0))]))
+    end
+
+    # nvJitLink links LTO-IR as a whole program, dropping everything that isn't used,
+    # including kernels that aren't referenced
+    if lto
+        kernels = filter(f -> f.callconv == LLVM.CallConv.PTXKernel, collect(mod.functions))
+        union!(mod.used, kernels)
     end
     return mod
 end
