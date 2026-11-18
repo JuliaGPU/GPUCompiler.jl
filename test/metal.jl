@@ -974,11 +974,6 @@ end
         air = sprint(io -> Metal.code_native_table(io, mod.kernel, tt; kernel=true))
         @test occursin("reloc_table", air)
         @test !occursin("load ptr, ptr addrspace(1)", air)
-        # LLVM 20 folds the comparison of the converted words into one of the words
-        if LLVM.version() >= v"20"
-            @test occursin("icmp eq i64", air)
-            @test !occursin("icmp eq ptr", air)
-        end
     end
 end
 

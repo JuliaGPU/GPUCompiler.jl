@@ -2134,6 +2134,70 @@ end
     end
 end
 
+@testset "merged constant loads" begin
+    # loads through a select or phi of baked relocation slots are folded to the selected
+    # values, as nothing else folds them after target finalization
+    fold(ir) = Context() do ctx
+        mod = parse(LLVM.Module, ir)
+        changed = GPUCompiler.fold_merged_constant_loads!(mod)
+        LLVM.verify(mod)
+        return changed, string(mod)
+    end
+    if !typed_ptrs
+        slots = """
+            @a = private constant i64 1
+            @b = private constant i64 2
+            """
+        changed, ir = fold(slots * """
+            define i64 @f(i1 %c, i1 %d) {
+            entry:
+              br i1 %d, label %loop, label %exit
+            loop:
+              %p = phi ptr [ @a, %entry ], [ %s, %loop ]
+              %s = select i1 %c, ptr %p, ptr @b
+              br i1 %c, label %loop, label %exit
+            exit:
+              %q = phi ptr [ @a, %entry ], [ %s, %loop ]
+              %v = load i64, ptr %q
+              ret i64 %v
+            }""")
+        @test changed
+        @test !occursin("load", ir)
+
+        # not when one of the addresses is something else, also when only reached through
+        # a loop, or when a global's initializer could be overridden
+        for (globals, other) in [(slots, "ptr %x"), (slots * "@w = weak constant i64 3\n", "ptr @w")]
+            changed, ir = fold(globals * """
+                define i64 @f(i1 %c, ptr %x) {
+                entry:
+                  br label %loop
+                loop:
+                  %p = phi ptr [ @a, %entry ], [ %s, %loop ], [ $(split(other)[2]), %other ]
+                  %s = select i1 %c, ptr %p, ptr @b
+                  br i1 %c, label %loop, label %other
+                other:
+                  br i1 %c, label %loop, label %exit
+                exit:
+                  %v = load i64, ptr %s
+                  ret i64 %v
+                }""")
+            @test !changed
+            @test occursin("load i64", ir)
+        end
+
+        # nor when the loaded type differs from the value's otherwise than integer and pointer
+        changed, ir = fold("""
+            @a = private constant ptr addrspace(1) null
+            @b = private constant ptr addrspace(1) null
+            define ptr @f(i1 %c) {
+              %p = select i1 %c, ptr @a, ptr @b
+              %v = load ptr, ptr %p
+              ret ptr %v
+            }""")
+        @test !changed
+    end
+end
+
 @testset "cglobal relocation" begin
     # JIT-private symbols like `jl_get_pgcstack_resolved` (JuliaLang/julia#61527) cannot
     # be looked up using `jl_cglobal`, so we should only resolve bindings that are

@@ -225,7 +225,11 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
 
     # a module-scope SPIR-V variable cannot live in the address space of the pointers that
     # refer to Julia's boxed constants (the Function storage class)
-    LLVM.version() >= v"17" && demote_boxed_constants!(job, mod)
+    if LLVM.version() >= v"17"
+        demote_boxed_constants!(job, mod)
+    else
+        fold_dead_box_references!(job, mod)
+    end
 
     # SPIR-V cannot express atomic loads and stores of pointers, which is what Julia's
     # `unordered` heap-reference accesses are (see `demote_unordered_atomics!`)
@@ -319,10 +323,10 @@ end
                          format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
 
-    # (after `prepare_execution!`, whose InstCombine would narrow the widened operations)
+    # (after the last InstCombine, which would narrow the widened operations)
     widen_bfloat16!(job, mod)
 
-    # (after `prepare_execution!` too, whose InstCombine can form overflow intrinsics)
+    # (after the last InstCombine too, which can form overflow intrinsics)
     lower_mul_with_overflow!(mod)
 
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
@@ -932,8 +936,8 @@ end
 # e.g., storing `(flag::Bool, (a, b))` built by inserting `flag`, `a` and `b`, loses `flag`
 # (intel/intel-graphics-compiler#378, JuliaGPU/OpenCL.jl#502, JuliaGPU/oneAPI.jl#259).
 # this runs after optimization, where SROA introduces these `insertvalue`s when splitting
-# aggregate loads. the InstCombine run in `prepare_execution!` doesn't reconstruct them
-# from the flattened form.
+# aggregate loads. nothing combines instructions after finalization, which could
+# reconstruct them from the flattened form.
 function flatten_nested_insertvalue!(mod::LLVM.Module)
     changed = false
     @tracepoint "flatten nested insertvalue" begin
@@ -1160,8 +1164,8 @@ const MUL_HI_TYPES = Dict(8 => ("c", "h"), 16 => ("s", "t"), 32 => ("i", "j"),
 # which rounding to `bfloat` is correct.
 #
 # Julia's `DemoteFloat16` pass widens arithmetic on CPUs, but leaves fast-math instructions,
-# intrinsics and conversions alone. This has to run after `prepare_execution!`, whose
-# InstCombine narrows `fptrunc(op(fpext x, fpext y))` back to a `bfloat` operation.
+# intrinsics and conversions alone. This has to run after the last InstCombine, which
+# narrows `fptrunc(op(fpext x, fpext y))` back to a `bfloat` operation.
 function widen_bfloat16!(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}),
                          mod::LLVM.Module)
     changed = false

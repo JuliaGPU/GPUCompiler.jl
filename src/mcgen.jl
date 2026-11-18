@@ -3,23 +3,25 @@
 # Finalize the module for backend emission by collecting and lowering all live relocations.
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                             relocs::Relocations=Relocations())
-    # Clean up first so only live relocations get lowered.
-    function cleanup(; fold_instructions=false)
+    # This runs after target finalization (`finish_ir!`), whose output must reach the back-end
+    # as it is: e.g. Metal loads pointers as words, and index narrowing would be undone by
+    # InstCombine widening the arithmetic again. So only fold the loads from relocation slots
+    # (see `fold_merged_constant_loads!`), simplify instructions to existing values or
+    # constants, and drop what is dead; nothing combines or canonicalizes instructions here.
+    function cleanup(; simplify=false)
         @dispose pb=PassBuilder() begin
-            if fold_instructions
+            if simplify
                 add!(pb, FunctionPassManager()) do fpm
-                    add!(fpm, instcombine_pass(job))
+                    add!(fpm, InstSimplifyPass())
                 end
             end
-            add!(pb, RecomputeGlobalsAAPass())
-            add!(pb, GlobalOptPass())
             add!(pb, GlobalDCEPass())
             add!(pb, StripDeadPrototypesPass())
-            with_llvm_machine(job.config.target) do tm
-                run!(pb, mod, tm)
-            end
+            run!(pb, mod)
         end
     end
+
+    # Clean up first so only live relocations get lowered.
     cleanup()
     prune_dead_relocations!(mod, relocs)
 
@@ -43,7 +45,8 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     freeze!(relocs)
 
     # Fold constants exposed by eager lowering, and drop globals the lowering left dead.
-    cleanup(; fold_instructions=true)
+    fold_merged_constant_loads!(mod)
+    cleanup(; simplify=true)
 
     has_unresolved_cglobal_loads(mod, relocs) &&
         error("Unresolved cglobal load after relocation lowering")
