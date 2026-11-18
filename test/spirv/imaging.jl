@@ -5,6 +5,7 @@
 script = """
     using GPUCompiler, LLVM, LLVM.IR
     include($(repr(joinpath(@__DIR__, "..", "helpers", "runtime.jl"))))
+    include($(repr(joinpath(@__DIR__, "..", "helpers", "handoff.jl"))))
     include($(repr(joinpath(@__DIR__, "..", "helpers", "spirv.jl"))))
 
     function kernel(out::Core.LLVMPtr{UInt,1})

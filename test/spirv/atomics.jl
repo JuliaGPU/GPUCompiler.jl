@@ -681,6 +681,7 @@ end
         script = """
             using GPUCompiler, LLVM, SPIRV_LLVM_Translator_jll, SPIRV_Tools_jll
             include($(repr(joinpath(@__DIR__, "..", "helpers", "runtime.jl"))))
+            include($(repr(joinpath(@__DIR__, "..", "helpers", "handoff.jl"))))
             include($(repr(joinpath(@__DIR__, "..", "helpers", "spirv.jl"))))
             failures, rejected = SPIRV.check_atomics_matrix(:khronos)
             foreach(println, failures)
@@ -719,6 +720,7 @@ end
     script = """
         using GPUCompiler, LLVM
         include($(repr(joinpath(@__DIR__, "..", "helpers", "runtime.jl"))))
+        include($(repr(joinpath(@__DIR__, "..", "helpers", "handoff.jl"))))
         include($(repr(joinpath(@__DIR__, "..", "helpers", "spirv.jl"))))
         import .SPIRV: Atomics
 

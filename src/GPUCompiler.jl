@@ -61,6 +61,7 @@ include("mangling.jl")
 
 # compiler interface and implementations
 include("interface.jl")
+include("handoff.jl")
 include("relocation.jl")
 include("atomics.jl")
 include("error.jl")

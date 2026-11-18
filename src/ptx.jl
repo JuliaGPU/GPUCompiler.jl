@@ -72,7 +72,10 @@ source_code(target::PTXCompilerTarget) = "ptx"
 llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
 
+supports_handoff(@nospecialize(target::PTXCompilerTarget)) = true
+
 function llvm_machine(target::PTXCompilerTarget)
+    is_handoff_library() && return handoff_machine(target)
     @static if :NVPTX ∉ LLVM.backends()
         return nothing
     end
@@ -108,6 +111,50 @@ llvm_datalayout(target::PTXCompilerTarget) =
     "v16:16-v32:32-" *
     # native integer widths
     "n16:32:64"
+
+# the minimum PTX ISA version of every processor the NVPTX back-end of LLVM 23.1 knows
+# (`getMinPTXVersionForSM` in NVPTXSubtarget.cpp)
+const ptx_minimum_versions = let
+    versions = Dict{String,VersionNumber}()
+    for (ptx, sms) in ((v"3.2", ["20", "21", "30", "35"]), (v"4.0", ["32", "50"]),
+                       (v"4.1", ["37", "52"]), (v"4.2", ["53"]),
+                       (v"5.0", ["60", "61", "62"]), (v"6.0", ["70"]), (v"6.1", ["72"]),
+                       (v"6.3", ["75"]), (v"7.0", ["80"]), (v"7.1", ["86"]),
+                       (v"7.4", ["87"]), (v"7.8", ["89", "90"]), (v"8.0", ["90a"]),
+                       (v"8.6", ["100", "100a", "101", "101a"]), (v"8.7", ["120", "120a"]),
+                       (v"8.8", ["100f", "101f", "103", "103f", "103a", "120f", "121",
+                                 "121f", "121a"]),
+                       (v"9.0", ["88", "110", "110f", "110a"]))
+        for sm in sms
+            versions["sm_$sm"] = ptx
+        end
+    end
+    versions
+end
+
+# after the hand-off, the library generating code also drives the middle end, so use the
+# actual target. like NVPTX_LLVM_Backend_jll did, reject processors and PTX versions that
+# LLVM would otherwise only warn about (or abort on).
+function handoff_machine(target::PTXCompilerTarget)
+    triple = llvm_triple(target)
+    t = LLVM.Target(; triple)
+    cpu = cpu_name(target)
+    ptx = "ptx$(target.ptx.major)$(target.ptx.minor)"
+    @dispose sti=LLVM.SubtargetInfo(t, triple; cpu) begin
+        # NVPTX also has a feature for every processor and PTX version
+        features = LLVM.processor_features(sti)
+        cpu in features || error("Unsupported processor $cpu for the NVPTX back-end")
+        ptx in features || error("Unsupported PTX ISA version $(target.ptx) for the NVPTX back-end")
+    end
+    # (LLVM aborts on a PTX version that's too old for the processor)
+    required = get(ptx_minimum_versions, cpu, nothing)
+    required === nothing && error("Unknown minimum PTX ISA version for processor $cpu")
+    target.ptx < required &&
+        error("Processor $cpu needs at least PTX ISA version $required, not $(target.ptx)")
+    tm = LLVM.TargetMachine(t, triple; cpu, features="+$ptx")
+    LLVM.asm_verbosity!(tm, true)
+    return tm
+end
 
 have_fma(@nospecialize(target::PTXCompilerTarget), T::Type) = true
 
@@ -324,11 +371,14 @@ end
 
 @unlocked function mcgen(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                          mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
-    if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
-        error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
-    end
     if format != LLVM.CodeGenFileType.Assembly
         error("Unsupported PTX output format $format; the NVPTX back-end only emits PTX assembly.")
+    end
+    if is_handoff_library(mod.library)
+        return String(handoff_mcgen(job, mod, format))
+    end
+    if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
+        error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
     end
     backend = ExternalBackend(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX")
 

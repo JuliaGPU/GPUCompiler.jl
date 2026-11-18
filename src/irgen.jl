@@ -1342,8 +1342,10 @@ end
 # the kernel state argument is always passed by value to avoid codegen issues with byval.
 # some back-ends however do not support passing kernel arguments by value, so this pass
 # serves to convert that argument (and is conceptually the inverse of `lower_byval`).
+# with `byval`, the reference is marked `byval` (for back-ends that pass it by value after
+# all). there's only a kernel state parameter to convert after optimization added it.
 function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
-                                    f::LLVM.Function)
+                                    f::LLVM.Function; byval::Bool=false)
     ft = f.function_type
 
     # check if we even need a kernel state argument
@@ -1352,7 +1354,7 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
         return f
     end
 
-    T_state = convert(LLVMType, state)
+    T_state = julia_llvm_type(state)
 
     # find the kernel state parameter (should be the first argument)
     if isempty(ft.parameters) || f.parameters[1].value_type != T_state
@@ -1378,6 +1380,7 @@ function kernel_state_to_reference!(@nospecialize(job::CompilerJob), mod::LLVM.M
         push!(attrs, EnumAttribute(:noalias))
         # the state is read-only
         push!(attrs, EnumAttribute(:readonly))
+        byval && push!(attrs, TypeAttribute(:byval, T_state))
 
         # remove the old function
         replace_function!(f, new_f)
