@@ -1730,10 +1730,10 @@ function add_parameter_address_spaces!(@nospecialize(job::CompilerJob), mod::LLV
         br!(builder, new_f.blocks[2])
     end
 
-    # parameters that were mapped through unchanged keep the `noalias` that
-    # `pass_by_reference!` added for the optimizer (copied ones lose it when cloning). Apple's
-    # AIR loader turns `noalias` kernel parameters into alias scopes, and crashes on modules
-    # that also carry Julia's alias scope metadata, so drop it now that optimization is done.
+    # the parameters kept the `noalias` that `pass_by_reference!` added for the optimizer.
+    # Apple's AIR loader turns `noalias` kernel parameters into alias scopes, and crashes on
+    # modules that also carry Julia's alias scope metadata, so drop it now that optimization
+    # is done.
     for i in 1:length(new_f.parameters)
         delete!(new_f.parameter_attributes[i], :noalias)
     end
@@ -2254,7 +2254,8 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
     # generate the new function type & definition
     args = classify_arguments(job, ft)
     new_types = LLVM.LLVMType[]
-    bits_as_reference = BitVector(undef, length(ft.parameters))
+    bits_as_reference = falses(length(ft.parameters))
+    bits_by_reference = falses(length(ft.parameters))
     for arg in args
         if arg.cc == BITS_VALUE && !(arg.typ <: Ptr || arg.typ <: Core.LLVMPtr)
             # pass the value as a reference instead
@@ -2262,7 +2263,7 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
             bits_as_reference[arg.idx] = true
         elseif arg.cc != GHOST
             push!(new_types, ft.parameters[arg.idx])
-            bits_as_reference[arg.idx] = false
+            bits_by_reference[arg.idx] = arg.cc == BITS_REF
         end
     end
     new_ft = LLVM.FunctionType(ft.return_type, new_types)
@@ -2317,7 +2318,14 @@ function pass_by_reference!(@nospecialize(job::CompilerJob), mod::LLVM.Module, f
             push!(new_f.parameter_attributes[i],
                   LLVM.version() >= v"21" ? EnumAttribute(:captures, 0)
                                           : EnumAttribute(:nocapture))
-            ## Metal.jl emits separate buffers for each scalar argument
+        end
+        if bits_as_reference[i] || bits_by_reference[i]
+            # Launchers must bind every argument that isn't a pointer as its own copy, which
+            # the kernel never writes to (Metal.jl uses `setBytes:`, or a separate slice of a
+            # scratch buffer on Metal 4). That lets LICM and GVN reuse loads from, e.g., an
+            # array's shape across stores to the array, as Apple's front-end does with
+            # `air-buffer-no-alias`. Dropped again after optimization, see
+            # `add_parameter_address_spaces!`.
             push!(new_f.parameter_attributes[i], EnumAttribute(:noalias))
         end
     end
