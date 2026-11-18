@@ -148,12 +148,12 @@ end
     # the square root is defined in a block laid out after the reciprocal using it
     Context() do ctx
         ir = parse(LLVM.Module, """
-            define void @kernel(ptr %p, float %x) {
+            define void @kernel(float* %p, float %x) {
             entry:
               br label %def
             use:
               %r = fdiv afn float 1.0, %s
-              store float %r, ptr %p
+              store float %r, float* %p
               ret void
             def:
               %s = call afn float @llvm.sqrt.f32(float %x)
