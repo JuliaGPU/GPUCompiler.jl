@@ -736,6 +736,12 @@ function unify_loop_exits!(mod::LLVM.Module)
             # LLVM 20-22 crash on a loop without exits (llvm/llvm-project#165343)
             v"20" <= LLVM.version() < v"23" && has_blocks_without_return_path(f) && continue
             @dispose pb=PassBuilder() begin
+                # UnifyLoopExits reuses the exit block of a loop with a single exit, and
+                # gives the values used after the loop a `phi` there that only covers the
+                # exiting edge. That `phi` is invalid if the exit block has predecessors
+                # outside the loop, e.g., when it is the header of a following loop.
+                # LoopSimplify gives every loop dedicated exit blocks first.
+                add!(pb, LoopSimplifyPass())
                 add!(pb, UnifyLoopExitsPass())
                 run!(pb, f)
             end

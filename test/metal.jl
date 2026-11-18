@@ -1066,6 +1066,24 @@ end
               ret i32 %j
             }
 
+            define i32 @consecutive(i32 %n) {
+            entry:
+              br label %first
+            first:
+              %i = phi i32 [ 0, %entry ], [ %inext, %first ]
+              %inext = add i32 %i, 1
+              %imore = icmp ult i32 %inext, %n
+              br i1 %imore, label %first, label %second
+            second:
+              %j = phi i32 [ 0, %first ], [ %jnext, %second ]
+              %jnext = add i32 %j, 1
+              %jmore = icmp ult i32 %jnext, %n
+              br i1 %jmore, label %second, label %done
+            done:
+              %sum = add i32 %inext, %jnext
+              ret i32 %sum
+            }
+
             define void @endless() {
             entry:
               br label %loop
