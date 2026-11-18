@@ -100,14 +100,64 @@ function compile_with(julia_passes, backend, f, tt; kwargs...)
         end
         str = string(ir)
         LLVM.dispose(ir)
-        normalize_ir(str)
+        str
+    end
+end
+
+# Julia 1.10 to 1.13 zero a GC frame with a volatile `memset`: their FinalLowerGC passes the
+# frame's TBAA tag as the volatility flag. The ports zero it as Julia 1.14 does
+# (JuliaLang/julia#62061), so later passes may drop the zeroing of slots that are
+# overwritten before the frame is used. Such IR is compared after making the C++ frame
+# `memset`s non-volatile and cleaning up both sides with the passes that shrink them.
+const VOLATILE_FRAME_MEMSET =
+    r"call void @llvm\.memset\.p0\.i64\(ptr align 16 %\d+, i8 0, i64 \d+, i1 true\)"
+
+# whether `inst` is the volatile `memset` zeroing all of a GC frame: an array of pointers
+function is_volatile_frame_memset(dl, inst)
+    inst isa LLVM.CallInst || return false
+    callee = LLVM.called_operand(inst)
+    callee isa LLVM.Function && startswith(LLVM.name(callee), "llvm.memset.") || return false
+    frame, value, len, volatile = LLVM.operands(inst)[1:4]
+    volatile == LLVM.ConstantInt(LLVM.Int1Type(), true) || return false
+    value == LLVM.ConstantInt(LLVM.Int8Type(), 0) || return false
+    frame isa LLVM.AllocaInst && LLVM.alignment(frame) == 16 || return false
+    T = LLVM.allocated_type(frame)
+    T isa LLVM.PointerType ||
+        (T isa LLVM.ArrayType && T.element_type isa LLVM.PointerType) || return false
+    count = LLVM.operands(frame)[1]
+    count isa LLVM.ConstantInt && len isa LLVM.ConstantInt || return false
+    return convert(Int, len) == LLVM.abi_size(dl, T) * convert(Int, count)
+end
+
+function without_volatile_frame_memsets(ir::String; cpp::Bool)
+    JuliaContext(; opaque_pointers=true) do ctx
+        mod = parse(LLVM.Module, ir)
+        dl = LLVM.datalayout(mod)
+        if cpp
+            for fn in mod.functions, bb in fn.blocks, inst in bb.instructions
+                is_volatile_frame_memset(dl, inst) || continue
+                LLVM.operands(inst)[4] = LLVM.ConstantInt(LLVM.Int1Type(), false)
+            end
+        end
+        LLVM.run!("function(dse,instcombine)", mod)
+        for fn in collect(mod.functions)
+            startswith(LLVM.name(fn), "llvm.memset.") && isempty(LLVM.uses(fn)) &&
+                LLVM.erase!(fn)
+        end
+        str = string(mod)
+        LLVM.dispose(mod)
+        str
     end
 end
 
 function same_ir(backend, f, tt; kwargs...)
     cpp = compile_with(:cpp, backend, f, tt; kwargs...)
     ports = compile_with(:ports, backend, f, tt; kwargs...)
-    cpp == ports && return true
+    normalize_ir(cpp) == normalize_ir(ports) && return true
+    if VERSION < v"1.14-" && occursin(VOLATILE_FRAME_MEMSET, cpp)
+        normalize_ir(without_volatile_frame_memsets(cpp; cpp=true)) ==
+            normalize_ir(without_volatile_frame_memsets(ports; cpp=false)) && return true
+    end
     @error "IR differs between the C++ passes and the ports" f tt kwargs cpp ports
     return false
 end
