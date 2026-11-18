@@ -407,6 +407,10 @@ function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
         push!(options, "-nvvm-latest")
     end
 
+    # options that tune libNVVM's passes (`-Xopt`, `-Xllc`, `-aggressive-inline`, ...) must
+    # never be passed here: libNVVM keeps them for the rest of the process, so they would
+    # leak into the compilation of every later job.
+
     # libNVVM only flushes f32 denormals, as fast math does, when asked to for the whole
     # module (approximate division and square roots are selected by `lower_approx_math!`)
     if target.fastmath
@@ -417,6 +421,9 @@ end
 
 function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module;
                       lto::Bool)
+    if job.config.optimize && job.config.opt_level >= 1
+        optimize_nvvm!(mod)
+    end
     legalize_nvvm!(mod; lto)
     options, arch = nvvm_options(job)
     lto && push!(options, "-gen-lto")
@@ -452,6 +459,35 @@ function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::L
     end
 
     return output
+end
+
+# Transforms that NVPTX's `llc` performs as part of code generation, but libNVVM does not.
+#
+# LLVM's code generator runs a few IR passes before instruction selection; libNVVM's
+# equivalent omits two of them that matter for Julia code, whose loops typically exit
+# through bounds checks that branch to `noreturn` error-reporting code:
+#
+# - loop strength reduction, which turns the 64-bit address computed from the induction
+#   variable in each iteration (`base + i * stride`, a 64-bit multiply) into a pointer
+#   that is incremented. libNVVM keeps the multiplication when the loop has a second
+#   exit, e.g. a bounds check, costing several instructions per iteration;
+# - sinking, which moves instructions that are only used after a bounds check, loads
+#   among them, past the check and into the block that uses them.
+#
+# Running these on the optimized IR closes the gap with NVPTX (up to 15% on a
+# bounds-checked matrix multiplication). They use LLVM's default cost model, so they
+# don't need NVPTX's target machine, which libNVVM doesn't use.
+function optimize_nvvm!(mod::LLVM.Module)
+    @dispose pb=PassBuilder() begin
+        add!(pb, FunctionPassManager()) do fpm
+            add!(fpm, LoopPassManager()) do lpm
+                add!(lpm, LoopStrengthReducePass())
+            end
+            add!(fpm, SinkingPass())
+        end
+        run!(pb, mod)
+    end
+    return mod
 end
 
 # make a module acceptable to libNVVM, which otherwise accepts the same IR as NVPTX

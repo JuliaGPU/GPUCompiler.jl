@@ -122,6 +122,57 @@ end
     end
 end
 
+@testset "loops with bounds checks" begin
+    # libNVVM's code generator doesn't strength-reduce or sink like NVPTX's (see
+    # `optimize_nvvm!`), which matters for loops that exit through bounds checks
+    mod = @eval module $(gensym())
+        # strided accesses: the address is a multiplication of the induction variable
+        function strided(out::Ptr{Float32}, a::Ptr{Float32}, stride::Int, n::Int, len::Int)
+            acc = 0f0
+            for i in 1:n
+                idx = (i - 1) * stride + 1
+                idx <= len || throw(BoundsError())
+                acc += unsafe_load(a, idx)
+            end
+            unsafe_store!(out, acc)
+            return
+        end
+
+        # a load that is only used after a bounds check and a loop guard
+        function scaled(out::Ptr{Float32}, a::Ptr{Float32}, b::Ptr{Float32}, n::Int, len::Int)
+            x = unsafe_load(a)
+            n <= len || throw(BoundsError())
+            acc = 0f0
+            for i in 1:n
+                acc += x * unsafe_load(b, i)
+            end
+            unsafe_store!(out, acc)
+            return
+        end
+    end
+
+    # the address is incremented by the stride instead of recomputed
+    @test @filecheck begin
+        @check_label ".entry"
+        @check_not "mul.lo"
+        @check "ret;"
+        PTX.code_native(mod.strided, Tuple{Ptr{Float32},Ptr{Float32},Int,Int,Int};
+                        backend=:nvvm, cap=v"10.0", kernel=true)
+    end
+
+    # the load of `x` happens after both branches
+    @test @filecheck begin
+        @check_label ".entry"
+        @check_not "ld.global"
+        @check "bra"
+        @check_not "ld.global"
+        @check "bra"
+        @check "ld.global"
+        PTX.code_native(mod.scaled, Tuple{Ptr{Float32},Ptr{Float32},Ptr{Float32},Int,Int};
+                        backend=:nvvm, cap=v"10.0", kernel=true)
+    end
+end
+
 @testset "older architectures" begin
     # libNVVM only reads current bitcode for these with `-nvvm-latest`, added in CUDA 13.5
     if CUDA_Compiler_jll.cuda_version >= v"13.5"
