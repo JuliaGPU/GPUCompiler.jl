@@ -679,6 +679,8 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         end
     end
 
+    annotate_sincos_eltypes!(mod)
+
     # expand these intrinsics only after that cleanup, as InstCombine would turn the expansions
     # back into the intrinsics: multiplications with overflow check when the product is also
     # checked by division, and three-way comparisons always
@@ -2336,6 +2338,12 @@ end
 # hardware index counters (thread id, group id, etc) aren't accessed via intrinsics,
 # but using special arguments to the kernel function.
 
+# some MSL attributes are passed as AIR arguments with another name. `thread_execution_width`
+# is an alias of `threads_per_simdgroup`, so a kernel using both gets one argument.
+const air_argument_names = Dict("grid_origin" => "stage_in_grid_origin",
+                                "grid_size" => "stage_in_grid_size",
+                                "thread_execution_width" => "threads_per_simdgroup")
+
 const kernel_intrinsics = Dict{String,@NamedTuple{name::String, typ::DataType}}()
 for intr in [
         "dispatch_quadgroups_per_threadgroup", "dispatch_simdgroups_per_threadgroup",
@@ -2347,7 +2355,8 @@ for intr in [
         ("i32",  UInt32),
         ("i16",  UInt16),
     ]
-    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" =>  (name=intr, typ=julia_typ))
+    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" =>
+                             (name=get(air_argument_names, intr, intr), typ=julia_typ))
 end
 for intr in [
         "dispatch_threads_per_threadgroup",
@@ -2363,7 +2372,8 @@ for intr in [
         ("v2i16", NTuple{2, VecElement{UInt16}}),
         ("v3i16", NTuple{3, VecElement{UInt16}}),
     ]
-    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" => (name=intr, typ=julia_typ))
+    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" =>
+                             (name=get(air_argument_names, intr, intr), typ=julia_typ))
 end
 
 function argument_type_name(typ)
@@ -3205,6 +3215,16 @@ function lower_ldexp!(builder::IRBuilder, call::LLVM.CallBase)
     return call_declared!(builder, fn, x.value_type, LLVM.Value[x, n])
 end
 
+# Tell the downgrader the element type of the output pointer of `air.sincos`, which it can't
+# infer from an opaque pointer: Apple declares `float(float, float* nocapture writeonly)`.
+function annotate_sincos_eltypes!(mod::LLVM.Module)
+    for f in mod.functions
+        occursin(r"^air\.(fast_)?sincos\.", f.name) || continue
+        f.metadata["arg_eltypes"] =
+            MDNode(Metadata[ConstantInt(Int32(1)), null(f.function_type.return_type)])
+    end
+end
+
 # `llvm.sincos` returns both results, `air.sincos` returns the sine and stores the cosine
 function lower_sincos!(builder::IRBuilder, call::LLVM.CallBase)
     x, = call.arguments
@@ -3221,6 +3241,10 @@ function lower_sincos!(builder::IRBuilder, call::LLVM.CallBase)
     res = insert_value!(builder, UndefValue(call.value_type), sin, 0)
     return insert_value!(builder, res, cos, 1)
 end
+
+# The prefix of the functions we define to implement LLVM intrinsics AIR lacks. They can't
+# be named `air.*`: Apple's verifier rejects any function there that it doesn't know.
+const helper_prefix = "gpucompiler."
 
 # IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
 function lower_minimum_maximum!(builder::IRBuilder, call::LLVM.CallBase, minmax::String)
@@ -3242,7 +3266,7 @@ function lower_minimum_maximum!(builder::IRBuilder, call::LLVM.CallBase, minmax:
     # we'd do this inline, but LLVM.jl doesn't have BB split functionality.
     nnan = call.fast_math.nnan
     fn = if !nnan
-        "air.$(minmax)imum.f$bits"
+        "$(helper_prefix)$(minmax)imum.f$bits"
     elseif optyp isa LLVM.FloatType
         "air.fast_f$minmax.f32"
     else
@@ -3276,7 +3300,7 @@ function lower_powi!(builder::IRBuilder, call::LLVM.CallBase)
 
     mod = builder.insert_block.parent.parent
     typ, ntyp = x.value_type, n.value_type
-    fn ="air.powi.$(type_suffix(typ)).$(type_suffix(ntyp))"
+    fn = "$(helper_prefix)powi.$(type_suffix(typ)).$(type_suffix(ntyp))"
     f = get!(() -> build_powi!(mod, fn, typ, ntyp), mod.functions, fn)
     return call!(builder, f.function_type, f, LLVM.Value[x, n])
 end
@@ -3415,6 +3439,7 @@ function build_minimum_maximum!(mod::LLVM.Module, fn::String, op_ft::LLVM.Functi
                                 jltyp::Type, minmax::String)
     optyp = op_ft.return_type
     f = LLVM.Function(mod, fn, op_ft)
+    f.linkage = LLVM.Linkage.Internal
     push!(f.function_attributes, EnumAttribute(:alwaysinline))
     arg0, arg1 = f.parameters
 

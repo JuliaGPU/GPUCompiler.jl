@@ -1402,7 +1402,25 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     used_intrinsics = filter(keys(kernel_intrinsics)) do intr_fn
         haskey(mod.functions, intr_fn)
     end |> collect
-    nargs = length(used_intrinsics)
+    # intrinsics for the same argument share it: aliases, and the same value at different
+    # integer widths, which are truncated from the widest one
+    inputs = Tuple{String,LLVMType}[]       # argument name and type
+    input_index = Dict{String,Int}()        # intrinsic => index into `inputs`
+    int_width(T) = (T isa LLVM.VectorType ? T.element_type : T).width
+    shape(T) = T isa LLVM.VectorType ? T.length : 0
+    for intr_fn in used_intrinsics
+        name = kernel_intrinsics[intr_fn].name
+        T = convert(LLVMType, kernel_intrinsics[intr_fn].typ)
+        i = findfirst(((n, U),) -> n == name && shape(U) == shape(T), inputs)
+        if i === nothing
+            push!(inputs, (name, T))
+            i = length(inputs)
+        elseif int_width(T) > int_width(inputs[i][2])
+            inputs[i] = (name, T)
+        end
+        input_index[intr_fn] = i
+    end
+    nargs = length(inputs)
 
     # determine which functions need these arguments
     worklist = Set{LLVM.Function}([entry])
@@ -1437,9 +1455,8 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         # create a new function
         new_param_types = collect(LLVMType, ft.parameters)
 
-        for intr_fn in used_intrinsics
-            llvm_typ = convert(LLVMType, kernel_intrinsics[intr_fn].typ)
-            push!(new_param_types, llvm_typ)
+        for (_, T) in inputs
+            push!(new_param_types, T)
         end
         new_ft = LLVM.FunctionType(ft.return_type, new_param_types)
         new_f = LLVM.Function(mod, fn, new_ft)
@@ -1447,8 +1464,8 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         for (arg, new_arg) in zip(f.parameters, new_f.parameters)
             new_arg.name = arg.name
         end
-        for (intr_fn, new_arg) in zip(used_intrinsics, new_f.parameters[end-nargs+1:end])
-            new_arg.name = kernel_intrinsics[intr_fn].name
+        for ((name, _), new_arg) in zip(inputs, new_f.parameters[end-nargs+1:end])
+            new_arg.name = name
         end
 
         workmap[f] = new_f
@@ -1490,13 +1507,21 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
     end
 
     # replace uses of the intrinsics with references to the input arguments
-    for (i, intr_fn) in enumerate(used_intrinsics)
+    for intr_fn in used_intrinsics
+        i = input_index[intr_fn]
         intr = mod.functions[intr_fn]
         for use in collect(intr.uses)
             val = use.user
             callee_f = val.parent.parent
             if val isa LLVM.CallInst || val isa LLVM.InvokeInst || val isa LLVM.CallBrInst
-                replace_uses!(val, callee_f.parameters[end-nargs+i])
+                arg = callee_f.parameters[end-nargs+i]
+                if arg.value_type != val.value_type
+                    arg = @dispose builder=IRBuilder() begin
+                        position!(builder, LLVM.before(val))
+                        trunc!(builder, arg, val.value_type)
+                    end
+                end
+                replace_uses!(val, arg)
             else
                 error("Cannot rewrite unknown use of function: $val")
             end

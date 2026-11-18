@@ -485,6 +485,45 @@ end
         @check "!{i32 1, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"thread_position_in_threadgroup\"}"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; dump_module=true, kernel=true)
     end
+
+    # MSL attributes whose AIR arguments are named differently
+    mod = @eval module $(gensym())
+        function kernel(ptr)
+            origin = ccall("extern julia.air.grid_origin.i32", llvmcall, UInt32, ())
+            size = ccall("extern julia.air.grid_size.i32", llvmcall, UInt32, ())
+            width = ccall("extern julia.air.thread_execution_width.i32", llvmcall, UInt32, ())
+            simd = ccall("extern julia.air.threads_per_simdgroup.i32", llvmcall, UInt32, ())
+            unsafe_store!(ptr, origin + size + width + simd)
+            return
+        end
+    end
+    ir = sprint(io->Metal.code_llvm(io, mod.kernel, Tuple{Core.LLVMPtr{UInt32,1}};
+                                    dump_module=true, kernel=true))
+    @test occursin("!\"air.stage_in_grid_origin\", !\"air.arg_type_name\", !\"uint\"", ir)
+    @test occursin("!\"air.stage_in_grid_size\", !\"air.arg_type_name\", !\"uint\"", ir)
+    # `thread_execution_width` is an alias, so both share one argument
+    @test occursin("!\"air.threads_per_simdgroup\", !\"air.arg_type_name\", !\"uint\"", ir)
+    @test count("air.threads_per_simdgroup", ir) == 1
+
+    # as do the same value at different widths, truncated from the widest
+    mod = @eval module $(gensym())
+        function kernel(ptr)
+            width = ccall("extern julia.air.thread_execution_width.i16", llvmcall, UInt16, ())
+            simd = ccall("extern julia.air.threads_per_simdgroup.i32", llvmcall, UInt32, ())
+            pos = ccall("extern julia.air.thread_position_in_grid.v3i16", llvmcall,
+                        NTuple{3, VecElement{UInt16}}, ())
+            pos32 = ccall("extern julia.air.thread_position_in_grid.v3i32", llvmcall,
+                          NTuple{3, VecElement{UInt32}}, ())
+            unsafe_store!(ptr, width + simd + pos[1].value + pos32[1].value)
+            return
+        end
+    end
+    ir = sprint(io->Metal.code_llvm(io, mod.kernel, Tuple{Core.LLVMPtr{UInt32,1}};
+                                    dump_module=true, kernel=true))
+    @test occursin("!\"air.threads_per_simdgroup\", !\"air.arg_type_name\", !\"uint\"", ir)
+    @test count("air.threads_per_simdgroup", ir) == 1
+    @test occursin("!\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint3\"", ir)
+    @test count("air.thread_position_in_grid", ir) == 1
 end
 
 @testset "byte GEP coalescing" begin
@@ -680,6 +719,13 @@ end
         @check_same cond=(opaque_ptrs && LLVM.version() < v"21") "(float, ptr nocapture writeonly)"
         @check_same cond=(LLVM.version() >= v"21") "(float, ptr writeonly captures(none))"
         Metal.code_llvm(mod.kernel_fast, Tuple{Float32}; dump_module=true)
+    end
+
+    # with opaque pointers, the downgrader is told the output argument's element type
+    @test @filecheck begin
+        @check "declare !arg_eltypes [[MD:![0-9]+]] float @air.sincos.f32"
+        @check "[[MD]] = !{i32 1, float 0.000000e+00}"
+        Metal.code_native(mod.kernel, Tuple{Float32}; dump_module=true, raw=true)
     end
 end
 
@@ -2581,9 +2627,10 @@ end
 end
 
 @testset "fast-math min/max lowering" begin
-    # Base min/max -> llvm.minimum/maximum lower to a NaN-propagating wrapper (air.minimum/
-    # maximum, which falls back to air.fmin/fmax). @fastmath/fastmath set `nnan`, so the relaxed
-    # air.fast_fmin/fmax (f32) — or bare air.fmin/fmax for f16, which has no fast form — are used.
+    # Base min/max -> llvm.minimum/maximum lower to a NaN-propagating wrapper
+    # (gpucompiler.minimum/maximum, which falls back to air.fmin/fmax). @fastmath/fastmath set
+    # `nnan`, so the relaxed air.fast_fmin/fmax (f32) — or bare air.fmin/fmax for f16, which has
+    # no fast form — are used.
     km = @eval module $(gensym())
         f() = return
     end
@@ -2605,7 +2652,7 @@ end
         mod = parse(LLVM.Module, ir); f = mod.functions["f"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
         ns = names(f)
-        @test "air.minimum.f32" in ns          # precise: NaN-propagating wrapper
+        @test "gpucompiler.minimum.f32" in ns  # precise: NaN-propagating wrapper
         @test "air.fast_fmin.f32" in ns        # @fastmath f32: relaxed
         @test "air.fmax.f16" in ns             # @fastmath f16: no fast form, bare builtin
         @test !("air.fast_fmax.f16" in ns)
@@ -2671,9 +2718,9 @@ end
         mod = parse(LLVM.Module, ir); f = mod.functions["g"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
         ns = names(f)
-        @test "air.minimum.f32" in ns
-        @test "air.maximum.f32" in ns
-        @test !("air.minimum.f16" in ns)
+        @test "gpucompiler.minimum.f32" in ns
+        @test "gpucompiler.maximum.f32" in ns
+        @test !("gpucompiler.minimum.f16" in ns)
         @test all(c -> c.value_type == LLVM.FloatType(), air_calls(f))
         @test has(f, LLVM.FPExtInst) && has(f, LLVM.FPTruncInst)
         @test (verify(mod); true)
