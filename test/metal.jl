@@ -157,6 +157,50 @@ end
     @test !haskey(attrs[1], :noalias)
 end
 
+@testset "byref aggregates do not alias" begin
+    # the host binds every by-value argument as its own copy, so stores through a pointer
+    # the argument holds cannot change it, and its fields need not be reloaded in the loop
+    mod = @eval module $(gensym())
+        struct Vec
+            ptr::Core.LLVMPtr{Float32,1}
+            len::Int
+        end
+        function kernel(v, i, stride)
+            while 1 <= i <= v.len
+                unsafe_store!(v.ptr, 1f0, i)
+                i += stride
+            end
+            return
+        end
+    end
+    tt = Tuple{mod.Vec, Int, Int}
+
+    ir = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; kernel=true, dump_module=true))
+    Context() do ctx
+        m = parse(LLVM.Module, ir)
+        f = only(filter(f -> startswith(f.name, "_Z6kernel"), collect(m.functions)))
+        store = only(inst for bb in f.blocks for inst in bb.instructions
+                     if inst isa LLVM.StoreInst)
+        function reach(next)
+            seen = Set([LLVM.parent(store)])
+            work = collect(seen)
+            while !isempty(work)
+                for bb in next(pop!(work))
+                    bb in seen || (push!(seen, bb); push!(work, bb))
+                end
+            end
+            return seen
+        end
+        loop = intersect(reach(bb -> bb.successors), reach(bb -> bb.predecessors))
+        @test any(bb -> LLVM.parent(store) in bb.successors, loop)
+        @test !any(inst -> inst isa LLVM.LoadInst, Iterators.flatten(bb.instructions for bb in loop))
+    end
+
+    # (without the `noalias` that made this possible, see "byref parameter attributes")
+    air = sprint(io -> Metal.code_native(io, mod.kernel, tt; kernel=true))
+    @test !occursin(r"define[^\n]*\bnoalias\b", air)
+end
+
 @testset "byref parameters written through" begin
     # parameters are only marked read-only when that is evident from the IR
     Context(; opaque_pointers=true) do ctx
