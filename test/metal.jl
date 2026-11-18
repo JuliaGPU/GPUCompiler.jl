@@ -568,6 +568,51 @@ end
     @test count("air.threads_per_simdgroup", ir) == 1
     @test occursin("!\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint3\"", ir)
     @test count("air.thread_position_in_grid", ir) == 1
+
+    # passed on by a function that calls itself
+    mod = @eval module $(gensym())
+        @noinline rec(n) = n <= 1 ?
+            ccall("extern julia.air.thread_position_in_threadgroup.i32", llvmcall, UInt32, ()) :
+            rec(n - 1) + rec(n - 2)
+        function kernel(ptr, n)
+            unsafe_store!(ptr, rec(n))
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check_label "define internal fastcc i32 @{{(julia|j)_rec_[0-9]+}}"
+        @check "call fastcc i32 @{{(julia|j)_rec_[0-9]+}}(i64 {{.*}}, i32 %thread_position_in_threadgroup)"
+        @check "call fastcc i32 @{{(julia|j)_rec_[0-9]+}}(i64 {{.*}}, i32 %thread_position_in_threadgroup)"
+        @check_label "define void @_Z6kernel"
+        Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{UInt32,1}, Int};
+                        dump_module=true, kernel=true)
+    end
+
+    # ... that also takes the kernel state, which is added to the call afterwards
+    mod = @eval module $(gensym())
+        using ..GPUCompiler, ..Metal
+        @inline @generated kernel_state() =
+            GPUCompiler.kernel_state_value(Metal.TableKernelState)
+        @noinline rec(n) = n <= 1 ?
+            ccall("extern julia.air.thread_position_in_threadgroup.i32", llvmcall, UInt32, ()) +
+                UInt32(UInt(kernel_state().reloc_table)) :
+            rec(n - 1) + rec(n - 2)
+        function kernel(ptr, n)
+            unsafe_store!(ptr, rec(n))
+            return
+        end
+    end
+    job, _ = Metal.create_table_job(mod.kernel, Tuple{Core.LLVMPtr{UInt32,1}, Int};
+                                    kernel=true)
+
+    @test @filecheck begin
+        @check_label "define internal fastcc i32 @{{(julia|j)_rec_[0-9]+}}"
+        @check "call fastcc i32 @{{(julia|j)_rec_[0-9]+}}({{.*}} %state, i64 {{.*}}, i32 %thread_position_in_threadgroup)"
+        @check "call fastcc i32 @{{(julia|j)_rec_[0-9]+}}({{.*}} %state, i64 {{.*}}, i32 %thread_position_in_threadgroup)"
+        @check_label "define void @_Z6kernel"
+        GPUCompiler.code_llvm(stdout, job; dump_module=true)
+    end
 end
 
 @testset "byte GEP coalescing" begin

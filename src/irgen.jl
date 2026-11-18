@@ -1482,7 +1482,8 @@ function add_input_arguments!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             value_map[param] = new_param
         end
 
-        value_map[f] = new_f
+        # calls of `f` to itself keep calling `f`, so that `rewrite_input_uses!` passes the
+        # input arguments on like for any other call
         clone_into!(new_f, f; value_map,
                     changes=LLVM.CloneFunctionChangeType.LocalChangesOnly)
 
