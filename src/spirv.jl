@@ -322,6 +322,9 @@ end
     # (after `prepare_execution!`, whose InstCombine would narrow the widened operations)
     widen_bfloat16!(job, mod)
 
+    # (after `prepare_execution!` too, whose InstCombine can form overflow intrinsics)
+    lower_mul_with_overflow!(mod)
+
     # The SPIRV Tools don't handle Julia's debug info, rejecting DW_LANG_Julia...
     strip_debuginfo!(mod)
 
@@ -1065,6 +1068,80 @@ function lower_minimum_maximum!(mod::LLVM.Module)
     end
     return changed
 end
+
+# The SPIR-V back-ends translate `llvm.smul.with.overflow` and `llvm.umul.with.overflow` to
+# OpSMulExtended and OpUMulExtended (or reject them), which upstream PoCL and Intel's CPU
+# runtime don't implement. So compute the high half of the product with OpenCL's `s_mul_hi`
+# or `u_mul_hi`, which every consumer supports: the multiplication overflows if that isn't
+# the sign (or zero) extension of the low half.
+#
+# Not only Julia's checked multiplication uses these intrinsics: LLVM also forms them, e.g.
+# from division-based overflow checks or for the runtime checks of loop transformations. So
+# this runs right before code generation.
+function lower_mul_with_overflow!(mod::LLVM.Module)
+    changed = false
+    @tracepoint "lower mul.with.overflow" begin
+
+    calls = Tuple{LLVM.CallInst,Bool}[]
+    for f in mod.functions
+        isdeclaration(f) || continue
+        m = match(r"^llvm\.([su])mul\.with\.overflow\.", f.name)
+        m === nothing && continue
+        for use in f.uses
+            call = use.user
+            call isa LLVM.CallInst && push!(calls, (call, m[1] == "s"))
+        end
+    end
+
+    for (call, signed) in calls
+        x, y = call.arguments
+        typ = x.value_type
+        eltyp = typ isa LLVM.VectorType ? typ.element_type : typ
+        haskey(MUL_HI_TYPES, eltyp.width) || continue
+        T = MUL_HI_TYPES[eltyp.width][signed ? 1 : 2]
+        # (the second parameter's type is a substitution of the first one's)
+        mangled = typ isa LLVM.VectorType ? "Dv$(typ.length)_$(T)S_" : T^2
+
+        @dispose builder=IRBuilder() begin
+            position!(builder, LLVM.before(call))
+            builder.debug_location = call.debug_location
+
+            lo = mul!(builder, x, y)
+            hi = call_spirv_builtin!(builder, mod,
+                                     signed ? "__spirv_ocl_s_mul_hi" : "__spirv_ocl_u_mul_hi",
+                                     typ, LLVM.Value[x, y], mangled)
+            ext = if signed
+                shift = LLVM.ConstantInt(eltyp, eltyp.width - 1)
+                if typ isa LLVM.VectorType
+                    shift = LLVM.ConstantVector(fill(shift, typ.length))
+                end
+                ashr!(builder, lo, shift)
+            else
+                LLVM.null(typ)
+            end
+            overflow = icmp!(builder, LLVM.API.LLVMIntNE, hi, ext)
+
+            res = LLVM.UndefValue(call.value_type)
+            res = insert_value!(builder, res, lo, 0)
+            res = insert_value!(builder, res, overflow, 1)
+            replace_uses!(call, res)
+            erase!(call)
+        end
+        changed = true
+    end
+
+    for f in collect(mod.functions)
+        isdeclaration(f) && isempty(f.uses) || continue
+        occursin(r"^llvm\.[su]mul\.with\.overflow\.", f.name) && erase!(f)
+    end
+
+    end
+    return changed
+end
+
+# Itanium manglings of the signed and unsigned integer types `mul_hi` takes, by bit width
+const MUL_HI_TYPES = Dict(8 => ("c", "h"), 16 => ("s", "t"), 32 => ("i", "j"),
+                          64 => ("l", "m"))
 
 # Unless the target supports arithmetic on `bfloat` values, perform it on `float`, rounding
 # the result back to `bfloat`: SPV_KHR_bfloat16 only covers storage and conversions, and the

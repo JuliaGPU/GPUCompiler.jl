@@ -879,6 +879,46 @@ end
     end
 end
 
+@testset "checked multiplication" begin
+    # becomes OpenCL's `mul_hi` instead of OpSMulExtended and OpUMulExtended
+    mod = @eval module $(gensym())
+        function kernel(out::Ptr{T}, x::T, y::T) where {T}
+            r, f = Base.Checked.mul_with_overflow(x, y)
+            unsafe_store!(out, f ? zero(T) : r)
+            return
+        end
+    end
+
+    @testset "$T" for (T, op) in ((Int64, "s_mul_hi"), (UInt64, "u_mul_hi"),
+                                 (Int32, "s_mul_hi"), (UInt8, "u_mul_hi"))
+        @test @filecheck begin
+            @check "OpExtInst {{.*}} $op"
+            @check_not "MulExtended"
+            SPIRV.code_native(mod.kernel, Tuple{Ptr{T}, T, T}; backend, kernel=true)
+        end
+    end
+
+    # InstCombine forms `llvm.umul.with.overflow` from division-based overflow checks, also
+    # right before code generation (in `prepare_execution!`) when not optimizing
+    mod = @eval module $(gensym())
+        overflows(x::UInt64, y::UInt64) = Base.llvmcall("""
+            %d = udiv i64 -1, %0
+            %f = icmp ult i64 %d, %1
+            %r = zext i1 %f to i8
+            ret i8 %r""", UInt8, Tuple{UInt64, UInt64}, x, y)
+        function kernel(out::Ptr{UInt8}, x::UInt64, y::UInt64)
+            unsafe_store!(out, overflows(x, y))
+            return
+        end
+    end
+    @test @filecheck begin
+        @check "OpExtInst {{.*}} u_mul_hi"
+        @check_not "MulExtended"
+        SPIRV.code_native(mod.kernel, Tuple{Ptr{UInt8}, UInt64, UInt64}; backend,
+                          kernel=true, optimize=false)
+    end
+end
+
 end
 
 @testset "min and max lowering" begin
@@ -978,6 +1018,75 @@ end
 
     # the back-ends expand `llvm.minimum` and `llvm.maximum` themselves
     @test occursin("call float @llvm.minimum.f32", lower("minimum"))
+end
+
+@testset "mul.with.overflow lowering" begin
+    # `lower_mul_with_overflow!` computes the overflow flag from OpenCL's `mul_hi`; check
+    # the result on the host, implementing `mul_hi` by widening the multiplication
+    function evaluate(T)
+        bits = 8 * sizeof(T)
+        ty = "i$bits"
+        s = T <: Signed ? "s" : "u"
+        ir = Context() do ctx
+            mod = parse(LLVM.Module, """
+                declare {$ty, i1} @llvm.$(s)mul.with.overflow.$ty($ty, $ty)
+                define $ty @product($ty %x, $ty %y) {
+                  %r = call {$ty, i1} @llvm.$(s)mul.with.overflow.$ty($ty %x, $ty %y)
+                  %v = extractvalue {$ty, i1} %r, 0
+                  ret $ty %v
+                }
+                define i8 @overflow($ty %x, $ty %y) {
+                  %r = call {$ty, i1} @llvm.$(s)mul.with.overflow.$ty($ty %x, $ty %y)
+                  %f = extractvalue {$ty, i1} %r, 1
+                  %b = zext i1 %f to i8
+                  ret i8 %b
+                }""")
+            @test GPUCompiler.lower_mul_with_overflow!(mod)
+            string(mod)
+        end
+        @test !occursin("with.overflow", ir)
+        ext = T <: Signed ? "sext" : "zext"
+        ir = replace(ir, r"^(;|source_filename|declare|attributes).*$"m => "",
+                     r"@_Z\d+__spirv_ocl_[su]_mul_hi\w+" => "@mul_hi")
+        ir *= """
+            define $ty @mul_hi($ty %x, $ty %y) {
+              %wx = $ext $ty %x to i$(2bits)
+              %wy = $ext $ty %y to i$(2bits)
+              %w = mul i$(2bits) %wx, %wy
+              %h = lshr i$(2bits) %w, $bits
+              %r = trunc i$(2bits) %h to $ty
+              ret $ty %r
+            }"""
+        f = @eval (x, y) ->
+            (Base.llvmcall(($ir, "product"), $T, Tuple{$T,$T}, x, y),
+             Base.llvmcall(($ir, "overflow"), Int8, Tuple{$T,$T}, x, y) != 0)
+        (x, y) -> Base.invokelatest(f, x, y)
+    end
+
+    @testset "$T" for T in (Int8, UInt8, Int16, UInt16, Int32, UInt32, Int64, UInt64)
+        f = evaluate(T)
+        values = T[typemin(T), typemin(T) + 1, -1 % T, 0, 1, 2, 3, typemax(T) - 1, typemax(T),
+                   (typemax(T) >> 4sizeof(T)) .+ T[0, 1, 2] .- one(T)..., rand(T, 20)...]
+        for x in values, y in values
+            @test f(x, y) == Base.Checked.mul_with_overflow(x, y)
+        end
+    end
+
+    @testset "vectors" begin
+        ir = Context() do ctx
+            mod = parse(LLVM.Module, """
+                declare {<2 x i64>, <2 x i1>} @llvm.smul.with.overflow.v2i64(<2 x i64>, <2 x i64>)
+                define {<2 x i64>, <2 x i1>} @entry(<2 x i64> %x, <2 x i64> %y) {
+                  %r = call {<2 x i64>, <2 x i1>} @llvm.smul.with.overflow.v2i64(<2 x i64> %x, <2 x i64> %y)
+                  ret {<2 x i64>, <2 x i1>} %r
+                }""")
+            @test GPUCompiler.lower_mul_with_overflow!(mod)
+            verify(mod)
+            string(mod)
+        end
+        @test occursin("@_Z20__spirv_ocl_s_mul_hiDv2_lS_(<2 x i64> %x, <2 x i64> %y)", ir)
+        @test !occursin("with.overflow", ir)
+    end
 end
 
 @testset "local memory padding" begin
