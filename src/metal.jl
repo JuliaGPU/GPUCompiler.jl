@@ -2338,6 +2338,12 @@ end
 # hardware index counters (thread id, group id, etc) aren't accessed via intrinsics,
 # but using special arguments to the kernel function.
 
+# some MSL attributes are passed as AIR arguments with another name. `thread_execution_width`
+# is an alias of `threads_per_simdgroup`, so a kernel using both gets one argument.
+const air_argument_names = Dict("grid_origin" => "stage_in_grid_origin",
+                                "grid_size" => "stage_in_grid_size",
+                                "thread_execution_width" => "threads_per_simdgroup")
+
 const kernel_intrinsics = Dict{String,@NamedTuple{name::String, typ::DataType}}()
 for intr in [
         "dispatch_quadgroups_per_threadgroup", "dispatch_simdgroups_per_threadgroup",
@@ -2349,7 +2355,8 @@ for intr in [
         ("i32",  UInt32),
         ("i16",  UInt16),
     ]
-    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" =>  (name=intr, typ=julia_typ))
+    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" =>
+                             (name=get(air_argument_names, intr, intr), typ=julia_typ))
 end
 for intr in [
         "dispatch_threads_per_threadgroup",
@@ -2365,7 +2372,8 @@ for intr in [
         ("v2i16", NTuple{2, VecElement{UInt16}}),
         ("v3i16", NTuple{3, VecElement{UInt16}}),
     ]
-    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" => (name=intr, typ=julia_typ))
+    push!(kernel_intrinsics, "julia.air.$intr.$llvm_typ" =>
+                             (name=get(air_argument_names, intr, intr), typ=julia_typ))
 end
 
 function argument_type_name(typ)

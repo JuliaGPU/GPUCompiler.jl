@@ -485,6 +485,45 @@ end
         @check "!{i32 1, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"thread_position_in_threadgroup\"}"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; dump_module=true, kernel=true)
     end
+
+    # MSL attributes whose AIR arguments are named differently
+    mod = @eval module $(gensym())
+        function kernel(ptr)
+            origin = ccall("extern julia.air.grid_origin.i32", llvmcall, UInt32, ())
+            size = ccall("extern julia.air.grid_size.i32", llvmcall, UInt32, ())
+            width = ccall("extern julia.air.thread_execution_width.i32", llvmcall, UInt32, ())
+            simd = ccall("extern julia.air.threads_per_simdgroup.i32", llvmcall, UInt32, ())
+            unsafe_store!(ptr, origin + size + width + simd)
+            return
+        end
+    end
+    ir = sprint(io->Metal.code_llvm(io, mod.kernel, Tuple{Core.LLVMPtr{UInt32,1}};
+                                    dump_module=true, kernel=true))
+    @test occursin("!\"air.stage_in_grid_origin\", !\"air.arg_type_name\", !\"uint\"", ir)
+    @test occursin("!\"air.stage_in_grid_size\", !\"air.arg_type_name\", !\"uint\"", ir)
+    # `thread_execution_width` is an alias, so both share one argument
+    @test occursin("!\"air.threads_per_simdgroup\", !\"air.arg_type_name\", !\"uint\"", ir)
+    @test count("air.threads_per_simdgroup", ir) == 1
+
+    # as do the same value at different widths, truncated from the widest
+    mod = @eval module $(gensym())
+        function kernel(ptr)
+            width = ccall("extern julia.air.thread_execution_width.i16", llvmcall, UInt16, ())
+            simd = ccall("extern julia.air.threads_per_simdgroup.i32", llvmcall, UInt32, ())
+            pos = ccall("extern julia.air.thread_position_in_grid.v3i16", llvmcall,
+                        NTuple{3, VecElement{UInt16}}, ())
+            pos32 = ccall("extern julia.air.thread_position_in_grid.v3i32", llvmcall,
+                          NTuple{3, VecElement{UInt32}}, ())
+            unsafe_store!(ptr, width + simd + pos[1].value + pos32[1].value)
+            return
+        end
+    end
+    ir = sprint(io->Metal.code_llvm(io, mod.kernel, Tuple{Core.LLVMPtr{UInt32,1}};
+                                    dump_module=true, kernel=true))
+    @test occursin("!\"air.threads_per_simdgroup\", !\"air.arg_type_name\", !\"uint\"", ir)
+    @test count("air.threads_per_simdgroup", ir) == 1
+    @test occursin("!\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint3\"", ir)
+    @test count("air.thread_position_in_grid", ir) == 1
 end
 
 @testset "byte GEP coalescing" begin
