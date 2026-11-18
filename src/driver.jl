@@ -514,7 +514,18 @@ const __llvm_initialized = Ref(false)
         @tracepoint "verification" verify(ir)
     end
 
-    if job.config.toplevel && uses_exception_sites(job)
+    # XXX: before Julia 1.13.5, the precompiled keyword wrapper of `emit_llvm` can keep
+    #      the return type inferred while `uses_exception_sites` only had its fallback, so
+    #      callers drop `exception_sites` after a back-end defines its own method. hiding
+    #      the call from inference makes the return type cover both shapes of the metadata.
+    #      fixed by JuliaLang/julia#64702.
+    @static if VERSION < v"1.13.5"
+        with_sites = job.config.toplevel &&
+                     Base.inferencebarrier(uses_exception_sites(job))::Bool
+    else
+        with_sites = job.config.toplevel && uses_exception_sites(job)
+    end
+    if with_sites
         return ir, (; entry, compiled, relocations, exception_sites)
     end
     return ir, (; entry, compiled, relocations)
