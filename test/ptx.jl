@@ -1,9 +1,16 @@
+for backend in (:nvptx, :nvvm)
+if backend === :nvvm && !PTX.nvvm_available()
+    @warn "libNVVM from CUDA 13.2+ not available; skipping PTX tests with the NVVM back-end"
+    continue
+end
+@testset "$backend" begin
+
 @testset "IR" begin
 
 @testset "exceptions" begin
     # plain exceptions should get lowered to a call to the GPU run-time, not a
     # jl_throw referencing a jl_value_t representing the exception
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true) do
+    @test @filecheck PTX.code_llvm(Tuple{}; backend, dump_module=true) do
         @check_not "jl_throw"
         @check "gpu_report_exception"
         throw(DivideError())
@@ -22,7 +29,7 @@ end
         @check "call {{.*}}handle_jl_error"
         @check "store"
         @check_not "gpu_report_exception"
-        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int},Int})
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int},Int}; backend)
     end
 end
 
@@ -38,7 +45,7 @@ end
         @check_label "define void @{{(julia|j)_kernel[0-9_]*}}"
         @check_not "atomic_error"
         @check "gpu_report_exception"
-        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int},mod.Atomic})
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int},mod.Atomic}; backend)
     end
 end
 
@@ -64,16 +71,16 @@ end
         @check "phi i32 [ {{[12]}}, %{{.*}} ], [ {{[12]}}, %{{.*}} ]"
         @check "store i32"
         @check "trap"
-        PTX.code_llvm(mod.kernel, types; exception_sites=true, kernel=true, debug_level=1)
+        PTX.code_llvm(mod.kernel, types; backend, exception_sites=true, kernel=true, debug_level=1)
     end
 
-    _, meta = PTX.code_execution(mod.kernel, types; exception_sites=true, debug_level=1)
+    _, meta = PTX.code_execution(mod.kernel, types; backend, exception_sites=true, debug_level=1)
     @test sort(meta.exception_sites; by=site -> site.name) ==
           [GPUCompiler.ExceptionSite("FirstError", "first reason", []),
            GPUCompiler.ExceptionSite("SecondError", "second reason", [])]
 
     # with backtraces, which start at the caller of `@gputhrow`
-    _, meta = PTX.code_execution(mod.kernel, types; exception_sites=true, debug_level=2)
+    _, meta = PTX.code_execution(mod.kernel, types; backend, exception_sites=true, debug_level=2)
     @test length(meta.exception_sites) == 2
     for site in meta.exception_sites
         frame = only(site.frames)
@@ -86,19 +93,19 @@ end
         @check_label "define ptx_kernel void @{{.*}}kernel"
         @check_not "phi i32"
         @check "store i32 0"
-        PTX.code_llvm(mod.kernel, types; exception_sites=true, kernel=true, debug_level=0)
+        PTX.code_llvm(mod.kernel, types; backend, exception_sites=true, kernel=true, debug_level=0)
     end
-    _, meta = PTX.code_execution(mod.kernel, types; exception_sites=true, debug_level=0)
+    _, meta = PTX.code_execution(mod.kernel, types; backend, exception_sites=true, debug_level=0)
     @test isempty(meta.exception_sites)
 
     # back-ends that don't opt in are unaffected (the test runtime's `signal_exception`
     # doesn't validate)
-    _, meta = PTX.code_execution(mod.kernel, types; debug_level=1, validate=false)
+    _, meta = PTX.code_execution(mod.kernel, types; backend, debug_level=1, validate=false)
     @test !haskey(meta, :exception_sites)
     @test @filecheck begin
         @check "gpu_report_exception"
         @check_not "gpu_exception_site"
-        PTX.code_llvm(mod.kernel, types; kernel=true, debug_level=1)
+        PTX.code_llvm(mod.kernel, types; backend, kernel=true, debug_level=1)
     end
 
     # sites in runtime functions that optimization introduces calls to (`gc_pool_alloc`,
@@ -116,7 +123,7 @@ end
         end
     end
     _, meta = PTX.code_execution(mod.kernel, Tuple{Ptr{Int},Int};
-                                 exception_sites=true, debug_level=1)
+                                 backend, exception_sites=true, debug_level=1)
     @test length(meta.exception_sites) == 2
     @test GPUCompiler.ExceptionSite("Error", "reason", []) in meta.exception_sites
 end
@@ -140,7 +147,7 @@ LLVM.version() >= v"17" && @testset "alignment inference" begin
     @test @filecheck begin
         @check "store i64 {{.*}}, ptr addrspace(3) {{.*}}, align 8"
         @check "load i64, ptr addrspace(3) {{.*}}, align 8"
-        PTX.code_llvm(mod.kernel, Tuple{Int})
+        PTX.code_llvm(mod.kernel, Tuple{Int}; backend)
     end
 end
 
@@ -170,7 +177,7 @@ end
         # PTX orders all memory, so the memory a scope names is dropped
         @check "fence syncscope(\"device\") acquire"
         @check "fence syncscope(\"block\") release"
-        PTX.code_llvm(mod.kernel, Tuple{})
+        PTX.code_llvm(mod.kernel, Tuple{}; backend)
     end
 end
 
@@ -178,7 +185,7 @@ end
     # validate textual IR, with NVPTX's synchronization scopes, for a PTX target
     function validate_atomics(body; cap, ptx=v"8.4", system_atomics=true)
         source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
-        target = PTXCompilerTarget(; cap, ptx, system_atomics)
+        target = PTXCompilerTarget(; cap, ptx, system_atomics, backend)
         job = CompilerJob(source, CompilerConfig(target, PTX.CompilerParams(); kernel=true))
         Context(; opaque_pointers=true) do ctx
             mod = parse(LLVM.Module, """
@@ -290,22 +297,24 @@ end
                        (mod.load_store, Tuple{Int32}),
                        (mod.local_arg, Tuple{Core.LLVMPtr{Int32,5}, Int32}))
         for optimize in (true, false)
-            ir = sprint(io->PTX.code_llvm(io, f, types; optimize))
+            ir = sprint(io->PTX.code_llvm(io, f, types; backend, optimize))
             @test !occursin(r"atomicrmw |cmpxchg |load atomic |store atomic ", ir)
         end
         # NVPTX selects an `atom.local` for `cmpxchg`, which ptxas rejects
-        asm = sprint(io->PTX.code_native(io, f, types))
+        asm = sprint(io->PTX.code_native(io, f, types; backend))
         @test !occursin(r"\batom\.|\.(relaxed|acquire|release)\.", asm)
     end
     # the volatile `cmpxchg` keeps its volatile accesses
     @test @filecheck begin
         @check "load volatile i32"
         @check "store volatile i32"
-        PTX.code_llvm(mod.cmpxchg, Tuple{Int32})
+        PTX.code_llvm(mod.cmpxchg, Tuple{Int32}; backend)
     end
 
     # they aren't validated either, as they don't need atomic instructions
-    @test PTX.code_execution(mod.kernel, Tuple{Int32}; cap=v"5.2") isa Tuple
+    # (on an architecture without system-scope atomics, which libNVVM doesn't support)
+    backend === :nvptx &&
+        @test PTX.code_execution(mod.kernel, Tuple{Int32}; backend, cap=v"5.2") isa Tuple
 end
 
 @testset "atomics on generic pointers" begin
@@ -346,21 +355,21 @@ end
             @check "atomicrmw add {{.*}} syncscope(\"block\") monotonic, align 4{{.*}}, !noalias.addrspace"
             @check "phi i32 [ [[OLD]]"
             @check_not "atomicrmw"
-            PTX.code_llvm(mod.rmw, Tuple{Ptr{Int32}, Int32}; optimize, raw=true)
+            PTX.code_llvm(mod.rmw, Tuple{Ptr{Int32}, Int32}; backend, optimize, raw=true)
         end
         @test @filecheck begin
             @check "call i1 @llvm.nvvm.isspacep.local"
             @check "load volatile i32"
             @check "store volatile i32"
             @check "cmpxchg weak volatile {{.*}} seq_cst acquire, align 4{{.*}}, !noalias.addrspace"
-            PTX.code_llvm(mod.cmpxchg, Tuple{Ptr{Int32}, Int32}; optimize, raw=true)
+            PTX.code_llvm(mod.cmpxchg, Tuple{Ptr{Int32}, Int32}; backend, optimize, raw=true)
         end
         @test @filecheck begin
             @check "call i1 @llvm.nvvm.isspacep.local"
             @check "store atomic i32 {{.*}} release, align 4{{.*}}, !noalias.addrspace"
             @check "call i1 @llvm.nvvm.isspacep.local"
             @check "load atomic i32{{.*}} monotonic, align 4{{.*}}, !noalias.addrspace"
-            PTX.code_llvm(mod.load_store, Tuple{Ptr{Int32}, Int32}; optimize, raw=true)
+            PTX.code_llvm(mod.load_store, Tuple{Ptr{Int32}, Int32}; backend, optimize, raw=true)
         end
     end
 
@@ -368,12 +377,12 @@ end
     @test @filecheck begin
         @check_not "isspacep"
         @check "load atomic i32{{.*}} unordered"
-        PTX.code_llvm(mod.unordered, Tuple{Ptr{Int32}})
+        PTX.code_llvm(mod.unordered, Tuple{Ptr{Int32}}; backend)
     end
     @test @filecheck begin
         @check_not "isspacep"
         @check "atomicrmw add"
-        PTX.code_llvm(mod.global_cast, Tuple{Core.LLVMPtr{Int32,1}, Int32})
+        PTX.code_llvm(mod.global_cast, Tuple{Core.LLVMPtr{Int32,1}, Int32}; backend)
     end
 
     # checked atomics aren't checked again, and the checks are inlined
@@ -401,7 +410,7 @@ end
         end
     end
 
-    asm = sprint(io->PTX.code_native(io, mod.cmpxchg, Tuple{Ptr{Int32}, Int32}))
+    asm = sprint(io->PTX.code_native(io, mod.cmpxchg, Tuple{Ptr{Int32}, Int32}; backend))
     @test occursin("isspacep.local", asm)
     @test occursin("atom.acquire.sys.cas.b32", asm)
 end
@@ -418,7 +427,7 @@ end
     end
     Base.@lock GPUCompiler.runtime_libs_lock empty!(GPUCompiler.runtime_libs)
     ir = sprint() do io
-        PTX.code_llvm(io, mod.kernel, Tuple{Int}; kernel=true, dump_module=true)
+        PTX.code_llvm(io, mod.kernel, Tuple{Int}; backend, kernel=true, dump_module=true)
     end
     @test occursin("gpu_report_exception", ir)
     @test occursin("[1 x i64] %state", ir)
@@ -432,7 +441,7 @@ end
     end
     # `patch=true` keeps the slot symbolic instead of resolving it into the IR.
     ir = sprint() do io
-        PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; dump_module=true, patch=true)
+        PTX.code_llvm(io, mod.kernel, Tuple{Symbol}; backend, dump_module=true, patch=true)
     end
     # Julia embeds the Symbol pointer before exposing the IR to GPUCompiler when it
     # can't emit relocatable global metadata; otherwise it stays a symbolic slot we preserve.
@@ -453,7 +462,7 @@ end
         const unusual_symbol = Symbol("value#global")
         kernel(name::Symbol) = (name === unusual_symbol; return)
     end
-    @test PTX.code_execution(mod.kernel, Tuple{Symbol}) !== nothing
+    @test PTX.code_execution(mod.kernel, Tuple{Symbol}; backend) !== nothing
 end
 
 @testset "boxed Bool singleton relocation" begin
@@ -476,7 +485,7 @@ end
         for (f, name) in ((mod.consume_true, "jl_true"),
                           (mod.consume_false, "jl_false"))
             ir = sprint(io->PTX.code_llvm(io, f, Tuple{Bool, Int32};
-                                          dump_module=true))
+                                          backend, dump_module=true))
             @test occursin("@$(name)_box = private unnamed_addr constant", ir)
             @test !occursin("@$name = external", ir)
             @test !occursin("inttoptr", ir)
@@ -495,7 +504,7 @@ end
     end
     # `patch=true` keeps the interior header relocation symbolic (externally_initialized).
     ir = sprint(io->PTX.code_llvm(io, mod.consume, Tuple{Bool,Int32};
-                                  dump_module=true, patch=true))
+                                  backend, dump_module=true, patch=true))
     # As with Symbol literals above, Julia embeds the type pointer when it can't emit
     # relocatable global metadata; otherwise GPUCompiler represents it as a relocation.
     if GPUCompiler.supports_relocatable_ir()
@@ -520,23 +529,23 @@ end
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
         @check_same cond=typed_ptrs "({{({ i64 }|\\[1 x i64\\])}}*"
         @check_same cond=opaque_ptrs "(ptr"
-        PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate})
+        PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; backend)
     end
 
     @test @filecheck begin
         @check_label "define ptx_kernel void @_Z6kernel9Aggregate"
         @check_not cond=typed_ptrs "*"
         @check_not cond=opaque_ptrs "ptr"
-        PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; kernel=true)
+        PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; backend, kernel=true)
     end
 end
 
 @testset "calling convention" begin
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true) do
+    @test @filecheck PTX.code_llvm(Tuple{}; backend, dump_module=true) do
         @check_not "ptx_kernel"
         return
     end
-    @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true, kernel=true) do
+    @test @filecheck PTX.code_llvm(Tuple{}; backend, dump_module=true, kernel=true) do
         @check "ptx_kernel"
         return
     end
@@ -551,12 +560,12 @@ end
 
     @test @filecheck begin
         @check "@{{(julia|j)_kernel[0-9_]*}}()"
-        PTX.code_llvm(mod.kernel, Tuple{})
+        PTX.code_llvm(mod.kernel, Tuple{}; backend)
     end
 
     @test @filecheck begin
         @check "@_Z6kernel([1 x i64] %state)"
-        PTX.code_llvm(mod.kernel, Tuple{}; kernel=true)
+        PTX.code_llvm(mod.kernel, Tuple{}; backend, kernel=true)
     end
 
     # state should only passed to device functions that use it
@@ -579,17 +588,17 @@ end
     @test @filecheck begin
         @check_label "define ptx_kernel void @_Z6kernelP5Int64([1 x i64] %state"
         @check_not "julia.gpu.state_getter"
-        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; backend, kernel=true, dump_module=true)
     end
     # child1 doesn't use the state
     @test @filecheck begin
         @check_label "define{{.*}} i64 @{{(julia|j)_child1_[0-9]+}}"
-        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; backend, kernel=true, dump_module=true)
     end
     # child2 does
     @test @filecheck begin
         @check_label "define{{.*}} i64 @{{(julia|j)_child2_[0-9]+}}"
-        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; kernel=true, dump_module=true)
+        PTX.code_llvm(mod.kernel, Tuple{Ptr{Int64}}; backend, kernel=true, dump_module=true)
     end
 end
 end
@@ -607,7 +616,7 @@ end
     end
 
     ir = sprint(io->PTX.code_llvm(io, dkernel, Tuple{Ptr{Float64}};
-                                  debuginfo=:none, dump_module=true, kernel=true))
+                                  backend, debuginfo=:none, dump_module=true, kernel=true))
     @test !occursin("deferred_codegen", ir)
     @test occursin(r"define internal .*@enzyme_(julia|j)_kernel", ir)
     @test occursin(r"call .*@(julia|j)_kernel", ir)
@@ -630,7 +639,7 @@ if :NVPTX in LLVM.backends()
             end
         end
         ptx = sprint(io->PTX.code_native(io, mod.consume, Tuple{Bool, Int32};
-                                         dump_module=true))
+                                         backend, dump_module=true))
         @test occursin("jl_true_box", ptx)
         @test !occursin(r"(?m)^\.extern .*\bjl_true\b", ptx)
     end
@@ -649,7 +658,7 @@ end
             end
         end
         ptx = sprint(io->PTX.code_native(io, mod.consume, Tuple{Bool,Int32};
-                                         dump_module=true, patch=true))
+                                         backend, dump_module=true, patch=true))
         @test occursin(r"\.global .*_box", ptx)
     end
 end
@@ -661,7 +670,7 @@ end
         kernel(x::Int) = (Int16(x); return)
     end
     ptx = sprint(io->PTX.code_native(io, mod.kernel, Tuple{Int};
-                                     kernel=true, dump_module=true, patch=true))
+                                     backend, kernel=true, dump_module=true, patch=true))
     @test !occursin("jl_sym_trunc", ptx)
 end
 
@@ -684,7 +693,7 @@ end
         @check_label ".visible .func {{(julia|j)_parent[0-9_]*}}"
         @check "call.uni"
         @check_same "{{(julia|j)_child_}}"
-        PTX.code_native(mod.parent, Tuple{Int64})
+        PTX.code_native(mod.parent, Tuple{Int64}; backend)
     end
 end
 
@@ -702,33 +711,33 @@ end
         @check_not ".visible .func {{(julia|j)_nonentry}}"
         @check_label ".visible .entry _Z5entry5Int64"
         @check "{{(julia|j)_nonentry}}"
-        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, dump_module=true)
+        PTX.code_native(mod.entry, Tuple{Int64}; backend, kernel=true, dump_module=true)
     end
 
 @testset "property_annotations" begin
     @test @filecheck begin
         @check_not "maxntid"
-        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true)
+        PTX.code_native(mod.entry, Tuple{Int64}; backend, kernel=true)
     end
 
     @test @filecheck begin
         @check ".maxntid 42, 1, 1"
-        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, maxthreads=42)
+        PTX.code_native(mod.entry, Tuple{Int64}; backend, kernel=true, maxthreads=42)
     end
 
     @test @filecheck begin
         @check ".reqntid 42, 1, 1"
-        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, minthreads=42)
+        PTX.code_native(mod.entry, Tuple{Int64}; backend, kernel=true, minthreads=42)
     end
 
     @test @filecheck begin
         @check ".minnctapersm 42"
-        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, blocks_per_sm=42)
+        PTX.code_native(mod.entry, Tuple{Int64}; backend, kernel=true, blocks_per_sm=42)
     end
 
     @test @filecheck begin
         @check ".maxnreg 42"
-        PTX.code_native(mod.entry, Tuple{Int64}; kernel=true, maxregs=42)
+        PTX.code_native(mod.entry, Tuple{Int64}; backend, kernel=true, maxregs=42)
     end
 end
 end
@@ -752,12 +761,12 @@ end
 
     @test @filecheck begin
         @check ".func {{(julia|j)_child}}"
-        PTX.code_native(mod.parent1, Tuple{Int})
+        PTX.code_native(mod.parent1, Tuple{Int}; backend)
     end
 
     @test @filecheck begin
         @check ".func {{(julia|j)_child}}"
-        PTX.code_native(mod.parent2, Tuple{Int})
+        PTX.code_native(mod.parent2, Tuple{Int}; backend)
     end
 end
 
@@ -782,13 +791,13 @@ end
     @test @filecheck begin
         @check_dag ".func {{(julia|j)_child1}}"
         @check_dag ".func {{(julia|j)_child2}}"
-        PTX.code_native(mod.parent1, Tuple{Int})
+        PTX.code_native(mod.parent1, Tuple{Int}; backend)
     end
 
     @test @filecheck begin
         @check_dag ".func {{(julia|j)_child1}}"
         @check_dag ".func {{(julia|j)_child2}}"
-        PTX.code_native(mod.parent2, Tuple{Int})
+        PTX.code_native(mod.parent2, Tuple{Int}; backend)
     end
 end
 
@@ -809,7 +818,7 @@ end
         @check_label ".visible .func {{(julia|j)_kernel[0-9_]*}}"
         @check_not "jl_throw"
         @check_not "jl_invoke"
-        PTX.code_native(mod.kernel, Tuple{Ptr{Int32}})
+        PTX.code_native(mod.kernel, Tuple{Ptr{Int32}}; backend)
     end
 end
 
@@ -821,7 +830,7 @@ end
             return
         end
     end
-    PTX.code_native(devnull, mod.kernel, Tuple{Float64})
+    PTX.code_native(devnull, mod.kernel, Tuple{Float64}; backend)
     @test "We did not crash!" != ""
 end
 
@@ -832,7 +841,7 @@ end
             return
         end
     end
-    PTX.code_native(devnull, mod.kernel, Tuple{Ptr{Float64}})
+    PTX.code_native(devnull, mod.kernel, Tuple{Ptr{Float64}}; backend)
     @test "We did not crash!" != ""
 end
 
@@ -855,7 +864,7 @@ end
         @check_not ".visible .func"
         @check ".visible .entry"
         @check_not ".visible .func"
-        PTX.code_native(mod.kernel, types; kernel=true, dump_module=true)
+        PTX.code_native(mod.kernel, types; backend, kernel=true, dump_module=true)
     end
 end
 
@@ -890,8 +899,8 @@ end
     end
 
     source = methodinstance(typeof(mod.kernel), Tuple{Int}, Base.get_world_counter())
-    job = CompilerJob(source, CompilerConfig(PTXCompilerTarget(; cap=v"7.0"), mod.Params();
-                                             kernel=true, validate=false))
+    target = PTXCompilerTarget(; cap=v"7.0", backend)
+    job = CompilerJob(source, CompilerConfig(target, mod.Params(); kernel=true, validate=false))
     @test @filecheck begin
         @check_not "declare {{.*}}@gpu_gc_pool_alloc"
         @check "call {{.*}}@test_malloc"
@@ -927,7 +936,7 @@ end
         @check_not "julia.get_gc_frame_slot"
         @check_not "julia.new_gc_frame"
         @check "gpu_gc_pool_alloc"
-        PTX.code_native(mod.kernel, Tuple{Int})
+        PTX.code_native(mod.kernel, Tuple{Int}; backend)
     end
 
     # make sure that we can still ellide allocations
@@ -948,7 +957,7 @@ end
     @test @filecheck begin
         @check_label ".visible .func {{(julia|j)_ref_kernel[0-9_]*}}"
         @check_not "gpu_gc_pool_alloc"
-        PTX.code_native(mod.ref_kernel, Tuple{Ptr{Int64}, Int})
+        PTX.code_native(mod.ref_kernel, Tuple{Ptr{Int64}, Int}; backend)
     end
 
     # storing a heap object into a field of another one emits a write barrier
@@ -967,7 +976,7 @@ end
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_store_field_[0-9]+}}"
         @check_not "write_barrier"
-        PTX.code_llvm(mod.store_field, Tuple{mod.Outer, Base.RefValue{Int}})
+        PTX.code_llvm(mod.store_field, Tuple{mod.Outer, Base.RefValue{Int}}; backend)
     end
 end
 
@@ -979,7 +988,7 @@ end
     end
 
     @test_throws_message(InvalidIRError,
-                         PTX.code_execution(mod.kernel, Tuple{})) do msg
+                         PTX.code_execution(mod.kernel, Tuple{}; backend)) do msg
         occursin(GPUCompiler.UNKNOWN_INTRINSIC, msg) &&
         occursin(r"\[\d+\] kernel", msg)
     end
@@ -1005,7 +1014,7 @@ end
     VERSION >= v"1.11" && for (f, types, T) in cases
         # relocations are checked before being resolved, so keep them symbolic
         @test_throws_message(InvalidIRError,
-                             PTX.code_execution(f, types; patch=true)) do msg
+                             PTX.code_execution(f, types; backend, patch=true)) do msg
             occursin("unsupported $(GPUCompiler.UNSUPPORTED_CONSTANT) (of type $T)", msg) &&
             occursin(r"\[\d+\] (read|print)_", msg)
         end
@@ -1021,9 +1030,10 @@ end
             return
         end
     end
-    @test PTX.code_execution(mod.compare_symbol, Tuple{Ptr{Int},Symbol}; patch=true) !== nothing
+    @test PTX.code_execution(mod.compare_symbol, Tuple{Ptr{Int},Symbol};
+                             backend, patch=true) !== nothing
     @test PTX.code_execution(mod.check_type, Tuple{Ptr{Float64},Bool,Int32};
-                             patch=true) !== nothing
+                             backend, patch=true) !== nothing
 end
 
 @testset "atomic validation" begin
@@ -1039,17 +1049,24 @@ end
         end
     end
     @test_throws_message(InvalidIRError,
-                         PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; cap=v"5.2")) do msg
+                         PTX.code_execution(mod.kernel, Tuple{Ptr{Int}};
+                                            backend, cap=v"5.2")) do msg
         occursin("Reason: unsupported system-scope atomic operation (requires compute capability 6.0", msg) &&
         occursin(r"\[\d+\] kernel", msg)
     end
     @test_throws_message(InvalidIRError,
-                         PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; cap=v"6.1",
+                         PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; backend, cap=v"6.1",
                                             system_atomics=false)) do msg
         occursin("Reason: unsupported system-scope atomic operation (not supported on this platform", msg)
     end
-    asm, _ = PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; cap=v"6.1")
-    @test occursin("atom.sys.global.add.u64", asm)
+    # (libNVVM doesn't support sm_61; on sm_70 and later, the operation is relaxed)
+    if backend === :nvptx
+        asm, _ = PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; backend, cap=v"6.1")
+        @test occursin("atom.sys.global.add.u64", asm)
+    else
+        asm, _ = PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; backend)
+        @test occursin("atom.relaxed.sys.global.add.u64", asm)
+    end
 end
 
 @testset "float boxes" begin
@@ -1068,9 +1085,9 @@ end
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
         @check_not "jl_box_float32"
         @check_not "gpu_gc_pool_alloc"
-        PTX.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}}; dump_module=true)
+        PTX.code_llvm(mod.kernel, Tuple{Float32,Ptr{Float32}}; backend, dump_module=true)
     end
-    PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}})
+    PTX.code_native(devnull, mod.kernel, Tuple{Float32,Ptr{Float32}}; backend)
 end
 
 @testset "FMA contraction" begin
@@ -1081,7 +1098,7 @@ end
         return x
     end
 
-    ptx = sprint(PTX.code_native, contract, Tuple{Float32})
+    ptx = sprint(io->PTX.code_native(io, contract, Tuple{Float32}; backend))
     @test occursin("mul.f32", ptx)
     @test occursin("sub.f32", ptx)
     @test !occursin("mul.rn.f32", ptx)
@@ -1097,7 +1114,7 @@ end
     for fastmath in (false, true)
         # IR attributes; the back-end selects approximate instructions from these.
         @test @filecheck PTX.code_llvm(Tuple{Ptr{Float32},Ptr{Float32}};
-                                       dump_module=true, fastmath) do x, out
+                                       backend, dump_module=true, fastmath) do x, out
             @check_not cond=!fastmath "unsafe-fp-math"
             @check_not cond=!fastmath "denormal-fp-math-f32"
             @check     cond=!fastmath "call float @llvm.sqrt.f32"
@@ -1108,7 +1125,7 @@ end
             return
         end
         # PTX-level selection.
-        @test @filecheck PTX.code_native(Tuple{Ptr{Float32},Ptr{Float32}}; fastmath) do x, out
+        @test @filecheck PTX.code_native(Tuple{Ptr{Float32},Ptr{Float32}}; backend, fastmath) do x, out
             @check     cond=fastmath  "sqrt.approx.ftz.f32"
             @check     cond=!fastmath "sqrt.rn.f32"
             @check_not cond=!fastmath "sqrt.approx"
@@ -1126,38 +1143,38 @@ end
     # fast f64). Per-call `@fastmath` is what we test here; the job-wide path
     # is covered by the testset above.
 
-    @test @filecheck PTX.code_native(Tuple{Float32, Float32}) do x, y
+    @test @filecheck PTX.code_native(Tuple{Float32, Float32}; backend) do x, y
         @check "div.approx.f32"
         @fastmath x / y
     end
-    @test @filecheck PTX.code_native(Tuple{Float32, Float32}) do x, y
+    @test @filecheck PTX.code_native(Tuple{Float32, Float32}; backend) do x, y
         @check_not "div.approx"
         x / y
     end
-    @test @filecheck PTX.code_native(Tuple{Float64, Float64}) do x, y
+    @test @filecheck PTX.code_native(Tuple{Float64, Float64}; backend) do x, y
         @check "rcp.approx.ftz.f64"
         @fastmath x / y
     end
-    @test @filecheck PTX.code_native(Tuple{Float64, Float64}) do x, y
+    @test @filecheck PTX.code_native(Tuple{Float64, Float64}; backend) do x, y
         @check_not "rcp.approx"
         x / y
     end
 
-    @test @filecheck PTX.code_native(Tuple{Float32}) do x
+    @test @filecheck PTX.code_native(Tuple{Float32}; backend) do x
         @check "sqrt.approx.f32"
         @fastmath sqrt(x)
     end
-    @test @filecheck PTX.code_native(Tuple{Float32}) do x
+    @test @filecheck PTX.code_native(Tuple{Float32}; backend) do x
         @check "sqrt.rn.f32"
         @check_not "sqrt.approx"
         sqrt(x)
     end
-    @test @filecheck PTX.code_native(Tuple{Float64}) do x
+    @test @filecheck PTX.code_native(Tuple{Float64}; backend) do x
         @check "rsqrt.approx.f64"
         @check "rcp.approx.ftz.f64"
         @fastmath sqrt(x)
     end
-    @test @filecheck PTX.code_native(Tuple{Float64}) do x
+    @test @filecheck PTX.code_native(Tuple{Float64}; backend) do x
         @check "sqrt.rn.f64"
         @check_not "rsqrt"
         sqrt(x)
@@ -1181,24 +1198,24 @@ end
         @check "rsqrt.approx.f32"
         @check_not "sqrt.approx"
         @check_not "div.approx"
-        PTX.code_native(mod.rsqrt32_fast, Tuple{Float32})
+        PTX.code_native(mod.rsqrt32_fast, Tuple{Float32}; backend)
     end
     @test @filecheck begin
         @check "rsqrt.approx.ftz.f32"
         @check_not "sqrt.approx"
         @check_not "div.approx"
-        PTX.code_native(mod.rsqrt32_fast, Tuple{Float32}; fastmath=true)
+        PTX.code_native(mod.rsqrt32_fast, Tuple{Float32}; backend, fastmath=true)
     end
     @test @filecheck begin
         @check "rsqrt.approx.f64"
         @check_not "rcp.approx"
-        PTX.code_native(mod.rsqrt64_fast, Tuple{Float64})
+        PTX.code_native(mod.rsqrt64_fast, Tuple{Float64}; backend)
     end
     @test @filecheck begin
         # job-wide fastmath stamps afn on all FP ops, so the pattern still fires
         @check "rsqrt.approx.f64"
         @check_not "rcp.approx"
-        PTX.code_native(mod.rsqrt64, Tuple{Float64}; fastmath=true)
+        PTX.code_native(mod.rsqrt64, Tuple{Float64}; backend, fastmath=true)
     end
 
     # Without afn, plain `1/sqrt(x)` must NOT fold to rsqrt: it would change
@@ -1206,7 +1223,7 @@ end
     @test @filecheck begin
         @check "sqrt.rn.f64"
         @check_not "rsqrt.approx"
-        PTX.code_native(mod.rsqrt64, Tuple{Float64})
+        PTX.code_native(mod.rsqrt64, Tuple{Float64}; backend)
     end
 end
 
@@ -1235,7 +1252,7 @@ end
     if LLVM.version() >= v"18"
         @test @filecheck begin
             @check ".target sm_90a"
-            PTX.code_native(mod.kernel, Tuple{}; cap=v"9.0", ptx=v"8.0",
+            PTX.code_native(mod.kernel, Tuple{}; backend, cap=v"9.0", ptx=v"8.0",
                             feature_set=:arch, kernel=true, dump_module=true)
         end
     end
@@ -1243,12 +1260,12 @@ end
     if LLVM.version() >= v"20"
         @test @filecheck begin
             @check ".target sm_100f"
-            PTX.code_native(mod.kernel, Tuple{}; cap=v"10.0", ptx=v"8.8",
+            PTX.code_native(mod.kernel, Tuple{}; backend, cap=v"10.0", ptx=v"8.8",
                             feature_set=:family, kernel=true, dump_module=true)
         end
         @test @filecheck begin
             @check ".target sm_100a"
-            PTX.code_native(mod.kernel, Tuple{}; cap=v"10.0", ptx=v"8.6",
+            PTX.code_native(mod.kernel, Tuple{}; backend, cap=v"10.0", ptx=v"8.6",
                             feature_set=:arch, kernel=true, dump_module=true)
         end
     end
@@ -1256,3 +1273,6 @@ end
 
 end
 end # NVPTX in LLVM.backends()
+
+end
+end # backend

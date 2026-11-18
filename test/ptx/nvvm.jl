@@ -1,7 +1,4 @@
-# the NVVM back-end needs libNVVM from CUDA 13.2+, which only reads current bitcode for
-# Blackwell (sm_100) and later without `-nvvm-latest`, so test with that architecture
-available = NVVM.is_available() && NVVM.llvm_version("compute_100") !== nothing
-if !available
+if !PTX.nvvm_available()
     @warn "libNVVM from CUDA 13.2+ not available; skipping NVVM tests"
 else
 
