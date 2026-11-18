@@ -3222,6 +3222,10 @@ function lower_sincos!(builder::IRBuilder, call::LLVM.CallBase)
     return insert_value!(builder, res, cos, 1)
 end
 
+# The prefix of the functions we define to implement LLVM intrinsics AIR lacks. They can't
+# be named `air.*`: Apple's verifier rejects any function there that it doesn't know.
+const helper_prefix = "gpucompiler."
+
 # IEEE 754-2018 compliant maximum/minimum, propagating NaNs and treating -0 as less than +0
 function lower_minimum_maximum!(builder::IRBuilder, call::LLVM.CallBase, minmax::String)
     mod = builder.insert_block.parent.parent
@@ -3242,7 +3246,7 @@ function lower_minimum_maximum!(builder::IRBuilder, call::LLVM.CallBase, minmax:
     # we'd do this inline, but LLVM.jl doesn't have BB split functionality.
     nnan = call.fast_math.nnan
     fn = if !nnan
-        "air.$(minmax)imum.f$bits"
+        "$(helper_prefix)$(minmax)imum.f$bits"
     elseif optyp isa LLVM.FloatType
         "air.fast_f$minmax.f32"
     else
@@ -3276,7 +3280,7 @@ function lower_powi!(builder::IRBuilder, call::LLVM.CallBase)
 
     mod = builder.insert_block.parent.parent
     typ, ntyp = x.value_type, n.value_type
-    fn ="air.powi.$(type_suffix(typ)).$(type_suffix(ntyp))"
+    fn = "$(helper_prefix)powi.$(type_suffix(typ)).$(type_suffix(ntyp))"
     f = get!(() -> build_powi!(mod, fn, typ, ntyp), mod.functions, fn)
     return call!(builder, f.function_type, f, LLVM.Value[x, n])
 end
@@ -3415,6 +3419,7 @@ function build_minimum_maximum!(mod::LLVM.Module, fn::String, op_ft::LLVM.Functi
                                 jltyp::Type, minmax::String)
     optyp = op_ft.return_type
     f = LLVM.Function(mod, fn, op_ft)
+    f.linkage = LLVM.Linkage.Internal
     push!(f.function_attributes, EnumAttribute(:alwaysinline))
     arg0, arg1 = f.parameters
 

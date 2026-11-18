@@ -2581,9 +2581,10 @@ end
 end
 
 @testset "fast-math min/max lowering" begin
-    # Base min/max -> llvm.minimum/maximum lower to a NaN-propagating wrapper (air.minimum/
-    # maximum, which falls back to air.fmin/fmax). @fastmath/fastmath set `nnan`, so the relaxed
-    # air.fast_fmin/fmax (f32) — or bare air.fmin/fmax for f16, which has no fast form — are used.
+    # Base min/max -> llvm.minimum/maximum lower to a NaN-propagating wrapper
+    # (gpucompiler.minimum/maximum, which falls back to air.fmin/fmax). @fastmath/fastmath set
+    # `nnan`, so the relaxed air.fast_fmin/fmax (f32) — or bare air.fmin/fmax for f16, which has
+    # no fast form — are used.
     km = @eval module $(gensym())
         f() = return
     end
@@ -2605,7 +2606,7 @@ end
         mod = parse(LLVM.Module, ir); f = mod.functions["f"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
         ns = names(f)
-        @test "air.minimum.f32" in ns          # precise: NaN-propagating wrapper
+        @test "gpucompiler.minimum.f32" in ns  # precise: NaN-propagating wrapper
         @test "air.fast_fmin.f32" in ns        # @fastmath f32: relaxed
         @test "air.fmax.f16" in ns             # @fastmath f16: no fast form, bare builtin
         @test !("air.fast_fmax.f16" in ns)
@@ -2671,9 +2672,9 @@ end
         mod = parse(LLVM.Module, ir); f = mod.functions["g"]
         GPUCompiler.lower_llvm_intrinsics!(job, f)
         ns = names(f)
-        @test "air.minimum.f32" in ns
-        @test "air.maximum.f32" in ns
-        @test !("air.minimum.f16" in ns)
+        @test "gpucompiler.minimum.f32" in ns
+        @test "gpucompiler.maximum.f32" in ns
+        @test !("gpucompiler.minimum.f16" in ns)
         @test all(c -> c.value_type == LLVM.FloatType(), air_calls(f))
         @test has(f, LLVM.FPExtInst) && has(f, LLVM.FPTruncInst)
         @test (verify(mod); true)
