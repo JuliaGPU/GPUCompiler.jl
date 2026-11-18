@@ -36,3 +36,14 @@ const typed_ptrs = JuliaContext() do ctx
     supports_typed_pointers(ctx)
 end
 const opaque_ptrs = !typed_ptrs
+
+# whether LLVM lays out the Julia type `T` like the host does under the datalayout `dl`:
+# the size and alignment of its LLVM type, and the offset of each field of a struct
+function host_layout(dl::LLVM.DataLayout, @nospecialize(T))
+    lt = convert(LLVMType, T)
+    LLVM.abi_size(dl, lt) == sizeof(T) || return false
+    LLVM.abi_alignment(dl, lt) == Base.datatype_alignment(T) || return false
+    lt isa LLVM.StructType || return true
+    length(lt.elements) == fieldcount(T) || return false
+    return all(i -> LLVM.offsetof(dl, lt, i) == fieldoffset(T, i), 1:fieldcount(T))
+end

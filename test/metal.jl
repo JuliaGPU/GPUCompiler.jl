@@ -3897,3 +3897,20 @@ end
 end
 
 end
+
+@testset "Int128 layout" begin
+    # Metal has no Int128 values, but kernels can index arrays of structs that contain one,
+    # which need the host's stride (Julia aligns Int128 to 16 bytes since 1.12)
+    mod = @eval module $(gensym())
+        struct S
+            a::Int8
+            b::Int128
+        end
+    end
+    target = MetalCompilerTarget(; macos=v"12.2", metal=v"3.0", air=v"3.0")
+    @dispose ctx=Context() dl=LLVM.DataLayout(GPUCompiler.llvm_datalayout(target)) begin
+        @testset "$T" for T in (Int128, mod.S, Tuple{Int32,Int128}, NTuple{2,mod.S})
+            @test host_layout(dl, T)
+        end
+    end
+end

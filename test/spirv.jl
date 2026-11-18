@@ -776,7 +776,8 @@ end
 
     @test @filecheck begin
         # TODO: should structs of `NTuple{VecElement{T}}` be passed by value instead of sret?
-        @check_not "i128"
+        # no i128 left, other than the `-i128:` entry of the datalayout
+        @check_not "{{[^-]}}i128"
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
         @check cond=(v"1.12" <= VERSION < v"1.12.5") "alloca <2 x i64>, align 16"
         @check cond=(VERSION >= v"1.12.5") "alloca [2 x i64], align 16"
@@ -785,7 +786,7 @@ end
     end
 
     @test @filecheck begin
-        @check_not "i128"
+        @check_not "{{[^-]}}i128"
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
         @check cond=(v"1.12" <= VERSION < v"1.12.5") "alloca [2 x <2 x i64>], align 16"
         @check cond=(VERSION >= v"1.12.5") "alloca [4 x i64], align 16"
@@ -1110,4 +1111,20 @@ end
     @test occursin("@odd = internal addrspace(3) global { [6 x i8], [2 x i8] } zeroinitializer, align 4", ir)
     @test occursin("@even = internal addrspace(3) global [8 x i8] zeroinitializer, align 8", ir)
     @test occursin("getelementptr i8, ptr addrspace(3) @odd", ir)
+end
+
+@testset "Int128 layout" begin
+    # Julia aligns Int128 to 16 bytes since 1.12, which LLVM doesn't by default; otherwise
+    # array strides and the offsets of fields after an Int128 differ from the host's
+    mod = @eval module $(gensym())
+        struct S
+            a::Int8
+            b::Int128
+        end
+    end
+    @dispose ctx=Context() dl=LLVM.DataLayout(GPUCompiler.llvm_datalayout(SPIRVCompilerTarget())) begin
+        @testset "$T" for T in (Int128, mod.S, Tuple{Int32,Int128}, NTuple{2,mod.S})
+            @test host_layout(dl, T)
+        end
+    end
 end
