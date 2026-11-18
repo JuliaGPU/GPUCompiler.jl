@@ -1008,6 +1008,44 @@ end
     @test_throws KernelError Native.code_llvm(devnull, mod.invalid_kernel, Tuple{})
 end
 
+@testset "range check elimination" begin
+    mod = @eval module $(gensym())
+        @inline function load(ptr, len, i)
+            (i - 1) % UInt < len % UInt || throw(BoundsError())
+            return unsafe_load(ptr, i)
+        end
+        # a short loop is fully unrolled instead of split into checked pre- and post-loops
+        function short(ptr, len)
+            acc = 0f0
+            for j in 1:2, i in 1:2
+                acc += load(ptr, len, i + 2j)
+            end
+            return acc
+        end
+        # a long loop still has the checks eliminated from its main loop
+        function long(ptr, len, n)
+            acc = 0f0
+            for i in 1:n
+                acc += load(ptr, len, i)
+            end
+            return acc
+        end
+    end
+
+    @test @filecheck begin
+        @check_not "preloop"
+        @check_not "postloop"
+        Native.code_llvm(mod.short, Tuple{Ptr{Float32}, Int})
+    end
+    # (before LLVM 20, the check is hoisted out of this loop instead)
+    if LLVM.version() >= v"20"
+        @test @filecheck begin
+            @check "postloop"
+            Native.code_llvm(mod.long, Tuple{Ptr{Float32}, Int, Int})
+        end
+    end
+end
+
 @testset "child functions" begin
     # we often test using `@noinline sink` child functions, so test whether these survive
     mod = @eval module $(gensym())
