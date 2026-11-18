@@ -150,15 +150,39 @@ function without_volatile_frame_memsets(ir::String; cpp::Bool)
     end
 end
 
+# the lines that differ between `a` and `b` (a longest-common-subsequence diff)
+function line_diff(a::String, b::String)
+    x, y = split(a, '\n'), split(b, '\n')
+    lcs = zeros(Int, length(x) + 1, length(y) + 1)
+    for i in length(x):-1:1, j in length(y):-1:1
+        lcs[i, j] = x[i] == y[j] ? lcs[i+1, j+1] + 1 : max(lcs[i+1, j], lcs[i, j+1])
+    end
+    io = IOBuffer()
+    i = j = 1
+    while i <= length(x) || j <= length(y)
+        if i <= length(x) && j <= length(y) && x[i] == y[j]
+            i += 1; j += 1
+        elseif j > length(y) || (i <= length(x) && lcs[i+1, j] >= lcs[i, j+1])
+            println(io, "- ", x[i]); i += 1
+        else
+            println(io, "+ ", y[j]); j += 1
+        end
+    end
+    String(take!(io))
+end
+
 function same_ir(backend, f, tt; kwargs...)
     cpp = compile_with(:cpp, backend, f, tt; kwargs...)
     ports = compile_with(:ports, backend, f, tt; kwargs...)
     normalize_ir(cpp) == normalize_ir(ports) && return true
     if VERSION < v"1.14-" && occursin(VOLATILE_FRAME_MEMSET, cpp)
-        normalize_ir(without_volatile_frame_memsets(cpp; cpp=true)) ==
-            normalize_ir(without_volatile_frame_memsets(ports; cpp=false)) && return true
+        cpp = without_volatile_frame_memsets(cpp; cpp=true)
+        ports = without_volatile_frame_memsets(ports; cpp=false)
+        normalize_ir(cpp) == normalize_ir(ports) && return true
     end
-    @error "IR differs between the C++ passes and the ports" f tt kwargs cpp ports
+    @error "IR differs between the C++ passes (-) and the ports (+)" f tt kwargs
+    # printed, as the logger truncates long strings
+    print(stderr, line_diff(normalize_ir(cpp), normalize_ir(ports)))
     return false
 end
 
