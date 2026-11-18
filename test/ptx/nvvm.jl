@@ -92,16 +92,20 @@ end
         sqrt_fast(ptr, x) = (unsafe_store!(ptr, @fastmath sqrt(x)); nothing)
         div_fast(ptr, x, y) = (unsafe_store!(ptr, @fastmath x / y); nothing)
         inv_fast(ptr, x) = (unsafe_store!(ptr, @fastmath 1f0 / x); nothing)
+        rsqrt_fast(ptr, x) = (unsafe_store!(ptr, @fastmath 1f0 / sqrt(x)); nothing)
     end
     for (f, types, instr) in ((mod.sqrt_fast, Tuple{Ptr{Float32},Float32}, "sqrt"),
                               (mod.div_fast, Tuple{Ptr{Float32},Float32,Float32}, "div"),
-                              (mod.inv_fast, Tuple{Ptr{Float32},Float32}, "rcp"))
+                              (mod.inv_fast, Tuple{Ptr{Float32},Float32}, "rcp"),
+                              (mod.rsqrt_fast, Tuple{Ptr{Float32},Float32}, "rsqrt"))
         @test @filecheck begin
             @check "$instr.approx.f32"
+            @check_not "{{(rcp|sqrt|div).approx}}"
             PTX.code_native(f, types; backend=:nvvm, cap=v"10.0")
         end
         @test @filecheck begin
             @check "$instr.approx.ftz.f32"
+            @check_not "{{(rcp|sqrt|div).approx}}"
             PTX.code_native(f, types; backend=:nvvm, cap=v"10.0", fastmath=true)
         end
     end
