@@ -1044,14 +1044,18 @@ PTXFSqrtFastPass() = ModulePass("ptx-fsqrt-fast", ptx_fsqrt_fast!)
 function lower_approx_math!(mod::LLVM.Module)
     f32 = LLVM.FloatType()
     is_f32(T) = T == f32 || (T isa LLVM.VectorType && T.element_type == f32)
+    function is_approx_sqrt(inst)
+        inst isa LLVM.CallInst || return false
+        callee = inst.called_operand
+        callee isa LLVM.Function && startswith(callee.name, "llvm.sqrt.") &&
+            is_f32(inst.value_type) && inst.fast_math.afn
+    end
     to_replace = LLVM.Instruction[]
     for f in mod.functions, bb in f.blocks, inst in bb.instructions
         if inst isa LLVM.FDivInst
             is_f32(inst.value_type) && inst.fast_math.afn && push!(to_replace, inst)
-        elseif inst isa LLVM.CallInst
-            callee = inst.called_operand
-            callee isa LLVM.Function && startswith(callee.name, "llvm.sqrt.") &&
-                is_f32(inst.value_type) && inst.fast_math.afn && push!(to_replace, inst)
+        elseif is_approx_sqrt(inst)
+            push!(to_replace, inst)
         end
     end
     isempty(to_replace) && return false
@@ -1061,7 +1065,13 @@ function lower_approx_math!(mod::LLVM.Module)
     unary = LLVM.FunctionType(f32, [f32])
     binary = LLVM.FunctionType(f32, [f32, f32])
     @dispose builder=IRBuilder() begin
-        for inst in to_replace
+        # in reverse, so that divisions are lowered before the square roots they divide by
+        for inst in Iterators.reverse(to_replace)
+            # a square root only used by a reciprocal, which became an `rsqrt`
+            if isempty(inst.uses)
+                erase!(inst)
+                continue
+            end
             suffix = flushes_f32_denormals(LLVM.parent(LLVM.parent(inst))) ? ".ftz.f" : ".f"
             position!(builder, LLVM.before(inst))
             # the intrinsics are scalar
@@ -1069,8 +1079,15 @@ function lower_approx_math!(mod::LLVM.Module)
                 if inst isa LLVM.FDivInst
                     lhs, rhs = operands
                     if lhs isa LLVM.ConstantFP && convert(Float32, lhs) == 1f0
-                        call!(builder, unary, declare("llvm.nvvm.rcp.approx$suffix", unary),
-                              [rhs])
+                        # NVPTX selects a single `rsqrt` for the reciprocal of a square root
+                        if is_approx_sqrt(rhs)
+                            call!(builder, unary,
+                                  declare("llvm.nvvm.rsqrt.approx$suffix", unary),
+                                  [rhs.operands[1]])
+                        else
+                            call!(builder, unary,
+                                  declare("llvm.nvvm.rcp.approx$suffix", unary), [rhs])
+                        end
                     else
                         call!(builder, binary, declare("llvm.nvvm.div.approx$suffix", binary),
                               [lhs, rhs])
