@@ -60,6 +60,14 @@ jobs:
       - name: Set-up cache
         uses: julia-actions/cache@v3
 
+      # without a driver, CUDA_Compiler_jll selects no toolkit; libNVVM works without one
+      - name: Select a CUDA toolkit
+        shell: bash
+        run: |
+          for dir in . test; do
+            echo -e '[CUDA_Compiler_jll]\nversion = "13.5"' >$dir/LocalPreferences.toml
+          done
+
       - name: Run tests
         uses: julia-actions/julia-runtest@v1
         env:
