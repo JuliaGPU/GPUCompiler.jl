@@ -66,6 +66,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             register!(pb, AddKernelStatePass(job))
             register!(pb, LowerKernelStatePass(job))
             register!(pb, CleanupKernelStatePass(job))
+            register!(pb, IRCEWithCleanupPass(job))
 
             add!(pb, ModulePassManager()) do mpm
                 buildNewPMPipeline!(mpm, job, opt_level)
@@ -85,6 +86,10 @@ function buildNewPMPipeline!(mpm, @nospecialize(job::CompilerJob), opt_level)
     add!(mpm, FunctionPassManager()) do fpm
         buildLoopOptimizerPipeline(fpm, job, opt_level)
         buildScalarOptimizerPipeline(fpm, job, opt_level)
+        if opt_level >= 2
+            add!(fpm, Float2IntPass())
+            add!(fpm, LowerConstantIntrinsicsPass())
+        end
         if (can_vectorize(job)) && opt_level >= 2
             buildVectorPipeline(fpm, job, opt_level)
         end
@@ -130,7 +135,6 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
         add!(mpm, PipelineStartCallbacks(; opt_level))
     end
     add!(mpm, Annotation2MetadataPass())
-    add!(mpm, InferFunctionAttrsPass())
     add!(mpm, ConstantMergePass())
     add!(mpm, FunctionPassManager()) do fpm
         add!(fpm, LowerExpectIntrinsicPass())
@@ -169,8 +173,6 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
         if opt_level >= 2
             add!(cgpm, FunctionPassManager()) do fpm
                 add!(fpm, AllocOptPass())
-                add!(fpm, Float2IntPass())
-                add!(fpm, LowerConstantIntrinsicsPass())
             end
         end
     end
@@ -184,6 +186,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
                 add!(fpm, aggressiveinstcombine_pass(job))
                 add!(fpm, JumpThreadingPass())
                 add!(fpm, CorrelatedValuePropagationPass())
+                # (Julia no longer runs this, but it helps PTX code that calls libdevice)
                 add!(fpm, LibCallsShrinkWrapPass())
                 add!(fpm, ReassociatePass())
                 add!(fpm, ConstraintEliminationPass())
@@ -200,6 +203,21 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
     add!(mpm, GlobalOptPass())
     add!(mpm, GlobalDCEPass())
 end
+
+# IRCE, followed by the SimplifyCFG + InstCombine cleanup its output needs, but only if it
+# changed the function, so that functions IRCE leaves alone see the same passes as without
+# it (as in Julia's pipeline)
+function irce_with_cleanup!(job, f::LLVM.Function, am::LLVM.FunctionAnalysisManager)
+    preserved = run!(IRCEPass(), f, am)
+    preserved == PreservedAnalyses(AllAnalyses) && return preserved
+    @dispose pb=PassBuilder() begin
+        add!(pb, simplifycfg_pass(job, BasicSimplifyCFGOptions))
+        add!(pb, instcombine_pass(job))
+        return intersect(preserved, run!(pb, f, am))
+    end
+end
+IRCEWithCleanupPass(job) =
+    FunctionPass("GPUIRCEWithCleanup", (f, am) -> irce_with_cleanup!(job, f, am); analyses=true)
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
@@ -223,17 +241,27 @@ function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_le
     if opt_level >= 2
         # IRCE judges a loop by its estimated trip count, so it also splits short loops
         # with a constant trip count into pre-, main and post-loops, which can then no
-        # longer be unrolled. Unroll those first. (IRCE itself has to stay ahead of
-        # IndVarSimplify, after which it no longer recognizes many loops.) On Metal, where
-        # every bounds check is a loop exit, the split loops made the back-end take seconds
-        # to compile, or hang (Metal.jl#1127).
+        # longer be unrolled. Unroll those first. On Metal, where every bounds check is a
+        # loop exit, the split loops made the back-end take seconds to compile, or hang
+        # (Metal.jl#1127).
         add!(fpm, LoopPassManager()) do lpm
             add!(lpm, LoopFullUnrollPass())
         end
-        add!(fpm, IRCEPass())
+        # Forward stores into the loads LICM just hoisted (the sizes of an array allocated
+        # before the loop), so IndVarSimplify sees the loop bound and a bounds check as the
+        # same value; GVN only runs after it. MemorySSA is built afresh: a load LICM hoisted
+        # keeps the clobber it was given inside the loop, which can stop at an unrelated
+        # store before the loop.
+        add!(fpm, "invalidate<memoryssa>")
+        add!(fpm, EarlyCSEPass(; memssa=true))
     end
     add!(fpm, simplifycfg_pass(job, BasicSimplifyCFGOptions))
     add!(fpm, instcombine_pass(job))
+    if opt_level >= 2
+        # IRCE needs the loops cleaned up to recognize their checks, and has to come before
+        # IndVarSimplify, whose LFTR can turn the latch into an equality test it doesn't handle
+        add!(fpm, IRCEWithCleanupPass(job))
+    end
     add!(fpm, LoopPassManager()) do lpm
         if opt_level >= 2
             add!(lpm, LoopIdiomRecognizePass())
@@ -276,11 +304,7 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
         add!(fpm, instcombine_pass(job))
         add!(fpm, ADCEPass())
     end
-    if opt_level >= 3
-        add!(fpm, GVNPass())
-    end
     if opt_level >= 2
-        add!(fpm, DSEPass())
         if LLVM.version() >= v"17"
             add!(fpm, PeepholeCallbacks(; opt_level))
         end
@@ -309,6 +333,9 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, LoopDistributePass())
     add!(fpm, InjectTLIMappings())
     add!(fpm, LoopVectorizePass())
+    if LLVM.version() >= v"18"
+        add!(fpm, "infer-alignment")
+    end
     add!(fpm, LoopLoadEliminationPass())
     add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
     add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
@@ -317,6 +344,9 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, EarlyCSEPass())
     add!(fpm, CorrelatedValuePropagationPass())
     add!(fpm, instcombine_pass(job))
+    # CVP can fold branch conditions here (e.g. bounds checks made redundant by the loop
+    # passes); fold those branches and hoist the code they guarded before SLP looks at it
+    add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
     add!(fpm, SLPVectorizerPass())
     add!(fpm, VectorCombinePass())
     if LLVM.version() >= v"17"
@@ -330,6 +360,9 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
         add!(fpm, SROAPass(; preserve_cfg=true))
     else
         add!(fpm, SROAPass())
+    end
+    if LLVM.version() >= v"18"
+        add!(fpm, "infer-alignment")
     end
     add!(fpm, InstSimplifyPass())
 end
@@ -395,7 +428,8 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     if opt_level >= 2
         add!(mpm, FunctionPassManager()) do fpm
-            add!(fpm, GVNPass())
+            add!(fpm, DSEPass())
+            add!(fpm, EarlyCSEPass(; memssa=true))
             add!(fpm, SCCPPass())
             add!(fpm, DCEPass())
         end
@@ -448,9 +482,6 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     end
     add!(mpm, FunctionPassManager()) do fpm
         add!(fpm, DemoteFloat16Pass())
-        if opt_level >= 2
-            add!(fpm, GVNPass())
-        end
     end
 end
 
