@@ -1080,68 +1080,73 @@ function lower_approx_math!(mod::LLVM.Module)
         callee isa LLVM.Function && startswith(callee.name, "llvm.sqrt.") &&
             is_f32(inst.value_type) && inst.fast_math.afn
     end
-    to_replace = LLVM.Instruction[]
+    divisions = LLVM.Instruction[]
+    square_roots = LLVM.Instruction[]
     for f in mod.functions, bb in f.blocks, inst in bb.instructions
         if inst isa LLVM.FDivInst
-            is_f32(inst.value_type) && inst.fast_math.afn && push!(to_replace, inst)
+            is_f32(inst.value_type) && inst.fast_math.afn && push!(divisions, inst)
         elseif is_approx_sqrt(inst)
-            push!(to_replace, inst)
+            push!(square_roots, inst)
         end
     end
-    isempty(to_replace) && return false
+    isempty(divisions) && isempty(square_roots) && return false
 
     fns = mod.functions
     declare(name, ft) = get!(() -> LLVM.Function(mod, name, ft), fns, name)
     unary = LLVM.FunctionType(f32, [f32])
     binary = LLVM.FunctionType(f32, [f32, f32])
     @dispose builder=IRBuilder() begin
-        # in reverse, so that divisions are lowered before the square roots they divide by
-        for inst in Iterators.reverse(to_replace)
-            # a square root only used by a reciprocal, which became an `rsqrt`
-            if isempty(inst.uses)
-                erase!(inst)
-                continue
-            end
+        # replace `inst` by applying the scalar intrinsics to each of its lanes, where
+        # `lane(v)` gives the current lane of a value of the same type
+        function replace_lanes!(f, inst)
             suffix = flushes_f32_denormals(LLVM.parent(LLVM.parent(inst))) ? ".ftz.f" : ".f"
+            intrinsic(name, ft) = declare("llvm.nvvm.$name.approx$suffix", ft)
             position!(builder, LLVM.before(inst))
-            # the intrinsics are scalar
-            function lower(operands)
-                if inst isa LLVM.FDivInst
-                    lhs, rhs = operands
-                    if lhs isa LLVM.ConstantFP && convert(Float32, lhs) == 1f0
-                        # NVPTX selects a single `rsqrt` for the reciprocal of a square root
-                        if is_approx_sqrt(rhs)
-                            call!(builder, unary,
-                                  declare("llvm.nvvm.rsqrt.approx$suffix", unary),
-                                  [rhs.operands[1]])
-                        else
-                            call!(builder, unary,
-                                  declare("llvm.nvvm.rcp.approx$suffix", unary), [rhs])
-                        end
-                    else
-                        call!(builder, binary, declare("llvm.nvvm.div.approx$suffix", binary),
-                              [lhs, rhs])
-                    end
-                else
-                    call!(builder, unary, declare("llvm.nvvm.sqrt.approx$suffix", unary),
-                          operands)
-                end
-            end
-            operands = inst isa LLVM.FDivInst ? inst.operands[1:2] : inst.operands[1:1]
             T = inst.value_type
             replacement = if T isa LLVM.VectorType
                 vec = LLVM.UndefValue(T)
                 for i in 0:T.length-1
                     idx = ConstantInt(Int32(i))
-                    lane = lower([extract_element!(builder, op, idx) for op in operands])
+                    lane = f(intrinsic, v -> extract_element!(builder, v, idx))
                     vec = insert_element!(builder, vec, lane, idx)
                 end
                 vec
             else
-                lower(operands)
+                f(intrinsic, identity)
             end
             replace_uses!(inst, replacement)
             erase!(inst)
+        end
+
+        # divisions first, so that a reciprocal can use the operand of the square root it
+        # divides by, as NVPTX selects a single `rsqrt` for that
+        for inst in divisions
+            lhs, rhs = inst.operands
+            replace_lanes!(inst) do intrinsic, lane
+                numerator = lane(lhs)
+                if numerator isa LLVM.ConstantFP && convert(Float32, numerator) == 1f0
+                    if is_approx_sqrt(rhs)
+                        call!(builder, unary, intrinsic("rsqrt", unary),
+                              [lane(rhs.operands[1])])
+                    else
+                        call!(builder, unary, intrinsic("rcp", unary), [lane(rhs)])
+                    end
+                else
+                    call!(builder, binary, intrinsic("div", binary), [numerator, lane(rhs)])
+                end
+            end
+        end
+
+        for inst in square_roots
+            # only used by reciprocals, which became an `rsqrt`
+            if isempty(inst.uses)
+                erase!(inst)
+                continue
+            end
+            x = inst.operands[1]
+            replace_lanes!(inst) do intrinsic, lane
+                call!(builder, unary, intrinsic("sqrt", unary), [lane(x)])
+            end
         end
     end
     return true

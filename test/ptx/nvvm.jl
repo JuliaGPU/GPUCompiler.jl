@@ -114,11 +114,46 @@ end
         div_fast(ptr, x, y) = unsafe_store!(ptr, Base.llvmcall("""
             %r = fdiv afn <2 x float> %0, %1
             ret <2 x float> %r""", V, Tuple{V,V}, x, y))
+        rsqrt_fast(ptr, x) = unsafe_store!(ptr, Base.llvmcall("""
+            %s = call afn <2 x float> @llvm.sqrt.v2f32(<2 x float> %0)
+            %r = fdiv afn <2 x float> <float 1.0, float 1.0>, %s
+            ret <2 x float> %r""", V, Tuple{V}, x))
     end
     @test @filecheck begin
         @check "div.approx.f32"
         @check "div.approx.f32"
         PTX.code_native(mod.div_fast, Tuple{Ptr{mod.V},mod.V,mod.V}; backend=:nvvm, cap=v"10.0")
+    end
+    @test @filecheck begin
+        @check "rsqrt.approx.f32"
+        @check "rsqrt.approx.f32"
+        @check_not "{{(rcp|[^r]sqrt|div).approx}}"
+        PTX.code_native(mod.rsqrt_fast, Tuple{Ptr{mod.V},mod.V}; backend=:nvvm, cap=v"10.0")
+    end
+end
+
+@testset "fast math across blocks" begin
+    # the square root is defined in a block laid out after the reciprocal using it
+    Context() do ctx
+        ir = parse(LLVM.Module, """
+            define void @kernel(ptr %p, float %x) {
+            entry:
+              br label %def
+            use:
+              %r = fdiv afn float 1.0, %s
+              store float %r, ptr %p
+              ret void
+            def:
+              %s = call afn float @llvm.sqrt.f32(float %x)
+              br label %use
+            }
+            declare float @llvm.sqrt.f32(float)""")
+        @test GPUCompiler.lower_approx_math!(ir)
+        str = string(ir)
+        @test occursin("call float @llvm.nvvm.rsqrt.approx.f(float %x)", str)
+        @test !occursin("call afn float @llvm.sqrt.f32", str)
+        @test !occursin("llvm.nvvm.sqrt.approx", str)
+        @test !occursin("llvm.nvvm.rcp.approx", str)
     end
 end
 
