@@ -85,3 +85,38 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
           files: lcov.info
+
+  handoff_test:
+    # the late hand-off to libLLVMGPU, for the targets that support it (the others are
+    # tested as usual)
+    name: Julia ${{ matrix.version }} with libLLVMGPU - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['1.12', '1.13']
+        os: [ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Julia
+        uses: julia-actions/setup-julia@v3
+        with:
+          version: ${{ matrix.version }}
+
+      - name: Set-up cache
+        uses: julia-actions/cache@v3
+
+      - name: Select the late hand-off
+        run: |
+          julia --project=test -e 'using Pkg; Pkg.add(name="LLVMGPU_jll", version="1")'
+          for dir in . test; do
+              printf '[GPUCompiler]\nhandoff = "late"\n' >> $dir/LocalPreferences.toml
+          done
+
+      - name: Run tests
+        uses: julia-actions/julia-runtest@v1
+        env:
+          # (checked by the tests, so that they don't silently test without the hand-off)
+          GPUCOMPILER_TEST_HANDOFF: late
