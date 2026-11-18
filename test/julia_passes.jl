@@ -104,13 +104,27 @@ function compile_with(julia_passes, backend, f, tt; kwargs...)
     end
 end
 
+# Differences that don't come from the ports, undone on both sides before comparing again.
+#
+# FinalLowerGC builds the load of the previous frame and the address of the frame's slot
+# for it as two arguments of one C++ call, which compilers evaluate in either order. The
+# pair is independent and only feeds the store that follows it; put the address first.
+#
 # Julia 1.10 to 1.13 zero a GC frame with a volatile `memset`: their FinalLowerGC passes the
 # frame's TBAA tag as the volatility flag. The ports zero it as Julia 1.14 does
 # (JuliaLang/julia#62061), so later passes may drop the zeroing of slots that are
 # overwritten before the frame is used. Such IR is compared after making the C++ frame
 # `memset`s non-volatile and cleaning up both sides with the passes that shrink them.
 const VOLATILE_FRAME_MEMSET =
-    r"call void @llvm\.memset\.p0\.i64\(ptr align 16 %\d+, i8 0, i64 \d+, i1 true\)"
+    r"call void @llvm\.memset\.p0\.i64\(ptr [^,]*%\d+, i8 0, i64 \d+, i1 true\)"
+
+# whether `load` and `gep` are the independent pair of a frame push that `store` links
+function is_frame_push(load, gep, store)
+    load isa LLVM.LoadInst && !LLVM.volatile(load) && !LLVM.isatomic(load) || return false
+    gep isa LLVM.GetElementPtrInst && store isa LLVM.StoreInst || return false
+    LLVM.operands(store)[1] == load && LLVM.operands(store)[2] == gep || return false
+    return load ∉ LLVM.operands(gep) && gep ∉ LLVM.operands(load)
+end
 
 # whether `inst` is the volatile `memset` zeroing all of a GC frame: an array of pointers
 function is_volatile_frame_memset(dl, inst)
@@ -129,20 +143,31 @@ function is_volatile_frame_memset(dl, inst)
     return convert(Int, len) == LLVM.abi_size(dl, T) * convert(Int, count)
 end
 
-function without_volatile_frame_memsets(ir::String; cpp::Bool)
+# `cpp`: whether `ir` comes from the C++ passes; `frame_memsets`: whether to undo the
+# zeroing difference (decided on the C++ side)
+function canonicalize(ir::String; cpp::Bool, frame_memsets::Bool)
     JuliaContext(; opaque_pointers=true) do ctx
         mod = parse(LLVM.Module, ir)
         dl = LLVM.datalayout(mod)
-        if cpp
-            for fn in mod.functions, bb in fn.blocks, inst in bb.instructions
-                is_volatile_frame_memset(dl, inst) || continue
-                LLVM.operands(inst)[4] = LLVM.ConstantInt(LLVM.Int1Type(), false)
+        for fn in mod.functions, bb in fn.blocks
+            insts = collect(bb.instructions)
+            for i in 1:length(insts)-2
+                load, gep, store = insts[i:i+2]
+                is_frame_push(load, gep, store) && LLVM.move!(gep, LLVM.before(load))
             end
         end
-        LLVM.run!("function(dse,instcombine)", mod)
-        for fn in collect(mod.functions)
-            startswith(LLVM.name(fn), "llvm.memset.") && isempty(LLVM.uses(fn)) &&
-                LLVM.erase!(fn)
+        if frame_memsets
+            if cpp
+                for fn in mod.functions, bb in fn.blocks, inst in bb.instructions
+                    is_volatile_frame_memset(dl, inst) || continue
+                    LLVM.operands(inst)[4] = LLVM.ConstantInt(LLVM.Int1Type(), false)
+                end
+            end
+            LLVM.run!("function(dse,instcombine)", mod)
+            for fn in collect(mod.functions)
+                startswith(LLVM.name(fn), "llvm.memset.") && isempty(LLVM.uses(fn)) &&
+                    LLVM.erase!(fn)
+            end
         end
         str = string(mod)
         LLVM.dispose(mod)
@@ -175,11 +200,10 @@ function same_ir(backend, f, tt; kwargs...)
     cpp = compile_with(:cpp, backend, f, tt; kwargs...)
     ports = compile_with(:ports, backend, f, tt; kwargs...)
     normalize_ir(cpp) == normalize_ir(ports) && return true
-    if VERSION < v"1.14-" && occursin(VOLATILE_FRAME_MEMSET, cpp)
-        cpp = without_volatile_frame_memsets(cpp; cpp=true)
-        ports = without_volatile_frame_memsets(ports; cpp=false)
-        normalize_ir(cpp) == normalize_ir(ports) && return true
-    end
+    frame_memsets = VERSION < v"1.14-" && occursin(VOLATILE_FRAME_MEMSET, cpp)
+    cpp = canonicalize(cpp; cpp=true, frame_memsets)
+    ports = canonicalize(ports; cpp=false, frame_memsets)
+    normalize_ir(cpp) == normalize_ir(ports) && return true
     @error "IR differs between the C++ passes (-) and the ports (+)" f tt kwargs
     # printed, as the logger truncates long strings
     print(stderr, line_diff(normalize_ir(cpp), normalize_ir(ports)))
