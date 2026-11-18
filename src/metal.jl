@@ -679,6 +679,8 @@ function lower_air!(@nospecialize(job::CompilerJob{MetalCompilerTarget}), mod::L
         end
     end
 
+    annotate_sincos_eltypes!(mod)
+
     # expand these intrinsics only after that cleanup, as InstCombine would turn the expansions
     # back into the intrinsics: multiplications with overflow check when the product is also
     # checked by division, and three-way comparisons always
@@ -3203,6 +3205,16 @@ function lower_ldexp!(builder::IRBuilder, call::LLVM.CallBase)
         n = trunc!(builder, n, T_i32)
     end
     return call_declared!(builder, fn, x.value_type, LLVM.Value[x, n])
+end
+
+# Tell the downgrader the element type of the output pointer of `air.sincos`, which it can't
+# infer from an opaque pointer: Apple declares `float(float, float* nocapture writeonly)`.
+function annotate_sincos_eltypes!(mod::LLVM.Module)
+    for f in mod.functions
+        occursin(r"^air\.(fast_)?sincos\.", f.name) || continue
+        f.metadata["arg_eltypes"] =
+            MDNode(Metadata[ConstantInt(Int32(1)), null(f.function_type.return_type)])
+    end
 end
 
 # `llvm.sincos` returns both results, `air.sincos` returns the sine and stores the cosine

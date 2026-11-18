@@ -681,6 +681,13 @@ end
         @check_same cond=(LLVM.version() >= v"21") "(float, ptr writeonly captures(none))"
         Metal.code_llvm(mod.kernel_fast, Tuple{Float32}; dump_module=true)
     end
+
+    # with opaque pointers, the downgrader is told the output argument's element type
+    @test @filecheck begin
+        @check "declare !arg_eltypes [[MD:![0-9]+]] float @air.sincos.f32"
+        @check "[[MD]] = !{i32 1, float 0.000000e+00}"
+        Metal.code_native(mod.kernel, Tuple{Float32}; dump_module=true, raw=true)
+    end
 end
 
 @testset "unsupported type detection" begin
