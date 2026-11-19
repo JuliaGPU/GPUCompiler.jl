@@ -854,6 +854,26 @@ end
         SPIRV.code_llvm(mod.table, Tuple{Ptr{Int32}, Ptr{Int64}}; backend, kernel=true,
                         dump_module=true)
     end
+
+    # front-ends that set other options, dispatching only on their params, keep the target's
+    # default (and are not ambiguous with it)
+    opts = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..TestRuntime
+        struct Params <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = TestRuntime
+        GPUCompiler.optimization_options(@nospecialize(job::CompilerJob{<:Any,Params})) =
+            (; instcombine=true)
+    end
+    source = methodinstance(typeof(mod.bitmap), Tuple{Ptr{Int8}, Ptr{Int64}},
+                            Base.get_world_counter())
+    config = CompilerConfig(SPIRVCompilerTarget(; backend), opts.Params(); kernel=true)
+    @test @filecheck begin
+        @check_label "define spir_kernel void @_Z6bitmap"
+        @check_not "switch."
+        @check "ret void"
+        GPUCompiler.code_llvm(stdout, CompilerJob(source, config))
+    end
 end
 
 @testset "freeze" begin
