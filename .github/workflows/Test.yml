@@ -69,7 +69,21 @@ jobs:
           done
 
       - name: Run tests
+        if: matrix.version != '1.10'
         uses: julia-actions/julia-runtest@v1
+        env:
+          JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
+
+      # TODO: remove once NVVM.jl is registered (JuliaRegistries/General#176914). Julia 1.10
+      # ignores `[sources]`, and its `Pkg.test` can't use a test dependency added by URL.
+      - name: Run tests (Julia 1.10)
+        if: matrix.version == '1.10'
+        shell: bash
+        run: |
+          julia --project=test -e 'using Pkg
+                                   Pkg.add(url="https://github.com/JuliaGPU/NVVM.jl", rev="main")
+                                   Pkg.develop(path=".")'
+          julia --project=test --check-bounds=yes --code-coverage=user test/runtests.jl
         env:
           JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
 
