@@ -585,11 +585,43 @@ function demote_boxed_constants!(@nospecialize(job::CompilerJob), mod::LLVM.Modu
                      can only be kept on the stack of a kernel.""")
         box_alloca!(f, gv)
     end
+    demoted = Set{LLVM.Function}()
     for gv in boxes
         slots = Dict{LLVM.Function, LLVM.Value}()
         replace_global_with_local!(gv, f -> get!(() -> slot(f, gv), slots, f))
+        union!(demoted, keys(slots))
     end
+
+    # A copy often only feeds the pointer half of an isbits union whose selector says it is
+    # unused, which back-ends then reject as a reference to a dead stack slot. Fold those
+    # away here, as nothing combines instructions after target finalization. This runs once:
+    # there are no boxes left for a later `finish_ir!` of another entry point.
+    combine_instructions!(job, demoted)
     return true
+end
+
+# Fold away the references to boxed constants that are dead, e.g. in the pointer half of an
+# isbits union whose selector says it is unused, for back-ends that cannot refer to them but
+# where `demote_boxed_constants!` does not work (SPIR-V before LLVM 17). The boxes stay in
+# the module, so with several entry points this runs again on their users for each.
+function fold_dead_box_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
+    users = Set{LLVM.Function}()
+    for gv in boxed_constants(mod)
+        using_functions!(users, gv)
+    end
+    combine_instructions!(job, users)
+    return
+end
+
+function combine_instructions!(@nospecialize(job::CompilerJob), fns)
+    isempty(fns) && return
+    @dispose pb=PassBuilder() begin
+        add!(pb, instcombine_pass(job))
+        for f in fns
+            run!(pb, f)
+        end
+    end
+    return
 end
 
 # Return the byte offset added by a constant cast or GEP, or `nothing` if it is not static.
@@ -851,6 +883,95 @@ function bake_relocations!(mod::LLVM.Module, relocs::Relocations)
     return
 end
 
+# Fold the loads from constant globals that go through a `select` or `phi` of their addresses,
+# as of relocation slots that `bake_relocations!` resolved, by selecting between the values.
+# InstSimplify only folds loads that are direct; this runs after target finalization, where
+# InstCombine (which would fold them all) must not, and back-ends cannot always take the
+# loaded globals (e.g., the Khronos translator rejects private globals in address space 0).
+function fold_merged_constant_loads!(mod::LLVM.Module)
+    changed = false
+    @dispose builder=IRBuilder() begin
+        for f in mod.functions, bb in f.blocks, inst in collect(bb.instructions)
+            inst isa LLVM.LoadInst && !inst.volatile || continue
+            T = inst.value_type
+            addr = inst.pointer_operand
+            addr isa LLVM.Instruction && forwarded_addresses(addr) !== nothing || continue
+            # (check everything first, so that nothing needs to be undone)
+            folds_to_constants(T, addr) || continue
+            value = merged_constant_value!(builder, T, addr, Dict{LLVM.Value,LLVM.Value}())
+            replace_uses!(inst, value)
+            erase!(inst)
+            changed = true
+        end
+    end
+    return changed
+end
+
+# The constant a load of type `T` from `gv` yields, if `gv` has an initializer that cannot
+# be overridden (like a baked relocation slot), and holds a word of that type.
+function constant_word(T::LLVMType, gv::LLVM.GlobalVariable)
+    gv.constant && !isdeclaration(gv) && !gv.externally_initialized || return nothing
+    gv.linkage in (LLVM.Linkage.Private, LLVM.Linkage.Internal) || return nothing
+    init = gv.initializer
+    S = init.value_type
+    S == T && is_word_type(T) && return init
+    if T isa LLVM.PointerType && S isa LLVM.IntegerType && is_word_type(S)
+        return const_inttoptr(init, T)
+    elseif T isa LLVM.IntegerType && S isa LLVM.PointerType && is_word_type(T)
+        return const_ptrtoint(init, T)
+    end
+    return nothing
+end
+
+# Whether every address that `addr` picks from is such a global.
+function folds_to_constants(T::LLVMType, @nospecialize(addr), seen=Set{LLVM.Value}())
+    addr in seen && return true
+    push!(seen, addr)
+    if addr isa LLVM.ConstantExpr
+        addr.opcode in (LLVM.Opcode.BitCast, LLVM.Opcode.AddrSpaceCast) || return false
+        return folds_to_constants(T, addr.operands[1], seen)
+    elseif addr isa LLVM.GlobalVariable
+        return constant_word(T, addr) !== nothing
+    elseif addr isa LLVM.Instruction
+        forwarded = forwarded_addresses(addr)
+        forwarded === nothing && return false
+        return all(a -> folds_to_constants(T, a, seen), forwarded)
+    end
+    return false
+end
+
+# The value of type `T` loaded from `addr`, built with `select`s and `phi`s next to those of
+# the addresses. Requires `folds_to_constants(T, addr)`.
+function merged_constant_value!(builder::IRBuilder, T::LLVMType, @nospecialize(addr),
+                                values::Dict{LLVM.Value,LLVM.Value})
+    haskey(values, addr) && return values[addr]
+    if addr isa LLVM.ConstantExpr || addr isa LLVM.BitCastInst ||
+       addr isa LLVM.AddrSpaceCastInst
+        return merged_constant_value!(builder, T, addr.operands[1], values)
+    elseif addr isa LLVM.GlobalVariable
+        return constant_word(T, addr)
+    elseif addr isa LLVM.SelectInst
+        # (create the select first, as cycles make it an operand of itself, with a placeholder
+        # that is not a constant so that the builder cannot fold it away)
+        position!(builder, LLVM.after(addr))
+        placeholder = LLVM.freeze!(builder, UndefValue(T))
+        sel = values[addr] = select!(builder, addr.operands[1], placeholder, placeholder)
+        sel.operands[2] = merged_constant_value!(builder, T, addr.operands[2], values)
+        sel.operands[3] = merged_constant_value!(builder, T, addr.operands[3], values)
+        erase!(placeholder)
+        return sel
+    elseif addr isa LLVM.PHIInst
+        # (create the phi first, as loops make it an incoming value of itself)
+        position!(builder, LLVM.before(addr))
+        phi = values[addr] = phi!(builder, T)
+        for (incoming, block) in addr.incoming
+            push!(phi.incoming, (merged_constant_value!(builder, T, incoming, values), block))
+        end
+        return phi
+    end
+    error("Unexpected address $addr")
+end
+
 """
     emit_patchable_relocations!(mod, relocs)
 
@@ -1095,9 +1216,8 @@ end
 
 # Load the slots' values as the words the table holds. A pointer-typed load would read a
 # host address as a pointer into the target's default address space, which on Metal is
-# thread memory, and shader validation does not preserve such a value's bits. Converting
-# the word back with `inttoptr` keeps the IR valid for existing users, while comparisons
-# fold to integer ones.
+# thread memory, and shader validation does not preserve such a value's bits. The word is
+# converted back with `inttoptr`, which keeps the IR valid for existing users.
 function load_relocation_words!(loads::Vector{LLVM.LoadInst}, T_word::LLVMType)
     @dispose builder=IRBuilder() begin
         for load in loads

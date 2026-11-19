@@ -233,6 +233,93 @@ end
     end
 end
 
+@testset "merged cglobal relocations" begin
+    globals = """
+        @jl_float32_type = external global ptr
+        @jl_float64_type = external global ptr
+        """
+    # (the instruction that selects the loaded value, and the code that loads it)
+    entries = [
+        # a select of two slots
+        "OpSelect" => """
+        define void @entry(ptr addrspace(1) %out, i8 %c) {
+          %cond = trunc i8 %c to i1
+          %addr = select i1 %cond, ptr @jl_float32_type, ptr @jl_float64_type
+          %value = load ptr, ptr %addr
+          %word = ptrtoint ptr %value to i64
+          store i64 %word, ptr addrspace(1) %out
+          ret void
+        }
+        """,
+        # a phi of two slots
+        "OpPhi" => """
+        define void @entry(ptr addrspace(1) %out, i8 %c) {
+        top:
+          %cond = trunc i8 %c to i1
+          br i1 %cond, label %l, label %r
+        l:
+          store i64 1, ptr addrspace(1) %out
+          br label %m
+        r:
+          store i64 2, ptr addrspace(1) %out
+          br label %m
+        m:
+          %addr = phi ptr [ @jl_float32_type, %l ], [ @jl_float64_type, %r ]
+          %value = load ptr, ptr %addr
+          %word = ptrtoint ptr %value to i64
+          store i64 %word, ptr addrspace(1) %out
+          ret void
+        }
+        """,
+        # a loop-carried phi and select, which stay behind as a dead cycle once folded
+        "OpSelect" => """
+        define void @entry(ptr addrspace(1) %out, i8 %c) {
+        top:
+          %cond = trunc i8 %c to i1
+          br label %loop
+        loop:
+          %i = phi i64 [ 0, %top ], [ %n, %loop ]
+          %p = phi ptr [ @jl_float32_type, %top ], [ %s, %loop ]
+          %s = select i1 %cond, ptr %p, ptr @jl_float64_type
+          %n = add i64 %i, 1
+          store i64 %n, ptr addrspace(1) %out
+          %done = icmp eq i64 %n, 10
+          br i1 %done, label %exit, label %loop
+        exit:
+          %value = load ptr, ptr %s
+          %word = ptrtoint ptr %value to i64
+          store i64 %word, ptr addrspace(1) %out
+          ret void
+        }
+        """]
+
+    # baking the slots of a merged load leaves them as private globals in a SPIR-V address
+    # space they cannot be in, so the load needs to be folded, and the slots dropped,
+    # before translation
+    if VERSION >= v"1.12.0-DEV.225"   # (opaque pointers in `llvmcall`)
+        for (op, entry) in entries
+            ir = globals * entry
+            mod = @eval module $(gensym())
+                function kernel(out::Core.LLVMPtr{UInt,1}, cond::Bool)
+                    Base.llvmcall(($ir, "entry"), Nothing, Tuple{Core.LLVMPtr{UInt,1},Bool},
+                                  out, cond)
+                    return
+                end
+            end
+            # (the LLVM back-end emits a leftover slot as a variable of the function, ahead of
+            # the instructions)
+            @test @filecheck begin
+                @check_not "OpVariable %_ptr_Function"
+                @check "$op"
+                @check_not "OpVariable %_ptr_Function"
+                SPIRV.code_native(mod.kernel, Tuple{Core.LLVMPtr{UInt,1},Bool}; backend,
+                                  kernel=true, optimize=false, validate=false,
+                                  dump_module=true)
+            end
+        end
+    end
+end
+
 @testset "boxed union constants" begin
     mod = @eval module $(gensym())
         @noinline produce(cond::Bool, a::Int32) = cond ? a : Int64(7)
@@ -415,7 +502,7 @@ end
     end
 
     # the flattened form must survive the passes that run between `finish_ir!` and the
-    # back end (`prepare_execution!` runs InstCombine)
+    # back end
     @test @filecheck begin
         @check "OpFunction"
         @check_not "OpCompositeInsert {{.*}} {{[0-9]+}} {{[0-9]+}}{{\$}}"
@@ -899,8 +986,8 @@ end
         end
     end
 
-    # InstCombine forms `llvm.umul.with.overflow` from division-based overflow checks, also
-    # right before code generation (in `prepare_execution!`) when not optimizing
+    # InstCombine forms `llvm.umul.with.overflow` from division-based overflow checks. That
+    # doesn't happen after target finalization, so without optimization the division stays.
     mod = @eval module $(gensym())
         overflows(x::UInt64, y::UInt64) = Base.llvmcall("""
             %d = udiv i64 -1, %0
@@ -914,6 +1001,12 @@ end
     end
     @test @filecheck begin
         @check "OpExtInst {{.*}} u_mul_hi"
+        @check_not "MulExtended"
+        SPIRV.code_native(mod.kernel, Tuple{Ptr{UInt8}, UInt64, UInt64}; backend,
+                          kernel=true)
+    end
+    @test @filecheck begin
+        @check "OpUDiv"
         @check_not "MulExtended"
         SPIRV.code_native(mod.kernel, Tuple{Ptr{UInt8}, UInt64, UInt64}; backend,
                           kernel=true, optimize=false)
