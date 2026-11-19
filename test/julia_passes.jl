@@ -88,19 +88,22 @@ function compile_with(julia_passes, backend, f, tt; kwargs...)
     JuliaContext(; opaque_pointers=true) do ctx
         job, _ = backend.create_job(f, tt; julia_passes, validate=false, kwargs...)
         ir, meta = GPUCompiler.compile(:llvm, job)
-        # Without the names of values and blocks: LLVM makes a name unique with a counter
-        # that every collision in the function advances, even for values a pass erases
-        # again, so the suffixes later passes pick (e.g. GVN's `%.pre12`) depend on how a
-        # pass named its temporaries.
-        for fn in ir.functions, bb in fn.blocks
-            for inst in bb.instructions
-                inst.name = ""
+        # in the context of the IR, which can live in another LLVM library than Julia's
+        LLVM.context!(LLVM.context(ir)) do
+            # Without the names of values and blocks: LLVM makes a name unique with a
+            # counter that every collision in the function advances, even for values a
+            # pass erases again, so the suffixes later passes pick (e.g. GVN's `%.pre12`)
+            # depend on how a pass named its temporaries.
+            for fn in ir.functions, bb in fn.blocks
+                for inst in bb.instructions
+                    inst.name = ""
+                end
+                bb.name = ""
             end
-            bb.name = ""
+            str = string(ir)
+            LLVM.dispose(ir)
+            str
         end
-        str = string(ir)
-        LLVM.dispose(ir)
-        str
     end
 end
 
@@ -345,7 +348,7 @@ end
         JuliaContext(; opaque_pointers) do ctx
             job, _ = backend.create_job(f, tt; julia_passes=:cpp, validate=false, kwargs...)
             asm, meta = GPUCompiler.compile(:asm, job)
-            LLVM.dispose(meta.ir)
+            LLVM.context!(() -> LLVM.dispose(meta.ir), LLVM.context(meta.ir))
             # without comments, which name basic blocks
             replace(normalize_ir(String(asm)), r"//.*" => "", r"[ \t]+" => " ")
         end
