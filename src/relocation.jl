@@ -5,8 +5,8 @@
 #   produce ──▶ merge (on link) ──▶ prune (after DCE) ──▶ lower
 #
 # Site names are fixed at creation and namespaced by their producer, so IR and metadata can
-# be linked without renaming. Unrelated jobs use distinct names; runtime functions linked
-# into several outputs reuse names whose definitions and targets are identical.
+# be linked without renaming. Names are unique within a module; modules that are combined
+# may share names, whose records then have to agree (see `add_relocation!`).
 
 
 ## targets
@@ -128,7 +128,7 @@ What a relocation record points at, and hence how it is lowered:
 """
     Relocation(kind, name, offset, target)
 
-One word to relocate: a global `name` (unique to the job that produced it), a byte `offset`
+One word to relocate: a global `name` (unique within its module), a byte `offset`
 within that global (always zero for a [`SlotSite`](@ref RelocationSiteKind)), the site
 `kind`, and the [`RelocationTarget`](@ref) whose address belongs there.
 """
@@ -349,10 +349,11 @@ function site_name!(sites::Dict{String,Any}, gv_name::AbstractString, @nospecial
     return name
 end
 
-# A namespace for this job's relocation site names, so that no two kernels — nor a kernel and
-# the runtime library linked into it — can ever define the same site symbol. That makes the
-# names globally unique by construction, which is what lets `:patch` loaders share one symbol
-# namespace (e.g. an ORC `JITDylib` holding several compiled functions) without renaming.
+# A namespace for this job's relocation site names, which keeps them apart from those of the
+# runtime functions linked into the same module. Names are only unique within a module: jobs
+# can share a namespace (it does not cover the world age or the compiler configuration), and
+# their names are derived from hashes. Whoever combines modules or objects must check that
+# the names they share agree, as `add_relocation!` does.
 #
 # The job's entry name is the natural discriminator, but it is only fixed later in `irgen`, and
 # for an unnamed non-kernel job it would carry Julia's per-session codegen counter. Derive the
@@ -750,9 +751,9 @@ end
 
 ## bookkeeping
 
-# Merge `src_mod` into `dest_mod` and carry its relocation metadata across. A site name always
-# denotes the same word and target; duplicate declarations or definitions may therefore be
-# coalesced by LLVM before their agreeing records are merged.
+# Merge `src_mod` into `dest_mod` and carry its relocation metadata across. LLVM coalesces
+# declarations or definitions that share a name, so their records have to agree, which
+# `add_relocation!` checks.
 function link_relocatable!(dest_mod::LLVM.Module, dest_relocs::Relocations,
                             src_mod::LLVM.Module, src_relocs::Relocations;
                             only_needed=false)
@@ -883,12 +884,13 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
         # Two objects can define the same record: a relocation-carrying runtime-library
         # function keeps its own job's namespace in every kernel it is linked into. A loader
         # holding both in one symbol namespace (an ORC `JITDylib`) would see a duplicate
-        # definition, so define them weakly and let it coalesce. That is sound rather than
-        # merely quiet: a shared name means a shared producing job, hence the same target
-        # (`add_relocation!` enforces agreement), so whichever definition survives gets
-        # patched with the word every object referencing it expects. `llvm.used` below still
-        # anchors them against DCE, and `externally_initialized` still stops the optimizer
-        # from believing the null initializer.
+        # definition, so define them weakly and let it coalesce. The linker does not check
+        # that coalesced definitions agree; that is up to the loader (see
+        # `relocation_lowering`). Only Julia's JIT before 1.14 forces objects to share a
+        # `JITDylib`, so once no loader needs that these can become strong definitions, which
+        # turns a clash into a link error. `llvm.used` below still anchors them against DCE,
+        # and `externally_initialized` still stops the optimizer from believing the null
+        # initializer.
         gv.linkage = LLVM.Linkage.WeakODR
         # Julia emits these globals `dso_local`, so backends address them PC-relatively
         # (e.g. `@rel32` on AMDGPU). A weak definition with default visibility is however

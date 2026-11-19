@@ -1719,8 +1719,19 @@ end
             end
 
             obj_a, relocs_a = shared_object("shared_entry_a")
-            obj_b, _ = shared_object("shared_entry_b")
+            obj_b, relocs_b = shared_object("shared_entry_b")
             expected = GPUCompiler.resolve_relocation_target(ref)
+
+            # The linker coalesces whatever shares a name, so a loader with one symbol
+            # namespace has to check that the records it puts there agree.
+            shared = GPUCompiler.Relocations()
+            for relocs in (relocs_a, relocs_b), rec in relocs.records
+                GPUCompiler.add_relocation!(shared, rec)
+            end
+            @test length(shared) == 1
+            @test_throws "conflicting values" GPUCompiler.add_relocation!(
+                shared, GPUCompiler.SlotSite, "shared_reloc", 0,
+                GPUCompiler.JuliaValueRef(:other))
 
             @dispose lljit=LLJIT(; tm=LLVM.JITTargetMachine()) begin
                 jd = lljit.main_dylib
@@ -1728,7 +1739,7 @@ end
                 add!(lljit, jd, MemoryBuffer(obj_b))   # the duplicate definition
 
                 # patching the one surviving definition serves both objects
-                for (rec, word) in GPUCompiler.resolved_relocations(relocs_a)
+                for (rec, word) in GPUCompiler.resolved_relocations(shared)
                     addr = lookup(lljit, rec.name)
                     unsafe_store!(Ptr{UInt}(pointer(addr) + rec.offset), word)
                 end
