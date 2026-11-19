@@ -2163,6 +2163,21 @@ end
             }""")
         @test changed
         @test !occursin("load", ir)
+        @test count("select i1 %c, i64", ir) == 1   # (one value per address)
+
+        # also with a cycle of selects, which is valid IR in an unreachable block
+        changed, ir = fold(slots * """
+            define i64 @f(i1 %c) {
+            entry:
+              ret i64 0
+            dead:
+              %s1 = select i1 %c, ptr %s2, ptr @a
+              %s2 = select i1 %c, ptr %s1, ptr @b
+              %v = load i64, ptr %s1
+              ret i64 %v
+            }""")
+        @test changed
+        @test !occursin("load", ir)
 
         # not when one of the addresses is something else, also when only reached through
         # a loop, or when a global's initializer could be overridden

@@ -602,7 +602,8 @@ end
 
 # Fold away the references to boxed constants that are dead, e.g. in the pointer half of an
 # isbits union whose selector says it is unused, for back-ends that cannot refer to them but
-# where `demote_boxed_constants!` does not work (SPIR-V before LLVM 17).
+# where `demote_boxed_constants!` does not work (SPIR-V before LLVM 17). The boxes stay in
+# the module, so with several entry points this runs again on their users for each.
 function fold_dead_box_references!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     users = Set{LLVM.Function}()
     for gv in boxed_constants(mod)
@@ -950,10 +951,15 @@ function merged_constant_value!(builder::IRBuilder, T::LLVMType, @nospecialize(a
     elseif addr isa LLVM.GlobalVariable
         return constant_word(T, addr)
     elseif addr isa LLVM.SelectInst
-        a = merged_constant_value!(builder, T, addr.operands[2], values)
-        b = merged_constant_value!(builder, T, addr.operands[3], values)
+        # (create the select first, as cycles make it an operand of itself, with a placeholder
+        # that is not a constant so that the builder cannot fold it away)
         position!(builder, LLVM.after(addr))
-        return values[addr] = select!(builder, addr.operands[1], a, b)
+        placeholder = LLVM.freeze!(builder, UndefValue(T))
+        sel = values[addr] = select!(builder, addr.operands[1], placeholder, placeholder)
+        sel.operands[2] = merged_constant_value!(builder, T, addr.operands[2], values)
+        sel.operands[3] = merged_constant_value!(builder, T, addr.operands[3], values)
+        erase!(placeholder)
+        return sel
     elseif addr isa LLVM.PHIInst
         # (create the phi first, as loops make it an incoming value of itself)
         position!(builder, LLVM.before(addr))
@@ -1210,9 +1216,8 @@ end
 
 # Load the slots' values as the words the table holds. A pointer-typed load would read a
 # host address as a pointer into the target's default address space, which on Metal is
-# thread memory, and shader validation does not preserve such a value's bits. Converting
-# the word back with `inttoptr` keeps the IR valid for existing users, while comparisons
-# fold to integer ones.
+# thread memory, and shader validation does not preserve such a value's bits. The word is
+# converted back with `inttoptr`, which keeps the IR valid for existing users.
 function load_relocation_words!(loads::Vector{LLVM.LoadInst}, T_word::LLVMType)
     @dispose builder=IRBuilder() begin
         for load in loads

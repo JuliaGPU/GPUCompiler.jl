@@ -4,15 +4,17 @@
 function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
                             relocs::Relocations=Relocations())
     # This runs after target finalization (`finish_ir!`), whose output must reach the back-end
-    # as it is: e.g. Metal loads pointers as words, and index narrowing would be undone by
-    # InstCombine widening the arithmetic again. So only fold the loads from relocation slots
-    # (see `fold_merged_constant_loads!`), simplify instructions to existing values or
-    # constants, and drop what is dead; nothing combines or canonicalizes instructions here.
+    # as it is: e.g. index narrowing would be undone by InstCombine widening the arithmetic
+    # again. So only fold the loads from relocation slots (see `fold_merged_constant_loads!`),
+    # simplify instructions to existing values or constants, and drop what is dead (with ADCE,
+    # as the address `phi`s and `select`s of folded loads can form dead cycles that would keep
+    # the slots alive); nothing combines or canonicalizes instructions here.
     function cleanup(; simplify=false)
         @dispose pb=PassBuilder() begin
             if simplify
                 add!(pb, FunctionPassManager()) do fpm
                     add!(fpm, InstSimplifyPass())
+                    add!(fpm, ADCEPass())
                 end
             end
             add!(pb, GlobalDCEPass())
