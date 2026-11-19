@@ -1079,13 +1079,10 @@ end
                                             system_atomics=false)) do msg
         occursin("Reason: unsupported system-scope atomic operation (not supported on this platform", msg)
     end
-    # (libNVVM doesn't support sm_61; on sm_70 and later, the operation is relaxed)
+    # (libNVVM doesn't support sm_61)
     if backend === :nvptx
         asm, _ = PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; backend, cap=v"6.1")
         @test occursin("atom.sys.global.add.u64", asm)
-    else
-        asm, _ = PTX.code_execution(mod.kernel, Tuple{Ptr{Int}}; backend)
-        @test occursin("atom.relaxed.sys.global.add.u64", asm)
     end
 end
 
@@ -1244,6 +1241,143 @@ end
         @check "sqrt.rn.f64"
         @check_not "rsqrt.approx"
         PTX.code_native(mod.rsqrt64, Tuple{Float64}; backend)
+    end
+end
+
+@testset "fastmath f32 approximations" begin
+    # each operation selects exactly one approximate instruction (`1f0 / sqrt(x)` is a
+    # single `rsqrt`, `1f0 / x` a single `rcp`), with the FTZ variant under job-wide fastmath
+    mod = @eval module $(gensym())
+        sqrt_fast(ptr, x) = (unsafe_store!(ptr, @fastmath sqrt(x)); nothing)
+        div_fast(ptr, x, y) = (unsafe_store!(ptr, @fastmath x / y); nothing)
+        inv_fast(ptr, x) = (unsafe_store!(ptr, @fastmath 1f0 / x); nothing)
+        rsqrt_fast(ptr, x) = (unsafe_store!(ptr, @fastmath 1f0 / sqrt(x)); nothing)
+    end
+    for (f, types, instr) in ((mod.sqrt_fast, Tuple{Ptr{Float32},Float32}, "sqrt"),
+                              (mod.div_fast, Tuple{Ptr{Float32},Float32,Float32}, "div"),
+                              (mod.inv_fast, Tuple{Ptr{Float32},Float32}, "rcp"),
+                              (mod.rsqrt_fast, Tuple{Ptr{Float32},Float32}, "rsqrt"))
+        @test @filecheck begin
+            @check "$instr.approx.f32"
+            @check_not "{{(rcp|sqrt|div).approx}}"
+            PTX.code_native(f, types; backend)
+        end
+        @test @filecheck begin
+            @check "$instr.approx.ftz.f32"
+            @check_not "{{(rcp|sqrt|div).approx}}"
+            PTX.code_native(f, types; backend, fastmath=true)
+        end
+    end
+end
+
+@testset "fastmath on vectors" begin
+    mod = @eval module $(gensym())
+        const V = NTuple{2,VecElement{Float32}}
+        div_fast(ptr, x, y) = unsafe_store!(ptr, Base.llvmcall("""
+            %r = fdiv afn <2 x float> %0, %1
+            ret <2 x float> %r""", V, Tuple{V,V}, x, y))
+        # a full module, as Julia 1.10 does not declare intrinsics used by `llvmcall`
+        rsqrt_fast(ptr, x) = unsafe_store!(ptr, Base.llvmcall(("""
+            define <2 x float> @entry(<2 x float> %0) #0 {
+              %s = call afn <2 x float> @llvm.sqrt.v2f32(<2 x float> %0)
+              %r = fdiv afn <2 x float> <float 1.0, float 1.0>, %s
+              ret <2 x float> %r
+            }
+            declare <2 x float> @llvm.sqrt.v2f32(<2 x float>)
+            attributes #0 = { alwaysinline }""", "entry"), V, Tuple{V}, x))
+    end
+    @test @filecheck begin
+        @check "div.approx.f32"
+        @check "div.approx.f32"
+        PTX.code_native(mod.div_fast, Tuple{Ptr{mod.V},mod.V,mod.V}; backend)
+    end
+    @test @filecheck begin
+        @check "rsqrt.approx.f32"
+        @check "rsqrt.approx.f32"
+        @check_not "{{(rcp|[^r]sqrt|div).approx}}"
+        PTX.code_native(mod.rsqrt_fast, Tuple{Ptr{mod.V},mod.V}; backend)
+    end
+end
+
+@testset "atomic scopes and orderings" begin
+    # (typed-pointer IR, which also parses with opaque pointers)
+    mod = @eval module $(gensym())
+        system(p) = Base.llvmcall("""
+            %p = inttoptr i64 %0 to i64*
+            %o = atomicrmw add i64* %p, i64 1 monotonic, align 8
+            ret void""", Cvoid, Tuple{Ptr{Int}}, p)
+        device_seq_cst(p) = Base.llvmcall("""
+            %p = inttoptr i64 %0 to i64*
+            %o = atomicrmw add i64* %p, i64 1 syncscope("device") seq_cst, align 8
+            ret void""", Cvoid, Tuple{Ptr{Int}}, p)
+    end
+    @test @filecheck begin
+        @check "atom.relaxed.sys.global.add.u64"
+        PTX.code_native(mod.system, Tuple{Ptr{Int}}; backend, kernel=true)
+    end
+    @test @filecheck begin
+        @check "fence.sc.gpu"
+        @check "atom.acquire.gpu.global.add.u64"
+        PTX.code_native(mod.device_seq_cst, Tuple{Ptr{Int}}; backend, kernel=true)
+    end
+end
+
+@testset "debug info" begin
+    mod = @eval module $(gensym())
+        kernel(ptr, x) = (unsafe_store!(ptr, x * x + 1f0); nothing)
+    end
+    # line tables at debug level 1, full debug info at level 2.
+    # (for an architecture that ptxas from CUDA 13 still supports)
+    for (debug_level, ptxas_flag) in ((1, "--generate-line-info"), (2, "--device-debug"))
+        asm, _ = PTX.code_execution(mod.kernel, Tuple{Ptr{Float32},Float32};
+                                    backend, cap=v"7.5", ptx=v"6.3", target_debuginfo=true,
+                                    debug_level)
+        @test @filecheck begin
+            @check ".target sm_75, debug"
+            @check ".loc"
+            @check ".file {{[0-9]+}} \"{{.*}}pointer.jl\""
+            @check ".section .debug_info"
+            asm
+        end
+
+        # ptxas accepts it with the flags CUDA.jl passes at that level
+        CUDA_Compiler_jll.is_available() || continue
+        path = tempname() * ".ptx"
+        write(path, asm)
+        try
+            @test success(`$(CUDA_Compiler_jll.ptxas()) -arch=sm_75 $ptxas_flag $path -o $path.cubin`)
+        finally
+            rm(path; force=true)
+            rm("$path.cubin"; force=true)
+        end
+    end
+end
+
+@testset "loops with bounds checks" begin
+    # NVPTX's code generator strength-reduces loops that exit through bounds checks, and
+    # libNVVM's doesn't (see `optimize_nvvm!`)
+    mod = @eval module $(gensym())
+        # strided accesses: the address is a multiplication of the induction variable
+        function strided(out::Ptr{Float32}, a::Ptr{Float32}, stride::Int, n::Int, len::Int)
+            acc = 0f0
+            for i in 1:n
+                idx = (i - 1) * stride + 1
+                idx <= len || throw(BoundsError())
+                acc += unsafe_load(a, idx)
+            end
+            unsafe_store!(out, acc)
+            return
+        end
+    end
+
+    # the address is incremented by the stride instead of recomputed, with or without
+    # a multiply-add: the kernel has no other integer multiplications
+    @test @filecheck begin
+        @check_label ".entry"
+        @check_not "{{(mul|mad)\\.(lo|wide)}}"
+        @check "ret;"
+        PTX.code_native(mod.strided, Tuple{Ptr{Float32},Ptr{Float32},Int,Int,Int};
+                        backend, kernel=true)
     end
 end
 
