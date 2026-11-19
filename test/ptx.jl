@@ -121,6 +121,26 @@ end
     @test GPUCompiler.ExceptionSite("Error", "reason", []) in meta.exception_sites
 end
 
+@testset "exception sites in a fresh session" begin
+    # back-ends opt in after GPUCompiler's precompiled pipeline was inferred without their
+    # method. code coverage recompiles that pipeline, so check without it.
+    script = """
+        using GPUCompiler, NVPTX_LLVM_Backend_jll
+        include($(repr(joinpath(@__DIR__, "helpers", "runtime.jl"))))
+        include($(repr(joinpath(@__DIR__, "helpers", "ptx.jl"))))
+        function kernel(p, i)
+            i == 1 && GPUCompiler.@gputhrow "Error" "reason"
+            unsafe_store!(p, i)
+            return
+        end
+        _, meta = PTX.code_execution(kernel, Tuple{Ptr{Int},Int};
+                                     exception_sites=true, debug_level=1)
+        meta.exception_sites == [GPUCompiler.ExceptionSite("Error", "reason", [])] || exit(1)
+        """
+    cmd = `$(Base.julia_cmd()) --code-coverage=none --project=$(Base.active_project()) -e $script`
+    @test success(pipeline(cmd; stdout, stderr))
+end
+
 LLVM.version() >= v"17" && @testset "alignment inference" begin
     # accesses get the alignment that can be proven, here from that of a global, which the
     # back-end needs to vectorize them
