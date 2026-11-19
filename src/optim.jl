@@ -29,20 +29,20 @@ function apply_fastmath!(mod::LLVM.Module)
     return
 end
 
-# Pick the peephole pass according to `optimization_options(job).instcombine`. Defaults to
+# Pick the peephole pass according to the `instcombine` optimization option. Defaults to
 # `InstCombinePass` to match LLVM's standard pipeline; `InstSimplifyPass` is the fallback
 # for back-ends that need only the simplification subset.
 function instcombine_pass(@nospecialize(job::CompilerJob))
-    if get(optimization_options(job), :instcombine, true)
+    if optimization_option(job, :instcombine, true)
         InstCombinePass()
     else
         InstSimplifyPass()
     end
 end
 
-# Pick the peephole pass according to `optimization_options(job).aggressiveinstcombine`.
+# Pick the peephole pass according to the `aggressiveinstcombine` optimization option.
 function aggressiveinstcombine_pass(@nospecialize(job::CompilerJob))
-    if get(optimization_options(job), :aggressiveinstcombine, true)
+    if optimization_option(job, :aggressiveinstcombine, true)
         AggressiveInstCombinePass()
     else
         InstSimplifyPass()
@@ -116,10 +116,10 @@ const AggressiveSimplifyCFGOptions =
        #sink_common_insts=true
     )
 
-# Build a SimplifyCFG pass with `options`, letting `optimization_options(job).switch_to_lookup`
+# Build a SimplifyCFG pass with `options`, letting the `switch_to_lookup` optimization option
 # disable the conversion of switches to lookup tables.
 function simplifycfg_pass(@nospecialize(job::CompilerJob), options)
-    switch_to_lookup = get(optimization_options(job), :switch_to_lookup, true)
+    switch_to_lookup = optimization_option(job, :switch_to_lookup, true)
     SimplifyCFGPass(; options..., switch_to_lookup)
 end
 

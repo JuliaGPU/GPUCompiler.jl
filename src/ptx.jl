@@ -263,7 +263,7 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
             register!(pb, PTXRSqrtFastPass())
             register!(pb, PTXFDivFastPass())
             register!(pb, PTXFSqrtFastPass())
-            if get(optimization_options(job), :fastmath, true)
+            if optimization_option(job, :fastmath, true)
                 add!(pb, PTXRSqrtFastPass())
                 add!(pb, PTXFDivFastPass())
                 add!(pb, PTXFSqrtFastPass())
