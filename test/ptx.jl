@@ -1,6 +1,6 @@
 for backend in (:nvptx, :nvvm)
 if backend === :nvvm && !PTX.nvvm_available()
-    @warn "libNVVM from CUDA 13.2+ not available; skipping PTX tests with the NVVM back-end"
+    @warn "libNVVM from CUDA 13.5+ not available; skipping PTX tests with the NVVM back-end"
     continue
 end
 @testset "$backend" begin

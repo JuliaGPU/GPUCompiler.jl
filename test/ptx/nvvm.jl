@@ -1,5 +1,14 @@
+# libNVVM before CUDA 13.5 miscompiles atomics
+if NVVM.is_available() && NVVM.toolkit_version() < v"13.5"
+    @testset "toolkit requirement" begin
+        f(ptr) = (unsafe_store!(ptr, 1f0); nothing)
+        @test_throws "requires libNVVM from CUDA 13.5 or later" PTX.code_native(devnull, f,
+            Tuple{Ptr{Float32}}; backend=:nvvm)
+    end
+end
+
 if !PTX.nvvm_available()
-    @warn "libNVVM from CUDA 13.2+ not available; skipping NVVM tests"
+    @warn "libNVVM from CUDA 13.5+ not available; skipping NVVM tests"
 else
 
 mod = @eval module $(gensym())
@@ -66,16 +75,14 @@ end
     @test occursin(".entry", nvjitlink_ptx(ltoir, "-arch=sm_100"))
 
     # LTO-IR for older architectures needs nvJitLink to use the current reader too
-    if CUDA_Compiler_jll.cuda_version >= v"13.5"
-        job, _ = PTX.create_job(mod.kernel, Tuple{Ptr{Float32},Float32};
-                                backend=:nvvm, cap=v"7.5", kernel=true)
-        ltoir = JuliaContext() do ctx
-            ltoir, meta = GPUCompiler.compile(:obj, job)
-            LLVM.dispose(meta.ir)
-            ltoir
-        end
-        @test occursin(".entry", nvjitlink_ptx(ltoir, "-arch=sm_75", "-nvvm-latest"))
+    job, _ = PTX.create_job(mod.kernel, Tuple{Ptr{Float32},Float32};
+                            backend=:nvvm, cap=v"7.5", kernel=true)
+    ltoir = JuliaContext() do ctx
+        ltoir, meta = GPUCompiler.compile(:obj, job)
+        LLVM.dispose(meta.ir)
+        ltoir
     end
+    @test occursin(".entry", nvjitlink_ptx(ltoir, "-arch=sm_75", "-nvvm-latest"))
 
     job, _ = PTX.create_job(mod.kernel, Tuple{Ptr{Float32},Float32}; kernel=true)
     JuliaContext() do ctx
@@ -209,17 +216,35 @@ end
 end
 
 @testset "older architectures" begin
-    # libNVVM only reads current bitcode for these with `-nvvm-latest`, added in CUDA 13.5
-    if CUDA_Compiler_jll.cuda_version >= v"13.5"
-        @test @filecheck begin
-            @check ".target sm_75"
-            @check ".visible .entry"
-            PTX.code_native(mod.kernel, Tuple{Ptr{Float32},Float32};
-                            backend=:nvvm, cap=v"7.5", kernel=true)
-        end
-    else
-        @test_throws "requires CUDA 13.5 or later" PTX.code_native(devnull, mod.kernel,
-            Tuple{Ptr{Float32},Float32}; backend=:nvvm, cap=v"7.5")
+    # libNVVM only reads current bitcode for these with `-nvvm-latest`
+    @test @filecheck begin
+        @check ".target sm_75"
+        @check ".visible .entry"
+        PTX.code_native(mod.kernel, Tuple{Ptr{Float32},Float32};
+                        backend=:nvvm, cap=v"7.5", kernel=true)
+    end
+end
+
+@testset "atomics" begin
+    # libNVVM before CUDA 13.5 ignored the scope and ordering of `atomicrmw`
+    mod = @eval module $(gensym())
+        system(p) = Base.llvmcall("""
+            %p = inttoptr i64 %0 to ptr
+            %o = atomicrmw add ptr %p, i64 1 monotonic, align 8
+            ret void""", Cvoid, Tuple{Ptr{Int}}, p)
+        device_seq_cst(p) = Base.llvmcall("""
+            %p = inttoptr i64 %0 to ptr
+            %o = atomicrmw add ptr %p, i64 1 syncscope("device") seq_cst, align 8
+            ret void""", Cvoid, Tuple{Ptr{Int}}, p)
+    end
+    @test @filecheck begin
+        @check "atom.relaxed.sys.global.add.u64"
+        PTX.code_native(mod.system, Tuple{Ptr{Int}}; backend=:nvvm, kernel=true)
+    end
+    @test @filecheck begin
+        @check "fence.sc.gpu"
+        @check "atom.acquire.gpu.global.add.u64"
+        PTX.code_native(mod.device_seq_cst, Tuple{Ptr{Int}}; backend=:nvvm, kernel=true)
     end
 end
 
