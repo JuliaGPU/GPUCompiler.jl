@@ -491,9 +491,17 @@ end
 function legalize_nvvm!(mod::LLVM.Module; lto::Bool=false)
     lower_approx_math!(mod)
 
-    # libNVVM requires a version, which libraries like libdevice carry, possibly repeatedly
+    # libNVVM requires a version, which libraries like libdevice carry, possibly repeatedly.
+    # a module with debug info also needs the version of the debug metadata, or libNVVM
+    # rejects it as soon as it's asked to emit debug info (`-g`, `-generate-line-info`).
     versions = get!(mod.metadata, "nvvmir.version")
-    if isempty(versions.operands)
+    if haskey(mod.metadata, "llvm.dbg.cu") && !isempty(mod.metadata["llvm.dbg.cu"].operands)
+        (; ir, dbg) = NVVM.ir_version()
+        empty!(versions.operands)
+        push!(versions.operands,
+              MDNode(Metadata[ConstantInt(Int32(ir.major)), ConstantInt(Int32(ir.minor)),
+                              ConstantInt(Int32(dbg.major)), ConstantInt(Int32(dbg.minor))]))
+    elseif isempty(versions.operands)
         push!(versions.operands,
               MDNode(Metadata[ConstantInt(Int32(2)), ConstantInt(Int32(0))]))
     end
