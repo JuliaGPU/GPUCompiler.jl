@@ -324,6 +324,9 @@ uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 #   InstCombine's more aggressive rewrites).
 # - `switch_to_lookup::Bool = true`: when `false`, SimplifyCFG does not turn switches into
 #   lookup tables or bitmaps, which can introduce integer types of arbitrary width.
+# - `unroll::Bool = true`: when `false`, GPUCompiler skips its general (partial and runtime)
+#   loop unrolling, e.g. for a back-end that unrolls loops itself (libNVVM). Loops with a
+#   small constant trip count are still unrolled fully.
 #
 # Returning a `NamedTuple` keeps this single extension point lightweight: downstream
 # users add new keys without GPUCompiler having to grow an interface method per option.

@@ -352,7 +352,9 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     if LLVM.version() >= v"17"
         add!(fpm, VectorizerStartCallbacks(; opt_level))
     end
-    add!(fpm, LoopUnrollPass(; opt_level))
+    if optimization_option(job, :unroll, true)
+        add!(fpm, LoopUnrollPass(; opt_level))
+    end
     if LLVM.version() >= v"21"
         add!(fpm, VectorizerEndCallbacks(; opt_level))
     end

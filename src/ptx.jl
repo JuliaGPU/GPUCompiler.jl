@@ -171,6 +171,11 @@ isintrinsic(@nospecialize(job::CompilerJob{PTXCompilerTarget}), fn::String) =
     # libdevice's __CUDA_ARCH dispatch, are still supported by the external back-end.
     startswith(fn, "llvm.nvvm.")
 
+# libNVVM re-optimizes the module and unrolls loops itself, for the actual device; unrolling
+# them in GPUCompiler as well can cause excessive unrolling
+optimization_options(@nospecialize(target::PTXCompilerTarget)) =
+    (; unroll = target.backend !== :nvvm)
+
 function finish_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                         mod::LLVM.Module, entry::LLVM.Function)
     # tell NVVMReflect whether to flush denormals; this mirrors what Clang does
@@ -306,7 +311,9 @@ function optimize_module!(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
 
                 # NVPTX's target machine info enables runtime unrolling,
                 # but Julia's pass sequence only invokes the simple unroller.
-                add!(fpm, LoopUnrollPass(; job.config.opt_level))
+                if optimization_option(job, :unroll, true)
+                    add!(fpm, LoopUnrollPass(; job.config.opt_level))
+                end
                 add!(fpm, instcombine_pass(job))        # clean-up redundancy
                 add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
                     add!(lpm, LICMPass())           # the inner runtime check might be

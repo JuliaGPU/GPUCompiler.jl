@@ -622,6 +622,106 @@ end
     @test occursin(r"call .*@(julia|j)_kernel", ir)
 end
 
+@testset "loop unrolling" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler
+        import ..TestRuntime
+
+        # disables unrolling
+        struct OffParams <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.optimization_options(@nospecialize(job::CompilerJob{PTXCompilerTarget,OffParams})) =
+            (; unroll=false)
+
+        # sets an unrelated option, like front-ends do, and should keep the target's default
+        struct OtherParams <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.optimization_options(@nospecialize(job::CompilerJob{PTXCompilerTarget,OtherParams})) =
+            (; fastmath=true)
+
+        # only dispatches on the parameters, and enables unrolling explicitly
+        struct OnParams <: GPUCompiler.AbstractCompilerParams end
+        GPUCompiler.optimization_options(@nospecialize(job::CompilerJob{<:Any,OnParams})) =
+            (; unroll=true)
+
+        const Params = Union{OffParams,OtherParams,OnParams}
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,<:Params}) = TestRuntime
+
+        function dot(a, b, n)
+            s = 0f0
+            for i in 1:n
+                s += unsafe_load(a, i) * unsafe_load(b, i)
+            end
+            unsafe_store!(a, s)
+            return
+        end
+        function dot4(a, b)
+            s = 0f0
+            for i in 1:4
+                s += unsafe_load(a, i) * unsafe_load(b, i)
+            end
+            unsafe_store!(a, s)
+            return
+        end
+    end
+    function job(f, tt, params)
+        source = methodinstance(typeof(f), tt, Base.get_world_counter())
+        target = PTXCompilerTarget(; cap=PTX.default_cap(backend), backend)
+        config = CompilerConfig(target, params; kernel=false)
+        CompilerJob(source, config)
+    end
+    dot_tt = Tuple{Ptr{Float32},Ptr{Float32},Int}
+
+    # by default, a loop with a runtime trip count is unrolled, with a remainder loop, but
+    # not for libNVVM, which unrolls loops itself
+    unrolled = backend === :nvptx
+    target = PTXCompilerTarget(; cap=v"7.0", backend)
+    @test GPUCompiler.optimization_options(target).unroll == unrolled
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_dot_[0-9]+}}"
+        @check "fmul float"
+        @check cond=unrolled "fmul float"
+        @check_not cond=!unrolled "fmul float"
+        PTX.code_llvm(mod.dot, dot_tt; backend, debuginfo=:none)
+    end
+
+    # `unroll=false` keeps a single loop body
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_dot_[0-9]+}}"
+        @check "fmul float"
+        @check_not "fmul float"
+        GPUCompiler.code_llvm(stdout, job(mod.dot, dot_tt, mod.OffParams()); debuginfo=:none)
+    end
+
+    # but still fully unrolls loops with a small constant trip count
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_dot4_[0-9]+}}"
+        @check "fmul float"
+        @check "fmul float"
+        @check "fmul float"
+        @check "fmul float"
+        @check_not "br "
+        GPUCompiler.code_llvm(stdout, job(mod.dot4, Tuple{Ptr{Float32},Ptr{Float32}},
+                                          mod.OffParams()); debuginfo=:none)
+    end
+
+    # options that do not mention `unroll` keep the back-end's default
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_dot_[0-9]+}}"
+        @check "fmul float"
+        @check cond=unrolled "fmul float"
+        @check_not cond=!unrolled "fmul float"
+        GPUCompiler.code_llvm(stdout, job(mod.dot, dot_tt, mod.OtherParams()); debuginfo=:none)
+    end
+
+    # options dispatching only on the parameters are not ambiguous with the target's, and
+    # an explicit `unroll=true` also unrolls with the NVVM back-end
+    @test @filecheck begin
+        @check_label "define void @{{(julia|j)_dot_[0-9]+}}"
+        @check "fmul float"
+        @check "fmul float"
+        GPUCompiler.code_llvm(stdout, job(mod.dot, dot_tt, mod.OnParams()); debuginfo=:none)
+    end
+end
+
 end
 
 ############################################################################################
