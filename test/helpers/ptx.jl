@@ -13,9 +13,9 @@ end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
 
-# the NVVM back-end needs libNVVM from CUDA 13.2+, which only reads current bitcode for
-# Blackwell (sm_100) and later without `-nvvm-latest`, so jobs target that by default
-nvvm_available() = NVVM.is_available() && NVVM.llvm_version("compute_100") !== nothing
+# the NVVM back-end needs libNVVM from CUDA 13.5+. jobs target Blackwell (sm_100) by
+# default, for which libNVVM reads current bitcode without `-nvvm-latest`.
+nvvm_available() = NVVM.is_available() && NVVM.toolkit_version() >= v"13.5"
 default_cap(backend) = backend === :nvvm ? v"10.0" : v"7.0"
 
 GPUCompiler.uses_exception_sites(@nospecialize(job::PTXCompilerJob)) =

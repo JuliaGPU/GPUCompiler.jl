@@ -24,11 +24,13 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
 
     # the back-end generating PTX from the optimized LLVM IR:
     #   :nvptx  - LLVM's NVPTX back-end
-    #   :nvvm   - NVIDIA's libNVVM, through NVVM.jl, which has to be loaded. It also
-    #             generates LTO-IR as object code (`compile(:obj, job)`). nvJitLink links
-    #             it as a whole program, so kernels are kept in `llvm.used`. LTO-IR for
-    #             architectures before Blackwell (sm_100) uses libNVVM's `-nvvm-latest`
-    #             reader, which nvJitLink then has to be passed as well.
+    #   :nvvm   - NVIDIA's libNVVM from CUDA 13.5 or later, through NVVM.jl, which has to
+    #             be loaded. libNVVM emits its newest PTX ISA, so `ptx` only gates the
+    #             features the IR uses. It also generates LTO-IR as object code
+    #             (`compile(:obj, job)`). nvJitLink links it as a whole program, so
+    #             kernels are kept in `llvm.used`. LTO-IR for architectures before
+    #             Blackwell (sm_100) uses libNVVM's `-nvvm-latest` reader, which
+    #             nvJitLink then has to be passed as well.
     backend::Symbol = :nvptx
 
     # codegen quirks
@@ -396,13 +398,18 @@ function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     target = job.config.target
     arch = replace(cpu_name(target), "sm_" => "compute_")
 
+    # earlier versions ignore the synchronization scope and ordering of `atomicrmw`
+    if NVVM.toolkit_version() < v"13.5"
+        error("""The NVVM back-end requires libNVVM from CUDA 13.5 or later.
+                 Earlier versions miscompile atomic operations.""")
+    end
+
     # libNVVM reads bitcode from LLVM 7 for older architectures, unless `-nvvm-latest`
-    # (CUDA 13.5+) selects its current LLVM, which Blackwell and later use by default.
-    # older readers would need the bitcode to be downgraded, which isn't supported.
+    # selects its current LLVM, which Blackwell and later use by default
     options = ["-arch=$arch"]
     reader = NVVM.llvm_version(arch)
     if reader === nothing
-        error("libNVVM does not support $arch, or predates CUDA 13.2, which the NVVM back-end requires.")
+        error("libNVVM does not support $arch.")
     elseif reader < LLVM.version().major
         push!(options, "-nvvm-latest")
     end
@@ -435,10 +442,6 @@ function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::L
         NVVM.compile(prog, options)
     catch err
         err isa NVVM.NVVMError || rethrow()
-        if err.code == NVVM.NVVM_ERROR_INVALID_OPTION && "-nvvm-latest" in options
-            error("""libNVVM does not support compiling bitcode from LLVM $(LLVM.version().major) for $arch.
-                     This requires CUDA 13.5 or later, or a Blackwell (sm_100) or newer GPU.""")
-        end
         path, = dump_failure(".bc" => input)
         error(sprint(showerror, err) *
               "\nIf you think this is a bug, please file an issue and attach $(path).")
