@@ -1,6 +1,7 @@
 [deps]
 AMDGPU_LLVM_Backend_jll = "cc5c0156-bd05-5a77-8a68-bb0aafb29019"
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
+CUDA_Compiler_jll = "d1e2174e-dfdc-576e-b43e-73b79eb1aca8"
 CompilerCaching = "9db33cc3-5358-4881-8759-fa4194144afd"
 FileCheck = "4e644321-382b-4b05-b0b6-5d23c3d944fb"
 GPUCompiler = "61eb1bfa-7361-4325-ad38-22787b887f55"
@@ -10,6 +11,7 @@ LLVM = "929cbde3-209d-540e-8aea-75f648917ca0"
 LLVMDowngrader_jll = "f52de702-fb25-5922-94ba-81dd59b07444"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 NVPTX_LLVM_Backend_jll = "ef6e0fe3-e6ef-59c0-bde6-4989574699e0"
+NVVM = "423072a2-8eda-41a8-b560-ab106c23935b"
 ParallelTestRunner = "d3525ed8-44d0-4b2c-a655-542cee43accc"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
@@ -24,3 +26,7 @@ demumble_jll = "1e29f10c-031c-5a83-9565-69cddfc27673"
 [compat]
 Aqua = "0.8"
 ParallelTestRunner = "2"
+
+# TODO: remove once NVVM.jl is registered (JuliaRegistries/General#176914)
+[sources]
+NVVM = {url = "https://github.com/JuliaGPU/NVVM.jl", rev = "main"}

@@ -3,6 +3,9 @@
 const NVPTX_LLVM_Backend_jll =
     LazyModule("NVPTX_LLVM_Backend_jll",
                UUID("ef6e0fe3-e6ef-59c0-bde6-4989574699e0"))
+const NVVM =
+    LazyModule("NVVM",
+               UUID("423072a2-8eda-41a8-b560-ab106c23935b"))
 
 
 ## target
@@ -18,6 +21,15 @@ Base.@kwdef struct PTXCompilerTarget <: AbstractCompilerTarget
     #   :family   ('f' suffix)  - same-major-family-portable; gates 'f'-tier intrinsics
     #   :arch     ('a' suffix)  - locked to one exact CC; unlocks all arch-accel intrinsics
     feature_set::Symbol = :baseline
+
+    # the back-end generating PTX from the optimized LLVM IR:
+    #   :nvptx  - LLVM's NVPTX back-end
+    #   :nvvm   - NVIDIA's libNVVM, through NVVM.jl, which has to be loaded. It also
+    #             generates LTO-IR as object code (`compile(:obj, job)`). nvJitLink links
+    #             it as a whole program, so kernels are kept in `llvm.used`. LTO-IR for
+    #             architectures before Blackwell (sm_100) uses libNVVM's `-nvvm-latest`
+    #             reader, which nvJitLink then has to be passed as well.
+    backend::Symbol = :nvptx
 
     # codegen quirks
     ## can we emit debug info in the PTX assembly?
@@ -45,6 +57,7 @@ function Base.hash(target::PTXCompilerTarget, h::UInt)
     h = hash(target.cap, h)
     h = hash(target.ptx, h)
     h = hash(target.feature_set, h)
+    h = hash(target.backend, h)
 
     h = hash(target.debuginfo, h)
 
@@ -94,7 +107,18 @@ end
 # disagree with the final layout. this notably affects i128, which Julia did not even
 # align to 16 bytes before 1.12 (users may have to reject affected types, as kernel
 # argument layouts will differ between such hosts and the device).
-llvm_datalayout(target::PTXCompilerTarget) =
+function llvm_datalayout(target::PTXCompilerTarget)
+    if target.backend === :nvptx
+        nvptx_datalayout()
+    elseif target.backend === :nvvm
+        Int === Int64 || error("The NVVM back-end only supports 64-bit hosts")
+        nvvm_datalayout()
+    else
+        error("PTXCompilerTarget.backend must be one of :nvptx, :nvvm; got $(repr(target.backend))")
+    end
+end
+
+nvptx_datalayout() =
     # little endian
     "e-" *
     # on 32-bit systems, use 32-bit pointers, including for distributed shared
@@ -108,6 +132,12 @@ llvm_datalayout(target::PTXCompilerTarget) =
     "v16:16-v32:32-" *
     # native integer widths
     "n16:32:64"
+
+# libNVVM rejects modules whose layout differs from its own in any way, including in
+# spelling out the defaults. it differs from NVPTX's in not aligning i256 to 32 bytes.
+nvvm_datalayout() =
+    "e-p:64:64:64-p6:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-" *
+    "f32:32:32-f64:64:64-f128:128:128-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64-a:8:8"
 
 have_fma(@nospecialize(target::PTXCompilerTarget), T::Type) = true
 
@@ -125,6 +155,7 @@ llvm_syncscope(::PTXCompilerTarget, name::String) =
 function Base.show(io::IO, @nospecialize(job::CompilerJob{PTXCompilerTarget}))
     print(io, "PTX CompilerJob of ", job.source)
     print(io, " for ", cpu_name(job.config.target))
+    job.config.target.backend === :nvptx || print(io, " using ", job.config.target.backend)
 
     job.config.target.minthreads !== nothing && print(io, ", minthreads=$(job.config.target.minthreads)")
     job.config.target.maxthreads !== nothing && print(io, ", maxthreads=$(job.config.target.maxthreads)")
@@ -324,11 +355,20 @@ end
 
 @unlocked function mcgen(@nospecialize(job::CompilerJob{PTXCompilerTarget}),
                          mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
-    if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
-        error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
+    target = job.config.target
+    if target.backend === :nvvm
+        if format == LLVM.CodeGenFileType.Object
+            return nvvm_codegen(job, mod; lto=true)
+        end
+        return String(nvvm_codegen(job, mod; lto=false))
     end
     if format != LLVM.CodeGenFileType.Assembly
-        error("Unsupported PTX output format $format; the NVPTX back-end only emits PTX assembly.")
+        error("""The NVPTX back-end only emits PTX assembly;
+                 object code (LTO-IR) requires the NVVM back-end (`backend=:nvvm`).""")
+    end
+
+    if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
+        error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
     end
     backend = ExternalBackend(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX")
 
@@ -336,7 +376,6 @@ end
     # it rejects unknown processors and PTX versions instead of silently falling back.
     # FMA contraction is requested as `-nvptx-fma-level=1` was: match nvcc by leaving
     # eligible multiply-add pairs contractible for ptxas.
-    target = job.config.target
     cpu = cpu_name(target)
     ptx = GC.@preserve cpu begin
         options = Ref(NVPTXCompileOptions(Base.unsafe_convert(Cstring, cpu),
@@ -347,6 +386,142 @@ end
                          "Failed to compile to PTX with the NVPTX back-end")
     end
     return String(ptx)
+end
+
+
+## NVVM back-end
+
+# the options for a job, and the architecture they target
+function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
+    target = job.config.target
+    arch = replace(cpu_name(target), "sm_" => "compute_")
+
+    # earlier versions ignore the synchronization scope and ordering of `atomicrmw`
+    if NVVM.toolkit_version() < v"13.5"
+        error("""The NVVM back-end requires libNVVM from CUDA 13.5 or later.
+                 Earlier versions miscompile atomic operations.""")
+    end
+
+    # libNVVM reads bitcode from LLVM 7 for older architectures, unless `-nvvm-latest`
+    # selects its current LLVM, which Blackwell and later use by default
+    options = ["-arch=$arch"]
+    reader = NVVM.llvm_version(arch)
+    if reader === nothing
+        error("libNVVM does not support $arch.")
+    elseif reader < LLVM.version().major
+        push!(options, "-nvvm-latest")
+    end
+
+    # options that tune libNVVM's passes (`-Xopt`, `-Xllc`, `-aggressive-inline`, ...) must
+    # never be passed here: libNVVM keeps them for the rest of the process, so they would
+    # leak into the compilation of every later job.
+
+    # libNVVM only flushes f32 denormals, as fast math does, when asked to for the whole
+    # module (approximate division and square roots are selected by `lower_approx_math!`)
+    if target.fastmath
+        append!(options, ["-ftz=1", "-prec-div=0", "-prec-sqrt=0"])
+    end
+
+    # the debug info itself comes from the module's metadata (see `llvm_debug_info`), so
+    # these flags only mirror what `nvcc -lineinfo` and `nvcc -G` pass to libNVVM's `cicc`.
+    # unlike `-G`, we don't add `-opt=0`: NVPTX also emits debug info for optimized code.
+    if job.config.debug_level == 1
+        push!(options, "-generate-line-info")
+    elseif job.config.debug_level >= 2
+        push!(options, "-g")
+    end
+    return options, arch
+end
+
+function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::LLVM.Module;
+                      lto::Bool)
+    if job.config.optimize && job.config.opt_level >= 1
+        optimize_nvvm!(mod)
+    end
+    legalize_nvvm!(mod; lto)
+    options, arch = nvvm_options(job)
+    lto && push!(options, "-gen-lto")
+
+    input = bitcode(mod)
+    prog = NVVM.Program()
+    output = try
+        NVVM.add!(prog, input)
+        NVVM.compile(prog, options)
+    catch err
+        err isa NVVM.NVVMError || rethrow()
+        path, = dump_failure(".bc" => input)
+        error(sprint(showerror, err) *
+              "\nIf you think this is a bug, please file an issue and attach $(path).")
+    finally
+        finalize(prog)
+    end
+
+    if !lto
+        # libNVVM silently turns calls to intrinsics it doesn't know into calls to external
+        # functions, which then fail to link
+        unknown = unique(m.captures[1] for m in eachmatch(r"\.extern \.func[^\n]*?\b(llvm\.[\w.]+)",
+                                                         String(copy(output))))
+        if !isempty(unknown)
+            path, = dump_failure(".bc" => input)
+            error("libNVVM does not support the intrinsics $(join(unknown, ", ")).\n" *
+                  "If you think this is a bug, please file an issue and attach $(path).")
+        end
+    end
+
+    return output
+end
+
+# IR passes that compensate for observed differences between the PTX of NVPTX and libNVVM.
+#
+# Julia's loops typically exit through bounds checks that branch to `noreturn` error
+# reporting code. In such loops NVPTX's code generator strength-reduces the address computed
+# from the induction variable (`base + i * stride`, a 64-bit multiply) into an incremented
+# pointer, and sinks instructions only used after a bounds check, loads among them, past it.
+# libNVVM's output does neither. Running loop strength reduction (which NVPTX's codegen
+# pipeline also runs) and IR sinking before libNVVM recovers most of that, up to 15% on a
+# bounds-checked matrix multiplication.
+#
+# Without NVPTX's target machine, LSR uses LLVM's default cost model. It is a heuristic
+# that could raise register pressure, but it measured as a net win.
+function optimize_nvvm!(mod::LLVM.Module)
+    @dispose pb=PassBuilder() begin
+        add!(pb, FunctionPassManager()) do fpm
+            add!(fpm, LoopPassManager()) do lpm
+                add!(lpm, LoopStrengthReducePass())
+            end
+            add!(fpm, SinkingPass())
+        end
+        run!(pb, mod)
+    end
+    return mod
+end
+
+# make a module acceptable to libNVVM, which otherwise accepts the same IR as NVPTX
+function legalize_nvvm!(mod::LLVM.Module; lto::Bool=false)
+    lower_approx_math!(mod)
+
+    # libNVVM requires a version, which libraries like libdevice carry, possibly repeatedly.
+    # a module with debug info also needs the version of the debug metadata, or libNVVM
+    # rejects it as soon as it's asked to emit debug info (`-g`, `-generate-line-info`).
+    versions = get!(mod.metadata, "nvvmir.version")
+    if haskey(mod.metadata, "llvm.dbg.cu") && !isempty(mod.metadata["llvm.dbg.cu"].operands)
+        (; ir, dbg) = NVVM.ir_version()
+        empty!(versions.operands)
+        push!(versions.operands,
+              MDNode(Metadata[ConstantInt(Int32(ir.major)), ConstantInt(Int32(ir.minor)),
+                              ConstantInt(Int32(dbg.major)), ConstantInt(Int32(dbg.minor))]))
+    elseif isempty(versions.operands)
+        push!(versions.operands,
+              MDNode(Metadata[ConstantInt(Int32(2)), ConstantInt(Int32(0))]))
+    end
+
+    # nvJitLink links LTO-IR as a whole program, dropping everything that isn't used,
+    # including kernels that aren't referenced
+    if lto
+        kernels = filter(f -> f.callconv == LLVM.CallConv.PTXKernel, collect(mod.functions))
+        union!(mod.used, kernels)
+    end
+    return mod
 end
 
 function llvm_debug_info(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
@@ -912,3 +1087,99 @@ function ptx_fsqrt_fast!(mod::LLVM.Module)
     return changed
 end
 PTXFSqrtFastPass() = ModulePass("ptx-fsqrt-fast", ptx_fsqrt_fast!)
+
+# libNVVM ignores the `afn` flag, only approximating f32 division and square roots when
+# asked to for the entire module (`-prec-div=0`, `-prec-sqrt=0`, and then with the slower
+# `div.full`), so select the approximate instructions as NVPTX does
+function lower_approx_math!(mod::LLVM.Module)
+    f32 = LLVM.FloatType()
+    is_f32(T) = T == f32 || (T isa LLVM.VectorType && T.element_type == f32)
+    function is_approx_sqrt(inst)
+        inst isa LLVM.CallInst || return false
+        callee = inst.called_operand
+        callee isa LLVM.Function && startswith(callee.name, "llvm.sqrt.") &&
+            is_f32(inst.value_type) && inst.fast_math.afn
+    end
+    divisions = LLVM.Instruction[]
+    square_roots = LLVM.Instruction[]
+    for f in mod.functions, bb in f.blocks, inst in bb.instructions
+        if inst isa LLVM.FDivInst
+            is_f32(inst.value_type) && inst.fast_math.afn && push!(divisions, inst)
+        elseif is_approx_sqrt(inst)
+            push!(square_roots, inst)
+        end
+    end
+    isempty(divisions) && isempty(square_roots) && return false
+
+    fns = mod.functions
+    declare(name, ft) = get!(() -> LLVM.Function(mod, name, ft), fns, name)
+    unary = LLVM.FunctionType(f32, [f32])
+    binary = LLVM.FunctionType(f32, [f32, f32])
+    @dispose builder=IRBuilder() begin
+        # replace `inst` by applying the scalar intrinsics to each of its lanes, where
+        # `lane(v)` gives the current lane of a value of the same type
+        function replace_lanes!(f, inst)
+            suffix = flushes_f32_denormals(LLVM.parent(LLVM.parent(inst))) ? ".ftz.f" : ".f"
+            intrinsic(name, ft) = declare("llvm.nvvm.$name.approx$suffix", ft)
+            position!(builder, LLVM.before(inst))
+            T = inst.value_type
+            replacement = if T isa LLVM.VectorType
+                vec = LLVM.UndefValue(T)
+                for i in 0:T.length-1
+                    idx = ConstantInt(Int32(i))
+                    lane = f(intrinsic, v -> extract_element!(builder, v, idx))
+                    vec = insert_element!(builder, vec, lane, idx)
+                end
+                vec
+            else
+                f(intrinsic, identity)
+            end
+            replace_uses!(inst, replacement)
+            erase!(inst)
+        end
+
+        # divisions first, so that a reciprocal can use the operand of the square root it
+        # divides by, as NVPTX selects a single `rsqrt` for that
+        for inst in divisions
+            lhs, rhs = inst.operands
+            replace_lanes!(inst) do intrinsic, lane
+                numerator = lane(lhs)
+                if numerator isa LLVM.ConstantFP && convert(Float32, numerator) == 1f0
+                    if is_approx_sqrt(rhs)
+                        call!(builder, unary, intrinsic("rsqrt", unary),
+                              [lane(rhs.operands[1])])
+                    else
+                        call!(builder, unary, intrinsic("rcp", unary), [lane(rhs)])
+                    end
+                else
+                    call!(builder, binary, intrinsic("div", binary), [numerator, lane(rhs)])
+                end
+            end
+        end
+
+        for inst in square_roots
+            # only used by reciprocals, which became an `rsqrt`
+            if isempty(inst.uses)
+                erase!(inst)
+                continue
+            end
+            x = inst.operands[1]
+            replace_lanes!(inst) do intrinsic, lane
+                call!(builder, unary, intrinsic("sqrt", unary), [lane(x)])
+            end
+        end
+    end
+    return true
+end
+
+# does a function flush f32 denormals, per its denormal mode attributes?
+function flushes_f32_denormals(f::LLVM.Function)
+    attrs = f.function_attributes
+    for kind in ("denormal-fp-math-f32", "denormal-fp-math")
+        attr = get(attrs, kind, nothing)
+        attr === nothing && continue
+        output = first(split(LLVM.value(attr), ','))
+        return output in ("preserve-sign", "positive-zero")
+    end
+    return false
+end
