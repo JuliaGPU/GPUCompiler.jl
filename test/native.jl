@@ -850,6 +850,52 @@ end
                     @test !any(gv -> startswith(gv.name, "jl_global#"), m.globals)
                 end
             end
+
+            # Distinct values can share an `objectid`, so names must not rely on it to
+            # tell them apart (#1116).
+            collide = @eval module $(gensym())
+                struct Singleton{T} end
+                struct Bits{T}; x::Int; end
+            end
+            for (a, b) in @eval collide ((Singleton{Vector}(), Singleton{Vector{Any}}()),
+                                         (Singleton{Vector}, Singleton{Vector{Any}}),
+                                         (Bits{Vector}(1), Bits{Vector{Any}}(1)))
+                @test a !== b
+                pair = Any[a, b]
+                pair_ptrs = [ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), x) for x in pair]
+                target(x) = isbits(x) && sizeof(x) > 0 ? typeof(x) : x
+                GC.@preserve pair @dispose m=LLVM.Module("colliding values") begin
+                    # each value is referenced through two globals
+                    gvs = [LLVM.GlobalVariable(m, LLVM.PointerType(LLVM.Int8Type()),
+                                               "jl_global#$i") for i in 1:4]
+                    relocs = collect!(m, Dict("jl_global#$i" => pair_ptrs[mod1(i, 2)]
+                                              for i in 1:4))
+                    @test length(relocs) == 2
+                    name(x) = only(rec.name for rec in relocs.records
+                                   if rec.target.value === target(x))
+                    @test name(a) != name(b)
+                    @test haskey(m.globals, name(a)) && haskey(m.globals, name(b))
+                    if only(unique(rec.kind for rec in relocs.records)) ===
+                       GPUCompiler.InteriorSite
+                        # every global points into the box of its own value
+                        for (i, gv) in enumerate(gvs)
+                            @test occursin("@$(name(pair[mod1(i, 2)])),",
+                                           string(gv.initializer))
+                        end
+                    else
+                        # the slots themselves were renamed, and the duplicates dropped
+                        @test count(Returns(true), m.globals) == 2
+                    end
+
+                    # a suffix only tells colliding values apart: on its own, the second
+                    # value gets the name the first one took here
+                    m_alone, map = slot_module(pair_ptrs[2])
+                    @dispose m_alone=m_alone begin
+                        @test only(collect!(m_alone, map).records).name ==
+                              name(objectid(a) == objectid(b) ? a : b)
+                    end
+                end
+            end
         end
     end
 
@@ -1673,8 +1719,19 @@ end
             end
 
             obj_a, relocs_a = shared_object("shared_entry_a")
-            obj_b, _ = shared_object("shared_entry_b")
+            obj_b, relocs_b = shared_object("shared_entry_b")
             expected = GPUCompiler.resolve_relocation_target(ref)
+
+            # The linker coalesces whatever shares a name, so a loader with one symbol
+            # namespace has to check that the records it puts there agree.
+            shared = GPUCompiler.Relocations()
+            for relocs in (relocs_a, relocs_b), rec in relocs.records
+                GPUCompiler.add_relocation!(shared, rec)
+            end
+            @test length(shared) == 1
+            @test_throws "conflicting values" GPUCompiler.add_relocation!(
+                shared, GPUCompiler.SlotSite, "shared_reloc", 0,
+                GPUCompiler.JuliaValueRef(:other))
 
             @dispose lljit=LLJIT(; tm=LLVM.JITTargetMachine()) begin
                 jd = lljit.main_dylib
@@ -1682,7 +1739,7 @@ end
                 add!(lljit, jd, MemoryBuffer(obj_b))   # the duplicate definition
 
                 # patching the one surviving definition serves both objects
-                for (rec, word) in GPUCompiler.resolved_relocations(relocs_a)
+                for (rec, word) in GPUCompiler.resolved_relocations(shared)
                     addr = lookup(lljit, rec.name)
                     unsafe_store!(Ptr{UInt}(pointer(addr) + rec.offset), word)
                 end

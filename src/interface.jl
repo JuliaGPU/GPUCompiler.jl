@@ -363,13 +363,19 @@ When [`supports_relocatable_ir`](@ref) is false, Julia may still embed unrecorde
 A back-end may lower the records it does receive with any strategy, but the result remains
 session-local regardless.
 
-A loader may hold several compiled functions in one symbol namespace without renaming
-anything: record names are namespaced per compiler job, and where two objects do define one
-record — a relocation-carrying runtime-library function keeps its own namespace in every
-kernel it is linked into — `:patch` defines it weakly, so the definitions coalesce and
-patching the survivor serves both. Record globals have protected visibility: they stay
-visible to the loader by name, yet are never preemptible, matching the `dso_local`
-references Julia emits.
+Record names are unique within one object, but not across objects: a relocation-carrying
+runtime-library function keeps its names in every kernel it is linked into, and unrelated
+jobs can end up with the same name for different values. Loading every object into a symbol
+namespace of its own avoids the question. A loader that instead holds several objects in one
+namespace (e.g. an ORC `JITDylib`) can rely on `:patch` defining records weakly, so that the
+definitions of a name coalesce and patching the survivor serves every object. That is only
+correct when those definitions refer to the same value, which the linker does not check: such
+a loader must keep one `Relocations` per namespace and `add_relocation!` each object's
+records to it, which throws when a name is already taken by another value. This only covers
+slots: the record of a relocatable box describes its header and not its payload, so objects
+containing boxes (device code) need a namespace of their own. Record globals
+have protected visibility: they stay visible to the loader by name, yet are never
+preemptible, matching the `dso_local` references Julia emits.
 
 The manifest is frozen once lowered: it then describes emitted code, so adding, dropping or
 reordering a record errors. Take a [`copy`](@ref) to work on one afterwards, as

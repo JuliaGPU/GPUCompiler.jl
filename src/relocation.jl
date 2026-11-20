@@ -5,8 +5,8 @@
 #   produce ──▶ merge (on link) ──▶ prune (after DCE) ──▶ lower
 #
 # Site names are fixed at creation and namespaced by their producer, so IR and metadata can
-# be linked without renaming. Unrelated jobs use distinct names; runtime functions linked
-# into several outputs reuse names whose definitions and targets are identical.
+# be linked without renaming. Names are unique within a module; modules that are combined
+# may share names, whose records then have to agree (see `add_relocation!`).
 
 
 ## targets
@@ -128,7 +128,7 @@ What a relocation record points at, and hence how it is lowered:
 """
     Relocation(kind, name, offset, target)
 
-One word to relocate: a global `name` (unique to the job that produced it), a byte `offset`
+One word to relocate: a global `name` (unique within its module), a byte `offset`
 within that global (always zero for a [`SlotSite`](@ref RelocationSiteKind)), the site
 `kind`, and the [`RelocationTarget`](@ref) whose address belongs there.
 """
@@ -330,16 +330,30 @@ end
 
 # Julia names value globals `<base>_<counter>`, where `<counter>` comes from a process-global
 # codegen sequence and so differs from one session to the next. Drop it from relocation slot and
-# box names: the target's `objectid` (appended alongside) is the stable per-target identity that
-# disambiguates them, so any bitcode keyed on these names stays reproducible across sessions.
-# `objectid` is content-stable for the interned symbols and `isbits`/`DataType` values that
-# appear as relocation targets.
+# box names in favor of the target's `objectid`, which for the symbols, types and immutable
+# values that appear as relocation targets is the same in every session, so any bitcode
+# keyed on these names stays reproducible.
 strip_codegen_counter(name::AbstractString) = replace(name, r"_[0-9]+$" => "")
 
-# A namespace for this job's relocation site names, so that no two kernels — nor a kernel and
-# the runtime library linked into it — can ever define the same site symbol. That makes the
-# names globally unique by construction, which is what lets `:patch` loaders share one symbol
-# namespace (e.g. an ORC `JITDylib` holding several compiled functions) without renaming.
+# A name for the site of `obj`, unique among `sites`: the names handed out for one module,
+# with the value each belongs to. Distinct values can share an `objectid` (a type only
+# contributes its 32-bit hash, which is the same for `W{Vector}` and `W{Vector{Any}}`), so a
+# value takes the first of `<gv>_<objectid>`, `<gv>_<objectid>_1`, ... that is free or
+# already its own.
+function site_name!(sites::Dict{String,Any}, gv_name::AbstractString, @nospecialize(obj))
+    base = strip_codegen_counter(safe_name(gv_name)) * "_" * string(objectid(obj); base=16)
+    name, n = base, 0
+    while get!(sites, name, obj) !== obj
+        name = string(base, "_", n += 1)
+    end
+    return name
+end
+
+# A namespace for this job's relocation site names, which keeps them apart from those of the
+# runtime functions linked into the same module. Names are only unique within a module: jobs
+# can share a namespace (it does not cover the world age or the compiler configuration), and
+# their names are derived from hashes. Whoever combines modules or objects must check that
+# the names they share agree, as `add_relocation!` does.
 #
 # The job's entry name is the natural discriminator, but it is only fixed later in `irgen`, and
 # for an unnamed non-kernel job it would carry Julia's per-session codegen counter. Derive the
@@ -358,14 +372,18 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
                                          gv_to_value::Dict{String, Ptr{Cvoid}})
     relocs = Relocations()
     namespace = relocation_namespace(job)
+    sites = Dict{String,Any}()
     mod_gvs = mod.globals
 
     # Device jobs cannot refer to host boxes, so embed copies of boxed isbits constants.
     # Runtime jobs must keep the GC-managed boxes because returned values may re-enter Julia.
     materialize_boxes = !uses_julia_runtime(job)
-    for (name, init) in gv_to_value
-        gv = get(mod_gvs, name, nothing)
-        gv === nothing && continue
+    # in module order, which unlike that of `gv_to_value` is the same in every session, so
+    # that the names `site_name!` settles on are too
+    for gv in collect(mod_gvs)
+        name = gv.name
+        init = get(gv_to_value, name, nothing)
+        init === nothing && continue
         cur = gv.initializer
         if !(cur === nothing || LLVM.isnull(cur))
             @assert !supports_relocatable_ir()
@@ -378,22 +396,17 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
         obj = Base.unsafe_pointer_to_objref(init)
         if materialize_boxes && isbitstype(typeof(obj)) && sizeof(typeof(obj)) > 0 &&
            !(obj isa Bool)
-            val = materialize_box!(mod, relocs, namespace, gv, obj, init)
+            val = materialize_box!(mod, relocs, namespace, sites, gv, obj, init)
             gv.initializer = val
             gv.linkage = LLVM.Linkage.Private
         else
             check_slot_size(mod, gv, name)
-            slot_name = namespaced_name(namespace,
-                strip_codegen_counter(safe_name(name)) * "_" *
-                string(objectid(obj); base=16))
-            # Codegen can emit several slots for one value in a module (observed on 1.11,
-            # whose backported GV API does not deduplicate them), and their content-derived
-            # names collide by construction. Alias later slots onto the first: an equal name
-            # means an equal referenced value, and `add_relocation!` below degenerates into
-            # its agreeing-duplicate no-op (or errors on the astronomically unlikely
-            # `objectid` collision between distinct values).
-            existing = get(mod_gvs, slot_name, nothing)
-            if existing !== nothing && existing !== gv
+            slot_name = namespaced_name(namespace, site_name!(sites, name, obj))
+            if find_relocation(relocs, slot_name) !== nothing
+                # Codegen can emit several slots for one value in a module (observed on
+                # 1.11, whose backported GV API does not deduplicate them). They get the
+                # same name, so alias later slots onto the first.
+                existing = mod_gvs[slot_name]
                 @assert existing.value_type == gv.value_type
                 replace_uses!(gv, existing)
                 erase!(gv)
@@ -401,8 +414,8 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
                 gv.name = slot_name
                 gv.name == slot_name ||
                     error("Relocation slot name '$slot_name' is already in use")
+                add_relocation!(relocs, SlotSite, slot_name, 0, JuliaValueRef(obj))
             end
-            add_relocation!(relocs, SlotSite, slot_name, 0, JuliaValueRef(obj))
         end
     end
 
@@ -419,7 +432,7 @@ function collect_julia_value_relocations!(@nospecialize(job::CompilerJob), mod::
             end
 
             init = ccall(:jl_value_ptr, Ptr{Cvoid}, (Any,), obj)
-            val = materialize_box!(mod, relocs, namespace, gv, obj, init)
+            val = materialize_box!(mod, relocs, namespace, sites, gv, obj, init)
             gv.initializer = val
             gv.constant = true
             gv.linkage = LLVM.Linkage.Private
@@ -431,7 +444,8 @@ end
 # Emit a device-resident constant replica of the box holding `obj` and return
 # the constant to store in its slot. Any relocatable header is recorded in `relocs`.
 function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::String,
-                          gv::GlobalVariable, @nospecialize(obj), init::Ptr{Cvoid})
+                          sites::Dict{String,Any}, gv::GlobalVariable, @nospecialize(obj),
+                          init::Ptr{Cvoid})
     obj_type = typeof(obj)
     @assert isbitstype(obj_type)
     obj_size = sizeof(obj_type)
@@ -451,26 +465,30 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
     patch_header = hdr >= UInt(64 << 4)   # jl_max_tags << 4
     fields = LLVM.Constant[ConstantInt(T_word, patch_header ? 0 : hdr),
                            ConstantDataArray(T_byte, bytes)]
-    header_idx = 0
-    payload_idx = 1
-    if Base.datatype_alignment(typeof(obj)) > W
-        # pad so the payload lands at a 16-byte offset (JL_HEAP_ALIGNMENT max)
-        pushfirst!(fields, ConstantDataArray(T_byte, zeros(UInt8, 16 - W)))
-        header_idx = 1
-        payload_idx = 2
-    end
+    # pad so the payload lands at a 16-byte offset (JL_HEAP_ALIGNMENT max)
+    padded = Base.datatype_alignment(typeof(obj)) > W
+    padded && pushfirst!(fields, ConstantDataArray(T_byte, zeros(UInt8, 16 - W)))
+    header_idx = Int(padded)
+    payload_idx = header_idx + 1
     boxinit = ConstantStruct(fields)
     boxty = boxinit.value_type
 
     # Only a relocatable box needs a namespaced name: its header is a site loaders address by
     # name. A fully-materialized box is a private constant, so LLVM uniques it on its own.
     box_name = if patch_header
-        namespaced_name(namespace,
-            strip_codegen_counter(safe_name(gv.name)) * "_" *
-            string(objectid(obj); base=16) * "_box")
+        namespaced_name(namespace, site_name!(sites, gv.name, obj) * "_box")
     else
         safe_name(gv.name) * "_box"
     end
+    idx(i) = ConstantInt(LLVM.Int32Type(), i)
+    payload(box) = const_pointercast(
+        const_gep(boxty, box, LLVM.Constant[idx(0), idx(payload_idx)]), gv.global_value_type)
+    # `header_idx` is a zero-based field index, `LLVM.offsetof` numbers fields from 1
+    offset = LLVM.offsetof(mod.datalayout, boxty, header_idx + 1)
+    # as with slots, a value referenced through several globals gets a single box
+    patch_header && find_relocation(relocs, box_name, offset) !== nothing &&
+        return payload(mod.globals[box_name])
+
     box = GlobalVariable(mod, boxty, box_name)
     box.name == box_name || error("Interior relocation global '$box_name' is already in use")
     box.initializer = boxinit
@@ -479,8 +497,6 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
         box.constant = false
         box.linkage = LLVM.Linkage.External
         box.externally_initialized = true
-        # `header_idx` is a zero-based field index, `LLVM.offsetof` numbers fields from 1
-        offset = LLVM.offsetof(mod.datalayout, boxty, header_idx + 1)
         add_relocation!(relocs, InteriorSite, box_name, offset, JuliaValueRef(typeof(obj)))
     else
         box.constant = true
@@ -488,9 +504,7 @@ function materialize_box!(mod::LLVM.Module, relocs::Relocations, namespace::Stri
         box.unnamed_addr = LLVM.UnnamedAddr.Global
     end
 
-    idx(i) = ConstantInt(LLVM.Int32Type(), i)
-    payload = const_gep(boxty, box, LLVM.Constant[idx(0), idx(payload_idx)])
-    return const_pointercast(payload, gv.global_value_type)
+    return payload(box)
 end
 
 # Does `gv` look like a boxed-constant replica created by `materialize_box!`? Its `_box` name
@@ -769,9 +783,9 @@ end
 
 ## bookkeeping
 
-# Merge `src_mod` into `dest_mod` and carry its relocation metadata across. A site name always
-# denotes the same word and target; duplicate declarations or definitions may therefore be
-# coalesced by LLVM before their agreeing records are merged.
+# Merge `src_mod` into `dest_mod` and carry its relocation metadata across. LLVM coalesces
+# declarations or definitions that share a name, so their records have to agree, which
+# `add_relocation!` checks.
 function link_relocatable!(dest_mod::LLVM.Module, dest_relocs::Relocations,
                             src_mod::LLVM.Module, src_relocs::Relocations;
                             only_needed=false)
@@ -991,12 +1005,13 @@ function emit_patchable_relocations!(mod::LLVM.Module, relocs::Relocations)
         # Two objects can define the same record: a relocation-carrying runtime-library
         # function keeps its own job's namespace in every kernel it is linked into. A loader
         # holding both in one symbol namespace (an ORC `JITDylib`) would see a duplicate
-        # definition, so define them weakly and let it coalesce. That is sound rather than
-        # merely quiet: a shared name means a shared producing job, hence the same target
-        # (`add_relocation!` enforces agreement), so whichever definition survives gets
-        # patched with the word every object referencing it expects. `llvm.used` below still
-        # anchors them against DCE, and `externally_initialized` still stops the optimizer
-        # from believing the null initializer.
+        # definition, so define them weakly and let it coalesce. The linker does not check
+        # that coalesced definitions agree; that is up to the loader (see
+        # `relocation_lowering`). Only Julia's JIT before 1.14 forces objects to share a
+        # `JITDylib`, so once no loader needs that these can become strong definitions, which
+        # turns a clash into a link error. `llvm.used` below still anchors them against DCE,
+        # and `externally_initialized` still stops the optimizer from believing the null
+        # initializer.
         gv.linkage = LLVM.Linkage.WeakODR
         # Julia emits these globals `dso_local`, so backends address them PC-relatively
         # (e.g. `@rel32` on AMDGPU). A weak definition with default visibility is however
