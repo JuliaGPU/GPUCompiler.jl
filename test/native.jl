@@ -2223,8 +2223,9 @@ end
 
 @testset "merged constant loads" begin
     # loads through a select or phi of baked relocation slots are folded to the selected
-    # values, as nothing else folds them after target finalization
-    fold(ir) = Context() do ctx
+    # values, as nothing else folds them after target finalization. (a Julia context,
+    # as `typed_ptrs` describes those: with the ports, they differ from plain ones on 1.11)
+    fold(ir) = JuliaContext() do ctx
         mod = parse(LLVM.Module, ir)
         changed = GPUCompiler.fold_merged_constant_loads!(mod)
         LLVM.verify(mod)
