@@ -258,6 +258,14 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=job.c
     config = CompilerConfig(job.config; validate=false, strip=false, optimize)
     str = JuliaContext() do ctx
         ir, meta = compile(:llvm, CompilerJob(job; config))
+        if is_handoff_library(ir.library)
+            # Julia's printer only works with its own LLVM. LLVM's always prints all
+            # metadata, and debug information unless it's disabled.
+            return context!(context(ir)) do
+                debuginfo === :none && strip_debuginfo!(ir)
+                dump_module ? string(ir) : string(meta.entry)
+            end
+        end
         ts_mod = ThreadSafeModule(ir)
         entry_fn = meta.entry
         GC.@preserve ts_mod entry_fn begin

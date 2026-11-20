@@ -20,17 +20,25 @@ export JuliaContext
 # this helper to a regular `Context()` call.
 function JuliaContext(; opaque_pointers=nothing)
     # XXX: remove
-    ThreadSafeContext(; opaque_pointers)
+    ThreadSafeContext(; opaque_pointers, library=:julia)
 end
 function JuliaContext(f; kwargs...)
-    ThreadSafeContext(; kwargs...) do ts_ctx
+    ThreadSafeContext(; library=:julia, kwargs...) do ts_ctx
         # for now, also activate the underlying context
         # XXX: this is wrong; we can't expose the underlying LLVM context, but should
         #      instead always go through the callback in order to unlock it properly.
         #      rework this once we depend on Julia 1.9 or later.
         ctx = context(ts_ctx)
-        context!(ctx) do
-            f(ctx)
+        # the block also owns the context of the late hand-off's library, if it's used
+        owner = ContextOwner(current_task(), nothing)
+        try
+            with(context_owner => owner) do
+                context!(ctx) do
+                    f(ctx)
+                end
+            end
+        finally
+            dispose_handoff_context(owner)
         end
     end
 end
@@ -83,7 +91,9 @@ The default [`relocation_lowering`](@ref) strategy resolves Julia-value relocati
 
 The IR in the result (the `:llvm` module, or `meta.ir` and `meta.entry`) lives in the
 LLVM context of the enclosing [`JuliaContext`](@ref) block, and is freed with it. Use it,
-and dispose of it, within that block.
+and dispose of it, within that block. With the late hand-off (see [`CompilerConfig`](@ref)),
+it belongs to another LLVM library than Julia's, in a context that the block also owns:
+work with it inside `context!(context(ir)) do ... end`.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     run_compile_hook(job)
@@ -368,7 +378,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    exception_sites = ExceptionSite[]
+    resolve_early = false
     @tracepoint "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
@@ -452,11 +462,36 @@ const __llvm_initialized = Ref(false)
                     end
                 end
             end
+        end
+    end
 
+    # the rest of the pipeline runs with the LLVM library that generates code: Julia's,
+    # or after the late hand-off, a newer one (see `handoff.jl`)
+    if job.config.handoff === :late
+        # (in a new variable, which the closures above don't capture)
+        handed_off = @tracepoint "hand-off" late_handoff(job, ir)
+        return finish_llvm_in!(context(handed_off), job, handed_off, entry_fn, entry,
+                               entrypoints, compiled, relocations, resolve_early)
+    else
+        return finish_llvm!(job, ir, entry_fn, entry, entrypoints, compiled, relocations,
+                            resolve_early)
+    end
+end
+
+finish_llvm_in!(ctx::LLVM.Context, args...) = context!(() -> finish_llvm!(args...), ctx)
+
+# finalize the IR for the target, validate it and collect its relocations
+function finish_llvm!(@nospecialize(job::CompilerJob), ir::LLVM.Module, entry_fn::String,
+                      entry::LLVM.Function, entrypoints, compiled, relocations::Relocations,
+                      resolve_early::Bool)
+    exception_sites = ExceptionSite[]
+    @tracepoint "IR finalization" begin
+        if job.config.toplevel
             # Do not expose dead sites to loaders.
             resolve_early || prune_dead_relocations!(ir, relocations)
 
-            # optimization may have replaced functions, so look the entry point up again
+            # optimization (or the hand-off) may have replaced functions, so look the
+            # entry point up again
             entry = ir.functions[entry_fn]
 
             # finish the module
@@ -543,10 +578,13 @@ emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
         @tracepoint "Debug info removal" strip_debuginfo!(ir)
     end
 
-    @tracepoint "LLVM back-end" begin
-        @tracepoint "preparation" prepare_execution!(job, ir, relocs)
+    # (the module may belong to another library than Julia's, after the late hand-off)
+    code = context!(context(ir)) do
+        @tracepoint "LLVM back-end" begin
+            @tracepoint "preparation" prepare_execution!(job, ir, relocs)
 
-        code = @tracepoint "machine-code generation" mcgen(job, ir, format)
+            @tracepoint "machine-code generation" mcgen(job, ir, format)
+        end
     end
 
     return code, (;)

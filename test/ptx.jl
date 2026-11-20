@@ -5,7 +5,7 @@
     # jl_throw referencing a jl_value_t representing the exception
     @test @filecheck PTX.code_llvm(Tuple{}; dump_module=true) do
         @check_not "jl_throw"
-        @check "gpu_report_exception"
+        @check cond=!late_handoff "gpu_report_exception"
         throw(DivideError())
     end
 end
@@ -37,7 +37,7 @@ end
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_kernel[0-9_]*}}"
         @check_not "atomic_error"
-        @check "gpu_report_exception"
+        @check cond=!late_handoff "gpu_report_exception"
         PTX.code_llvm(mod.kernel, Tuple{Ptr{Int},mod.Atomic})
     end
 end
@@ -96,7 +96,7 @@ end
     _, meta = PTX.code_execution(mod.kernel, types; debug_level=1, validate=false)
     @test !haskey(meta, :exception_sites)
     @test @filecheck begin
-        @check "gpu_report_exception"
+        @check cond=!late_handoff "gpu_report_exception"
         @check_not "gpu_exception_site"
         PTX.code_llvm(mod.kernel, types; kernel=true, debug_level=1)
     end
@@ -117,7 +117,8 @@ end
     end
     _, meta = PTX.code_execution(mod.kernel, Tuple{Ptr{Int},Int};
                                  exception_sites=true, debug_level=1)
-    @test length(meta.exception_sites) == 2
+    # (the second optimization sees that the test runtime's allocator never fails)
+    @test length(meta.exception_sites) == (late_handoff ? 1 : 2)
     @test GPUCompiler.ExceptionSite("Error", "reason", []) in meta.exception_sites
 end
 
@@ -440,7 +441,7 @@ end
     ir = sprint() do io
         PTX.code_llvm(io, mod.kernel, Tuple{Int}; kernel=true, dump_module=true)
     end
-    @test occursin("gpu_report_exception", ir)
+    @test occursin("gpu_report_exception", ir) skip=late_handoff
     @test occursin("[1 x i64] %state", ir)
 end
 
@@ -629,8 +630,9 @@ end
     ir = sprint(io->PTX.code_llvm(io, dkernel, Tuple{Ptr{Float64}};
                                   debuginfo=:none, dump_module=true, kernel=true))
     @test !occursin("deferred_codegen", ir)
-    @test occursin(r"define internal .*@enzyme_(julia|j)_kernel", ir)
-    @test occursin(r"call .*@(julia|j)_kernel", ir)
+    # (the second optimization inlines the deferred function)
+    @test occursin(r"define internal .*@enzyme_(julia|j)_kernel", ir) skip=late_handoff
+    @test occursin(r"call .*@(julia|j)_kernel", ir) skip=late_handoff
 end
 
 end
@@ -946,7 +948,7 @@ end
         @check_not "julia.pop_gc_frame"
         @check_not "julia.get_gc_frame_slot"
         @check_not "julia.new_gc_frame"
-        @check "gpu_gc_pool_alloc"
+        @check cond=!late_handoff "gpu_gc_pool_alloc"
         PTX.code_native(mod.kernel, Tuple{Int})
     end
 
@@ -1122,7 +1124,9 @@ end
             @check_not cond=!fastmath "denormal-fp-math-f32"
             @check     cond=!fastmath "call float @llvm.sqrt.f32"
             @check     cond=fastmath  "call fast float @llvm.sqrt.f32"
-            @check     cond=fastmath  "\"denormal-fp-math-f32\"=\"preserve-sign,preserve-sign\""
+            # (LLVM 23 upgrades the attribute to `denormal_fpenv` when reading bitcode)
+            @check     cond=fastmath && !late_handoff "\"denormal-fp-math-f32\"=\"preserve-sign,preserve-sign\""
+            @check     cond=fastmath && late_handoff  "denormal_fpenv(float: preservesign)"
             @check     cond=fastmath  "\"unsafe-fp-math\"=\"true\""
             unsafe_store!(out, sqrt(unsafe_load(x)))
             return

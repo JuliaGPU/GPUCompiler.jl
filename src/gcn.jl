@@ -33,7 +33,11 @@ llvm_triple(::GCNCompilerTarget) = "amdgcn-amd-amdhsa"
 
 source_code(target::GCNCompilerTarget) = "gcn"
 
+# the hand-off replaces the external back-end, whose datalayout it shares
+supports_handoff(@nospecialize(target::GCNCompilerTarget)) = target.backend === :external
+
 function llvm_machine(target::GCNCompilerTarget)
+    is_handoff_library() && return handoff_machine(target)
     @static if :AMDGPU ∉ LLVM.backends()
         return nothing
     end
@@ -46,6 +50,61 @@ function llvm_machine(target::GCNCompilerTarget)
     tm = LLVM.TargetMachine(t, triple; cpu, features=feat, reloc)
     LLVM.asm_verbosity!(tm, true)
 
+    return tm
+end
+
+# the processors that the AMDGPU back-end of LLVM 23.1 knows (GCNProcessors.td)
+const gcn_processors = Set([
+    "generic", "generic-hsa", "gfx600", "tahiti", "gfx601", "pitcairn", "verde", "gfx602",
+    "hainan", "oland", "gfx700", "kaveri", "gfx701", "hawaii", "gfx702", "gfx703",
+    "kabini", "mullins", "gfx704", "bonaire", "gfx705", "gfx801", "carrizo", "gfx802",
+    "iceland", "tonga", "gfx803", "fiji", "polaris10", "polaris11", "gfx805", "tongapro",
+    "gfx810", "stoney", "gfx900", "gfx902", "gfx904", "gfx906", "gfx908", "gfx909",
+    "gfx90a", "gfx90c", "gfx942", "gfx950", "gfx9-generic", "gfx9-4-generic", "gfx1010",
+    "gfx1011", "gfx1012", "gfx1013", "gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034",
+    "gfx1035", "gfx1036", "gfx10-1-generic", "gfx10-3-generic", "gfx1100", "gfx1101",
+    "gfx1102", "gfx1103", "gfx1150", "gfx1151", "gfx1152", "gfx1153", "gfx1154", "gfx1170",
+    "gfx1171", "gfx1172", "gfx11-generic", "gfx11-7-generic", "gfx1200", "gfx1201",
+    "gfx12-generic", "gfx1250", "gfx1251", "gfx12-5-generic", "gfx1310", "gfx13-generic"])
+
+# after the hand-off, a target machine of the library that generates code. like
+# AMDGPU_LLVM_Backend_jll did, reject processors and features that LLVM would only warn
+# about, and keep the 8-byte alignment of i128 that Julia needs before 1.12.
+function handoff_machine(target::GCNCompilerTarget)
+    triple = llvm_triple(target)
+    t = LLVM.Target(; triple)
+    cpu = target.dev_isa
+    features = target.features
+    # (LLVM only warns about unknown processors, and falls back to the oldest one)
+    cpu in gcn_processors || error("Unsupported processor $cpu for the AMDGPU back-end")
+    @dispose sti=LLVM.SubtargetInfo(t, triple; cpu) begin
+        try
+            LLVM.hasfeatures(sti, features)
+        catch err
+            err isa ArgumentError || rethrow()
+            error("Unsupported features $(repr(features)) for the AMDGPU back-end: $(err.msg)")
+        end
+    end
+
+    tm = if Base.datatype_alignment(Int128) == 8
+        # the ABI name selects that alignment (a patch of the library's AMDGPU back-end),
+        # which LLVM.jl's `TargetMachine` constructor cannot set
+        lib = LLVM.library()
+        options = LLVM.API.LLVMCreateTargetMachineOptions(lib)
+        try
+            LLVM.API.LLVMTargetMachineOptionsSetCPU(lib, options, cpu)
+            LLVM.API.LLVMTargetMachineOptionsSetFeatures(lib, options, features)
+            LLVM.API.LLVMTargetMachineOptionsSetRelocMode(lib, options, LLVM.API.LLVMRelocPIC)
+            LLVM.API.LLVMTargetMachineOptionsSetABI(lib, options, "i128:64")
+            ref = LLVM.API.LLVMCreateTargetMachineWithOptions(lib, t, triple, options)
+            LLVM.mark_alloc(LLVM.TargetMachine(ref; library=lib))
+        finally
+            LLVM.API.LLVMDisposeTargetMachineOptions(lib, options)
+        end
+    else
+        LLVM.TargetMachine(t, triple; cpu, features, reloc=LLVM.RelocMode.PIC)
+    end
+    LLVM.asm_verbosity!(tm, true)
     return tm
 end
 
@@ -257,7 +316,9 @@ const AMDGPUObjectFile = Cint(1)
                          mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
 
-    if target.backend === :inprocess
+    if is_handoff_library(mod.library)
+        return String(handoff_mcgen(job, mod, format))
+    elseif target.backend === :inprocess
         if :AMDGPU ∉ LLVM.backends()
             error("The in-process LLVM lacks the AMDGPU target; cannot compile to GCN. " *
                   "Load AMDGPU_LLVM_Backend_jll and use `backend=:external` instead.")
@@ -301,7 +362,7 @@ end
 # the version of the LLVM that generates code for the target, which can differ from the one
 # GPUCompiler runs in. only the release matters, so JLL rebuilds are ignored.
 function backend_llvm_version(target::GCNCompilerTarget)
-    target.backend === :external || return LLVM.version()
+    (target.backend === :external && !is_handoff_library()) || return LLVM.version()
     jll = get(Base.loaded_modules, getfield(AMDGPU_LLVM_Backend_jll, :pkg), nothing)
     # (without the back-end, `mcgen` reports a clearer error)
     jll === nothing && return LLVM.version()

@@ -93,8 +93,25 @@ function llvm_triple(target::SPIRVCompilerTarget)
     end
 end
 
-# SPIRV is not supported by our LLVM builds, so we can't get a target machine
-llvm_machine(::SPIRVCompilerTarget) = nothing
+supports_handoff(@nospecialize(target::SPIRVCompilerTarget)) = true
+
+# Julia's LLVM does not have the SPIR-V target, so we can't get a target machine, except
+# from the library of the late hand-off. the Khronos translator takes `spir` modules, for
+# which there's no target machine at all.
+function llvm_machine(target::SPIRVCompilerTarget)
+    (is_handoff_library() && target.backend === :llvm) || return nothing
+    if target.version !== nothing && !(v"1.0" <= target.version <= v"1.6")
+        error("Unsupported SPIR-V version $(target.version) for the SPIR-V back-end")
+    end
+    triple = llvm_triple(target)
+    t = LLVM.Target(; triple)
+    # the extensions are taken from a global option when creating the target machine
+    state = current_handoff_library()
+    @lock state.lock begin
+        set_spirv_extensions!(state, spirv_extensions(target))
+        LLVM.TargetMachine(t, triple)
+    end
+end
 
 function runtime_cstring_type(job::CompilerJob{SPIRVCompilerTarget})
     LLVM.DataLayout(llvm_datalayout(job.config.target)) do dl
@@ -255,15 +272,7 @@ function finish_ir!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
     if job.config.kernel
         state = kernel_state_type(job)
         if state !== Nothing
-            new_entry = kernel_state_to_reference!(job, mod, entry)
-
-            # only if there was a kernel state parameter to convert, which optimization adds
-            # (so not when emitting unoptimized IR)
-            if new_entry != entry
-                entry = new_entry
-                T_state = convert(LLVMType, state)
-                push!(entry.parameter_attributes[1], TypeAttribute(:byval, T_state))
-            end
+            entry = kernel_state_to_reference!(job, mod, entry; byval=true)
         end
     end
 
@@ -342,7 +351,9 @@ end
 
     # translate to SPIR-V
     input = bitcode(mod)
-    spirv = if target.backend === :llvm
+    spirv = if is_handoff_library(mod.library) && target.backend === :llvm
+        handoff_mcgen(job, mod, LLVM.CodeGenFileType.Object)
+    elseif target.backend === :llvm
         # compile in-process through libspirv. the back-end derives the triple from the
         # options; unlike `llc`, it rejects unknown extensions instead of ignoring them.
         backend = ExternalBackend(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV")

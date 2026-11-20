@@ -348,8 +348,11 @@ end
                                        kernel=true, backend)
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job; kwargs...)
-            @test all(!endswith(gv.name, "_box") for gv in ir.globals)
-            @test [f for f in ir.functions if !LLVM.isdeclaration(f)] == [meta.entry]
+            # (with the late hand-off, the IR belongs to another LLVM library)
+            context!(context(ir)) do
+                @test all(!endswith(gv.name, "_box") for gv in ir.globals)
+                @test [f for f in ir.functions if !LLVM.isdeclaration(f)] == [meta.entry]
+            end
             dispose(ir)
         end
 

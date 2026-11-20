@@ -265,8 +265,8 @@ end
 
     @test @filecheck begin
         @check_not "{{julia_throw_boundserror_[0-9]+}}"
-        @check "@gpu_report_exception"
-        @check "@gpu_signal_exception"
+        @check cond=!late_handoff "@gpu_report_exception"
+        @check cond=!late_handoff "@gpu_signal_exception"
         GCN.code_llvm(mod.kernel, Tuple{})
     end
 end
@@ -386,7 +386,8 @@ end
                              kernel=true)
     JuliaContext() do ctx
         ir, meta = GPUCompiler.compile(:llvm, job)
-        @dispose ir=ir begin
+        # (with the late hand-off, the IR belongs to another LLVM library)
+        context!(context(ir)) do
             entry = meta.entry
             ft = entry.function_type
             params = ft.parameters
@@ -404,6 +405,7 @@ end
             ir_str = string(ir)
             @test occursin("byref", ir_str)
         end
+        dispose(ir)
     end
 end
 
@@ -582,6 +584,7 @@ end
     script = """
         using GPUCompiler, LLVM
         include($(repr(joinpath(@__DIR__, "helpers", "runtime.jl"))))
+        include($(repr(joinpath(@__DIR__, "helpers", "handoff.jl"))))
         include($(repr(joinpath(@__DIR__, "helpers", "gcn.jl"))))
         kernel_i8(p::Core.LLVMPtr{Int8,1}, x::Int8) =
             (Base.llvmcall(($(repr(rmw_source("i8", "add"; as=1))), "entry"), Nothing,
@@ -946,7 +949,8 @@ end
     @test @filecheck begin
         @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
         @check "alloca [8 x i32], align 4, addrspace(5)"
-        @check_not "addrspacecast"
+        # (Julia's IR printer hides the casts to Julia's address spaces, LLVM's doesn't)
+        @check_not cond=!late_handoff "addrspacecast"
         @check_not "julia.gpu.alloca"
         GCN.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)
     end
