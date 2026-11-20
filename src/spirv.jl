@@ -163,8 +163,7 @@ isintrinsic(@nospecialize(job::CompilerJob{SPIRVCompilerTarget}), fn::String) =
 
 # lookup bitmaps are integers of the table's bit size (e.g. i24), which the Khronos
 # translator does not support
-optimization_options(@nospecialize(job::CompilerJob{SPIRVCompilerTarget})) =
-    (; switch_to_lookup=false)
+optimization_options(@nospecialize(target::SPIRVCompilerTarget)) = (; switch_to_lookup=false)
 
 function finish_module!(job::CompilerJob{SPIRVCompilerTarget}, mod::LLVM.Module,
                         entry::LLVM.Function)

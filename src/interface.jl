@@ -315,7 +315,8 @@ end
 uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 
 # Optional toggles consulted by the optimization pipeline. Override this method to return
-# a `NamedTuple` with any of the following keys (defaults shown):
+# a `NamedTuple` with any of the following keys (defaults shown, unless the target
+# overrides them, see below):
 #
 # - `instcombine::Bool = true`: when `false`, the pipeline substitutes `InstSimplifyPass`
 #   for `InstCombinePass`, retaining only the simplification subset of the peephole
@@ -323,10 +324,26 @@ uses_julia_runtime(@nospecialize(job::CompilerJob)) = false
 #   InstCombine's more aggressive rewrites).
 # - `switch_to_lookup::Bool = true`: when `false`, SimplifyCFG does not turn switches into
 #   lookup tables or bitmaps, which can introduce integer types of arbitrary width.
+# - `unroll::Bool = true`: when `false`, GPUCompiler skips its general (partial and runtime)
+#   loop unrolling, e.g. for a back-end that unrolls loops itself (libNVVM). Loops with a
+#   small constant trip count are still unrolled fully.
 #
 # Returning a `NamedTuple` keeps this single extension point lightweight: downstream
 # users add new keys without GPUCompiler having to grow an interface method per option.
 optimization_options(@nospecialize(job::CompilerJob)) = (;)
+
+# Defaults a target sets for the keys above, e.g. because its back-end cannot handle what a
+# pass produces. Options returned for the job take precedence. Targets override this method
+# rather than `optimization_options(job)`, so that front-ends overriding that method keep the
+# target's defaults, and are not ambiguous with it when they dispatch only on their params.
+optimization_options(@nospecialize(target::AbstractCompilerTarget)) = (;)
+
+# The value of optimization option `key` for `job`, or `default` if neither the job nor its
+# target sets it.
+function optimization_option(@nospecialize(job::CompilerJob), key::Symbol, default)
+    options = merge(optimization_options(job.config.target), optimization_options(job))
+    return get(options, key, default)
+end
 
 # Is it legal to run vectorization passes on this target
 can_vectorize(@nospecialize(job::CompilerJob)) = false
