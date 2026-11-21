@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   release_test:
-    name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }}${{ matrix.coverage == 'false' && ' (no coverage)' || '' }} - ${{ matrix.os }}
+    name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }}${{ matrix.coverage == 'false' && ' (no coverage)' || '' }} - ${{ matrix.os }} - ${{ matrix.julia_passes }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -23,6 +23,8 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macOS-15, windows-2025]
         llvm_args: ['']
         coverage: ['true']
+        # the provider of Julia's passes (the `julia_passes` preference)
+        julia_passes: [cpp, ports]
         include:
           # code coverage recompiles the package instead of using its precompiled code,
           # which hides bugs in how that code interacts with methods back-ends define
@@ -30,32 +32,41 @@ jobs:
             os: 'ubuntu-24.04'
             llvm_args: ''
             coverage: 'false'
+            julia_passes: cpp
           # starting with Julia 1.10, we can enable opaque pointers
-          # from Julia 1.12 on, this is the default.
+          # from Julia 1.12 on, this is the default. (the ports always use them.)
           - version: '1.10'
             os: 'ubuntu-24.04'
             llvm_args: '--opaque-pointers'
+            julia_passes: cpp
           - version: '1.10'
             os: 'ubuntu-24.04-arm'
             llvm_args: '--opaque-pointers'
+            julia_passes: cpp
           - version: '1.10'
             os: 'macOS-15'
             llvm_args: '--opaque-pointers'
+            julia_passes: cpp
           - version: '1.10'
             os: 'windows-2025'
             llvm_args: '--opaque-pointers'
+            julia_passes: cpp
           - version: '1.11'
             os: 'ubuntu-24.04'
             llvm_args: '--opaque-pointers'
+            julia_passes: cpp
           - version: '1.11'
             os: 'ubuntu-24.04-arm'
             llvm_args: '--opaque-pointers'
+            julia_passes: cpp
           - version: '1.11'
             os: 'macOS-15'
             llvm_args: '--opaque-pointers'
+            julia_passes: cpp
           - version: '1.11'
             os: 'windows-2025'
             llvm_args: '--opaque-pointers'
+            julia_passes: cpp
     steps:
       - uses: actions/checkout@v7
 
@@ -67,12 +78,24 @@ jobs:
       - name: Set-up cache
         uses: julia-actions/cache@v3
 
+      # Run the suite in the environment with the selected pass-provider preference.
+      - name: Set up the test environment
+        run: julia --color=yes .ci/juliair.jl test ${{ matrix.julia_passes }}
+
+      # with the flags `julia-actions/julia-runtest` (`Pkg.test`) would pass
       - name: Run tests
-        uses: julia-actions/julia-runtest@v1
-        with:
-          coverage: ${{ matrix.coverage != 'false' }}
+        run: julia --color=yes --check-bounds=yes --depwarn=yes --code-coverage=${{ matrix.coverage != 'false' && format('@{0}', github.workspace) || 'none' }} --project=test test/runtests.jl
         env:
           JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
+          JULIAIR_LEDGER: ${{ runner.temp }}/juliair-ledger.tsv
+
+      # the suite also runs the ports explicitly, so check the preference too
+      - name: Check that the ports were the default
+        if: matrix.julia_passes == 'ports'
+        run: julia --project=test -e 'using GPUCompiler; GPUCompiler.JULIA_PASSES === :ports || error("julia_passes preference not applied")'
+      - name: Check that the ports ran
+        if: matrix.julia_passes == 'ports'
+        run: julia .ci/juliair.jl check-ledger '${{ runner.temp }}/juliair-ledger.tsv'
 
       - name: Process coverage
         # CoverageTools 1.4.1 uses a PkgLoadSpec field renamed in Julia 1.14.

@@ -3,6 +3,8 @@ module GPUCompiler
 using LLVM, LLVM.IR, LLVM.Build, LLVM.Passes, LLVM.ORC
 using LLVM.Interop
 
+import JuliaIR
+
 
 using ExprTools: splitdef, combinedef
 
@@ -79,6 +81,7 @@ include("jlgen.jl")
 include("irgen.jl")
 include("exception_sites.jl")
 include("determinism.jl")
+include("julia_passes.jl")
 include("optim.jl")
 include("validation.jl")
 include("rtlib.jl")

@@ -92,7 +92,7 @@ end
                         Tuple{Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}, Int32, Int32, Int};
                         dump_module=true, kernel=true)
     end
-    @test Context() do ctx
+    @test JuliaContext() do ctx
         verify(parse(LLVM.Module, ir))
         true
     end
@@ -126,7 +126,7 @@ end
 
     # (by position, as older Julia versions do not name the parameters)
     function kernel_parameter_attributes(ir)
-        Context() do ctx
+        JuliaContext() do ctx
             m = parse(LLVM.Module, ir)
             f = only(filter(f -> startswith(f.name, "_Z6kernel"), collect(m.functions)))
             [Dict(LLVM.kind(attr) => LLVM.value(attr)
@@ -176,7 +176,7 @@ end
     tt = Tuple{mod.Vec, Int, Int}
 
     ir = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; kernel=true, dump_module=true))
-    Context() do ctx
+    JuliaContext() do ctx
         m = parse(LLVM.Module, ir)
         f = only(filter(f -> startswith(f.name, "_Z6kernel"), collect(m.functions)))
         store = only(inst for bb in f.blocks for inst in bb.instructions
@@ -657,7 +657,7 @@ end
       ret void
     }
     """
-    @dispose ctx=Context() begin
+    JuliaContext() do ctx
         mod = parse(LLVM.Module, ir)
         GPUCompiler.merge_byte_gep_chains!(mod)
         f = mod.functions["k"]
@@ -1417,7 +1417,7 @@ end
         5 => [(0, 64, 8), (8, 8, 8)],
     )
 
-    @dispose ctx=Context() begin
+    JuliaContext() do ctx
         mod = parse(LLVM.Module, ir)
         @test GPUCompiler.legalize_odd_width_integers!(mod)
         @test !GPUCompiler.legalize_odd_width_integers!(mod)
@@ -1475,7 +1475,7 @@ end
       ret i32 %z
     }
     """
-    @dispose ctx=Context() begin
+    JuliaContext() do ctx
         mod = parse(LLVM.Module, ir)
         @test GPUCompiler.legalize_odd_width_integers!(mod)
         @test LLVM.verify(mod) === nothing
@@ -3689,7 +3689,10 @@ end
         source = methodinstance(typeof(mod.kernel), Tuple{Core.LLVMPtr{Float32,1}, Float32},
                                 Base.get_world_counter())
         target = MetalCompilerTarget(; macos=v"15", metal=v"3.2", air=v"2.7")
-        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        # JuliaIR.jl's `AllocOpt` uses the escape analysis of 1.13 on every version, which
+        # removes the object altogether, so test the lowering with Julia's C++ passes
+        job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true,
+                                                 julia_passes=:cpp))
         @test @filecheck begin
             @check "alloca"
             @check "cmpxchg"
