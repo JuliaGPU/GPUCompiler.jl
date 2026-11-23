@@ -1054,6 +1054,91 @@ end
     @test_throws KernelError Native.code_llvm(devnull, mod.invalid_kernel, Tuple{})
 end
 
+@testset "throw branch weights" begin
+    # branches into code from which all paths lead to `unreachable` are weighed as unlikely,
+    # on either side; existing weights, and branches with both or neither side throwing, are
+    # left alone. a loop that may never reach `unreachable` doesn't count as throwing.
+    Context() do ctx
+        ir = parse(LLVM.Module, """
+            declare void @throw() noreturn
+            define void @checked(i1 %ok) {
+              br i1 %ok, label %pass, label %fail
+            pass:
+              ret void
+            fail:
+              call void @throw()
+              unreachable
+            }
+            define void @nested(i1 %bad, i1 %c) {
+              br i1 %bad, label %fail, label %pass
+            pass:
+              ret void
+            fail:
+              br i1 %c, label %fail1, label %fail2
+            fail1:
+              call void @throw()
+              unreachable
+            fail2:
+              unreachable
+            }
+            define void @untouched(i1 %c1, i1 %c2, i1 %c3) {
+              br i1 %c1, label %a, label %fail, !prof !0
+            a:
+              br i1 %c2, label %b, label %b
+            b:
+              ret void
+            fail:
+              br i1 %c3, label %fail1, label %fail2
+            fail1:
+              unreachable
+            fail2:
+              unreachable
+            }
+            define void @duplicate(i1 %ok, i1 %c) {
+              br i1 %ok, label %pass, label %fail
+            pass:
+              ret void
+            fail:
+              br i1 %c, label %throw, label %throw
+            throw:
+              unreachable
+            }
+            define void @spin(i1 %c) {
+              br i1 %c, label %loop, label %done
+            loop:
+              br i1 %c, label %loop, label %fail
+            fail:
+              unreachable
+            done:
+              ret void
+            }
+            !0 = !{!"branch_weights", i32 3, i32 5}""")
+        annotate!(name) = GPUCompiler.annotate_throw_branches!(ir.functions[name])
+        @test annotate!("checked") && annotate!("nested") && annotate!("duplicate") &&
+              annotate!("spin")
+        @test !annotate!("untouched")
+        @test @filecheck begin
+            @check_label "define void @checked"
+            @check "br i1 %ok, label %pass, label %fail, !prof [[LIKELY:![0-9]+]]"
+            @check_label "define void @nested"
+            @check "br i1 %bad, label %fail, label %pass, !prof [[UNLIKELY:![0-9]+]]"
+            @check_label "define void @untouched"
+            @check "br i1 %c1, label %a, label %fail, !prof [[EXISTING:![0-9]+]]"
+            @check "br i1 %c3, label %fail1, label %fail2{{\$}}"
+            @check_label "define void @duplicate"
+            @check "br i1 %ok, label %pass, label %fail, !prof [[LIKELY]]"
+            @check "br i1 %c, label %throw, label %throw{{\$}}"
+            @check_label "define void @spin"
+            @check "br i1 %c, label %loop, label %done{{\$}}"
+            @check "br i1 %c, label %loop, label %fail, !prof [[LIKELY]]"
+            @check_dag "[[LIKELY]] = !{!\"branch_weights\", i32 2000, i32 1}"
+            @check_dag "[[UNLIKELY]] = !{!\"branch_weights\", i32 1, i32 2000}"
+            @check_dag "[[EXISTING]] = !{!\"branch_weights\", i32 3, i32 5}"
+            string(ir)
+        end
+    end
+end
+
 @testset "range check elimination" begin
     mod = @eval module $(gensym())
         @inline function load(ptr, len, i)

@@ -67,6 +67,7 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
             register!(pb, LowerKernelStatePass(job))
             register!(pb, CleanupKernelStatePass(job))
             register!(pb, IRCEWithCleanupPass(job))
+            register!(pb, AnnotateThrowBranchesPass())
 
             add!(pb, ModulePassManager()) do mpm
                 buildNewPMPipeline!(mpm, job, opt_level)
@@ -138,6 +139,7 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
     add!(mpm, ConstantMergePass())
     add!(mpm, FunctionPassManager()) do fpm
         add!(fpm, LowerExpectIntrinsicPass())
+        add!(fpm, AnnotateThrowBranchesPass())
         if opt_level >= 2
             add!(fpm, PropagateJuliaAddrspacesPass())
         end
@@ -218,6 +220,56 @@ function irce_with_cleanup!(job, f::LLVM.Function, am::LLVM.FunctionAnalysisMana
 end
 IRCEWithCleanupPass(job) =
     FunctionPass("GPUIRCEWithCleanup", (f, am) -> irce_with_cleanup!(job, f, am); analyses=true)
+
+# Julia only weighs the branches of the checks its codegen emits itself; the ones written in
+# Julia (e.g. `checkbounds` calling `throw_boundserror`) reach LLVM without weights. passes that
+# only look at `!prof` metadata then don't know these branches are unlikely, e.g. the runtime
+# unroller, which (since LLVM 23) can unroll a loop with a side exit if that exit is cold.
+# give every conditional branch into code from which all paths lead to `unreachable` the
+# weights Julia uses for its own bounds checks.
+function annotate_throw_branches!(f::LLVM.Function)
+    # blocks from which all paths lead to `unreachable`, found backwards from those blocks
+    throws = Set{BasicBlock}()
+    worklist = BasicBlock[]
+    for bb in f.blocks
+        if LLVM.terminator(bb) isa LLVM.UnreachableInst
+            push!(throws, bb)
+            push!(worklist, bb)
+        end
+    end
+    isempty(throws) && return false
+    remaining = Dict{BasicBlock,Int}()  # successors not known to lead to `unreachable` yet
+    while !isempty(worklist)
+        bb = pop!(worklist)
+        for pred in unique(LLVM.predecessors(bb))
+            pred in throws && continue
+            n = get!(() -> length(unique(LLVM.successors(LLVM.terminator(pred)))),
+                     remaining, pred) - 1
+            remaining[pred] = n
+            if n == 0
+                push!(throws, pred)
+                push!(worklist, pred)
+            end
+        end
+    end
+
+    changed = false
+    for bb in f.blocks
+        bb in throws && continue
+        term = LLVM.terminator(bb)
+        (term isa LLVM.BrInst && LLVM.isconditional(term)) || continue
+        haskey(LLVM.metadata(term), LLVM.MD_prof) && continue
+        taken, not_taken = LLVM.successors(term)
+        (taken in throws) == (not_taken in throws) && continue
+        weights = taken in throws ? (1, 2000) : (2000, 1)
+        LLVM.metadata(term)[LLVM.MD_prof] = MDNode([MDString("branch_weights"),
+                                                    ConstantInt(Int32(weights[1])),
+                                                    ConstantInt(Int32(weights[2]))])
+        changed = true
+    end
+    return changed
+end
+AnnotateThrowBranchesPass() = FunctionPass("GPUAnnotateThrowBranches", annotate_throw_branches!)
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
