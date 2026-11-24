@@ -49,6 +49,34 @@ end
     end
 end
 
+@testset "bounds-checked loops" begin
+    mod = @eval module $(gensym())
+        @inline function load(ptr, len, i)
+            (i - 1) % UInt < len % UInt || throw(BoundsError())
+            return unsafe_load(ptr, i)
+        end
+        # the check on `a` isn't on the induction variable, so IRCE can't remove it
+        function dot(c, a, b, len, n, m, stride)
+            acc = 0f0
+            for k in 1:n
+                acc += load(a, len, m + (k - 1) * stride) * load(b, len, k)
+            end
+            unsafe_store!(c, acc)
+            return
+        end
+    end
+    types = Tuple{Ptr{Float32},Ptr{Float32},Ptr{Float32},Int,Int,Int,Int}
+
+    # the check's side exit is weighed as unlikely, which lets LLVM 23+ runtime-unroll the loop
+    if LLVM.version() >= v"23"
+        @test @filecheck begin
+            @check_label "define void @{{.*}}dot"
+            @check "epil"
+            PTX.code_llvm(mod.dot, types)
+        end
+    end
+end
+
 @testset "exception sites" begin
     mod = @eval module $(gensym())
         import ..GPUCompiler
@@ -1370,12 +1398,13 @@ end
         end
     end
 
-    # the address is incremented by the stride instead of recomputed, with or without
-    # a multiply-add: the kernel has no other integer multiplications
+    # inside the loop, the address is incremented by the stride instead of recomputed.
+    # (once unrolled, the remainder iteration may still multiply, outside of the loop.)
     @test @filecheck begin
         @check_label ".entry"
+        @check "[[LOOP:\\\$L__BB[0-9_]+]]:"
         @check_not "{{(mul|mad)\\.(lo|wide)}}"
-        @check "ret;"
+        @check "bra{{(\\.uni)?}}{{[ \t]+}}[[LOOP]];"
         PTX.code_native(mod.strided, Tuple{Ptr{Float32},Ptr{Float32},Int,Int,Int};
                         backend, kernel=true)
     end

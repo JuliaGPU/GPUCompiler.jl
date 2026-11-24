@@ -60,6 +60,31 @@ end
     end
 end
 
+# LLVM 23+ can runtime-unroll a loop with a side exit if that exit is weighed as unlikely
+if LLVM.version() >= v"23"
+@testset "bounds-checked loops" begin
+    mod = @eval module $(gensym())
+        @inline function load(ptr, len, i)
+            (i - 1) % UInt < len % UInt || throw(BoundsError())
+            return unsafe_load(ptr, i)
+        end
+        function dot(c, a, b, len, n, m, stride)
+            acc = 0f0
+            for k in 1:n
+                acc += load(a, len, m + (k - 1) * stride) * load(b, len, k)
+            end
+            unsafe_store!(c, acc)
+            return
+        end
+    end
+    @test @filecheck begin
+        @check_label "define void @{{.*}}dot"
+        @check "epil"
+        GCN.code_llvm(mod.dot, Tuple{Ptr{Float32},Ptr{Float32},Ptr{Float32},Int,Int,Int,Int})
+    end
+end
+end
+
 @testset "fma" begin
     # `fma` uses the hardware instruction, not the Float64-based `fma_emulated`
     mod = @eval module $(gensym())
