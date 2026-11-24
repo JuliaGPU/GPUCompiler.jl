@@ -397,7 +397,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    exception_sites = ExceptionSite[]
+    resolve_early = false
     @tracepoint "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
@@ -440,7 +440,21 @@ const __llvm_initialized = Ref(false)
                 prune_dead_relocations!(ir, relocations)
                 bake_relocations!(ir, relocations)
             end
+        end
+    end
 
+    return finish_llvm!(job, ir, entry, entry_fn, entrypoints, compiled, relocations,
+                        has_deferred_jobs, resolve_early)
+end
+
+# optimize the linked IR, finalize it for the target, validate it and collect relocations
+function finish_llvm!(@nospecialize(job::CompilerJob), ir::LLVM.Module,
+                      entry::LLVM.Function, entry_fn::String, entrypoints, compiled,
+                      relocations::Relocations, has_deferred_jobs::Bool,
+                      resolve_early::Bool)
+    exception_sites = ExceptionSite[]
+    @tracepoint "IR finalization" begin
+        if job.config.toplevel
             if job.config.optimize
                 @tracepoint "optimization" begin
                     optimize!(job, ir, relocations; job.config.opt_level)
