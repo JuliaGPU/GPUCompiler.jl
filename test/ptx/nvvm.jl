@@ -19,7 +19,7 @@ mod = @eval module $(gensym())
 end
 
 # link LTO-IR with nvJitLink, returning the PTX it generates
-function nvjitlink_ptx(ltoir, options...)
+function nvjitlink_ptx(inputs::Vector{Vector{UInt8}}, options...)
     lib = CUDA_Compiler_jll.libnvJitLink
     version = "$(CUDA_Compiler_jll.cuda_version.major)_0"
     api(name) = Libc.Libdl.dlsym(Libc.Libdl.dlopen(lib), Symbol("__nvJitLink$(name)_$version"))
@@ -28,9 +28,11 @@ function nvjitlink_ptx(ltoir, options...)
     @test 0 == @ccall $(api("Create"))(handle::Ptr{Ptr{Cvoid}}, length(options)::Cuint,
                                          options::Ptr{Cstring})::Cint
     try
-        @test 0 == @ccall $(api("AddData"))(handle[]::Ptr{Cvoid}, 3::Cint, # LTO-IR
-                                              ltoir::Ptr{UInt8}, length(ltoir)::Csize_t,
-                                              "kernel"::Cstring)::Cint
+        for (i, ltoir) in enumerate(inputs)
+            @test 0 == @ccall $(api("AddData"))(handle[]::Ptr{Cvoid}, 3::Cint, # LTO-IR
+                                                  ltoir::Ptr{UInt8}, length(ltoir)::Csize_t,
+                                                  "input$i"::Cstring)::Cint
+        end
         @test 0 == @ccall $(api("Complete"))(handle[]::Ptr{Cvoid})::Cint
         size = Ref{Csize_t}()
         @ccall $(api("GetLinkedPtxSize"))(handle[]::Ptr{Cvoid}, size::Ptr{Csize_t})::Cint
@@ -39,6 +41,27 @@ function nvjitlink_ptx(ltoir, options...)
         return String(ptx)
     finally
         @ccall $(api("Destroy"))(handle::Ptr{Ptr{Cvoid}})::Cint
+    end
+end
+
+# compile CUDA C++ to LTO-IR with NVRTC
+const libnvrtc = CUDA_Compiler_jll.libnvrtc
+function nvrtc_ltoir(source, arch)
+    prog = Ref{Ptr{Cvoid}}()
+    @test 0 == @ccall libnvrtc.nvrtcCreateProgram(prog::Ptr{Ptr{Cvoid}}, source::Cstring,
+                                                   "source.cu"::Cstring, 0::Cint,
+                                                   C_NULL::Ptr{Cvoid}, C_NULL::Ptr{Cvoid})::Cint
+    try
+        options = ["-arch=$arch", "-dlto", "-rdc=true"]
+        @test 0 == @ccall libnvrtc.nvrtcCompileProgram(prog[]::Ptr{Cvoid}, length(options)::Cint,
+                                                        options::Ptr{Cstring})::Cint
+        size = Ref{Csize_t}()
+        @ccall libnvrtc.nvrtcGetLTOIRSize(prog[]::Ptr{Cvoid}, size::Ptr{Csize_t})::Cint
+        ltoir = Vector{UInt8}(undef, size[])
+        @ccall libnvrtc.nvrtcGetLTOIR(prog[]::Ptr{Cvoid}, ltoir::Ptr{UInt8})::Cint
+        return ltoir
+    finally
+        @ccall libnvrtc.nvrtcDestroyProgram(prog::Ptr{Ptr{Cvoid}})::Cint
     end
 end
 
@@ -72,7 +95,13 @@ end
     @test ltoir[1:4] == [0xed, 0x43, 0x4e, 0x7f]
 
     # linking keeps the kernel, which nothing else references
-    @test occursin(".entry", nvjitlink_ptx(ltoir, "-arch=sm_100"))
+    @test occursin(".entry", nvjitlink_ptx([ltoir], "-arch=sm_100"))
+
+    # it also links with NVIDIA's own LTO-IR, as libraries like cuFFT do with callbacks
+    cuda = nvrtc_ltoir("extern \"C\" __global__ void twice(float *x) { *x *= 2; }",
+                       "compute_100")
+    ptx = nvjitlink_ptx([ltoir, cuda], "-arch=sm_100")
+    @test count(".entry", ptx) == 2
 
     # LTO-IR for older architectures needs nvJitLink to use the current reader too
     job, _ = PTX.create_job(mod.kernel, Tuple{Ptr{Float32},Float32};
@@ -82,7 +111,7 @@ end
         LLVM.dispose(meta.ir)
         ltoir
     end
-    @test occursin(".entry", nvjitlink_ptx(ltoir, "-arch=sm_75", "-nvvm-latest"))
+    @test occursin(".entry", nvjitlink_ptx([ltoir], "-arch=sm_75", "-nvvm-latest"))
 
     job, _ = PTX.create_job(mod.kernel, Tuple{Ptr{Float32},Float32}; kernel=true)
     JuliaContext() do ctx
