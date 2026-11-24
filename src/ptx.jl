@@ -515,6 +515,20 @@ function legalize_nvvm!(mod::LLVM.Module; lto::Bool=false)
               MDNode(Metadata[ConstantInt(Int32(2)), ConstantInt(Int32(0))]))
     end
 
+    # NVIDIA's compilers declare the debug metadata version with the `Error` behavior, and
+    # nvJitLink refuses to link modules whose flags have different behaviors, so LTO-IR
+    # with Julia's `Warning` couldn't be linked with code from NVRTC or nvcc
+    if haskey(mod.metadata, "llvm.module.flags")
+        flags = mod.metadata["llvm.module.flags"].operands
+        updated = map(collect(flags)) do flag
+            _, key, val = flag.operands
+            String(key) == "Debug Info Version" || return flag
+            MDNode(Metadata[ConstantInt(Int32(1)), key, val]) # 1 = Error
+        end
+        empty!(flags)
+        foreach(flag -> push!(flags, flag), updated)
+    end
+
     # nvJitLink links LTO-IR as a whole program, dropping everything that isn't used,
     # including kernels that aren't referenced
     if lto
