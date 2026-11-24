@@ -59,11 +59,15 @@ end
 llvm_targetinfo(@nospecialize(target::AbstractCompilerTarget)) = nothing
 
 # the target's datalayout, with Julia's non-integral address spaces added to it, as a
-# `DataLayout` the caller owns (or `nothing`)
+# `DataLayout` the caller owns (or `nothing`). they come before the target's own
+# non-integral address spaces (e.g. AMDGPU's), as `RemoveNIPass` removes the first set.
 function julia_datalayout(@nospecialize(target::AbstractCompilerTarget))
     dl = llvm_datalayout(target)::Union{Nothing,String}
     dl === nothing && return nothing
-    LLVM.DataLayout(dl * "-ni:10:11:12:13")
+    components = split(dl, '-')
+    i = something(findfirst(startswith("ni:"), components), length(components) + 1)
+    insert!(components, i, "ni:10:11:12:13")
+    LLVM.DataLayout(join(components, '-'))
 end
 
 have_fma(@nospecialize(target::AbstractCompilerTarget), T::Type) = false

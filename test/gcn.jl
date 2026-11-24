@@ -41,6 +41,24 @@ end
 
 @testset "IR" begin
 
+@testset "non-integral address spaces" begin
+    # Julia's are removed after optimization, AMDGPU's are kept for its back-end
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+    job, _ = GCN.create_job(mod.kernel, Tuple{}; kernel=true)
+    JuliaContext() do ctx
+        target_ni = filter(startswith("ni:"),
+                           split(GPUCompiler.llvm_datalayout(job.config.target), '-'))
+        @test !isempty(target_ni)
+        ir, _ = GPUCompiler.compile(:llvm, job)
+        layout = string(LLVM.datalayout(ir))
+        @test all(ni -> occursin("-$ni", layout), target_ni)
+        @test !occursin("ni:10:11:12:13", layout)
+        dispose(ir)
+    end
+end
+
 @testset "runtime symbol lookup" begin
     # A libjulia ccall emits a lookup through jl_libjulia_internal_handle. Its global
     # lives in AS1 on GCN, while jl_load_and_lookup takes a generic pointer.
