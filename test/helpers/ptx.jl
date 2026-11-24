@@ -2,6 +2,7 @@ module PTX
 
 using ..GPUCompiler
 import LLVM
+import NVVM
 import ..TestRuntime
 
 struct CompilerParams <: AbstractCompilerParams
@@ -11,6 +12,11 @@ struct CompilerParams <: AbstractCompilerParams
 end
 
 PTXCompilerJob = CompilerJob{PTXCompilerTarget,CompilerParams}
+
+# the NVVM back-end needs libNVVM from CUDA 13.5+. jobs target Blackwell (sm_100) by
+# default, for which libNVVM reads current bitcode without `-nvvm-latest`.
+nvvm_available() = NVVM.is_available() && NVVM.toolkit_version() >= v"13.5"
+default_cap(backend) = backend === :nvvm ? v"10.0" : v"7.0"
 
 GPUCompiler.uses_exception_sites(@nospecialize(job::PTXCompilerJob)) =
     job.config.params.exception_sites
@@ -55,16 +61,20 @@ end
 GPUCompiler.runtime_module(::PTXCompilerJob) = PTXTestRuntime
 
 function create_job(@nospecialize(func), @nospecialize(types);
-                    cap=v"7.0", ptx=v"6.0", feature_set=:baseline,
+                    backend=:nvptx, cap=default_cap(backend), ptx=v"6.0",
+                    feature_set=:baseline,
                     minthreads=nothing, maxthreads=nothing,
                     blocks_per_sm=nothing, maxregs=nothing,
-                    fastmath=false, system_atomics=true, patch::Bool=false,
+                    fastmath=false, system_atomics=true, target_debuginfo::Bool=false,
+                    patch::Bool=false,
                     exception_sites::Bool=false, kwargs...)
     config_kwargs, kwargs = split_kwargs(kwargs, GPUCompiler.CONFIG_KWARGS)
     source = methodinstance(typeof(func), Base.to_tuple_type(types), Base.get_world_counter())
-    target = PTXCompilerTarget(; cap, ptx, feature_set,
+    target = PTXCompilerTarget(; cap, ptx, feature_set, backend,
                                  minthreads, maxthreads, blocks_per_sm, maxregs,
-                                 fastmath, system_atomics)
+                                 fastmath, system_atomics,
+                                 # `debuginfo` is the reflection keyword (`code_llvm`)
+                                 debuginfo=target_debuginfo)
     params = CompilerParams(patch, exception_sites)
     config = CompilerConfig(target, params; kernel=false, config_kwargs...)
     CompilerJob(source, config), kwargs
