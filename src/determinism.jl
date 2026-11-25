@@ -210,6 +210,7 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
     # domain), so walk it, replacing every string that carries a name. Only nodes reachable
     # from a function or an instruction are visited, which is where inlining leaves its traces.
     visited = Set{LLVM.MDNode}()
+    has_records = LLVM.version() >= v"19"
 
     # the instruction metadata that can name a function: a debug location points at the
     # subprogram it came from (orphaned once that function is inlined away), and the alias
@@ -233,6 +234,15 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
         for bb in f.blocks
             rename!(bb)
             for inst in bb.instructions
+                # debug records are not metadata attachments, and can be all that is left of
+                # an inlined function (a record's variable belongs to the same subprogram as
+                # its location)
+                if has_records
+                    for record in inst.debug_records
+                        normalize_metadata!(record.debug_location, visited, codegen_name,
+                                            normalize)
+                    end
+                end
                 rename!(inst)
                 md = inst.metadata
                 for kind in md_kinds
