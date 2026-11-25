@@ -27,6 +27,28 @@ import InteractiveUtils
     end
 end
 
+@testset "compile do-block" begin
+    mod = @eval module $(gensym())
+        f(x::Int) = x + 1
+    end
+    job, _ = Native.create_job(mod.f, (Int,))
+
+    # the block runs in the context of the IR
+    name = GPUCompiler.compile(:llvm, job) do ir, meta
+        @test context() == context(ir)
+        @test meta.entry in ir.functions
+        meta.entry.name
+    end
+    asm, entry = GPUCompiler.compile(:asm, job) do asm, meta
+        @test meta.entry in meta.ir.functions
+        asm, meta.entry.name
+    end
+    @test occursin(r"^(julia|j)_f_\d+$", name)
+    @test occursin(r"^(julia|j)_f_\d+$", entry) && occursin(entry, asm)
+
+    @test_throws "boom" GPUCompiler.compile((_, _) -> error("boom"), :llvm, job)
+end
+
 @testset "compile hook" begin
     mod = @eval module $(gensym())
         f(x::Int) = nothing
