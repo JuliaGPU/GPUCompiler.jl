@@ -83,12 +83,41 @@ The default [`relocation_lowering`](@ref) strategy resolves Julia-value relocati
 
 The IR in the result (the `:llvm` module, or `meta.ir` and `meta.entry`) lives in the
 LLVM context of the enclosing [`JuliaContext`](@ref) block, and is freed with it. Use it,
-and dispose of it, within that block.
+and dispose of it, within that block. The do-block form, `compile(f, target, job)`, takes
+care of both.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     run_compile_hook(job)
     return report_failure(job) do
         compile_unhooked(target, job)
+    end
+end
+
+"""
+    compile(f, target::Symbol, job::CompilerJob)
+
+Compile `job` as `compile(target, job)` does, in an LLVM context of its own, and return
+`f(result, meta)`. `result` is the module for `:llvm`, and the code otherwise.
+
+`f` runs with the context of the IR active, so it can work with the module and its values
+directly. The IR and its context are freed when `f` returns: return only values that don't
+refer to them, e.g., strings, or the code.
+
+```julia
+compile(:obj, job) do obj, meta
+    (; obj, entry=meta.entry.name)
+end
+```
+"""
+function compile(f, target::Symbol, @nospecialize(job::CompilerJob))
+    return JuliaContext() do _
+        result, meta = compile(target, job)
+        ir = target === :llvm ? result : meta.ir
+        try
+            f(result, meta)
+        finally
+            dispose(ir)
+        end
     end
 end
 
