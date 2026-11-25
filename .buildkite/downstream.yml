@@ -4,6 +4,13 @@
 # `src/` and `ext/`, `Project.toml` and the CI configuration, except the other back-ends'
 # target files. The `if:` conditions implement the commit message tags documented in the
 # Development section of the README; keep both in sync when adding a step.
+#
+# Every package also gets an "(llvmgpu)" step, which runs its tests with the llvmgpu
+# toolchain (the `toolchain = "llvmgpu"` preference, set up by `.ci/toolchain.jl` in an
+# environment of its own, as the default one persists on some agents).
+# `[only llvmgpu]` selects only those steps and `[skip llvmgpu]` skips them; a package's own
+# tags (e.g. `[only cuda]`) select both of its steps. Steps are skipped on draft pull
+# requests unless a tag selects them.
 steps:
   - label: "CUDA.jl"
     plugins:
@@ -34,6 +41,7 @@ steps:
         - "ext/**"
         - "Project.toml"
         - ".buildkite/**"
+        - ".ci/**"
       exclude:
         - "src/{gcn,spirv,metal,bpf,native}.jl"
     if: |
@@ -43,6 +51,38 @@ steps:
     timeout_in_minutes: 120
     soft_fail:
       - exit_status: 3
+
+  - label: "CUDA.jl (llvmgpu)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      unset LD_LIBRARY_PATH
+      echo "--- :julia: Instantiating project"
+      # an environment and checkouts of its own, so that the preference and the edited test
+      # environment don't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      export JULIA_PKG_DEVDIR="$$JULIA_PROJECT/dev"
+      julia .ci/toolchain.jl CUDA
+
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("CUDA")'
+    agents:
+      queue: "cuda"
+    env:
+      JULIA_CPU_THREADS: "3"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{gcn,spirv,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|cuda|ptx|llvmgpu)/ &&
+      (build.message =~ /\[only [^\]]*(cuda|ptx|llvmgpu)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
+    # until the package works with IR of libLLVMGPU (JuliaGPU/CUDA.jl#3627)
+    soft_fail: true
 
   - label: "oneAPI.jl"
     plugins:
@@ -77,6 +117,38 @@ steps:
     soft_fail:
       - exit_status: 3
 
+  - label: "oneAPI.jl (llvmgpu)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      echo "--- :julia: Instantiating project"
+      # an environment and checkouts of its own, so that the preference and the edited test
+      # environment don't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      export JULIA_PKG_DEVDIR="$$JULIA_PROJECT/dev"
+      julia .ci/toolchain.jl oneAPI
+      julia -e 'using Pkg;
+                println("+++ :julia: Building support library")
+                include(joinpath(Pkg.devdir(), "oneAPI", "deps", "build_ci.jl"))'
+
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("oneAPI")'
+    agents:
+      queue: "oneapi"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|oneapi|spirv|llvmgpu)/ &&
+      (build.message =~ /\[only [^\]]*(oneapi|spirv|llvmgpu)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 60
+    # until the package works with IR of libLLVMGPU (JuliaGPU/oneAPI.jl#780)
+    soft_fail: true
+
   - label: "AMDGPU.jl"
     plugins:
       - JuliaCI/julia#v1:
@@ -105,6 +177,35 @@ steps:
     timeout_in_minutes: 60
     soft_fail:
       - exit_status: 3
+
+  - label: "AMDGPU.jl (llvmgpu)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      echo "--- :julia: Instantiating project"
+      # an environment and checkouts of its own, so that the preference and the edited test
+      # environment don't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      export JULIA_PKG_DEVDIR="$$JULIA_PROJECT/dev"
+      julia .ci/toolchain.jl AMDGPU
+
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("AMDGPU")'
+    agents:
+      queue: "rocm"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,spirv,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|amdgpu|gcn|llvmgpu)/ &&
+      (build.message =~ /\[only [^\]]*(amdgpu|gcn|llvmgpu)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 60
+    # until the package works with IR of libLLVMGPU (JuliaGPU/AMDGPU.jl#1250)
+    soft_fail: true
 
   - label: "Metal.jl"
     plugins:
@@ -146,6 +247,33 @@ steps:
     soft_fail:
       - exit_status: 3
 
+  - label: "Metal.jl (llvmgpu)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      echo "--- :julia: Instantiating project"
+      # an environment and checkouts of its own, so that the preference and the edited test
+      # environment don't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      export JULIA_PKG_DEVDIR="$$JULIA_PROJECT/dev"
+      JULIA_PKG_PRECOMPILE_AUTO=0 julia .ci/toolchain.jl Metal --workspace
+
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("Metal")'
+    agents:
+      queue: "metal"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,spirv,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|metal|llvmgpu)/ &&
+      (build.message =~ /\[only [^\]]*(metal|llvmgpu)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
+
   - label: "OpenCL.jl"
     plugins:
       - JuliaCI/julia#v1:
@@ -175,6 +303,35 @@ steps:
     timeout_in_minutes: 120
     soft_fail:
       - exit_status: 3
+
+  - label: "OpenCL.jl (llvmgpu)"
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.13"
+    command: |
+      echo "--- :julia: Instantiating project"
+      # an environment and checkouts of its own, so that the preference and the edited test
+      # environment don't reach the other steps
+      export JULIA_PROJECT="$$(mktemp -d)"
+      export JULIA_PKG_DEVDIR="$$JULIA_PROJECT/dev"
+      julia .ci/toolchain.jl OpenCL SPIRVIntrinsics
+
+      julia -e 'println("+++ :julia: Running tests")
+                using Pkg
+                Pkg.test("OpenCL")'
+    agents:
+      queue: "cuda"
+    if_changed:
+      include: *sources
+      exclude:
+        - "src/{ptx,gcn,metal,bpf,native}.jl"
+    if: |
+      build.message !~ /\[skip [^\]]*(tests|opencl|spirv|llvmgpu)/ &&
+      (build.message =~ /\[only [^\]]*(opencl|spirv|llvmgpu)/ ||
+       build.message !~ /\[only / && !build.pull_request.draft)
+    timeout_in_minutes: 120
+    # until the package works with IR of libLLVMGPU (JuliaGPU/OpenCL.jl#631)
+    soft_fail: true
 
 env:
   JULIA_PKG_SERVER_REGISTRY_PREFERENCE: "eager" # see freshly-registered versions without cloning the registry

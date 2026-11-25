@@ -52,6 +52,10 @@ Back-ends are named `cuda`, `amdgpu`, `metal`, `oneapi` and `opencl` (all lowerc
 their target: `ptx` for CUDA.jl, `gcn` for AMDGPU.jl, and `spirv` for both oneAPI.jl and
 OpenCL.jl.
 
+Each back-end is tested twice: with the default toolchain, and with the llvmgpu toolchain
+(see below). `llvmgpu` can be used as a back-end name to select or skip only the latter,
+e.g., `[only llvmgpu]`.
+
 
 ## LLVM toolchain
 
