@@ -232,18 +232,34 @@ function register_deferred_codegen()
     return nothing
 end
 
-const __llvm_initialized = Ref(false)
+function initialize_llvm()
+    LLVM.InitializeAllTargets()
+    LLVM.InitializeAllTargetInfos()
+    LLVM.InitializeAllAsmPrinters()
+    LLVM.InitializeAllAsmParsers()
+    LLVM.InitializeAllTargetMCs()
+    return
+end
+
+# LLVM's target registry isn't thread-safe: registering a target from two threads at once
+# can make the list of targets cyclic, after which every target lookup hangs.
+@static if isdefined(Base, :OncePerProcess)
+    const ensure_llvm_initialized = Base.OncePerProcess{Nothing}(initialize_llvm)
+else
+    # `@locked` holds the typeinf lock here, which serializes the initialization
+    const __llvm_initialized = Ref(false)
+    function ensure_llvm_initialized()
+        if !__llvm_initialized[]
+            initialize_llvm()
+            __llvm_initialized[] = true
+        end
+        return
+    end
+end
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob);
                            resolve_relocations::Bool=true)
-    if !__llvm_initialized[]
-        LLVM.InitializeAllTargets()
-        LLVM.InitializeAllTargetInfos()
-        LLVM.InitializeAllAsmPrinters()
-        LLVM.InitializeAllAsmParsers()
-        LLVM.InitializeAllTargetMCs()
-        __llvm_initialized[] = true
-    end
+    ensure_llvm_initialized()
 
     @tracepoint "IR generation" begin
         ir, compiled, relocations = irgen(job)
