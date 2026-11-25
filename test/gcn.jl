@@ -37,6 +37,15 @@ sink_gcn(i) = sink(i, Val(5))
 
     # an unknown back-end is rejected at machine-code generation
     @test_throws "Unsupported GCN back-end" GCN.code_native(devnull, mod.kernel, Tuple{}; backend=:bogus)
+
+    # the external back-end reports the version of its LLVM
+    major, minor, patch = Ref{Cuint}(), Ref{Cuint}(), Ref{Cuint}()
+    ccall((:AMDGPUGetLLVMVersion, AMDGPU_LLVM_Backend_jll.libamdgpu), Cvoid,
+          (Ref{Cuint}, Ref{Cuint}, Ref{Cuint}), major, minor, patch)
+    @test GPUCompiler.backend_llvm_version(GCNCompilerTarget("gfx900"; backend=:external)) ==
+          VersionNumber(major[], minor[], patch[])
+    @test GPUCompiler.backend_llvm_version(GCNCompilerTarget("gfx900"; backend=:inprocess)) ==
+          LLVM.version()
 end
 
 @testset "IR" begin

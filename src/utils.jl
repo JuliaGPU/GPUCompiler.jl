@@ -82,6 +82,14 @@ function api(backend::ExternalBackend, name::String)
     Libdl.dlsym(Libdl.dlopen(backend.library), Symbol(backend.prefix * name))
 end
 
+# the version of the LLVM that the back-end is built on
+function llvm_version(backend::ExternalBackend)
+    major, minor, patch = Ref{Cuint}(), Ref{Cuint}(), Ref{Cuint}()
+    @ccall $(api(backend, "GetLLVMVersion"))(major::Ptr{Cuint}, minor::Ptr{Cuint},
+                                             patch::Ptr{Cuint})::Cvoid
+    return VersionNumber(major[], minor[], patch[])
+end
+
 function external_diagnostic(severity::Cint, message::Cstring, ctx::Ptr{Cvoid})
     diagnostics = unsafe_pointer_to_objref(ctx)::Vector{String}
     # errors are folded into the failure message by the back-end; only keep what would

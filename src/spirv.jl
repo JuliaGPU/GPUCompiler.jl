@@ -96,6 +96,15 @@ end
 # SPIRV is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::SPIRVCompilerTarget) = nothing
 
+function backend_llvm_version(target::SPIRVCompilerTarget)
+    target.backend === :khronos && return nothing
+    # (without the back-end, `mcgen` reports a clearer error)
+    if isavailable(SPIRV_LLVM_Backend_jll) && SPIRV_LLVM_Backend_jll.is_available()
+        return llvm_version(ExternalBackend(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV"))
+    end
+    return @invoke backend_llvm_version(target::AbstractCompilerTarget)
+end
+
 function runtime_cstring_type(job::CompilerJob{SPIRVCompilerTarget})
     LLVM.DataLayout(llvm_datalayout(job.config.target)) do dl
         Core.LLVMPtr{Cchar, dl.globals_addrspace}

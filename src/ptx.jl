@@ -102,6 +102,15 @@ function llvm_machine(target::PTXCompilerTarget)
     return LLVM.TargetMachine(t, triple)
 end
 
+function backend_llvm_version(target::PTXCompilerTarget)
+    target.backend === :nvvm && return nothing
+    # (without the back-end, `mcgen` reports a clearer error)
+    if isavailable(NVPTX_LLVM_Backend_jll) && NVPTX_LLVM_Backend_jll.is_available()
+        return llvm_version(ExternalBackend(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX"))
+    end
+    return @invoke backend_llvm_version(target::AbstractCompilerTarget)
+end
+
 # match the layout computed by the NVPTX back-end (computeNVPTXDataLayout); components
 # that match LLVM's defaults (small integers, floats, common vectors) are left implicit.
 # note that the external back-end ignores the module datalayout and recomputes it from

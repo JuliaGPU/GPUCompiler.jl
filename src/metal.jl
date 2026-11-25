@@ -94,6 +94,9 @@ source_code(target::MetalCompilerTarget) = "llvm"
 # Metal is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::MetalCompilerTarget) = nothing
 
+# Apple's compiler generates code from the AIR
+backend_llvm_version(::MetalCompilerTarget) = nothing
+
 # Apple's toolchain encodes the AIR version in the architecture component of the triple, as
 # `air64_v<major><minor>` (e.g. `air64_v26` for AIR 2.6). Tools like metal-opt derive the
 # expected AIR version from the triple and complain when the `air.version` module metadata

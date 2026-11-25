@@ -298,17 +298,14 @@ const AMDGPUObjectFile = Cint(1)
     return String(code)
 end
 
-# the version of the LLVM that generates code for the target, which can differ from the one
-# GPUCompiler runs in. only the release matters, so JLL rebuilds are ignored.
 function backend_llvm_version(target::GCNCompilerTarget)
-    target.backend === :external || return LLVM.version()
-    jll = get(Base.loaded_modules, getfield(AMDGPU_LLVM_Backend_jll, :pkg), nothing)
     # (without the back-end, `mcgen` reports a clearer error)
-    jll === nothing && return LLVM.version()
-    version = pkgversion(jll)
-    return VersionNumber(version.major, version.minor, version.patch)
+    if target.backend === :external &&
+       isavailable(AMDGPU_LLVM_Backend_jll) && AMDGPU_LLVM_Backend_jll.is_available()
+        return llvm_version(ExternalBackend(AMDGPU_LLVM_Backend_jll.libamdgpu, "AMDGPU"))
+    end
+    return @invoke backend_llvm_version(target::AbstractCompilerTarget)
 end
-
 
 ## validation
 
