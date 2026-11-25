@@ -82,5 +82,7 @@ import REPL
     end
 
     # reset state that was initialized during precompilation
-    __llvm_initialized[] = false
+    @static if !isdefined(Base, :OncePerProcess)
+        __llvm_initialized[] = false
+    end
 end
