@@ -113,12 +113,23 @@ function dedup_compile_units!(mod::LLVM.Module)
 
     # Metadata forms a graph, so walk every attachment reachable from module values.
     visited = Set{LLVM.Metadata}()
+    has_records = LLVM.version() >= v"19"
     for f in mod.functions
         sp = f.subprogram
         sp === nothing || repoint!(sp, replacement, visited)
         for bb in f.blocks, inst in bb.instructions
             for (kind, md) in inst.metadata
                 repoint!(md, replacement, visited)
+            end
+            # Debug records are not metadata attachments, and can hold the only reference to
+            # the subprogram of an inlined function whose code was optimized away, or (through
+            # the scope of the variable's type) to a compile unit.
+            if has_records
+                for record in inst.debug_records
+                    repoint!(record.debug_location, replacement, visited)
+                    record.kind == LLVM.API.LLVMDbgRecordLabel ||
+                        repoint!(record.variable, replacement, visited)
+                end
             end
         end
     end
@@ -199,6 +210,7 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
     # domain), so walk it, replacing every string that carries a name. Only nodes reachable
     # from a function or an instruction are visited, which is where inlining leaves its traces.
     visited = Set{LLVM.MDNode}()
+    has_records = LLVM.version() >= v"19"
 
     # the instruction metadata that can name a function: a debug location points at the
     # subprogram it came from (orphaned once that function is inlined away), and the alias
@@ -222,6 +234,15 @@ function normalize_julia_symbol_names!(mod::LLVM.Module)
         for bb in f.blocks
             rename!(bb)
             for inst in bb.instructions
+                # debug records are not metadata attachments, and can be all that is left of
+                # an inlined function (a record's variable belongs to the same subprogram as
+                # its location)
+                if has_records
+                    for record in inst.debug_records
+                        normalize_metadata!(record.debug_location, visited, codegen_name,
+                                            normalize)
+                    end
+                end
                 rename!(inst)
                 md = inst.metadata
                 for kind in md_kinds
