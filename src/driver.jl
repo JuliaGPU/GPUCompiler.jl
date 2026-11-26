@@ -178,9 +178,14 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);
     error("Unknown compilation output $output")
 end
 
-# primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
-# this could both be generalized (e.g. supporting actual function calls, instead of
-# returning a function pointer), and be integrated with the nonrecursive codegen.
+# Deferred compilation: code obtains the address of a function that the compilation it ends
+# up in compiles too (see `deferred_codegen` and `deferred_codegen!`), through calls to a
+# `deferred_codegen` marker with an id that identifies what to compile.
+#
+# Jobs registered here directly, with the id of their marker as key, are the legacy way of
+# requesting them, which Enzyme.jl and releases of back-ends that predate
+# `deferred_codegen!` use. New code should use `deferred_codegen!` instead, which registers
+# requests without racing with concurrent compilations.
 const deferred_codegen_jobs = Dict{Int, Any}()
 
 # We make this function explicitly callable so that we can drive OrcJIT's
