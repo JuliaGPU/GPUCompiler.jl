@@ -371,10 +371,6 @@ CC.OptimizationParams(interp::GPUInterpreter) = interp.opt_params
 #=CC.=#get_inference_world(interp::GPUInterpreter) = interp.world
 CC.get_inference_cache(interp::GPUInterpreter) = interp.inf_cache
 
-# No need to do any locking since we're not putting our results into the runtime cache
-CC.lock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
-CC.unlock_mi_inference(interp::GPUInterpreter, mi::MethodInstance) = nothing
-
 function CC.add_remark!(interp::GPUInterpreter, sv::CC.InferenceState, msg)
     @safe_debug "Inference remark during GPU compilation of $(sv.linfo): $msg"
 end
@@ -664,8 +660,9 @@ function record_coverage(mi::MethodInstance, src::CodeInfo)
     return
 end
 
-# for platforms without @cfunction-with-closure support, used pre-1.12 (and on 1.12 paths
-# that still require `cgparams.lookup`).
+# the codegen lookup callback for platforms without closure `@cfunction` support, used
+# before Julia 1.12.0-DEV.1823. as process-wide state, it relies on `@locked` holding the
+# codegen lock, which it no longer does on some development versions before that.
 const _method_instances = Ref{Any}()
 const _lookup_cache = Ref{Any}()
 function _lookup_fun(mi, min_world, max_world)

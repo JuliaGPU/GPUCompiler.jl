@@ -311,14 +311,13 @@ end
 
 ## codegen locking
 
-# lock codegen to prevent races on the LLVM context.
-#
-# XXX: it's not allowed to switch tasks while under this lock, can we guarantee that?
-#      its probably easier to start using our own LLVM context when that's possible.
+# Before Julia 1.12 (JuliaLang/julia#54816), these hold Julia's codegen lock across
+# compilation, serializing it with Julia's own codegen and with other compilations. Some
+# process-wide state relies on that, e.g. `_lookup_cache`. The lock must not be held
+# across a task switch, so `@unlocked` releases it for the annotated function. On Julia
+# 1.12 and later they do nothing, so process-wide state needs its own synchronization.
 macro locked(ex)
     if VERSION >= v"1.12.0-DEV.769"
-        # no need to handle locking; it's taken care of by the engine
-        # as long as we use a correct cache owner token.
         return esc(ex)
     end
 
@@ -334,7 +333,6 @@ macro locked(ex)
     esc(combinedef(def))
 end
 
-# HACK: temporarily unlock again to perform a task switch
 macro unlocked(ex)
     if VERSION >= v"1.12.0-DEV.769"
         return esc(ex)
