@@ -289,6 +289,56 @@ function lower_deferred_requests!(mod::LLVM.Module, compiled)
     return
 end
 
+"""
+    deferred_codegen!(builder::IRBuilder, job::CompilerJob) -> LLVM.Value
+
+Emit code at the position of `builder` that evaluates to the address of the function that
+`job` compiles to. This is the counterpart of [`deferred_codegen`](@ref) for code
+generation, e.g. to call a function from [`finish_module!`](@ref) that is only known to be
+needed then. The compilation resolves requests after `finish_module!`, so they can't be made
+later (e.g. from `finish_ir!`), and it doesn't resolve them when compiling only the entry
+point (`only_entry=true`).
+
+`job` is compiled like the functions that [`deferred_codegen`](@ref) requests: as part of
+the requesting compilation, with its target and parameters nested in the requesting job's
+ones (see `nest_target` and `nest_params`), but otherwise with its own source, world and
+configuration (e.g. `kernel=false` for a function that is only called). Only kernels remain
+entry points.
+
+The result is an LLVM pointer. To call the function, cast it to a pointer to the function's
+type (with `pointercast!`, which does nothing with opaque pointers). Once the request is
+resolved, that call is a direct call of a defined function, which LLVM requires to have a
+debug location if the calling function has debug info: set one on `builder` (e.g. with
+`debug_location!`) before emitting the call.
+"""
+function deferred_codegen!(builder::IRBuilder, @nospecialize(job::CompilerJob))
+    bb = builder.insert_block
+    bb === nothing && throw(ArgumentError("The IR builder is not positioned"))
+    mod = LLVM.parent(LLVM.parent(bb))
+    context!(LLVM.context(mod)) do
+        # the marker, as Julia declares it for `ccall("extern deferred_codegen", llvmcall,
+        # Ptr{Cvoid}, (Int,), id)`
+        ft = LLVM.FunctionType(convert(LLVMType, Ptr{Cvoid}), [convert(LLVMType, Int)])
+        marker = get!(mod.functions, "deferred_codegen") do
+            LLVM.Function(mod, "deferred_codegen", ft)
+        end
+        marker.function_type == ft ||
+            error("The deferred_codegen marker in this module has type $(marker.function_type), expected $ft")
+
+        id = register_deferred_request(job)
+        ptr = call!(builder, ft, marker, [ConstantInt(only(LLVM.parameters(ft)), id)])
+        if LLVM.return_type(ft) isa LLVM.IntegerType
+            # Julia before 1.12 represents `Ptr` as an integer
+            T_ptr = supports_typed_pointers(context()) ?
+                    LLVM.PointerType(LLVM.Int8Type()) : LLVM.PointerType()
+            ptr = inttoptr!(builder, ptr, T_ptr)
+        end
+        return ptr
+    end
+end
+
+@public deferred_codegen, deferred_codegen!
+
 # Register deferred_codegen as a global function so that it can be called with
 # `ccall("extern deferred_codegen", ...)`. Called from __init__.
 #

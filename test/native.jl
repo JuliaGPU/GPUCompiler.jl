@@ -3496,6 +3496,107 @@ end
     end
 end
 
+@testset "deferred codegen from a back-end" begin
+    mod = @eval module $(gensym())
+        using ..GPUCompiler, ..LLVM
+        import ..TestRuntime
+
+        # a back-end whose kernels call a function that it only knows to be needed when
+        # it has generated their code, like the RNG initialization of some back-ends
+        struct Params <: AbstractCompilerParams end
+        GPUCompiler.runtime_module(::CompilerJob{<:Any,Params}) = TestRuntime
+
+        @noinline helper() = (unsafe_store!(Ptr{Int}(UInt(0x1000)), 42); return)
+        needs_helper(job) = startswith(String(job.source.def.name), "uses_helper")
+
+        # calls of the helper, emitted for each request (requesting it more than once)
+        const requests = Ref(1)
+
+        const BackendJob = CompilerJob{NativeCompilerTarget,Params}
+        function GPUCompiler.finish_module!(@nospecialize(job::BackendJob),
+                                            mod::LLVM.Module, entry::LLVM.Function)
+            entry = invoke(GPUCompiler.finish_module!,
+                           Tuple{CompilerJob{NativeCompilerTarget}, LLVM.Module, LLVM.Function},
+                           job, mod, entry)
+            needs_helper(job) || return entry
+            src = methodinstance(typeof(helper), Tuple{}, job.world)
+            helper_job = CompilerJob(src, CompilerConfig(job.config; kernel=false, name=nothing),
+                                     job.world)
+            @dispose builder=LLVM.IRBuilder() begin
+                LLVM.position!(builder, LLVM.before(first(first(entry.blocks).instructions)))
+                # calls of defined functions need a location in functions with debug info
+                sp = LLVM.subprogram(entry)
+                sp === nothing || LLVM.debug_location!(builder, LLVM.DILocation(0, 0, sp))
+                ft = LLVM.FunctionType(LLVM.VoidType())
+                for _ in 1:requests[]
+                    ptr = GPUCompiler.deferred_codegen!(builder, helper_job)
+                    ptr = LLVM.pointercast!(builder, ptr, LLVM.PointerType(ft))
+                    LLVM.call!(builder, ft, ptr)
+                end
+            end
+            return entry
+        end
+
+        uses_helper_kernel() = return
+        uses_helper_child(p) = (unsafe_store!(p, 1); return)
+        # also requesting a function from Julia, making the module contain the marker already
+        uses_helper_parent(p) = (unsafe_store!(p, GPUCompiler.deferred_codegen(
+                                     Val(typeof(uses_helper_child)), Val(Tuple{Ptr{Int}})));
+                                 return)
+
+        function ir(f, tt)
+            source = methodinstance(typeof(f), tt)
+            config = CompilerConfig(NativeCompilerTarget(), Params(); kernel=true,
+                                    libraries=false, optimize=false, validate=false)
+            JuliaContext() do ctx
+                ir, meta = GPUCompiler.compile(:llvm, CompilerJob(source, config))
+                string(ir)
+            end
+        end
+    end
+    W = Sys.WORD_SIZE
+
+    # the helper is compiled and linked in, as a function that isn't an entry point
+    ir = mod.ir(mod.uses_helper_kernel, Tuple{})
+    @test !occursin("deferred_codegen", ir)
+    @test occursin(Regex("define internal [^\\n]*helper[^\\n]*\\n(?:(?!\\n}\\n).)*store i$W 42,", "s"), ir)
+
+    # requesting it again doesn't compile it again
+    mod.requests[] = 2
+    try
+        ir = mod.ir(mod.uses_helper_kernel, Tuple{})
+        @test !occursin("deferred_codegen", ir)
+        @test count("store i$W 42,", ir) == 1
+    finally
+        mod.requests[] = 1
+    end
+
+    # next to requests from Julia, and from deferred children too (for a helper job with
+    # the child's configuration)
+    ir = mod.ir(mod.uses_helper_parent, Tuple{Ptr{Ptr{Cvoid}}})
+    @test !occursin("deferred_codegen", ir)
+    @test occursin("store i$W 1,", ir) && occursin("store i$W 42,", ir)
+
+    # requests for the same job are registered once
+    @dispose ctx=Context() begin
+        m = LLVM.Module("requests")
+        f = LLVM.Function(m, "f", LLVM.FunctionType(LLVM.VoidType()))
+        src = methodinstance(typeof(mod.helper), Tuple{})
+        job = CompilerJob(src, CompilerConfig(NativeCompilerTarget(), mod.Params()))
+        @dispose builder=IRBuilder() begin
+            @test_throws ArgumentError GPUCompiler.deferred_codegen!(builder, job)
+            position!(builder, LLVM.at_end(BasicBlock(f, "entry")))
+            GPUCompiler.deferred_codegen!(builder, job)
+            GPUCompiler.deferred_codegen!(builder, job)
+            ret!(builder)
+        end
+        calls = [LLVM.user(use) for use in LLVM.uses(LLVM.functions(m)["deferred_codegen"])]
+        @test length(calls) == 2
+        @test first(LLVM.operands(calls[1])) == first(LLVM.operands(calls[2]))
+        dispose(m)
+    end
+end
+
 @testset "concurrent deferred codegen" begin
     # requests used to be registered while inferring the caller, which happens concurrently
     script = """
