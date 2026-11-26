@@ -212,39 +212,55 @@ deferred_codegen(f::Val, tt::Val) = Base.@noinline deferred_codegen_request(f, t
 end
 const deferred_codegen_request_method = which(deferred_codegen_request, Tuple{Val,Val})
 
-# The requests that `irgen` found, by the function and argument types they request. The id
-# of a request is its address, which the jobs in `deferred_codegen_jobs` don't use: they
-# are registered under small integers or addresses of other objects. (Checking that would
-# race with code registering them.) Ids only have a meaning in the process that generated
-# the code, so they aren't stored: addresses change when an image is restored. Requests are
-# registered once, so that this only grows with the number of distinct ones. That may
-# happen in generated functions, so use a lock that doesn't yield, and compare requests by
-# identity, which calls no user-defined `hash`.
+# Requests for deferred code generation: function and argument types relative to the
+# requesting job (from `deferred_codegen(::Val, ::Val)`), or a job (from back-ends).
+#
+# The id of a request is its address, which the jobs in `deferred_codegen_jobs` don't use:
+# they are registered under small integers or addresses of other objects. (Checking that
+# would race with code registering them.) Ids only have a meaning in the process that
+# generated the code: addresses change when an image is restored, so a request found by
+# its id is only used if that is still its address, and registering it again indexes it
+# under its current one. Requests are registered once, so that
+# this only grows with the number of distinct ones. That may happen in generated functions,
+# so use a lock that doesn't yield, and compare requests by identity, which calls no
+# user-defined `hash`.
 mutable struct DeferredRequest
-    const ft::Any
-    const tt::Any
+    const spec::Any
 end
 const deferred_requests = IdDict{Any,DeferredRequest}()
+const deferred_requests_by_id = Dict{Int,DeferredRequest}()
 const deferred_requests_lock = Threads.SpinLock()
 
 request_id(request::DeferredRequest) = reinterpret(Int, pointer_from_objref(request))
 
-function register_deferred_request(@nospecialize(ft), @nospecialize(tt))
+function register_deferred_request(@nospecialize(spec))
     Base.@lock deferred_requests_lock begin
-        request = get!(deferred_requests, (ft, tt)) do
-            DeferredRequest(ft, tt)
+        request = get!(deferred_requests, spec) do
+            DeferredRequest(spec)
         end
-        return request_id(request)
+        id = request_id(request)
+        deferred_requests_by_id[id] = request
+        return id
     end
 end
 
-function lookup_deferred_request(id::Int)
-    Base.@lock deferred_requests_lock begin
-        for request in values(deferred_requests)
-            request_id(request) == id && return request
-        end
-        return nothing
+# the request with a marker's id, or the job registered under it with `deferred_codegen_jobs`
+function deferred_spec(id::Int)
+    request = Base.@lock deferred_requests_lock get(deferred_requests_by_id, id, nothing)
+    if request !== nothing && request_id(request) == id
+        return request.spec
     end
+    global deferred_codegen_jobs
+    spec = get(deferred_codegen_jobs, id, nothing)
+    spec === nothing && error("No deferred codegen request has id $id")
+    return spec
+end
+
+# the job a request specifies, for the job whose module contains it
+function deferred_job(@nospecialize(spec), @nospecialize(job::CompilerJob))
+    spec isa CompilerJob && return spec
+    ft, tt = spec
+    return CompilerJob(methodinstance(ft, tt, job.world), job.config, job.world)
 end
 
 # In a module that Julia generated, give the legacy markers in the code of requests the
@@ -256,7 +272,7 @@ function lower_deferred_requests!(mod::LLVM.Module, compiled)
     for (mi, entry) in compiled
         mi.def === deferred_codegen_request_method || continue
         _, ft, tt = Base.unwrap_unionall(mi.specTypes).parameters
-        id = register_deferred_request(ft.parameters[1], tt.parameters[1])
+        id = register_deferred_request((ft.parameters[1], tt.parameters[1]))
         for name in (entry.specfunc, entry.func)
             name === nothing && continue
             f = get(mod.functions, name, nothing)
@@ -376,23 +392,7 @@ end
                 call = use.user::LLVM.CallInst
                 id = convert(Int, first(call.operands))
 
-                # requests from `deferred_codegen` (see `lower_deferred_requests!`) or jobs
-                # that back-ends and Enzyme.jl registered with `deferred_codegen_jobs`
-                global deferred_codegen_jobs
-                request = lookup_deferred_request(id)
-                dyn_val = request === nothing ? deferred_codegen_jobs[id] :
-                                                (request.ft, request.tt)
-
-                # get a job in the appopriate world
-                dyn_job = if dyn_val isa CompilerJob
-                    # trust that the user knows what they're doing
-                    dyn_val
-                else
-                    ft, tt = dyn_val
-                    dyn_src = methodinstance(ft, tt, job.world)
-                    CompilerJob(dyn_src, job.config, job.world)
-                end
-
+                dyn_job = deferred_job(deferred_spec(id), job)
                 push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
             end
 
