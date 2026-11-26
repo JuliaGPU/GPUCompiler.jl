@@ -3434,6 +3434,10 @@ end
         # inlining the request at the call site
         forced(p) = (unsafe_store!(p, @inline(req(a))); return)
 
+        # requesting itself
+        recursive(p) = (unsafe_store!(p, deferred_codegen(Val(typeof(recursive)),
+                                                          Val(Tuple{Ptr{Ptr{Cvoid}}}))); return)
+
         # a job registered by a back-end, under an id with the sign bit set (like an address
         # on a 32-bit system)
         const legacy_id = typemin(Int) + 42
@@ -3470,6 +3474,11 @@ end
     c2 = body(ir, "(julia|j)_c2")
     @test occursin(g, c1) && !occursin(h, c1)
     @test 0 < findfirst(g, c2)[1] < findfirst(h, c2)[1]
+
+    # a request for the function being compiled resolves to it
+    ir = llvm(mod.recursive)
+    @test !occursin("deferred_codegen", ir)
+    @test count(r"define [^\n]*recursive", ir) == 1
 
     # a request that is inlined at the call site
     ir = llvm(mod.forced)
@@ -3571,11 +3580,11 @@ end
         mod.requests[] = 1
     end
 
-    # next to requests from Julia, and from deferred children too (for a helper job with
-    # the child's configuration)
+    # next to requests from Julia, and from deferred children too, which request the same
+    # helper once nested in the parent's compilation
     ir = mod.ir(mod.uses_helper_parent, Tuple{Ptr{Ptr{Cvoid}}})
     @test !occursin("deferred_codegen", ir)
-    @test occursin("store i$W 1,", ir) && occursin("store i$W 42,", ir)
+    @test occursin("store i$W 1,", ir) && count("store i$W 42,", ir) == 1
 
     # requests for the same job are registered once
     @dispose ctx=Context() begin

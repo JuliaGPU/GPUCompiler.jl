@@ -261,6 +261,14 @@ function deferred_spec(id::Int)
     return spec
 end
 
+# the job that compiles a request as part of `job`
+function nest_deferred_job(@nospecialize(dyn_job::CompilerJob), @nospecialize(job::CompilerJob))
+    target = nest_target(dyn_job.config.target, job.config.target)
+    params = nest_params(dyn_job.config.params, job.config.params)
+    config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
+    return CompilerJob(dyn_job; config)
+end
+
 # the job a request specifies, for the job whose module contains it
 function deferred_job(@nospecialize(spec), @nospecialize(job::CompilerJob))
     spec isa CompilerJob && return spec
@@ -431,6 +439,7 @@ end
     has_deferred_jobs = job.config.toplevel && !job.config.only_entry &&
                         haskey(ir.functions, "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
+    nested_jobs = Dict{CompilerJob, String}()
     if has_deferred_jobs
         dyn_marker = ir.functions["deferred_codegen"]
 
@@ -451,21 +460,26 @@ end
                 push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
             end
 
-            function deferred_codegen(@nospecialize(dyn_job::CompilerJob), @nospecialize(job::CompilerJob))
-                target = nest_target(dyn_job.config.target, job.config.target)
-                params = nest_params(dyn_job.config.params, job.config.params)
-                config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
-                return compile_unhooked(:llvm, CompilerJob(dyn_job; config))
-            end
-
             # compile and link
             for dyn_job in keys(worklist)
-                # cached compilation
+                # cached compilation: of the same job (e.g. a kernel requesting itself), or,
+                # for functions that aren't kernels, of one that is the same once nested in
+                # this compilation (e.g. a function that both a job and its deferred child
+                # request). kernels are entry points, which `finish_ir!` processes with the
+                # requested job, so they are compiled for each one (which can make kernels
+                # requested from different levels of nesting get the same name).
                 dyn_entry_fn = get(jobs, dyn_job, nothing)
                 if dyn_entry_fn === nothing
                     # We are potentially calling into a sibling compiler (Enzyme)
                     # which was loaded in a newer world.
-                    dyn_ir, dyn_meta = @invokelatest deferred_codegen(dyn_job, job)
+                    nested_job = @invokelatest nest_deferred_job(dyn_job, job)
+                    if !dyn_job.config.kernel
+                        dyn_entry_fn = get(nested_jobs, nested_job, nothing)
+                        dyn_entry_fn === nothing || (jobs[dyn_job] = dyn_entry_fn)
+                    end
+                end
+                if dyn_entry_fn === nothing
+                    dyn_ir, dyn_meta = @invokelatest compile_unhooked(:llvm, nested_job)
                     dyn_entry_fn = dyn_meta.entry.name
                     # the sibling compiler's result isn't inferred
                     dyn_compiled = dyn_meta.compiled
@@ -478,6 +492,7 @@ end
                     link_relocatable!(ir, relocations, dyn_ir,
                                       dyn_meta.relocations)
                     jobs[dyn_job] = dyn_entry_fn
+                    dyn_job.config.kernel || (nested_jobs[nested_job] = dyn_entry_fn)
                     changed = true
                 end
                 dyn_entry = ir.functions[dyn_entry_fn]
