@@ -190,20 +190,87 @@ function deferred_codegen(ptr::Ptr{Cvoid})::Ptr{Cvoid}
     ptr
 end
 
-@generated function deferred_codegen(::Val{ft}, ::Val{tt}) where {ft,tt}
-    id = length(deferred_codegen_jobs) + 1
-    deferred_codegen_jobs[id] = (; ft, tt)
-    # don't bother looking up the method instance, as we'll do so again during codegen
-    # using the world age of the parent.
-    #
-    # this also works around an issue on <1.10, where we don't know the world age of
-    # generated functions so use the current world counter, which may be too new
-    # for the world we're compiling for.
+"""
+    deferred_codegen(::Val{ft}, ::Val{tt}) -> Ptr{Cvoid}
 
-    quote
-        # TODO: add an edge to this method instance to support method redefinitions
-        ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), $id)
+Return a pointer to the function of type `ft` compiled for arguments of the types in the
+tuple type `tt`, by the job compiling the caller and in its world, e.g. to launch it as a
+kernel from device code.
+"""
+deferred_codegen(f::Val, tt::Val) = Base.@noinline deferred_codegen_request(f, tt)
+
+# The request is identified by the specialization of this method. `irgen` registers it,
+# and gives the legacy marker in its code the request's id (see `lower_deferred_requests!`).
+# Nothing is registered while inferring the caller, which happens concurrently on Julia
+# 1.12+ and possibly in another process (when the caller's code is cached in a package
+# image). The call is kept from being inlined (also when inlining the public wrapper), and
+# its opaque result from being folded. The id 0 is never looked up, and keeps this method
+# valid on the host (see `register_deferred_codegen`).
+@noinline function deferred_codegen_request(::Val{ft}, ::Val{tt}) where {ft,tt}
+    # TODO: add an edge to the child's method instance to support method redefinitions
+    ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), 0)
+end
+const deferred_codegen_request_method = which(deferred_codegen_request, Tuple{Val,Val})
+
+# The requests that `irgen` found, by the function and argument types they request. The id
+# of a request is its address, which the jobs in `deferred_codegen_jobs` don't use: they
+# are registered under small integers or addresses of other objects. (Checking that would
+# race with code registering them.) Ids only have a meaning in the process that generated
+# the code, so they aren't stored: addresses change when an image is restored. Requests are
+# registered once, so that this only grows with the number of distinct ones. That may
+# happen in generated functions, so use a lock that doesn't yield, and compare requests by
+# identity, which calls no user-defined `hash`.
+mutable struct DeferredRequest
+    const ft::Any
+    const tt::Any
+end
+const deferred_requests = IdDict{Any,DeferredRequest}()
+const deferred_requests_lock = Threads.SpinLock()
+
+request_id(request::DeferredRequest) = reinterpret(Int, pointer_from_objref(request))
+
+function register_deferred_request(@nospecialize(ft), @nospecialize(tt))
+    Base.@lock deferred_requests_lock begin
+        request = get!(deferred_requests, (ft, tt)) do
+            DeferredRequest(ft, tt)
+        end
+        return request_id(request)
     end
+end
+
+function lookup_deferred_request(id::Int)
+    Base.@lock deferred_requests_lock begin
+        for request in values(deferred_requests)
+            request_id(request) == id && return request
+        end
+        return nothing
+    end
+end
+
+# In a module that Julia generated, give the legacy markers in the code of requests the
+# id of their request. Unlike the names of functions, that survives linking modules.
+function lower_deferred_requests!(mod::LLVM.Module, compiled)
+    marker = get(mod.functions, "deferred_codegen", nothing)
+    marker === nothing && return
+    T_id = only(LLVM.parameters(marker.function_type))
+    for (mi, entry) in compiled
+        mi.def === deferred_codegen_request_method || continue
+        _, ft, tt = Base.unwrap_unionall(mi.specTypes).parameters
+        id = register_deferred_request(ft.parameters[1], tt.parameters[1])
+        for name in (entry.specfunc, entry.func)
+            name === nothing && continue
+            f = get(mod.functions, name, nothing)
+            (f === nothing || isdeclaration(f)) && continue
+            for bb in f.blocks, inst in bb.instructions
+                inst isa LLVM.CallInst && inst.called_operand == marker || continue
+                inst.operands[1] = ConstantInt(T_id, id)
+            end
+            # with the request identified by its id, it can be inlined
+            delete!(f.function_attributes, :noinline)
+            push!(f.function_attributes, EnumAttribute(:alwaysinline))
+        end
+    end
+    return
 end
 
 # Register deferred_codegen as a global function so that it can be called with
@@ -309,8 +376,12 @@ end
                 call = use.user::LLVM.CallInst
                 id = convert(Int, first(call.operands))
 
+                # requests from `deferred_codegen` (see `lower_deferred_requests!`) or jobs
+                # that back-ends and Enzyme.jl registered with `deferred_codegen_jobs`
                 global deferred_codegen_jobs
-                dyn_val = deferred_codegen_jobs[id]
+                request = lookup_deferred_request(id)
+                dyn_val = request === nothing ? deferred_codegen_jobs[id] :
+                                                (request.ft, request.tt)
 
                 # get a job in the appopriate world
                 dyn_job = if dyn_val isa CompilerJob
