@@ -436,7 +436,8 @@ GPUCompiler.llvm_triple(::UnknownTarget) = "unknown-unknown-unknown"
 end
 
 @testset "back-end LLVM versions" begin
-    # the back-end libraries report the version of their LLVM
+    # the back-end libraries report the version of their LLVM (with the llvmgpu toolchain,
+    # libLLVMGPU generates the code; see test/toolchain.jl)
     function library_version(library, prefix)
         major, minor, patch = Ref{Cuint}(), Ref{Cuint}(), Ref{Cuint}()
         Libdl = GPUCompiler.Libdl
@@ -444,11 +445,11 @@ end
         ccall(f, Cvoid, (Ref{Cuint}, Ref{Cuint}, Ref{Cuint}), major, minor, patch)
         VersionNumber(major[], minor[], patch[])
     end
-    if NVPTX_LLVM_Backend_jll.is_available()
+    if !llvmgpu && NVPTX_LLVM_Backend_jll.is_available()
         @test GPUCompiler.backend_llvm_version(PTXCompilerTarget(; cap=v"7.0")) ==
               library_version(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX")
     end
-    if SPIRV_LLVM_Backend_jll.is_available()
+    if !llvmgpu && SPIRV_LLVM_Backend_jll.is_available()
         @test GPUCompiler.backend_llvm_version(SPIRVCompilerTarget(; backend=:llvm)) ==
               library_version(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV")
     end

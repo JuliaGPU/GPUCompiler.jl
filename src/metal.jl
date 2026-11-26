@@ -94,6 +94,8 @@ source_code(target::MetalCompilerTarget) = "llvm"
 # Metal is not supported by our LLVM builds, so we can't get a target machine
 llvm_machine(::MetalCompilerTarget) = nothing
 
+llvm_library(::MetalCompilerTarget) = toolchain_library()
+
 # Apple's compiler generates code from the AIR
 backend_llvm_version(::MetalCompilerTarget) = nothing
 
@@ -1598,6 +1600,17 @@ end
 end
 
 # downgrade bitcode to the format of an older LLVM through libllvm_downgrade
+# the newest bitcode format, up to that of LLVM `major`, that LLVMDowngrader_jll emits
+function downgrade_target(major::Integer)
+    backend = ExternalBackend(LLVMDowngrader_jll.libllvm_downgrade, "LLVMDG")
+    count = Ref{Csize_t}()
+    names = @ccall $(api(backend, "GetTargets"))(count::Ptr{Csize_t})::Ptr{Cstring}
+    versions = [VersionNumber(unsafe_string(unsafe_load(names, i))) for i in 1:count[]]
+    filter!(v -> v.major <= major, versions)
+    isempty(versions) && error("LLVMDowngrader_jll cannot downgrade bitcode to LLVM $major or older")
+    return maximum(versions)
+end
+
 function downgrade(input::Vector{UInt8}, version::VersionNumber)
     backend = ExternalBackend(LLVMDowngrader_jll.libllvm_downgrade, "LLVMDG")
     buffer = Ref{Ptr{Cvoid}}(C_NULL)

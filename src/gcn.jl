@@ -12,11 +12,21 @@ Base.@kwdef struct GCNCompilerTarget <: AbstractCompilerTarget
     dev_isa::String
     features::String=""
 
-    backend::Symbol = isavailable(AMDGPU_LLVM_Backend_jll) ? :external : :inprocess
+    # the LLVM that generates code: an external one (`:external`; AMDGPU_LLVM_Backend_jll,
+    # or libLLVMGPU with the `llvmgpu` toolchain) or Julia's (`:inprocess`)
+    backend::Symbol = TOOLCHAIN === :llvmgpu || isavailable(AMDGPU_LLVM_Backend_jll) ?
+                      :external : :inprocess
 
     # optional launch bounds (scalar or per-dimension; flattened to their product)
     minthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
     maxthreads::Union{Nothing,Int,NTuple{<:Any,Int}} = nothing
+
+    function GCNCompilerTarget(dev_isa, features, backend, minthreads, maxthreads)
+        if TOOLCHAIN === :llvmgpu && backend !== :external
+            error("The llvmgpu toolchain generates GCN code with libLLVMGPU, so it only supports `backend=:external`, not $(repr(backend)).")
+        end
+        new(dev_isa, features, backend, minthreads, maxthreads)
+    end
 end
 
 function Base.hash(target::GCNCompilerTarget, h::UInt)
@@ -33,7 +43,10 @@ llvm_triple(::GCNCompilerTarget) = "amdgcn-amd-amdhsa"
 
 source_code(target::GCNCompilerTarget) = "gcn"
 
+llvm_library(::GCNCompilerTarget) = toolchain_library()
+
 function llvm_machine(target::GCNCompilerTarget)
+    is_llvmgpu() && return llvmgpu_machine(target)
     @static if :AMDGPU ∉ LLVM.backends()
         return nothing
     end
@@ -49,9 +62,38 @@ function llvm_machine(target::GCNCompilerTarget)
     return tm
 end
 
-# the external back-end replaces the module's datalayout with its own, which aligns i128 to
-# 16 bytes. it does keep a 64-bit alignment if the module asks for one (since
-# AMDGPU_LLVM_Backend_jll 23.1.1+4), which Julia needs before 1.12 to lay out kernel
+# a target machine of libLLVMGPU. like AMDGPU_LLVM_Backend_jll did, reject processors and
+# features that LLVM would only warn about, and keep the 8-byte alignment of i128 that
+# Julia needs before 1.12.
+function llvmgpu_machine(target::GCNCompilerTarget)
+    triple = llvm_triple(target)
+    t = LLVM.Target(; triple)
+    cpu = target.dev_isa
+    features = target.features
+    # (LLVM only warns about unknown processors, and falls back to the oldest one)
+    @dispose sti=LLVM.SubtargetInfo(t, triple) begin
+        LLVM.isprocessor(sti, cpu) ||
+            error("Unsupported processor $cpu for the AMDGPU back-end")
+    end
+    @dispose sti=LLVM.SubtargetInfo(t, triple; cpu) begin
+        try
+            LLVM.hasfeatures(sti, features)
+        catch err
+            err isa ArgumentError || rethrow()
+            error("Unsupported features $(repr(features)) for the AMDGPU back-end: $(err.msg)")
+        end
+    end
+
+    # (the ABI name selects that alignment, a patch of the library's AMDGPU back-end)
+    abi = Base.datatype_alignment(Int128) == 8 ? "i128:64" : ""
+    tm = LLVM.TargetMachine(t, triple; cpu, features, reloc=LLVM.RelocMode.PIC, abi)
+    LLVM.asm_verbosity!(tm, true)
+    return tm
+end
+
+# the external back-end and libLLVMGPU replace the module's datalayout with their own,
+# which aligns i128 to 16 bytes. they do keep a 64-bit alignment if the module asks for one
+# (since AMDGPU_LLVM_Backend_jll 23.1.1+4), which Julia needs before 1.12 to lay out kernel
 # arguments like the host does.
 function llvm_datalayout(target::GCNCompilerTarget)
     dl = @invoke llvm_datalayout(target::AbstractCompilerTarget)
@@ -257,7 +299,9 @@ const AMDGPUObjectFile = Cint(1)
                          mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
     target = job.config.target
 
-    if target.backend === :inprocess
+    if is_llvmgpu(mod.library)
+        return String(llvmgpu_emit(job, mod, format))
+    elseif target.backend === :inprocess
         if :AMDGPU ∉ LLVM.backends()
             error("The in-process LLVM lacks the AMDGPU target; cannot compile to GCN. " *
                   "Load AMDGPU_LLVM_Backend_jll and use `backend=:external` instead.")
@@ -300,12 +344,13 @@ end
 
 function backend_llvm_version(target::GCNCompilerTarget)
     # (without the back-end, `mcgen` reports a clearer error)
-    if target.backend === :external &&
+    if TOOLCHAIN === :julia && target.backend === :external &&
        isavailable(AMDGPU_LLVM_Backend_jll) && AMDGPU_LLVM_Backend_jll.is_available()
         return llvm_version(ExternalBackend(AMDGPU_LLVM_Backend_jll.libamdgpu, "AMDGPU"))
     end
     return @invoke backend_llvm_version(target::AbstractCompilerTarget)
 end
+
 
 ## validation
 
@@ -409,7 +454,7 @@ function needs_cmpxchg_expansion(target::GCNCompilerTarget, version::VersionNumb
     # flat memory, and for local memory before gfx12, failing with "Cannot select"
     # (llvm/llvm-project#229442). Expand it on flat memory on every target, where LLVM
     # otherwise expands it depending on the scope and metadata. AMDGPU_LLVM_Backend_jll
-    # carries the fix since 23.1.3, so only Julia's own LLVM needs this.
+    # (since 23.1.3) and libLLVMGPU carry the fix, so only Julia's own LLVM needs this.
     if target.backend === :inprocess && version >= v"22" &&
        inst.binop == LLVM.AtomicRMWBinOp.USubSat && T isa LLVM.IntegerType && T.width == 32
         as == 0 && return true

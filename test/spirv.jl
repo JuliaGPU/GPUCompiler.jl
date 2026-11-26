@@ -93,13 +93,13 @@ end
     @test @filecheck begin
         @check_label "define spir_kernel void @_Z6kernel"
         @check "gpu_report_exception_name("
-        @check_same cond=opaque_ptrs "ptr addrspace(1) @exception"
-        @check_same cond=typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @exception"
+        @check_same cond=gpu_opaque_ptrs "ptr addrspace(1) @exception"
+        @check_same cond=gpu_typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @exception"
         @check "gpu_report_exception_frame(i32 1,"
-        @check_same cond=opaque_ptrs "ptr addrspace(1) @di_func"
-        @check_same cond=opaque_ptrs "ptr addrspace(1) @di_file"
-        @check_same cond=typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @di_func"
-        @check_same cond=typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @di_file"
+        @check_same cond=gpu_opaque_ptrs "ptr addrspace(1) @di_func"
+        @check_same cond=gpu_opaque_ptrs "ptr addrspace(1) @di_file"
+        @check_same cond=gpu_typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @di_func"
+        @check_same cond=gpu_typed_ptrs "i8 addrspace(1)* getelementptr inbounds ({{.*}} @di_file"
         SPIRV.code_llvm(mod.kernel, Tuple{}; backend, kernel=true, debug_level=2, optimize=false)
     end
 
@@ -348,8 +348,11 @@ end
                                        kernel=true, backend)
         JuliaContext() do ctx
             ir, meta = GPUCompiler.compile(:llvm, job; kwargs...)
-            @test all(!endswith(gv.name, "_box") for gv in ir.globals)
-            @test [f for f in ir.functions if !LLVM.isdeclaration(f)] == [meta.entry]
+            # (with the llvmgpu toolchain, the IR belongs to another LLVM library)
+            context!(context(ir)) do
+                @test all(!endswith(gv.name, "_box") for gv in ir.globals)
+                @test [f for f in ir.functions if !LLVM.isdeclaration(f)] == [meta.entry]
+            end
             dispose(ir)
         end
 

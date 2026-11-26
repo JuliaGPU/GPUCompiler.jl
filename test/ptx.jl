@@ -68,7 +68,7 @@ end
     types = Tuple{Ptr{Float32},Ptr{Float32},Ptr{Float32},Int,Int,Int,Int}
 
     # the check's side exit is weighed as unlikely, which lets LLVM 23+ runtime-unroll the loop
-    if LLVM.version() >= v"23"
+    if llvmgpu || LLVM.version() >= v"23"
         @test @filecheck begin
             @check_label "define void @{{.*}}dot"
             @check "epil"
@@ -575,15 +575,15 @@ end
 
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
-        @check_same cond=typed_ptrs "({{({ i64 }|\\[1 x i64\\])}}*"
-        @check_same cond=opaque_ptrs "(ptr"
+        @check_same cond=gpu_typed_ptrs "({{({ i64 }|\\[1 x i64\\])}}*"
+        @check_same cond=gpu_opaque_ptrs "(ptr"
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; backend)
     end
 
     @test @filecheck begin
         @check_label "define ptx_kernel void @_Z6kernel9Aggregate"
-        @check_not cond=typed_ptrs "*"
-        @check_not cond=opaque_ptrs "ptr"
+        @check_not cond=gpu_typed_ptrs "*"
+        @check_not cond=gpu_opaque_ptrs "ptr"
         PTX.code_llvm(mod.kernel, Tuple{mod.Aggregate}; backend, kernel=true)
     end
 end
@@ -1164,7 +1164,9 @@ end
             @check_not cond=!fastmath "denormal-fp-math-f32"
             @check     cond=!fastmath "call float @llvm.sqrt.f32"
             @check     cond=fastmath  "call fast float @llvm.sqrt.f32"
-            @check     cond=fastmath  "\"denormal-fp-math-f32\"=\"preserve-sign,preserve-sign\""
+            # (libLLVMGPU upgrades the string attribute to `denormal_fpenv`)
+            @check     cond=fastmath&&!llvmgpu "\"denormal-fp-math-f32\"=\"preserve-sign,preserve-sign\""
+            @check     cond=fastmath&&llvmgpu  "denormal_fpenv(float: preservesign)"
             @check     cond=fastmath  "\"unsafe-fp-math\"=\"true\""
             unsafe_store!(out, sqrt(unsafe_load(x)))
             return

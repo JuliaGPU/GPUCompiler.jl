@@ -57,6 +57,10 @@ function optimize!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
         @dispose pb=PassBuilder() begin
             tti === nothing || LLVM.target_transform_info!(pb, tti)
 
+            # Julia's passes (`JuliaIR.AllocOptPass()` etc.) are its C++ passes when
+            # constructed in Julia's LLVM, and JuliaIR.jl's ports of them in another library
+            # (where the module optimized here may live, see `llvm_library`)
+            JuliaIR.register!(pb)
             register!(pb, GPULowerCPUFeaturesPass(job))
             register!(pb, GPULowerPTLSPass(job))
             register!(pb, GPULowerGCFramePass(job, relocs))
@@ -127,7 +131,7 @@ end
 function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if should_verify()
         add!(mpm, FunctionPassManager()) do fpm
-            add!(fpm, GCInvariantVerifierPass())
+            add!(fpm, JuliaIR.GCInvariantVerifierPass())
         end
         add!(mpm, VerifierPass())
     end
@@ -141,7 +145,7 @@ function buildEarlySimplificationPipeline(mpm, @nospecialize(job::CompilerJob), 
         add!(fpm, LowerExpectIntrinsicPass())
         add!(fpm, AnnotateThrowBranchesPass())
         if opt_level >= 2
-            add!(fpm, PropagateJuliaAddrspacesPass())
+            add!(fpm, JuliaIR.PropagateJuliaAddrspacesPass())
         end
         # DCE must come before simplifycfg: codegen can generate unused
         # statements that would otherwise alter how simplifycfg optimizes the CFG.
@@ -174,7 +178,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
         end
         if opt_level >= 2
             add!(cgpm, FunctionPassManager()) do fpm
-                add!(fpm, AllocOptPass())
+                add!(fpm, JuliaIR.AllocOptPass())
             end
         end
     end
@@ -192,7 +196,7 @@ function buildEarlyOptimizerPipeline(mpm, @nospecialize(job::CompilerJob), opt_l
                 add!(fpm, LibCallsShrinkWrapPass())
                 add!(fpm, ReassociatePass())
                 add!(fpm, ConstraintEliminationPass())
-                add!(fpm, AllocOptPass())
+                add!(fpm, JuliaIR.AllocOptPass())
             else
                 add!(fpm, EarlyCSEPass())
                 add!(fpm, instcombine_pass(job))
@@ -273,17 +277,17 @@ AnnotateThrowBranchesPass() = FunctionPass("GPUAnnotateThrowBranches", annotate_
 
 function buildLoopOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
-        add!(lpm, LowerSIMDLoopPass())
+        add!(lpm, JuliaIR.LowerSIMDLoopPass())
         if opt_level >= 2
             add!(lpm, LoopInstSimplifyPass())
             add!(lpm, LoopSimplifyCFGPass())
             # run LICM with AllowSpeculation=false before rotation to avoid
             # speculating loads that rotation can hoist more precisely.
             add!(lpm, LICMPass(; allowspeculation=false))
-            add!(lpm, JuliaLICMPass())
+            add!(lpm, JuliaIR.JuliaLICMPass())
             add!(lpm, LoopRotatePass())
             add!(lpm, LICMPass())
-            add!(lpm, JuliaLICMPass())
+            add!(lpm, JuliaIR.JuliaLICMPass())
             add!(lpm, SimpleLoopUnswitchPass(nontrivial=true, trivial=true))
         end
         if LLVM.version() >= v"17"
@@ -330,7 +334,7 @@ end
 
 function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
     if opt_level >= 2
-        add!(fpm, AllocOptPass())
+        add!(fpm, JuliaIR.AllocOptPass())
         add!(fpm, SROAPass())
         if can_vectorize(job)
             add!(fpm, VectorCombinePass())
@@ -348,7 +352,7 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
         add!(fpm, JumpThreadingPass())
         add!(fpm, ConstraintEliminationPass())
     elseif opt_level >= 1
-        add!(fpm, AllocOptPass())
+        add!(fpm, JuliaIR.AllocOptPass())
         add!(fpm, SROAPass())
         add!(fpm, MemCpyOptPass())
         add!(fpm, SCCPPass())
@@ -361,10 +365,10 @@ function buildScalarOptimizerPipeline(fpm, @nospecialize(job::CompilerJob), opt_
             add!(fpm, PeepholeCallbacks(; opt_level))
         end
         add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
-        add!(fpm, AllocOptPass())
+        add!(fpm, JuliaIR.AllocOptPass())
         add!(fpm, LoopPassManager(; use_memory_ssa=true)) do lpm
             add!(lpm, LICMPass())
-            add!(lpm, JuliaLICMPass())
+            add!(lpm, JuliaIR.JuliaLICMPass())
         end
         add!(fpm, simplifycfg_pass(job, AggressiveSimplifyCFGOptions))
         add!(fpm, instcombine_pass(job))
@@ -420,7 +424,7 @@ function buildVectorPipeline(fpm, @nospecialize(job::CompilerJob), opt_level)
 end
 
 function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
-    add!(mpm, RemoveNIPass())
+    add!(mpm, JuliaIR.RemoveNIPass())
 
     # lower GC intrinsics
     if !uses_julia_runtime(job)
@@ -458,24 +462,24 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     add!(mpm, FunctionPassManager()) do fpm
         # lower exception handling
         if uses_julia_runtime(job) && VERSION < v"1.13.0-DEV.36"
-            add!(fpm, LowerExcHandlersPass())
+            add!(fpm, JuliaIR.LowerExcHandlersPass())
         end
-        add!(fpm, GCInvariantVerifierPass())
-        add!(fpm, LateLowerGCPass())
+        add!(fpm, JuliaIR.GCInvariantVerifierPass())
+        add!(fpm, JuliaIR.LateLowerGCPass())
         # FinalLowerGCPass moved from a module pass to a function pass in
         # JuliaLang/julia#51081 (1.11.0-DEV.208).
         if uses_julia_runtime(job) && VERSION >= v"1.11.0-DEV.208"
-            add!(fpm, FinalLowerGCPass())
+            add!(fpm, JuliaIR.FinalLowerGCPass(; kind=:function))
         end
         # codegen emits atomic modifications (e.g. `@atomic x.f += 1`) as calls to the
         # `julia.atomicmodify` pseudo-intrinsic, which Julia expands after GC lowering
         # (JuliaLang/julia#57010)
         @static if VERSION >= v"1.13.0-DEV.321"
-            add!(fpm, ExpandAtomicModifyPass())
+            add!(fpm, JuliaIR.ExpandAtomicModifyPass())
         end
     end
     if uses_julia_runtime(job) && VERSION < v"1.11.0-DEV.208"
-        add!(mpm, FinalLowerGCPass())
+        add!(mpm, JuliaIR.FinalLowerGCPass(; kind=:module))
     end
 
     if opt_level >= 2
@@ -489,7 +493,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
 
     # lower PTLS intrinsics
     if uses_julia_runtime(job)
-        add!(mpm, LowerPTLSPass())
+        add!(mpm, JuliaIR.LowerPTLSPass())
     end
 
     if opt_level >= 1
@@ -507,7 +511,7 @@ function buildIntrinsicLoweringPipeline(mpm, @nospecialize(job::CompilerJob), op
     end
 
     # remove Julia address spaces
-    add!(mpm, RemoveJuliaAddrspacesPass())
+    add!(mpm, JuliaIR.RemoveJuliaAddrspacesPass())
 
     # Julia's operand bundles confuse the inliner, so repeat here now they are gone.
     # FIXME: we should fix the inliner so that inlined code gets optimized early-on
@@ -521,7 +525,7 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
     if opt_level >= 2
         add!(mpm, FunctionPassManager()) do fpm
             if VERSION < v"1.12.0-DEV.1390"
-                add!(fpm, CombineMulAddPass())
+                add!(fpm, JuliaIR.CombineMulAddPass())
             end
             add!(fpm, DivRemPairsPass())
         end
@@ -533,7 +537,7 @@ function buildCleanupPipeline(mpm, @nospecialize(job::CompilerJob), opt_level)
         add!(fpm, AnnotationRemarksPass())
     end
     add!(mpm, FunctionPassManager()) do fpm
-        add!(fpm, DemoteFloat16Pass())
+        add!(fpm, JuliaIR.DemoteFloat16Pass())
     end
 end
 

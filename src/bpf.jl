@@ -11,6 +11,8 @@ end
 llvm_triple(::BPFCompilerTarget) = "bpf-bpf-bpf"
 llvm_datalayout(::BPFCompilerTarget) = "e-m:e-p:64:64-i64:64-n32:64-S128"
 
+llvm_library(::BPFCompilerTarget) = toolchain_library()
+
 function llvm_machine(target::BPFCompilerTarget)
     triple = llvm_triple(target)
     t = lookup_target(triple)

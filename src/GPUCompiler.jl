@@ -61,6 +61,7 @@ include("mangling.jl")
 
 # compiler interface and implementations
 include("interface.jl")
+include("toolchain.jl")
 include("relocation.jl")
 include("atomics.jl")
 include("error.jl")
@@ -96,6 +97,7 @@ include("precompile.jl")
 function __init__()
     STDERR_HAS_COLOR[] = get(stderr, :color, false)
     empty!(session_results_cache)
+    llvmgpu_state_ref[] = nothing
 
     @static if !HAS_INTEGRATED_CACHE
         # CodeInstances created by GPUCompiler's precompile workload are process-local.

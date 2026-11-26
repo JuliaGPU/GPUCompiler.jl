@@ -1,8 +1,28 @@
-if :AMDGPU in LLVM.backends()
+# (with the llvmgpu toolchain, libLLVMGPU generates the code)
+if llvmgpu || :AMDGPU in LLVM.backends()
+
+# the back-ends to test. the llvmgpu toolchain only supports :external, whose code
+# libLLVMGPU generates.
+const gcn_backends = llvmgpu ? (:external,) : (:inprocess, :external)
 
 # XXX: generic `sink` generates an instruction selection error
 sink_gcn(i) = sink(i, Val(5))
 
+if llvmgpu
+@testset "backend selector" begin
+    # libLLVMGPU generates the code, as the external back-end
+    @test GCNCompilerTarget(dev_isa="gfx900").backend === :external
+    @test_throws "only supports `backend=:external`" GCNCompilerTarget("gfx900"; backend=:inprocess)
+    @test_throws "only supports `backend=:external`" GCNCompilerTarget("gfx900"; backend=:bogus)
+
+    mod = @eval module $(gensym())
+        kernel() = return
+    end
+    @test (GCN.code_native(devnull, mod.kernel, Tuple{}); true)
+    @test GPUCompiler.backend_llvm_version(GCNCompilerTarget("gfx900")) ==
+          LLVM.version(GPUCompiler.llvm_library(GCNCompilerTarget("gfx900")))
+end
+else
 @testset "backend selector" begin
     # in the test environment AMDGPU_LLVM_Backend_jll is loaded, so the default is :external
     @test GCNCompilerTarget(dev_isa="gfx900").backend === :external
@@ -47,6 +67,7 @@ sink_gcn(i) = sink(i, Val(5))
     @test GPUCompiler.backend_llvm_version(GCNCompilerTarget("gfx900"; backend=:inprocess)) ==
           LLVM.version()
 end
+end
 
 @testset "IR" begin
 
@@ -88,7 +109,7 @@ end
 end
 
 # LLVM 23+ can runtime-unroll a loop with a side exit if that exit is weighed as unlikely
-if LLVM.version() >= v"23"
+if llvmgpu || LLVM.version() >= v"23"
 @testset "bounds-checked loops" begin
     mod = @eval module $(gensym())
         @inline function load(ptr, len, i)
@@ -191,7 +212,7 @@ end
 
 @testset "atomic validation" begin
     # validate textual IR, with AMDGPU's synchronization scopes, for a GCN target
-    function validate_atomics(body; backend=:inprocess)
+    function validate_atomics(body; backend=first(gcn_backends))
         source = methodinstance(typeof(identity), Tuple{Int}, Base.get_world_counter())
         target = GCNCompilerTarget(; dev_isa="gfx90a", backend)
         job = CompilerJob(source, CompilerConfig(target, GCN.CompilerParams(); kernel=true))
@@ -259,8 +280,10 @@ end
     # the cluster scope (the agent on targets without clusters) is only known from LLVM 22
     cluster = "%a = atomicrmw add ptr addrspace(1) %p, i32 1 syncscope(\"cluster\") monotonic, align 4\n" *
               "fence syncscope(\"cluster-one-as\") acquire"
-    @test occursin("synchronization scope \"cluster\"", validate_atomics(cluster)) ==
-          (LLVM.version() < v"22")
+    if !llvmgpu
+        @test occursin("synchronization scope \"cluster\"", validate_atomics(cluster)) ==
+              (LLVM.version() < v"22")
+    end
     @test validate_atomics(cluster; backend=:external) == ""
 end
 
@@ -357,8 +380,8 @@ end
 
     # byref struct params should be ptr addrspace(4) in kernel IR
     @test @filecheck begin
-        @check cond=typed_ptrs "define amdgpu_kernel void @_Z6kernel8MyStruct({{.*}} addrspace(4)*"
-        @check cond=opaque_ptrs "define amdgpu_kernel void @_Z6kernel8MyStruct(ptr addrspace(4)"
+        @check cond=gpu_typed_ptrs "define amdgpu_kernel void @_Z6kernel8MyStruct({{.*}} addrspace(4)*"
+        @check cond=gpu_opaque_ptrs "define amdgpu_kernel void @_Z6kernel8MyStruct(ptr addrspace(4)"
         GCN.code_llvm(mod.kernel, Tuple{mod.MyStruct}; dump_module=true, kernel=true)
     end
 
@@ -412,8 +435,8 @@ end
     @test @filecheck begin
         @check "define amdgpu_kernel void"
         @check_same "double"
-        @check_same cond=typed_ptrs "{{.*}} addrspace(4)*"
-        @check_same cond=opaque_ptrs "ptr addrspace(4)"
+        @check_same cond=gpu_typed_ptrs "{{.*}} addrspace(4)*"
+        @check_same cond=gpu_opaque_ptrs "ptr addrspace(4)"
         @check_same "{{(i64|ptr)}}"
         GCN.code_llvm(mod.kernel, Tuple{Float64, mod.Params, Ptr{Float64}};
                        dump_module=true, kernel=true)
@@ -438,7 +461,7 @@ end
                              kernel=true)
     JuliaContext() do ctx
         ir, meta = GPUCompiler.compile(:llvm, job)
-        @dispose ir=ir begin
+        context!(context(ir)) do
             entry = meta.entry
             ft = entry.function_type
             params = ft.parameters
@@ -456,6 +479,7 @@ end
             ir_str = string(ir)
             @test occursin("byref", ir_str)
         end
+        dispose(ir)
     end
 end
 
@@ -515,7 +539,7 @@ end
         Base.invokelatest(getfield, mod, :kernel), Tuple{Core.LLVMPtr{JT,1},JT}
     end
     f, tt = add_kernel("i128")
-    for backend in (:inprocess, :external)
+    for backend in gcn_backends
         @test_throws_message(InvalidIRError,
                              Base.invokelatest(GCN.code_execution, f, tt; backend)) do msg
             occursin("Reason: unsupported 128-bit atomic operation", msg) &&
@@ -569,6 +593,8 @@ LLVM.version() >= v"20" && @testset "usub_sat atomics" begin
         asm = sprint(io->GCN.code_native(io, f, tt; dev_isa, kernel))
         @test occursin(instruction, asm)
 
+        llvmgpu && continue
+
         # Julia's LLVM needs the workaround from version 22 on
         ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa, kernel, backend=:inprocess))
         @test occursin("atomicrmw usub_sat", ir) == (LLVM.version() < v"22" || !affected)
@@ -580,7 +606,7 @@ LLVM.version() >= v"20" && @testset "usub_sat atomics" begin
     end
 
     # the expansion is a workaround, not part of validation
-    if LLVM.version() >= v"22"
+    if !llvmgpu && LLVM.version() >= v"22"
         f, tt = rmw_kernel(3)
         ir = sprint(io->GCN.code_llvm(io, f, tt; dev_isa="gfx1030", kernel=true,
                                       backend=:inprocess, validate=false))
@@ -621,9 +647,12 @@ end
     end
 
     for (T, op, as) in (("i8", "add", 1), ("i16", "max", 3), ("i8", "umin", 0))
+        @test occursin("atomicrmw $op", rmw_ir(T, op; as, backend=:external))
+    end
+    if !llvmgpu
+    for (T, op, as) in (("i8", "add", 1), ("i16", "max", 3), ("i8", "umin", 0))
         @test occursin("atomicrmw $op", rmw_ir(T, op; as, backend=:inprocess)) ==
               (LLVM.version() >= v"21")
-        @test occursin("atomicrmw $op", rmw_ir(T, op; as, backend=:external))
     end
     # other operations, unused results and wider atomics are unaffected
     @test occursin("atomicrmw xchg", rmw_ir("i8", "xchg"; backend=:inprocess))
@@ -648,6 +677,7 @@ end
         """
     cmd = `$(Base.julia_cmd()) --project=$(Base.active_project()) -e $script`
     @test success(pipeline(cmd; stdout, stderr))
+    end
 end
 
 @testset "s_load for kernarg struct access" begin
@@ -998,7 +1028,8 @@ end
     @test @filecheck begin
         @check_label "define float @{{(julia|j)_scratch_[0-9]+}}"
         @check "alloca [8 x i32], align 4, addrspace(5)"
-        @check_not "addrspacecast"
+        # (Julia's IR printer hides the casts to Julia's address spaces, LLVM's doesn't)
+        @check_not cond=!llvmgpu "addrspacecast"
         @check_not "julia.gpu.alloca"
         GCN.code_llvm(mod.scratch, Tuple{Float32}; optimize=false, dump_module=true)
     end
@@ -1020,4 +1051,4 @@ end
 end
 
 end
-end # :AMDGPU in LLVM.backends()
+end # llvmgpu || :AMDGPU in LLVM.backends()
