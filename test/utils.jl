@@ -424,3 +424,13 @@ end
     @test GPUCompiler.deserves_argbox(BigWithPointer)
     @test !GPUCompiler.deserves_argbox(NTuple{4100, Float64})
 end
+
+# a target that no LLVM library has
+struct UnknownTarget <: GPUCompiler.AbstractCompilerTarget end
+GPUCompiler.llvm_triple(::UnknownTarget) = "unknown-unknown-unknown"
+
+@testset "target machines" begin
+    # targets that the LLVM library lacks have no target machine
+    @test GPUCompiler.llvm_machine(UnknownTarget()) === nothing
+    @test GPUCompiler.with_llvm_machine(tm -> tm isa LLVM.TargetMachine, NativeCompilerTarget())
+end

@@ -13,7 +13,8 @@ llvm_datalayout(::BPFCompilerTarget) = "e-m:e-p:64:64-i64:64-n32:64-S128"
 
 function llvm_machine(target::BPFCompilerTarget)
     triple = llvm_triple(target)
-    t = LLVM.Target(;triple=triple)
+    t = lookup_target(triple)
+    t === nothing && return nothing
 
     cpu = ""
     feat = ""

@@ -23,17 +23,29 @@ source_code(@nospecialize(target::AbstractCompilerTarget)) = "text"
 
 llvm_triple(@nospecialize(target::AbstractCompilerTarget)) = error("Not implemented")
 
-# may return nothing if the target is not support by the current version of LLVM.
+# may return nothing if the target is not supported by the active LLVM library.
 # the caller owns the returned target machine; see `with_llvm_machine`.
 function llvm_machine(@nospecialize(target::AbstractCompilerTarget))
     triple = llvm_triple(target)
 
-    t = LLVM.Target(triple=triple)
+    t = lookup_target(triple)
+    t === nothing && return nothing
 
     tm = LLVM.TargetMachine(t, triple)
     LLVM.asm_verbosity!(tm, true)
 
     return tm
+end
+
+# the target of the active LLVM library for `triple`, or `nothing` if it lacks one
+function lookup_target(triple::String)
+    t = Ref{LLVM.API.LLVMTargetRef}()
+    message = Ref{Cstring}(C_NULL)
+    if LLVM.API.LLVMGetTargetFromTriple(triple, t, message) |> Bool
+        message[] == C_NULL || LLVM.API.LLVMDisposeMessage(message[])
+        return nothing
+    end
+    return LLVM.Target(t[])
 end
 
 # call `f` with a target machine for `target`, or with `nothing` if there is none, and dispose
