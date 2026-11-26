@@ -232,34 +232,48 @@ function register_deferred_codegen()
     return nothing
 end
 
-function initialize_llvm()
-    LLVM.InitializeAllTargets()
-    LLVM.InitializeAllTargetInfos()
-    LLVM.InitializeAllAsmPrinters()
-    LLVM.InitializeAllAsmParsers()
-    LLVM.InitializeAllTargetMCs()
+# LLVM's target registry isn't thread-safe: registering a target from two threads at once
+# can make the list of targets cyclic, after which every target lookup hangs. so register
+# them when loading GPUCompiler, which also lets `llvm_machine` work before compiling.
+# register them with Julia's library, which GPUCompiler requires as its IR comes from
+# Julia's code generator, even when the `libLLVM` preference makes another the default.
+function initialize_llvm(lib::LLVM.Library=LLVM.Library(:julia))
+    LLVM.library!(lib) do
+        LLVM.InitializeAllTargets()
+        LLVM.InitializeAllTargetInfos()
+        LLVM.InitializeAllAsmPrinters()
+        LLVM.InitializeAllAsmParsers()
+        LLVM.InitializeAllTargetMCs()
+    end
     return
 end
 
-# LLVM's target registry isn't thread-safe: registering a target from two threads at once
-# can make the list of targets cyclic, after which every target lookup hangs.
-@static if isdefined(Base, :OncePerProcess)
-    const ensure_llvm_initialized = Base.OncePerProcess{Nothing}(initialize_llvm)
-else
-    # `@locked` holds the typeinf lock here, which serializes the initialization
-    const __llvm_initialized = Ref(false)
-    function ensure_llvm_initialized()
-        if !__llvm_initialized[]
-            initialize_llvm()
-            __llvm_initialized[] = true
-        end
-        return
+# `__init__` doesn't run while generating output for GPUCompiler itself, or for a system
+# image, so compilations register the targets then. LLVM's initializers write to the
+# registry every time, so only do so once per process, as concurrent compilations may be
+# using it. they may run in generated functions, so use a lock that doesn't yield, and
+# look up the library (which may) outside of it.
+const llvm_init_lock = Threads.SpinLock()
+# whether this process registered them, as a pointer, which images reset to `C_NULL`
+mutable struct LLVMInitState
+    @atomic initialized::Ptr{Cvoid}
+end
+const llvm_init_state = LLVMInitState(C_NULL)
+llvm_initialized() = (@atomic :acquire llvm_init_state.initialized) != C_NULL
+mark_llvm_initialized() = @atomic :release llvm_init_state.initialized = Ptr{Cvoid}(1)
+function initialize_llvm_for_output()
+    llvm_initialized() && return
+    lib = LLVM.Library(:julia)
+    Base.@lock llvm_init_lock begin
+        llvm_initialized() || initialize_llvm(lib)
+        mark_llvm_initialized()
     end
+    return
 end
 
 @locked function emit_llvm(@nospecialize(job::CompilerJob);
                            resolve_relocations::Bool=true)
-    ensure_llvm_initialized()
+    ccall(:jl_generating_output, Cint, ()) == 1 && initialize_llvm_for_output()
 
     @tracepoint "IR generation" begin
         ir, compiled, relocations = irgen(job)

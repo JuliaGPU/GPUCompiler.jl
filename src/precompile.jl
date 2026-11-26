@@ -80,9 +80,4 @@ import REPL
         split_kwargs((:(a = 1), :(b = 2)), [:a], [:c])
         assign_args!(quote end, Any[:x, :(y...)])
     end
-
-    # reset state that was initialized during precompilation
-    @static if !isdefined(Base, :OncePerProcess)
-        __llvm_initialized[] = false
-    end
 end

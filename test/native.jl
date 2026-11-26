@@ -28,9 +28,9 @@ import InteractiveUtils
 end
 
 @testset "concurrent first compilation" begin
-    # LLVM's targets are initialized on first compilation, which must happen only once even
-    # when several threads start compiling at the same time. a corrupted target registry
-    # hangs target lookups, so this runs in a separate process that we can kill.
+    # threads that compile at the same time look up LLVM targets, which must not be
+    # registered concurrently. a corrupted target registry hangs target lookups, so this
+    # runs in a separate process that we can kill.
     script = """
         using GPUCompiler, LLVM
         include($(repr(joinpath(@__DIR__, "helpers", "runtime.jl"))))
@@ -58,6 +58,24 @@ end
     # a process with threads stuck in LLVM doesn't respond to SIGTERM
     timedwait(() -> !process_running(proc), 600) === :ok || kill(proc, Base.SIGKILL)
     @test success(proc)
+end
+
+@testset "target machine before compiling" begin
+    # LLVM's targets are registered when GPUCompiler is loaded. Julia only registers the
+    # native one, so check another.
+    script = """
+        using GPUCompiler, LLVM
+        tm = GPUCompiler.llvm_machine(PTXCompilerTarget(cap=v"7.0"))
+        tm isa LLVM.TargetMachine || exit(1)
+        LLVM.dispose(tm)
+        """
+    cmd = `$(Base.julia_cmd()) --code-coverage=none --startup-file=no
+           --project=$(Base.active_project()) -e $script`
+    if :NVPTX in LLVM.backends()
+        @test success(pipeline(cmd; stdout, stderr))
+    else
+        @test_skip success(pipeline(cmd; stdout, stderr))
+    end
 end
 
 @testset "compile do-block" begin
