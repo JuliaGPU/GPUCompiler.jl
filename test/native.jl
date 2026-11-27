@@ -1217,6 +1217,86 @@ end
     end
 end
 
+@testset "signed remainder" begin
+    mod = @eval module $(gensym())
+        # an index is never `typemin`, so nothing guards the remainder
+        index_rem(i::UInt32, y::Int64) = rem(Int64(i), y)
+
+        function rems!(out::Ptr{T}, xs::Ptr{T}, ys::Ptr{T}, n::Int) where {T}
+            for i in 1:n
+                unsafe_store!(out, rem(unsafe_load(xs, i), unsafe_load(ys, i)), i)
+            end
+            return
+        end
+    end
+
+    @test @filecheck begin
+        @check_label "define {{.*}}index_rem"
+        @check_not "-1"
+        @check "srem i64"
+        @check_not "phi"
+        @check "ret i64"
+        Native.code_llvm(mod.index_rem, Tuple{UInt32, Int64})
+    end
+
+    # the rewrite itself: the guard tests the frozen numerator that the `srem` divides, and
+    # a join block that tells the two paths apart by anything else is left alone
+    function narrowed(extra_phi)
+        Context() do ctx
+            ir = parse(LLVM.Module, """
+                define i64 @f(i64 %x, i64 %y, i64 %z) {
+                top:
+                  %m1 = icmp eq i64 %y, -1
+                  br i1 %m1, label %minus1, label %oksrem
+                minus1:
+                  br label %after
+                oksrem:
+                  %r = srem i64 %x, %y
+                  br label %after
+                after:
+                  %v = phi i64 [ 0, %minus1 ], [ %r, %oksrem ]
+                  $(extra_phi ? "%w = phi i64 [ %z, %minus1 ], [ 0, %oksrem ]" : "")
+                  ret i64 %v
+                }""")
+            GPUCompiler.narrow_srem_guards!(ir)
+            string(ir)
+        end
+    end
+    @test @filecheck begin
+        @check "%[[X:.+]] = freeze i64 %x"
+        @check "icmp eq i64 %[[X]], -9223372036854775808"
+        @check "srem i64 %[[X]], %y"
+        narrowed(false)
+    end
+    @test @filecheck begin
+        @check_not "freeze"
+        @check "br i1 %m1"
+        narrowed(true)
+    end
+
+    # only `typemin(T) % -1` overflows `srem`, and must still return 0
+    for T in (Int8, Int16, Int32, Int64, Int128)
+        vals = T[typemin(T), typemin(T) + 1, -7, -1, 0, 1, 7, typemax(T)]
+        divs = filter(!iszero, vals)
+        xs = repeat(vals, outer=length(divs))
+        ys = repeat(divs, inner=length(vals))
+        out = similar(xs)
+
+        job, _ = Native.create_job(mod.rems!, Tuple{Ptr{T}, Ptr{T}, Ptr{T}, Int};
+                                   validate=false)
+        obj, entry = GPUCompiler.compile(:obj, job) do obj, meta
+            Vector{UInt8}(codeunits(obj)), meta.entry.name
+        end
+        fptr, lljit, _ = Native.load(obj, entry, GPUCompiler.Relocations())
+        @dispose lljit=lljit begin
+            GC.@preserve out xs ys ccall(fptr, Cvoid,
+                                         (Ptr{Cvoid}, Ptr{Cvoid}, Ptr{Cvoid}, Int),
+                                         out, xs, ys, length(xs))
+        end
+        @test out == rem.(xs, ys)
+    end
+end
+
 @testset "bounds checks against a fresh array" begin
     # the bound of a loop over a fresh array is the product of the sizes its constructor
     # stored; those have to be forwarded into the bounds checks before IndVarSimplify

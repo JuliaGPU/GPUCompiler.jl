@@ -162,6 +162,11 @@ function irgen(@nospecialize(job::CompilerJob))
         # materialize `GPUCompiler.alloca` intrinsics as real entry-block allocas, before the
         # optimizer runs so the slots can be promoted (see `lower_alloca!`).
         lower_alloca!(job, mod)
+
+        # Julia 1.15 emits the narrowed guard itself (JuliaLang/julia#65218)
+        @static if VERSION < v"1.15.0-DEV.1007"
+            narrow_srem_guards!(mod)
+        end
     end
 
     return mod, compiled, relocations
@@ -1224,6 +1229,100 @@ function lower_debug_level!(@nospecialize(job::CompilerJob), mod::LLVM.Module)
     erase!(intr)
 
     return true
+end
+
+
+## signed remainder
+
+# `rem(x, y)` on signed integers must return 0 for `typemin(T) % -1`, where LLVM's `srem`
+# overflows. Julia's codegen (`emit_checked_srem_int`) therefore skips the `srem` for every
+# divisor of -1:
+#
+#       %m1 = icmp eq iN %y, -1
+#       br i1 %m1, label %minus1, label %oksrem
+#   minus1:
+#       br label %after
+#   oksrem:
+#       %r = srem iN %x, %y
+#       br label %after
+#   after:
+#       %v = phi iN [ 0, %minus1 ], [ %r, %oksrem ]
+#
+# Keeping the `srem` conditional can block CSE of identical remainders, hoisting, and pairing
+# with an `sdiv` of the same operands. Only `(typemin(T), -1)` overflows, and
+# `x % -1 == 0` for every other `x`, so we narrow the guard to that pair. LLVM then drops it
+# whenever either operand rules the pair out (e.g. a zero-extended index), leaving a plain
+# `srem`. This runs on Julia's unoptimized IR, where the pattern is still intact.
+#
+# Julia 1.15 emits the narrowed guard itself (JuliaLang/julia#65218), so this pass only runs
+# on older versions and can go once those are no longer supported.
+function narrow_srem_guards!(mod::LLVM.Module)
+    changed = false
+    @dispose builder=IRBuilder() begin
+        for f in mod.functions, bb in f.blocks
+            br = LLVM.terminator(bb)
+            br isa LLVM.BrInst && LLVM.isconditional(br) || continue
+            cond = LLVM.condition(br)
+            cond isa LLVM.ICmpInst && LLVM.predicate(cond) == LLVM.API.LLVMIntEQ || continue
+            y, minus1 = LLVM.operands(cond)
+            T = LLVM.value_type(y)
+            T isa LLVM.IntegerType && minus1 == LLVM.all_ones(T) || continue
+
+            # the remainder block: only the `srem`, falling through to the join block
+            succ_m1, succ_rem = LLVM.successors(br)
+            insts = collect(LLVM.instructions(succ_rem))
+            length(insts) == 2 || continue
+            r, jump = insts
+            r isa LLVM.Instruction && LLVM.opcode(r) == LLVM.API.LLVMSRem || continue
+            LLVM.operands(r)[2] == y || continue
+            jump isa LLVM.BrInst && !LLVM.isconditional(jump) || continue
+            join = only(LLVM.successors(jump))
+            length(LLVM.predecessors(succ_rem)) == 1 || continue
+
+            # the -1 edge reaches the join block directly or through an empty block
+            if succ_m1 == join
+                m1_pred = bb
+            elseif length(collect(LLVM.instructions(succ_m1))) == 1 &&
+                   LLVM.terminator(succ_m1) isa LLVM.BrInst &&
+                   !LLVM.isconditional(LLVM.terminator(succ_m1)) &&
+                   only(LLVM.successors(LLVM.terminator(succ_m1))) == join
+                m1_pred = succ_m1
+            else
+                continue
+            end
+
+            # the join block may only distinguish the two paths by the remainder,
+            # which is 0 on the -1 edge
+            ok = true
+            for phi in LLVM.instructions(join)
+                phi isa LLVM.PHIInst || break
+                v_m1 = v_rem = nothing
+                for (val, blk) in LLVM.incoming(phi)
+                    blk == m1_pred && (v_m1 = val)
+                    blk == succ_rem && (v_rem = val)
+                end
+                if v_m1 === nothing || v_rem === nothing
+                    ok = false
+                elseif v_rem == r
+                    ok &= v_m1 == LLVM.null(T)
+                else
+                    ok &= v_m1 == v_rem
+                end
+            end
+            ok || continue
+
+            # the -1 path didn't use `x`, which may thus be poison there, and branching on
+            # poison is UB. freeze it, and have the `srem` use the frozen value too.
+            position!(builder, LLVM.before(br))
+            x = LLVM.freeze!(builder, LLVM.operands(r)[1])
+            LLVM.operands(r)[1] = x
+            tmin = ConstantInt(T, big(1) << (LLVM.width(T) - 1))
+            overflows = and!(builder, cond, icmp!(builder, LLVM.API.LLVMIntEQ, x, tmin))
+            LLVM.condition!(br, overflows)
+            changed = true
+        end
+    end
+    return changed
 end
 
 
