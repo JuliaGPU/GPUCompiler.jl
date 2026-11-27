@@ -210,3 +210,36 @@ precompile_test_harness("Duplicate CodeInstances") do load_path
         end
     end
 end
+
+precompile_test_harness("Deferred codegen") do load_path
+    create_standalone(load_path, "DeferredCompiler", "native.jl")
+    write(joinpath(load_path, "DeferredKernels.jl"), :(
+        module DeferredKernels
+        import DeferredCompiler, GPUCompiler
+        child(p) = (unsafe_store!(p, 42); return)
+        parent(p) = (unsafe_store!(p, GPUCompiler.deferred_codegen(
+                         Val(typeof(child)), Val(Tuple{Ptr{Int}}))); return)
+        let
+            job, _ = DeferredCompiler.Native.create_job(parent, (Ptr{Ptr{Cvoid}},))
+            precompile(job)
+        end
+        end) |> string)
+    Base.compilecache(Base.PkgId("DeferredKernels"), stderr, stdout)
+
+    @eval let
+        import DeferredCompiler, DeferredKernels
+
+        # the parent is inferred while precompiling, but the child is only requested in the
+        # session that generates code
+        job, _ = DeferredCompiler.Native.create_job(DeferredKernels.parent,
+                                                    (Ptr{Ptr{Cvoid}},))
+        parent_mi = GPUCompiler.methodinstance(typeof(DeferredKernels.parent),
+                                               Tuple{Ptr{Ptr{Cvoid}}})
+        @test check_presence(parent_mi, GPUCompiler.cache_owner(job))
+        JuliaContext() do ctx
+            ir, meta = GPUCompiler.compile(:llvm, job)
+            child = only(f for f in LLVM.functions(ir) if occursin("child", LLVM.name(f)))
+            @test occursin(LLVM.name(child), string(meta.entry))
+        end
+    end
+end

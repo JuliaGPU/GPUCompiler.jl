@@ -3405,6 +3405,127 @@ end
     end
 end
 
+@testset "deferred codegen" begin
+    mod = @eval module $(gensym())
+        import ..GPUCompiler: deferred_codegen
+        import ..Enzyme
+        # children are identified by the value they store
+        a(p) = (unsafe_store!(p, 1); return)
+        b(p) = (unsafe_store!(p, 2); return)
+        req(f) = deferred_codegen(Val(typeof(f)), Val(Tuple{Ptr{Int}}))
+        function parent(p)
+            unsafe_store!(p, req(a), 1)
+            unsafe_store!(p, req(b), 2)
+            return
+        end
+
+        # children requesting a shared and a distinct grandchild
+        g(p) = (unsafe_store!(p, 3); return)
+        h(p) = (unsafe_store!(p, 4); return)
+        c1(p) = (unsafe_store!(Ptr{Ptr{Cvoid}}(p), req(g)); return)
+        c2(p) = (unsafe_store!(Ptr{Ptr{Cvoid}}(p), req(g), 1);
+                 unsafe_store!(Ptr{Ptr{Cvoid}}(p), req(h), 2); return)
+        function nested(p)
+            unsafe_store!(p, req(c1), 1)
+            unsafe_store!(p, req(c2), 2)
+            return
+        end
+
+        # inlining the request at the call site
+        forced(p) = (unsafe_store!(p, @inline(req(a))); return)
+
+        # a job registered by a back-end, under an id with the sign bit set (like an address
+        # on a 32-bit system)
+        const legacy_id = typemin(Int) + 42
+        legacy(p) = (unsafe_store!(p, ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid},
+                                            (Int,), legacy_id)); return)
+
+        # a request in code that a sibling compiler compiles
+        sibling(p) = (unsafe_store!(p, req(a)); return)
+        function via_sibling(p)
+            ptr = Enzyme.deferred_codegen(typeof(sibling), Tuple{Ptr{Ptr{Cvoid}}})
+            ccall(ptr, Cvoid, (Ptr{Ptr{Cvoid}},), p)
+            return
+        end
+    end
+    llvm(f) = sprint(io->Native.code_llvm(io, f, Tuple{Ptr{Ptr{Cvoid}}};
+                                          debuginfo=:none, dump_module=true))
+    # the function that stores `n`, and the code of a function
+    child(ir, n) = match(Regex("define internal void @([^(]+)\\([^\\n]*\\n[^}]*?store i$(Sys.WORD_SIZE) $n,"), ir)
+    body(ir, name) = match(Regex("define [^\\n]*@$name[^\\n]*\\n[^}]*"), ir).match
+
+    # every request resolves to its own child
+    ir = llvm(mod.parent)
+    @test !occursin("deferred_codegen", ir)
+    a, b = child(ir, 1)[1], child(ir, 2)[1]
+    code = body(ir, "(julia|j)_parent")
+    @test 0 < findfirst(a, code)[1] < findfirst(b, code)[1]
+
+    # children's requests are resolved too, sharing a grandchild they both request
+    ir = llvm(mod.nested)
+    @test !occursin("deferred_codegen", ir)
+    g, h = child(ir, 3)[1], child(ir, 4)[1]
+    @test count(Regex("define internal void @[^(]+\\([^\\n]*\\n[^}]*?store i$(Sys.WORD_SIZE) 3,"), ir) == 1
+    c1 = body(ir, "(julia|j)_c1")
+    c2 = body(ir, "(julia|j)_c2")
+    @test occursin(g, c1) && !occursin(h, c1)
+    @test 0 < findfirst(g, c2)[1] < findfirst(h, c2)[1]
+
+    # a request that is inlined at the call site
+    ir = llvm(mod.forced)
+    @test !occursin("deferred_codegen", ir)
+    @test child(ir, 1) !== nothing
+
+    # children are compiled with the entry's ABI
+    ir = sprint(io->Native.code_llvm(io, mod.parent, Tuple{Ptr{Ptr{Cvoid}}}; entry_abi=:func,
+                                     debuginfo=:none, dump_module=true))
+    @test !occursin("deferred_codegen", ir)
+    @test occursin("store i$(Sys.WORD_SIZE) 1,", ir) && occursin("store i$(Sys.WORD_SIZE) 2,", ir)
+
+    ir = llvm(mod.via_sibling)
+    @test !occursin("deferred_codegen", ir)
+    @test child(ir, 1) !== nothing
+
+    GPUCompiler.deferred_codegen_jobs[mod.legacy_id] = (; ft=typeof(mod.b), tt=Tuple{Ptr{Int}})
+    try
+        ir = llvm(mod.legacy)
+        @test !occursin("deferred_codegen", ir)
+        @test child(ir, 2) !== nothing
+    finally
+        delete!(GPUCompiler.deferred_codegen_jobs, mod.legacy_id)
+    end
+end
+
+@testset "concurrent deferred codegen" begin
+    # requests used to be registered while inferring the caller, which happens concurrently
+    script = """
+        using GPUCompiler
+        include($(repr(joinpath(@__DIR__, "helpers", "runtime.jl"))))
+        include($(repr(joinpath(@__DIR__, "helpers", "native.jl"))))
+        const N = 32
+        for i in 1:N
+            @eval \$(Symbol(:child, i))(p) = (unsafe_store!(p, \$i); return)
+            @eval \$(Symbol(:parent, i))(p) = (unsafe_store!(p,
+                GPUCompiler.deferred_codegen(Val(typeof(\$(Symbol(:child, i)))),
+                                             Val(Tuple{Ptr{Int}}))); return)
+        end
+        go = Threads.Atomic{Bool}(false)
+        tasks = map(1:N) do i
+            Threads.@spawn begin
+                while !go[]; GC.safepoint(); end
+                sprint(io -> Native.code_llvm(io, getfield(Main, Symbol(:parent, i)),
+                                              Tuple{Ptr{Ptr{Cvoid}}}; dump_module=true))
+            end
+        end
+        go[] = true
+        irs = fetch.(tasks)
+        all(i -> occursin("store i\$(Sys.WORD_SIZE) \$i,", irs[i]), 1:N) || exit(1)
+        """
+    cmd = `$(Base.julia_cmd()) --code-coverage=none --startup-file=no
+           --project=$(Base.active_project()) --threads=8 -e $script`
+    @test success(pipeline(cmd; stdout, stderr))
+end
+
 @testset "Mock Enzyme" begin
     function kernel(a)
         a[1] = a[1]^2
