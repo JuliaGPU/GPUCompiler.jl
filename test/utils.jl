@@ -424,3 +424,41 @@ end
     @test GPUCompiler.deserves_argbox(BigWithPointer)
     @test !GPUCompiler.deserves_argbox(NTuple{4100, Float64})
 end
+
+# a target that no LLVM library has
+struct UnknownTarget <: GPUCompiler.AbstractCompilerTarget end
+GPUCompiler.llvm_triple(::UnknownTarget) = "unknown-unknown-unknown"
+
+@testset "target machines" begin
+    # targets that the LLVM library lacks have no target machine
+    @test GPUCompiler.llvm_machine(UnknownTarget()) === nothing
+    @test GPUCompiler.with_llvm_machine(tm -> tm isa LLVM.TargetMachine, NativeCompilerTarget())
+end
+
+@testset "back-end LLVM versions" begin
+    # the back-end libraries report the version of their LLVM (with the llvmgpu toolchain,
+    # libLLVMGPU generates the code; see test/toolchain.jl)
+    function library_version(library, prefix)
+        major, minor, patch = Ref{Cuint}(), Ref{Cuint}(), Ref{Cuint}()
+        Libdl = GPUCompiler.Libdl
+        f = Libdl.dlsym(Libdl.dlopen(library), "$(prefix)GetLLVMVersion")
+        ccall(f, Cvoid, (Ref{Cuint}, Ref{Cuint}, Ref{Cuint}), major, minor, patch)
+        VersionNumber(major[], minor[], patch[])
+    end
+    if !llvmgpu && NVPTX_LLVM_Backend_jll.is_available()
+        @test GPUCompiler.backend_llvm_version(PTXCompilerTarget(; cap=v"7.0")) ==
+              library_version(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX")
+    end
+    if !llvmgpu && SPIRV_LLVM_Backend_jll.is_available()
+        @test GPUCompiler.backend_llvm_version(SPIRVCompilerTarget(; backend=:llvm)) ==
+              library_version(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV")
+    end
+    @test GPUCompiler.backend_llvm_version(NativeCompilerTarget()) == LLVM.version()
+
+    # code generators that aren't LLVM
+    @test GPUCompiler.backend_llvm_version(PTXCompilerTarget(; cap=v"7.0", backend=:nvvm)) ===
+          nothing
+    @test GPUCompiler.backend_llvm_version(SPIRVCompilerTarget(; backend=:khronos)) === nothing
+    @test GPUCompiler.backend_llvm_version(
+        MetalCompilerTarget(; macos=v"15", metal=v"3.2", air=v"2.7")) === nothing
+end

@@ -18,19 +18,28 @@ export JuliaContext
 # JuliaContext helper below, which returns a local context on Julia 1.9, and the global
 # unique context on all other versions. Once we only support Julia 1.9, we'll deprecate
 # this helper to a regular `Context()` call.
+#
+# The context always belongs to Julia's LLVM, whose code generator GPUCompiler uses, also
+# when it is created while another library is active (e.g. to inspect IR that the
+# `llvmgpu` toolchain returned). With that toolchain, the do-block form also owns a context
+# of libLLVMGPU, which the modules of top-level jobs move to.
 function JuliaContext(; opaque_pointers=nothing)
     # XXX: remove
-    ThreadSafeContext(; opaque_pointers)
+    ThreadSafeContext(; opaque_pointers, library=:julia)
 end
 function JuliaContext(f; kwargs...)
-    ThreadSafeContext(; kwargs...) do ts_ctx
+    ThreadSafeContext(; library=:julia, kwargs...) do ts_ctx
         # for now, also activate the underlying context
         # XXX: this is wrong; we can't expose the underlying LLVM context, but should
         #      instead always go through the callback in order to unlock it properly.
         #      rework this once we depend on Julia 1.9 or later.
         ctx = context(ts_ctx)
         context!(ctx) do
-            f(ctx)
+            TOOLCHAIN === :llvmgpu || return f(ctx)
+            # (activated without switching the current library)
+            @dispose gpu_ctx=Context(; library=llvmgpu_state().library) begin
+                f(ctx)
+            end
         end
     end
 end
@@ -83,8 +92,13 @@ The default [`relocation_lowering`](@ref) strategy resolves Julia-value relocati
 
 The IR in the result (the `:llvm` module, or `meta.ir` and `meta.entry`) lives in the
 LLVM context of the enclosing [`JuliaContext`](@ref) block, and is freed with it. Use it,
-and dispose of it, within that block. The do-block form, `compile(f, target, job)`, takes
-care of both.
+and dispose of it, within that block. With the `llvmgpu` toolchain (see the README), that
+context can belong to libLLVMGPU rather than Julia's LLVM: work with the module and its
+values inside `context!(context(ir)) do ... end`. As with Julia's LLVM, the context is the
+one of that library that the task activated last, which is the block's unless the caller
+created one inside it. The do-block form,
+`compile(f, target, job)`, takes care of all of this, and is the preferred way to use the
+IR.
 """
 function compile(target::Symbol, @nospecialize(job::CompilerJob))
     run_compile_hook(job)
@@ -99,9 +113,10 @@ end
 Compile `job` as `compile(target, job)` does, in an LLVM context of its own, and return
 `f(result, meta)`. `result` is the module for `:llvm`, and the code otherwise.
 
-`f` runs with the context of the IR active, so it can work with the module and its values
-directly. The IR and its context are freed when `f` returns: return only values that don't
-refer to them, e.g., strings, or the code.
+`f` runs with the context of the IR active, whichever LLVM library it belongs to (see the
+`llvmgpu` toolchain in the README), so it can work with the module and its values
+directly. The IR and its context are freed when `f` returns: return only values that
+don't refer to them, e.g., strings, or the code.
 
 ```julia
 compile(:obj, job) do obj, meta
@@ -113,10 +128,12 @@ function compile(f, target::Symbol, @nospecialize(job::CompilerJob))
     return JuliaContext() do _
         result, meta = compile(target, job)
         ir = target === :llvm ? result : meta.ir
-        try
-            f(result, meta)
-        finally
-            dispose(ir)
+        in_context(ir) do
+            try
+                f(result, meta)
+            finally
+                dispose(ir)
+            end
         end
     end
 end
@@ -137,6 +154,11 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);
     if context(; throw_error=false) === nothing
         error("No active LLVM context. Use `JuliaContext()` do-block syntax to create one.")
     end
+    # Julia's code generator only works with Julia's LLVM (e.g. not in the context of IR
+    # that the `llvmgpu` toolchain returned)
+    if context().library !== LLVM.Library(:julia)
+        error("Julia code can only be compiled in a context of Julia's LLVM, not of LLVM library :$(context().library.name); use a `JuliaContext()` block")
+    end
 
     @tracepoint "Validation" begin
         check_method(job)   # not optional
@@ -152,7 +174,7 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);
 
     if output == :llvm
         if job.config.strip
-            @tracepoint "strip debug info" strip_debuginfo!(ir)
+            @tracepoint "strip debug info" in_context(() -> strip_debuginfo!(ir), ir)
         end
 
         return ir, ir_meta
@@ -397,7 +419,7 @@ const __llvm_initialized = Ref(false)
         end
     end
 
-    exception_sites = ExceptionSite[]
+    resolve_early = false
     @tracepoint "IR post-processing" begin
         # mark the kernel entry-point functions (optimization may need it)
         if job.config.kernel
@@ -440,7 +462,37 @@ const __llvm_initialized = Ref(false)
                 prune_dead_relocations!(ir, relocations)
                 bake_relocations!(ir, relocations)
             end
+        end
+    end
 
+    # the rest of the pipeline runs with the LLVM library that optimizes the code (see
+    # `llvm_library`)
+    if uses_llvmgpu(job)
+        # (in a new variable, which the closures above don't capture)
+        moved = @tracepoint "move to libLLVMGPU" move_to_llvmgpu!(ir)
+        # (rebound, as capturing variables that are assigned more than once boxes them)
+        let entry_fn = entry_fn, resolve_early = resolve_early
+            return context!(context(moved)) do
+                # (by name, as `finish_linked_module!` may have replaced `entry`)
+                finish_llvm!(job, moved, moved.functions[entry_fn], entry_fn,
+                             entrypoints, compiled, relocations, has_deferred_jobs,
+                             resolve_early)
+            end
+        end
+    else
+        return finish_llvm!(job, ir, entry, entry_fn, entrypoints, compiled, relocations,
+                            has_deferred_jobs, resolve_early)
+    end
+end
+
+# optimize the linked IR, finalize it for the target, validate it and collect relocations
+function finish_llvm!(@nospecialize(job::CompilerJob), ir::LLVM.Module,
+                      entry::LLVM.Function, entry_fn::String, entrypoints, compiled,
+                      relocations::Relocations, has_deferred_jobs::Bool,
+                      resolve_early::Bool)
+    exception_sites = ExceptionSite[]
+    @tracepoint "IR finalization" begin
+        if job.config.toplevel
             if job.config.optimize
                 @tracepoint "optimization" begin
                     optimize!(job, ir, relocations; job.config.opt_level)
@@ -567,15 +619,18 @@ emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
 
 @locked function emit_asm(@nospecialize(job::CompilerJob), ir::LLVM.Module,
                           relocs::Relocations, format::LLVM.CodeGenFileType.T)
-    # NOTE: strip after validation to get better errors
-    if job.config.strip
-        @tracepoint "Debug info removal" strip_debuginfo!(ir)
-    end
+    # (the module may belong to libLLVMGPU, with the `llvmgpu` toolchain)
+    code = in_context(ir) do
+        # NOTE: strip after validation to get better errors
+        if job.config.strip
+            @tracepoint "Debug info removal" strip_debuginfo!(ir)
+        end
 
-    @tracepoint "LLVM back-end" begin
-        @tracepoint "preparation" prepare_execution!(job, ir, relocs)
+        @tracepoint "LLVM back-end" begin
+            @tracepoint "preparation" prepare_execution!(job, ir, relocs)
 
-        code = @tracepoint "machine-code generation" mcgen(job, ir, format)
+            @tracepoint "machine-code generation" mcgen(job, ir, format)
+        end
     end
 
     return code, (;)

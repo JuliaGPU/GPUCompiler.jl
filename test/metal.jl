@@ -8,16 +8,16 @@
 
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
-        @check_same cond=typed_ptrs "({{(\\{ i64 \\}|\\[1 x i64\\])}}*"
-        @check_same cond=opaque_ptrs "(ptr"
+        @check_same cond=gpu_typed_ptrs "({{(\\{ i64 \\}|\\[1 x i64\\])}}*"
+        @check_same cond=gpu_opaque_ptrs "(ptr"
         Metal.code_llvm(mod.kernel, Tuple{Tuple{Int}})
     end
 
     # for kernels, every pointer argument needs to take an address space
     @test @filecheck begin
         @check_label "define void @_Z6kernel5TupleI5Int64E"
-        @check_same cond=typed_ptrs "({{(\\{ i64 \\}|\\[1 x i64\\])}} addrspace(1)*"
-        @check_same cond=opaque_ptrs "(ptr addrspace(1)"
+        @check_same cond=gpu_typed_ptrs "({{(\\{ i64 \\}|\\[1 x i64\\])}} addrspace(1)*"
+        @check_same cond=gpu_opaque_ptrs "(ptr addrspace(1)"
         Metal.code_llvm(mod.kernel, Tuple{Tuple{Int}}; kernel=true)
     end
 end
@@ -69,8 +69,8 @@ end
     # for kernels, every pointer argument needs to take an address space
     @test @filecheck begin
         @check_label "define void @_Z6kernel5Int64"
-        @check_same cond=typed_ptrs "(i64 addrspace(1)*"
-        @check_same cond=opaque_ptrs "(ptr addrspace(1)"
+        @check_same cond=gpu_typed_ptrs "(i64 addrspace(1)*"
+        @check_same cond=gpu_opaque_ptrs "(ptr addrspace(1)"
         Metal.code_llvm(mod.kernel, Tuple{Int}; kernel=true)
     end
 end
@@ -92,7 +92,7 @@ end
                         Tuple{Core.LLVMPtr{Int32,1}, Core.LLVMPtr{Int32,1}, Int32, Int32, Int};
                         dump_module=true, kernel=true)
     end
-    @test Context() do ctx
+    @test Context(; opaque_pointers=gpu_opaque_ptrs, library=gpu_library()) do ctx
         verify(parse(LLVM.Module, ir))
         true
     end
@@ -126,7 +126,7 @@ end
 
     # (by position, as older Julia versions do not name the parameters)
     function kernel_parameter_attributes(ir)
-        Context() do ctx
+        Context(; opaque_pointers=gpu_opaque_ptrs, library=gpu_library()) do ctx
             m = parse(LLVM.Module, ir)
             f = only(filter(f -> startswith(f.name, "_Z6kernel"), collect(m.functions)))
             [Dict(LLVM.kind(attr) => LLVM.value(attr)
@@ -176,7 +176,7 @@ end
     tt = Tuple{mod.Vec, Int, Int}
 
     ir = sprint(io -> Metal.code_llvm(io, mod.kernel, tt; kernel=true, dump_module=true))
-    Context() do ctx
+    Context(; opaque_pointers=gpu_opaque_ptrs, library=gpu_library()) do ctx
         m = parse(LLVM.Module, ir)
         f = only(filter(f -> startswith(f.name, "_Z6kernel"), collect(m.functions)))
         store = only(inst for bb in f.blocks for inst in bb.instructions
@@ -511,16 +511,16 @@ end
 
     @test @filecheck begin
         @check_label "define void @{{(julia|j)_kernel_[0-9]+}}"
-        @check_same cond=typed_ptrs "({{.+}} addrspace(1)* %{{.+}})"
-        @check_same cond=opaque_ptrs "(ptr addrspace(1) %{{.+}})"
+        @check_same cond=gpu_typed_ptrs "({{.+}} addrspace(1)* %{{.+}})"
+        @check_same cond=gpu_opaque_ptrs "(ptr addrspace(1) %{{.+}})"
         @check "call i32 @julia.air.thread_position_in_threadgroup.i32"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}})
     end
 
     @test @filecheck begin
         @check_label "define void @_Z6kernel7LLVMPtrI5Int64Li1EE"
-        @check_same cond=typed_ptrs "({{.+}} addrspace(1)* %{{.+}}, i32 %thread_position_in_threadgroup)"
-        @check_same cond=opaque_ptrs "(ptr addrspace(1) %{{.+}}, i32 %thread_position_in_threadgroup)"
+        @check_same cond=gpu_typed_ptrs "({{.+}} addrspace(1)* %{{.+}}, i32 %thread_position_in_threadgroup)"
+        @check_same cond=gpu_opaque_ptrs "(ptr addrspace(1) %{{.+}}, i32 %thread_position_in_threadgroup)"
         @check_not "call i32 @julia.air.thread_position_in_threadgroup.i32"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Int,1}}; kernel=true)
     end
@@ -796,17 +796,17 @@ end
     # (`nocapture` having been replaced by `captures(none)` in LLVM 21)
     @test @filecheck begin
         @check "declare float @air.sincos.f32"
-        @check_same cond=typed_ptrs "(float, float* nocapture writeonly)"
-        @check_same cond=(opaque_ptrs && LLVM.version() < v"21") "(float, ptr nocapture writeonly)"
-        @check_same cond=(LLVM.version() >= v"21") "(float, ptr writeonly captures(none))"
+        @check_same cond=gpu_typed_ptrs "(float, float* nocapture writeonly)"
+        @check_same cond=(gpu_opaque_ptrs && LLVM.version(gpu_library()) < v"21") "(float, ptr nocapture writeonly)"
+        @check_same cond=(LLVM.version(gpu_library()) >= v"21") "(float, ptr writeonly captures(none))"
         Metal.code_llvm(mod.kernel, Tuple{Float32}; dump_module=true)
     end
 
     @test @filecheck begin
         @check "declare float @air.fast_sincos.f32"
-        @check_same cond=typed_ptrs "(float, float* nocapture writeonly)"
-        @check_same cond=(opaque_ptrs && LLVM.version() < v"21") "(float, ptr nocapture writeonly)"
-        @check_same cond=(LLVM.version() >= v"21") "(float, ptr writeonly captures(none))"
+        @check_same cond=gpu_typed_ptrs "(float, float* nocapture writeonly)"
+        @check_same cond=(gpu_opaque_ptrs && LLVM.version(gpu_library()) < v"21") "(float, ptr nocapture writeonly)"
+        @check_same cond=(LLVM.version(gpu_library()) >= v"21") "(float, ptr writeonly captures(none))"
         Metal.code_llvm(mod.kernel_fast, Tuple{Float32}; dump_module=true)
     end
 
@@ -1552,7 +1552,9 @@ end
             return
         end
     end
-    if LLVM.version() >= v"17"
+    # (demotion runs with the library that optimizes the kernel; before 1.11, Julia embeds
+    # the box's address instead)
+    if GPUCompiler.supports_relocatable_ir() && LLVM.version(gpu_library()) >= v"17"
         # the box must be demoted, leaving a stack alloca rather than an addrspace(2) constant
         air = sprint() do io
             Metal.code_native(io, mod.kernel, (Core.LLVMPtr{Int64,1}, Bool, Int32); kernel=true)
@@ -1598,8 +1600,8 @@ end
         @check_label "define void @_Z6kernel7LLVMPtrI7Float32Li1EE5Int64"
         # the load must happen in addrspace(2); Metal miscompiles loads of
         # the constant if they occur via an addrspacecast to the generic AS
-        @check cond=opaque_ptrs "load float, ptr addrspace(2)"
-        @check cond=typed_ptrs "load float, float addrspace(2)*"
+        @check cond=gpu_opaque_ptrs "load float, ptr addrspace(2)"
+        @check cond=gpu_typed_ptrs "load float, float addrspace(2)*"
         Metal.code_llvm(mod.kernel, Tuple{Core.LLVMPtr{Float32,1}, Int};
                         dump_module=true, kernel=true)
     end
@@ -3690,9 +3692,11 @@ end
                                 Base.get_world_counter())
         target = MetalCompilerTarget(; macos=v"15", metal=v"3.2", air=v"2.7")
         job = CompilerJob(source, CompilerConfig(target, Metal.CompilerParams(); kernel=true))
+        # (JuliaIR's port of `AllocOpt` removes the object altogether)
         @test @filecheck begin
-            @check "alloca"
-            @check "cmpxchg"
+            @check cond=!llvmgpu "alloca"
+            @check cond=!llvmgpu "cmpxchg"
+            @check_not cond=llvmgpu "cmpxchg"
             GPUCompiler.code_llvm(job; dump_module=true)
         end
         @test @filecheck begin

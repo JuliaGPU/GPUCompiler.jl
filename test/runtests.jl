@@ -66,7 +66,8 @@ if filter_tests!(testsuite, args)
             startswith(key, "ptx") && delete!(testsuite, key)
         end
     end
-    if !AMDGPU_LLVM_Backend_jll.is_available()
+    # (with the llvmgpu toolchain, libLLVMGPU generates the code)
+    if !AMDGPU_LLVM_Backend_jll.is_available() && GPUCompiler.TOOLCHAIN !== :llvmgpu
         @warn "AMDGPU back-end not available; skipping GCN tests"
         delete!(testsuite, "gcn")
     end

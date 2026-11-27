@@ -69,7 +69,10 @@ Base.@kwdef struct SPIRVCompilerTarget <: AbstractCompilerTarget
     # these are performed on `float` (see `widen_bfloat16!`).
     supports_bfloat16_arithmetic::Bool = false
 
-    backend::Symbol = isavailable(SPIRV_LLVM_Backend_jll) ? :llvm : :khronos
+    # the code generator: LLVM's SPIR-V back-end (`:llvm`, from SPIRV_LLVM_Backend_jll, or
+    # with the `llvmgpu` toolchain, libLLVMGPU's) or the Khronos translator (`:khronos`)
+    backend::Symbol = TOOLCHAIN === :llvmgpu || isavailable(SPIRV_LLVM_Backend_jll) ?
+                      :llvm : :khronos
 
     # the driver that will consume the SPIR-V, used to work around its bugs. `:generic` if
     # unknown, `:intel` for Intel's GPU driver (NEO, with IGC), `:pocl`, `:nvidia`, ...
@@ -93,8 +96,35 @@ function llvm_triple(target::SPIRVCompilerTarget)
     end
 end
 
-# SPIRV is not supported by our LLVM builds, so we can't get a target machine
-llvm_machine(::SPIRVCompilerTarget) = nothing
+# Julia's LLVM does not have the SPIR-V target, so we can't get a target machine, except
+# from libLLVMGPU. the Khronos translator takes `spir` modules, for which there's no target
+# machine at all.
+llvm_library(::SPIRVCompilerTarget) = toolchain_library()
+
+function llvm_machine(target::SPIRVCompilerTarget)
+    (is_llvmgpu() && target.backend === :llvm) || return nothing
+    if target.version !== nothing && !(v"1.0" <= target.version <= v"1.6")
+        error("Unsupported SPIR-V version $(target.version) for the SPIR-V back-end")
+    end
+    triple = llvm_triple(target)
+    t = LLVM.Target(; triple)
+    # the extensions are taken from a global option when creating the target machine
+    state = llvmgpu_state()
+    @lock state.lock begin
+        set_spirv_extensions!(state, spirv_extensions(target))
+        LLVM.TargetMachine(t, triple)
+    end
+end
+
+function backend_llvm_version(target::SPIRVCompilerTarget)
+    target.backend === :khronos && return nothing
+    # (without the back-end, `mcgen` reports a clearer error)
+    if TOOLCHAIN === :julia &&
+       isavailable(SPIRV_LLVM_Backend_jll) && SPIRV_LLVM_Backend_jll.is_available()
+        return llvm_version(ExternalBackend(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV"))
+    end
+    return @invoke backend_llvm_version(target::AbstractCompilerTarget)
+end
 
 function runtime_cstring_type(job::CompilerJob{SPIRVCompilerTarget})
     LLVM.DataLayout(llvm_datalayout(job.config.target)) do dl
@@ -341,7 +371,9 @@ end
 
     # translate to SPIR-V
     input = bitcode(mod)
-    spirv = if target.backend === :llvm
+    spirv = if is_llvmgpu(mod.library) && target.backend === :llvm
+        llvmgpu_emit(job, mod, LLVM.CodeGenFileType.Object)
+    elseif target.backend === :llvm
         # compile in-process through libspirv. the back-end derives the triple from the
         # options; unlike `llc`, it rejects unknown extensions instead of ignoring them.
         backend = ExternalBackend(SPIRV_LLVM_Backend_jll.libspirv, "SPIRV")

@@ -51,3 +51,56 @@ last commit of a pull request:
 Back-ends are named `cuda`, `amdgpu`, `metal`, `oneapi` and `opencl` (all lowercase), or by
 their target: `ptx` for CUDA.jl, `gcn` for AMDGPU.jl, and `spirv` for both oneAPI.jl and
 OpenCL.jl.
+
+Each back-end is tested twice: with the default toolchain, and with the llvmgpu toolchain
+(see below). `llvmgpu` can be used as a back-end name to select or skip only the latter,
+e.g., `[only llvmgpu]`.
+
+
+## LLVM toolchain
+
+By default, GPUCompiler optimizes code with Julia's own LLVM, including the LLVM passes of
+Julia's code generator, and generates code with back-end libraries (e.g.
+NVPTX_LLVM_Backend_jll). The experimental `llvmgpu` toolchain instead moves the code of
+every top-level job for a GPU target (PTX, GCN, SPIR-V, Metal and BPF) to libLLVMGPU, a
+newer, standalone LLVM from LLVMGPU_jll, once it is linked and post-processed (e.g. by
+`finish_linked_module!`), and optimizes it there with
+[JuliaIR.jl](https://github.com/JuliaLLVM/JuliaIR.jl)'s ports of Julia's passes.
+libLLVMGPU then also generates code for the PTX, GCN, SPIR-V and BPF targets, except for
+the alternative code generators: libNVVM (`backend=:nvvm`), which gets the optimized code
+downgraded with LLVMDowngrader_jll, and the Khronos SPIR-V translator (`backend=:khronos`).
+Metal code is optimized there too, and downgraded to AIR as before. The toolchain is
+selected with a preference, which takes effect after restarting Julia:
+
+```julia
+using Preferences, GPUCompiler
+set_preferences!(GPUCompiler, "toolchain" => "llvmgpu")
+```
+
+The IR that `GPUCompiler.compile` returns for jobs that moved to libLLVMGPU (the module,
+`meta.ir` and `meta.entry`) then belongs to that library, and LLVM.jl only works with it
+in its own context. The do-block form of `compile` takes care of that, with either
+toolchain: it compiles in contexts of its own, runs the block in the context of the IR,
+and frees both afterwards.
+
+```julia
+entry = GPUCompiler.compile(:obj, job) do obj, meta
+    meta.entry.name
+end
+```
+
+Code that calls `compile(target, job)` inside a `JuliaContext() do ... end` block, which
+owns and frees the contexts, has to work with the IR inside
+`LLVM.context!(LLVM.context(ir)) do ... end`. (As with Julia's LLVM, the IR belongs to the
+context of libLLVMGPU that was activated last, normally the block's.) Hooks that run during or after optimization
+run in that context too: e.g. `optimize_module!`, `finish_ir!`, and `link_libraries!`,
+which optimization can call again after it ran with Julia's LLVM. `code_llvm` prints that
+IR with LLVM's printer, which shows all metadata.
+
+Code for other targets, like the host's or ones defined elsewhere, stays with Julia's LLVM.
+Targets defined elsewhere can move to libLLVMGPU too, by defining
+`GPUCompiler.llvm_library(::MyTarget) = GPUCompiler.toolchain_library()`.
+`GPUCompiler.backend_llvm_version(target)` tells which LLVM generates the machine code.
+
+To run the test suite with the llvmgpu toolchain, set the preference in
+`test/LocalPreferences.toml` (on Julia 1.10 and 1.11, in `LocalPreferences.toml`).

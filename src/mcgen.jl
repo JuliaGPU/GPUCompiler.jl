@@ -56,6 +56,7 @@ function prepare_execution!(@nospecialize(job::CompilerJob), mod::LLVM.Module,
 end
 
 function mcgen(@nospecialize(job::CompilerJob), mod::LLVM.Module, format=LLVM.CodeGenFileType.Assembly)
+    is_llvmgpu(mod.library) && return String(llvmgpu_emit(job, mod, format))
     with_llvm_machine(job.config.target) do tm
         String(LLVM.emit(tm, mod, format))
     end

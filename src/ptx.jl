@@ -87,8 +87,13 @@ source_code(target::PTXCompilerTarget) = "ptx"
 llvm_triple(target::PTXCompilerTarget) = Int===Int64 ? "nvptx64-nvidia-cuda" : "nvptx-nvidia-cuda"
 
 
+llvm_library(::PTXCompilerTarget) = toolchain_library()
+
 function llvm_machine(target::PTXCompilerTarget)
-    @static if :NVPTX ∉ LLVM.backends()
+    if is_llvmgpu()
+        # (libNVVM generates code for the actual target, so it only uses the machine below)
+        target.backend === :nvvm || return llvmgpu_machine(target)
+    elseif :NVPTX ∉ LLVM.backends()
         return nothing
     end
     triple = llvm_triple(target)
@@ -100,6 +105,58 @@ function llvm_machine(target::PTXCompilerTarget)
     # use the generic subtarget: subtarget-dependent middle-end behavior is handled by
     # GPUCompiler itself (`nvvm_reflect!`), and differences in cost models are immaterial.
     return LLVM.TargetMachine(t, triple)
+end
+
+function backend_llvm_version(target::PTXCompilerTarget)
+    target.backend === :nvvm && return nothing
+    # (without the back-end, `mcgen` reports a clearer error)
+    if TOOLCHAIN === :julia &&
+       isavailable(NVPTX_LLVM_Backend_jll) && NVPTX_LLVM_Backend_jll.is_available()
+        return llvm_version(ExternalBackend(NVPTX_LLVM_Backend_jll.libnvptx, "NVPTX"))
+    end
+    return @invoke backend_llvm_version(target::AbstractCompilerTarget)
+end
+
+# the minimum PTX ISA version that the NVPTX back-end of `state.library` accepts for `cpu`.
+# since LLVM 22, it aborts on older versions, and targets this one when none is requested,
+# so ask it by generating code for an empty module.
+function ptx_minimum_version(state::LLVMGPUState, triple::String, cpu::String)
+    @lock state.lock get!(state.ptx_minimum_versions, cpu) do
+        LLVM.library!(state.library) do
+            t = LLVM.Target(; triple)
+            @dispose ctx=Context() tm=LLVM.TargetMachine(t, triple; cpu) mod=LLVM.Module("") begin
+                LLVM.triple!(mod, triple)
+                asm = String(LLVM.emit(tm, mod, LLVM.CodeGenFileType.Assembly))
+                m = match(r"^\.version (\d+)\.(\d+)$"m, asm)
+                VersionNumber(parse(Int, m[1]), parse(Int, m[2]))
+            end
+        end
+    end
+end
+
+# a target machine of libLLVMGPU, which also generates code, so for the actual target. like
+# NVPTX_LLVM_Backend_jll did, reject processors and PTX versions that LLVM would otherwise
+# only warn about (or abort on).
+function llvmgpu_machine(target::PTXCompilerTarget)
+    triple = llvm_triple(target)
+    t = LLVM.Target(; triple)
+    cpu = cpu_name(target)
+    ptx = "ptx$(target.ptx.major)$(target.ptx.minor)"
+    # (checked without selecting the processor, since LLVM only warns about unknown ones)
+    @dispose sti=LLVM.SubtargetInfo(t, triple) begin
+        LLVM.isprocessor(sti, cpu) ||
+            error("Unsupported processor $cpu for the NVPTX back-end")
+        # (NVPTX has a feature for every PTX version)
+        ptx in LLVM.processor_features(sti) ||
+            error("Unsupported PTX ISA version $(target.ptx) for the NVPTX back-end")
+    end
+    # (LLVM aborts on a PTX version that's too old for the processor)
+    required = ptx_minimum_version(llvmgpu_state(), triple, cpu)
+    target.ptx < required &&
+        error("Processor $cpu needs at least PTX ISA version $required, not $(target.ptx)")
+    tm = LLVM.TargetMachine(t, triple; cpu, features="+$ptx")
+    LLVM.asm_verbosity!(tm, true)
+    return tm
 end
 
 # match the layout computed by the NVPTX back-end (computeNVPTXDataLayout); components
@@ -369,6 +426,9 @@ end
                  object code (LTO-IR) requires the NVVM back-end (`backend=:nvvm`).""")
     end
 
+    if is_llvmgpu(mod.library)
+        return String(llvmgpu_emit(job, mod, format))
+    end
     if !isavailable(NVPTX_LLVM_Backend_jll) || !NVPTX_LLVM_Backend_jll.is_available()
         error("NVPTX LLVM back-end not loaded; cannot compile to PTX.")
     end
@@ -393,8 +453,11 @@ end
 
 ## NVVM back-end
 
-# the options for a job, and the architecture they target
-function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
+# the newest LLVM whose bitcode libNVVM reads (with `-nvvm-latest`)
+const nvvm_max_llvm = 22
+
+# the options for a job whose bitcode is of LLVM `version`, and the architecture they target
+function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}), version::Integer)
     target = job.config.target
     arch = replace(cpu_name(target), "sm_" => "compute_")
 
@@ -410,7 +473,7 @@ function nvvm_options(@nospecialize(job::CompilerJob{PTXCompilerTarget}))
     reader = NVVM.llvm_version(arch)
     if reader === nothing
         error("libNVVM does not support $arch.")
-    elseif reader < LLVM.version().major
+    elseif reader < version
         push!(options, "-nvvm-latest")
     end
 
@@ -441,10 +504,19 @@ function nvvm_codegen(@nospecialize(job::CompilerJob{PTXCompilerTarget}), mod::L
         optimize_nvvm!(mod)
     end
     legalize_nvvm!(mod; lto)
-    options, arch = nvvm_options(job)
-    lto && push!(options, "-gen-lto")
 
     input = bitcode(mod)
+    version = LLVM.version(mod).major
+    if version > nvvm_max_llvm
+        if !isavailable(LLVMDowngrader_jll)
+            error("The NVVM back-end requires the LLVMDowngrader_jll package to compile bitcode of LLVM $version, which should be installed and loaded first.")
+        end
+        target = downgrade_target(nvvm_max_llvm)
+        input = downgrade(input, target)
+        version = target.major
+    end
+    options, arch = nvvm_options(job, version)
+    lto && push!(options, "-gen-lto")
     prog = NVVM.Program()
     output = try
         NVVM.add!(prog, input)
@@ -1189,6 +1261,13 @@ end
 # does a function flush f32 denormals, per its denormal mode attributes?
 function flushes_f32_denormals(f::LLVM.Function)
     attrs = f.function_attributes
+    # LLVM 23 replaced the string attributes by `denormal_fpenv`, which packs the output
+    # and input modes of all types and of f32 in four 2-bit fields
+    attr = get(attrs, :denormal_fpenv, nothing)
+    if attr !== nothing
+        output = (LLVM.value(attr) >> 4) & 0x3
+        return output in (1, 2)     # preserve-sign, positive-zero
+    end
     for kind in ("denormal-fp-math-f32", "denormal-fp-math")
         attr = get(attrs, kind, nothing)
         attr === nothing && continue

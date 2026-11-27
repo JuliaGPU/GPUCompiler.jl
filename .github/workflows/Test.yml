@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   release_test:
-    name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }}${{ matrix.coverage == 'false' && ' (no coverage)' || '' }} - ${{ matrix.os }}
+    name: Julia ${{ matrix.version }} ${{ matrix.llvm_args }}${{ matrix.toolchain == 'llvmgpu' && ' with llvmgpu' || '' }}${{ matrix.coverage == 'false' && ' (no coverage)' || '' }} - ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -23,7 +23,19 @@ jobs:
         os: [ubuntu-24.04, ubuntu-24.04-arm, macOS-15, windows-2025]
         llvm_args: ['']
         coverage: ['true']
+        toolchain: ['julia']
         include:
+          # the llvmgpu toolchain (JuliaIR's passes, libLLVMGPU), on fewer platforms. not on
+          # aarch64 Linux with Julia 1.12 or 1.13, whose GC lowering crashes on JuliaIR's
+          # code (JuliaLang/julia#62899).
+          - {version: '1.10', os: 'ubuntu-24.04', llvm_args: '', coverage: 'true', toolchain: 'llvmgpu'}
+          - {version: '1.11', os: 'ubuntu-24.04', llvm_args: '', coverage: 'true', toolchain: 'llvmgpu'}
+          - {version: '1.12', os: 'ubuntu-24.04', llvm_args: '', coverage: 'true', toolchain: 'llvmgpu'}
+          - {version: '1.13', os: 'ubuntu-24.04', llvm_args: '', coverage: 'true', toolchain: 'llvmgpu'}
+          - {version: 'nightly', os: 'ubuntu-24.04', llvm_args: '', coverage: 'true', toolchain: 'llvmgpu'}
+          - {version: '1.12', os: 'macOS-15', llvm_args: '', coverage: 'true', toolchain: 'llvmgpu'}
+          - {version: '1.12', os: 'windows-2025', llvm_args: '', coverage: 'true', toolchain: 'llvmgpu'}
+          - {version: '1.11', os: 'ubuntu-24.04-arm', llvm_args: '', coverage: 'true', toolchain: 'llvmgpu'}
           # code coverage recompiles the package instead of using its precompiled code,
           # which hides bugs in how that code interacts with methods back-ends define
           - version: '1.12'
@@ -68,11 +80,12 @@ jobs:
         uses: julia-actions/cache@v3
 
       # without a driver, CUDA_Compiler_jll selects no toolkit; libNVVM works without one
-      - name: Select a CUDA toolkit
+      - name: Set preferences
         shell: bash
         run: |
           for dir in . test; do
             echo -e '[CUDA_Compiler_jll]\nversion = "13.5"' >$dir/LocalPreferences.toml
+            echo -e '[GPUCompiler]\ntoolchain = "${{ matrix.toolchain || 'julia' }}"' >>$dir/LocalPreferences.toml
           done
 
       - name: Run tests
@@ -81,6 +94,8 @@ jobs:
           coverage: ${{ matrix.coverage != 'false' }}
         env:
           JULIA_LLVM_ARGS: ${{ matrix.llvm_args }}
+          # makes the tests check that the preference applied
+          GPUCOMPILER_TEST_TOOLCHAIN: ${{ matrix.toolchain || 'julia' }}
 
       - name: Process coverage
         # CoverageTools 1.4.1 uses a PkgLoadSpec field renamed in Julia 1.14.

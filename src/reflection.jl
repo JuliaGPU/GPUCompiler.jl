@@ -247,7 +247,8 @@ The following keyword arguments are supported:
 
 - `optimize`: determines if the code is optimized, which includes kernel-specific
   optimizations if `kernel` is true
-- `raw`: return the raw IR including all metadata
+- `raw`: return the raw IR including all metadata (IR that moved to another LLVM library
+  than Julia's, see [`llvm_library`](@ref), is always printed with all metadata)
 - `dump_module`: display the entire module instead of just the function
 
 See also: [`@device_code_llvm`](@ref), `InteractiveUtils.code_llvm`
@@ -258,6 +259,14 @@ function code_llvm(io::IO, @nospecialize(job::CompilerJob); optimize::Bool=job.c
     config = CompilerConfig(job.config; validate=false, strip=false, optimize)
     str = JuliaContext() do ctx
         ir, meta = compile(:llvm, CompilerJob(job; config))
+        if is_llvmgpu(ir.library)
+            # Julia's printer only works with its own LLVM. LLVM's always prints all
+            # metadata, and debug information unless it's disabled.
+            return context!(context(ir)) do
+                debuginfo === :none && strip_debuginfo!(ir)
+                dump_module ? string(ir) : string(meta.entry)
+            end
+        end
         ts_mod = ThreadSafeModule(ir)
         entry_fn = meta.entry
         GC.@preserve ts_mod entry_fn begin
