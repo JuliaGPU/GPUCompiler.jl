@@ -106,6 +106,8 @@ function __init__()
         Tracy.@register_tracepoints()
     end
     register_deferred_codegen()
+    initialize_llvm()
+    mark_llvm_initialized()
 end
 
 end # module

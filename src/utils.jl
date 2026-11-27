@@ -247,78 +247,15 @@ function dump_failure(artifacts::Pair{String}...)
 end
 
 
-## safe deprecation warnings
-
-const depwarn_lock = Threads.SpinLock()
-# the frame is a `Ptr{Cvoid}` for compiled frames, or a `Base.InterpreterIP` for
-# interpreted ones (e.g., when the deprecated function is called from top level)
-const depwarn_seen = Set{Tuple{Union{Ptr{Cvoid},Base.InterpreterIP},Symbol}}()
-
-"""
-    safe_depwarn(msg, funcsym; force=false)
-
-A `Base.depwarn` that does not switch tasks, so it can be used where task switches are
-illegal: `@locked` regions holding the typeinf lock, generated functions, or abstract
-interpreter callbacks. `Base.depwarn` logs through the active logger, whose I/O may
-yield; this version writes the warning synchronously to `Core.stderr`, like `@safe_warn`
-does. It still attributes the warning to the caller, warns only once per call site, and
-throws under `--depwarn=error`. Custom loggers are bypassed, though.
-"""
-function safe_depwarn(msg, funcsym; force::Bool=false)
-    @static if VERSION >= v"1.12.0-DEV.769"
-        # compilation does not hold the typeinf lock, so we can warn regularly
-        return Base.depwarn(msg, funcsym; force)
-    else
-        opts = Base.JLOptions()
-        if opts.depwarn == 2
-            throw(ErrorException(msg))
-        end
-        force || opts.depwarn == 1 || return
-
-        # respect the verbosity of the global logger, like `@safe_warn` does
-        Logging.Warn >= _invoked_min_enabled_level(global_logger()) || return
-
-        # attribute the warning to the caller, like `Base.depwarn`
-        # (`backtrace` and `firstcaller` do not switch tasks)
-        bt = Base.backtrace()
-        frame, caller = Base.firstcaller(bt, funcsym)
-
-        # only warn once per call site. we can't use the logger's `maxlog` for this,
-        # since we construct a fresh logger every time
-        Base.@lock depwarn_lock begin
-            (frame, funcsym) in depwarn_seen && return
-            push!(depwarn_seen, (frame, funcsym))
-        end
-
-        linfo = caller.linfo
-        mod = if linfo isa Core.MethodInstance
-            def = linfo.def
-            def isa Module ? def : def.module
-        else
-            Core
-        end
-
-        # emit synchronously; writes to `Core.stderr` do not switch tasks
-        io = IOContext(Core.stderr, :color => STDERR_HAS_COLOR[])
-        logger = Logging.ConsoleLogger(io)
-        Logging.handle_message(logger, Logging.Warn, msg, mod, :depwarn,
-                               (frame, funcsym), String(caller.file), caller.line;
-                               caller)
-        return
-    end
-end
-
-
 ## codegen locking
 
-# lock codegen to prevent races on the LLVM context.
-#
-# XXX: it's not allowed to switch tasks while under this lock, can we guarantee that?
-#      its probably easier to start using our own LLVM context when that's possible.
+# Before Julia 1.12 (JuliaLang/julia#54816), these hold Julia's codegen lock across
+# compilation, serializing it with Julia's own codegen and with other compilations. Some
+# process-wide state relies on that, e.g. `_lookup_cache`. The lock must not be held
+# across a task switch, so `@unlocked` releases it for the annotated function. On Julia
+# 1.12 and later they do nothing, so process-wide state needs its own synchronization.
 macro locked(ex)
     if VERSION >= v"1.12.0-DEV.769"
-        # no need to handle locking; it's taken care of by the engine
-        # as long as we use a correct cache owner token.
         return esc(ex)
     end
 
@@ -334,7 +271,6 @@ macro locked(ex)
     esc(combinedef(def))
 end
 
-# HACK: temporarily unlock again to perform a task switch
 macro unlocked(ex)
     if VERSION >= v"1.12.0-DEV.769"
         return esc(ex)

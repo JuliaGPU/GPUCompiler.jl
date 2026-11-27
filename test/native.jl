@@ -27,6 +27,57 @@ import InteractiveUtils
     end
 end
 
+@testset "concurrent first compilation" begin
+    # threads that compile at the same time look up LLVM targets, which must not be
+    # registered concurrently. a corrupted target registry hangs target lookups, so this
+    # runs in a separate process that we can kill.
+    script = """
+        using GPUCompiler, LLVM
+        include($(repr(joinpath(@__DIR__, "helpers", "runtime.jl"))))
+        include($(repr(joinpath(@__DIR__, "helpers", "native.jl"))))
+        kernel(p) = (unsafe_store!(p, 1); return)
+        go = Threads.Atomic{Bool}(false)
+        tasks = map(1:Threads.nthreads()) do _
+            Threads.@spawn (while !go[]; GC.safepoint(); end;
+                            Native.code_native(devnull, kernel, Tuple{Ptr{Int}}))
+        end
+        go[] = true
+        foreach(wait, tasks)
+        targets = let targets = String[], t = LLVM.API.LLVMGetFirstTarget()
+            while t != C_NULL && length(targets) <= 1000
+                push!(targets, unsafe_string(LLVM.API.LLVMGetTargetName(t)))
+                t = LLVM.API.LLVMGetNextTarget(t)
+            end
+            targets
+        end
+        allunique(targets) || exit(1)
+        """
+    cmd = `$(Base.julia_cmd()) --code-coverage=none --project=$(Base.active_project())
+           --threads=8 -e $script`
+    proc = run(pipeline(cmd; stdout, stderr); wait=false)
+    # a process with threads stuck in LLVM doesn't respond to SIGTERM
+    timedwait(() -> !process_running(proc), 600) === :ok || kill(proc, Base.SIGKILL)
+    @test success(proc)
+end
+
+@testset "target machine before compiling" begin
+    # LLVM's targets are registered when GPUCompiler is loaded. Julia only registers the
+    # native one, so check another.
+    script = """
+        using GPUCompiler, LLVM
+        tm = GPUCompiler.llvm_machine(PTXCompilerTarget(cap=v"7.0"))
+        tm isa LLVM.TargetMachine || exit(1)
+        LLVM.dispose(tm)
+        """
+    cmd = `$(Base.julia_cmd()) --code-coverage=none --startup-file=no
+           --project=$(Base.active_project()) -e $script`
+    if :NVPTX in LLVM.backends()
+        @test success(pipeline(cmd; stdout, stderr))
+    else
+        @test_skip success(pipeline(cmd; stdout, stderr))
+    end
+end
+
 @testset "compile do-block" begin
     mod = @eval module $(gensym())
         f(x::Int) = x + 1
