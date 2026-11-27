@@ -3495,6 +3495,7 @@ end
     @test !occursin("deferred_codegen", ir)
     @test child(ir, 1) !== nothing
 
+    # the legacy way of requesting deferred code generation (see deprecated.jl)
     GPUCompiler.deferred_codegen_jobs[mod.legacy_id] = (; ft=typeof(mod.b), tt=Tuple{Ptr{Int}})
     try
         ir = llvm(mod.legacy)

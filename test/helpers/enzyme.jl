@@ -115,6 +115,7 @@ function GPUCompiler.compile_unhooked(output::Symbol, job::CompilerJob{<:EnzymeT
     return ir, (; entry, meta.compiled, meta.relocations)
 end
 
+# like Enzyme.jl, this uses the legacy `deferred_codegen_jobs` (see deprecated.jl)
 import GPUCompiler: deferred_codegen_jobs
 
 # Enzyme's ids are word-sized values (pointers or hashes), passed as a `UInt`, rather than

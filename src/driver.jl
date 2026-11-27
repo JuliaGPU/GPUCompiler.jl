@@ -180,13 +180,8 @@ end
 
 # Deferred compilation: code obtains the address of a function that the compilation it ends
 # up in compiles too (see `deferred_codegen` and `deferred_codegen!`), through calls to a
-# `deferred_codegen` marker with an id that identifies what to compile.
-#
-# Jobs registered here directly, with the id of their marker as key, are the legacy way of
-# requesting them, which Enzyme.jl and releases of back-ends that predate
-# `deferred_codegen!` use. New code should use `deferred_codegen!` instead, which registers
-# requests without racing with concurrent compilations.
-const deferred_codegen_jobs = Dict{Int, Any}()
+# `deferred_codegen` marker with an id that identifies what to compile. (Jobs can also be
+# registered directly in the legacy `deferred_codegen_jobs`, see `deprecated.jl`.)
 
 # We make this function explicitly callable so that we can drive OrcJIT's
 # lazy compilation from, while also enabling recursive compilation.
@@ -249,14 +244,13 @@ function register_deferred_request(@nospecialize(spec))
     end
 end
 
-# the request with a marker's id, or the job registered under it with `deferred_codegen_jobs`
+# the request with a marker's id
 function deferred_spec(id::Int)
     request = Base.@lock deferred_requests_lock get(deferred_requests_by_id, id, nothing)
     if request !== nothing && request_id(request) == id
         return request.spec
     end
-    global deferred_codegen_jobs
-    spec = get(deferred_codegen_jobs, id, nothing)
+    spec = legacy_deferred_spec(id)
     spec === nothing && error("No deferred codegen request has id $id")
     return spec
 end
