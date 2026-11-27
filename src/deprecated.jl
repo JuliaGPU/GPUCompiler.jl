@@ -315,3 +315,21 @@ end
 Base.@deprecate_binding compile_hook active_compile_hook false ", use `run_compile_hook` or `with_compile_hook` instead."
 
 @public compile_hook
+
+
+## `deferred_codegen_jobs`
+
+# Deferred compilation used to be requested by registering a job (or a function and
+# argument types) in this dictionary, under the id passed to the `deferred_codegen` marker,
+# and looking it up by that id when linking. Choosing ids that way races with concurrent
+# compilations, so back-ends should use `deferred_codegen!`, and device code
+# `deferred_codegen(::Val, ::Val)`. Released versions of CUDA.jl, Metal.jl, OpenCL.jl and
+# KernelAbstractions.jl (POCL) still write here, as does Enzyme.jl from a generated
+# function, which has no replacement yet (EnzymeAD/Enzyme.jl#3511). It is therefore not
+# marked with `@deprecate_binding`, which would warn those users. Remove in the next
+# breaking release, together with `legacy_deferred_spec`, its use in `deferred_spec` and
+# the remark about these ids next to `DeferredRequest`.
+const deferred_codegen_jobs = Dict{Int, Any}()
+
+# the job registered under a marker's id, if any
+legacy_deferred_spec(id::Int) = get(deferred_codegen_jobs, id, nothing)
