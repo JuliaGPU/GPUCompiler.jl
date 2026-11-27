@@ -209,4 +209,24 @@ end
     ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (UInt,), id)
 end
 
+# with GPUCompiler 2.26+, the job is described by a type Enzyme owns, and only created when
+# generating code, as part of the compilation of the caller
+struct DeferredSpec{ft,tt,always_inline} end
+
+function GPUCompiler.deferred_job(::DeferredSpec{ft,tt,always_inline},
+                                  job::CompilerJob) where {ft,tt,always_inline}
+    mi = GPUCompiler.methodinstance(ft, tt, job.world)
+    config = CompilerConfig(EnzymeTarget(), EnzymeCompilerParams(; always_inline);
+                            kernel=false)
+    return CompilerJob(mi, config, job.world)
+end
+
+struct DeferredOnHostError <: Exception end
+
+@inline function deferred_codegen_spec(f::Type, tt::Type; always_inline::Bool=false)
+    ptr = GPUCompiler.deferred_codegen(DeferredSpec{f,tt,always_inline}())
+    ptr == C_NULL && throw(DeferredOnHostError())
+    return ptr
+end
+
 end

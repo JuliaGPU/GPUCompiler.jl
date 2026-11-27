@@ -84,7 +84,7 @@ function irgen(@nospecialize(job::CompilerJob))
     end
 
     # identify requests for deferred code generation, before linking or inlining anything
-    lower_deferred_requests!(mod, compiled)
+    lower_deferred_requests!(job, mod, compiled)
 
     # rename and process the entry point
     if job.config.name !== nothing

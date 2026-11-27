@@ -219,8 +219,17 @@ precompile_test_harness("Deferred codegen") do load_path
         child(p) = (unsafe_store!(p, 42); return)
         parent(p) = (unsafe_store!(p, GPUCompiler.deferred_codegen(
                          Val(typeof(child)), Val(Tuple{Ptr{Int}}))); return)
-        let
-            job, _ = DeferredCompiler.Native.create_job(parent, (Ptr{Ptr{Cvoid}},))
+
+        # a request described by a type of this package
+        struct ChildSpec end
+        GPUCompiler.deferred_job(::ChildSpec, job::GPUCompiler.CompilerJob) =
+            GPUCompiler.CompilerJob(GPUCompiler.methodinstance(typeof(child), Tuple{Ptr{Int}},
+                                                               job.world),
+                                    job.config, job.world)
+        spec_parent(p) = (unsafe_store!(p, GPUCompiler.deferred_codegen(ChildSpec())); return)
+
+        for f in (parent, spec_parent)
+            job, _ = DeferredCompiler.Native.create_job(f, (Ptr{Ptr{Cvoid}},))
             precompile(job)
         end
         end) |> string)
@@ -229,17 +238,17 @@ precompile_test_harness("Deferred codegen") do load_path
     @eval let
         import DeferredCompiler, DeferredKernels
 
-        # the parent is inferred while precompiling, but the child is only requested in the
-        # session that generates code
-        job, _ = DeferredCompiler.Native.create_job(DeferredKernels.parent,
-                                                    (Ptr{Ptr{Cvoid}},))
-        parent_mi = GPUCompiler.methodinstance(typeof(DeferredKernels.parent),
-                                               Tuple{Ptr{Ptr{Cvoid}}})
-        @test check_presence(parent_mi, GPUCompiler.cache_owner(job))
-        JuliaContext() do ctx
-            ir, meta = GPUCompiler.compile(:llvm, job)
-            child = only(f for f in LLVM.functions(ir) if occursin("child", LLVM.name(f)))
-            @test occursin(LLVM.name(child), string(meta.entry))
+        # the parents are inferred while precompiling, but the child is only requested in
+        # the session that generates code
+        for parent in (DeferredKernels.parent, DeferredKernels.spec_parent)
+            job, _ = DeferredCompiler.Native.create_job(parent, (Ptr{Ptr{Cvoid}},))
+            parent_mi = GPUCompiler.methodinstance(typeof(parent), Tuple{Ptr{Ptr{Cvoid}}})
+            @test check_presence(parent_mi, GPUCompiler.cache_owner(job))
+            JuliaContext() do ctx
+                ir, meta = GPUCompiler.compile(:llvm, job)
+                child = only(f for f in LLVM.functions(ir) if occursin("child", LLVM.name(f)))
+                @test occursin(LLVM.name(child), string(meta.entry))
+            end
         end
     end
 end

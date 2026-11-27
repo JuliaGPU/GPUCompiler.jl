@@ -199,6 +199,29 @@ kernel from device code.
 """
 deferred_codegen(f::Val, tt::Val) = Base.@noinline deferred_codegen_request(f, tt)
 
+"""
+    deferred_codegen(spec) -> Ptr{Cvoid}
+
+Return a pointer to the function that the job [`deferred_job(spec, job)`](@ref
+deferred_job) returns compiles to, as part of the compilation of the caller. This is for
+packages that compile functions with their own configuration (e.g. a derivative, with
+another target and parameters), from device code that another back-end compiles.
+
+`spec` is the instance of a singleton type that the package owns, and that describes the
+job in its type parameters, e.g. `MySpec{typeof(f), Tuple{Float32}}()`. The job is only
+created when generating code, in the world of the compilation, so `spec` has to identify it
+on its own: it can't refer to objects of the session that inferred the caller (which may
+be cached in a package image).
+
+The request doesn't add an edge from the caller to the requested function, so redefining
+the latter doesn't invalidate the caller. To get that, add the edge yourself (e.g. from a
+generated function that returns `spec`).
+
+In code that GPUCompiler doesn't compile (e.g. when calling it directly), this returns
+`C_NULL`.
+"""
+deferred_codegen(spec) = Base.@noinline deferred_codegen_request(spec)
+
 # The request is identified by the specialization of this method. `irgen` registers it,
 # and gives the legacy marker in its code the request's id (see `lower_deferred_requests!`).
 # Nothing is registered while inferring the caller, which happens concurrently on Julia
@@ -210,10 +233,15 @@ deferred_codegen(f::Val, tt::Val) = Base.@noinline deferred_codegen_request(f, t
     # TODO: add an edge to the child's method instance to support method redefinitions
     ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), 0)
 end
+@noinline function deferred_codegen_request(::S) where {S}
+    ccall("extern deferred_codegen", llvmcall, Ptr{Cvoid}, (Int,), 0)
+end
 const deferred_codegen_request_method = which(deferred_codegen_request, Tuple{Val,Val})
+const deferred_codegen_spec_request_method = which(deferred_codegen_request, Tuple{Any})
 
 # Requests for deferred code generation: function and argument types relative to the
-# requesting job (from `deferred_codegen(::Val, ::Val)`), or a job (from back-ends).
+# requesting job (from `deferred_codegen(::Val, ::Val)`), a spec that `deferred_job` turns
+# into a job (from `deferred_codegen(spec)`), or a job (from back-ends).
 #
 # The id of a request is its address, which the jobs in `deferred_codegen_jobs` don't use:
 # they are registered under small integers or addresses of other objects. (Checking that
@@ -263,23 +291,55 @@ function nest_deferred_job(@nospecialize(dyn_job::CompilerJob), @nospecialize(jo
     return CompilerJob(dyn_job; config)
 end
 
-# the job a request specifies, for the job whose module contains it
-function deferred_job(@nospecialize(spec), @nospecialize(job::CompilerJob))
+"""
+    deferred_job(spec, job::CompilerJob) -> CompilerJob
+
+Return the job that compiles the function that [`deferred_codegen(spec)`](@ref
+deferred_codegen) requests. Packages that make such requests add a method for their type of
+`spec`.
+
+`job` is the top-level job of the compilation, which isn't necessarily the one whose code
+contains the request (e.g. when that code is part of a function requested in turn). The
+returned job can use its world or method table. Its target and parameters are nested in
+those of `job` (see `nest_target` and `nest_params`). This is called while generating code,
+so it mustn't yield.
+"""
+function deferred_job end
+
+# the job a request specifies, for the top-level job of the compilation
+function resolve_deferred_job(@nospecialize(spec), @nospecialize(job::CompilerJob))
     spec isa CompilerJob && return spec
-    ft, tt = spec
-    return CompilerJob(methodinstance(ft, tt, job.world), job.config, job.world)
+    if spec isa Union{Tuple,NamedTuple}
+        # function and argument types, from `deferred_codegen(::Val, ::Val)` or the legacy
+        # `deferred_codegen_jobs`
+        ft, tt = spec
+        return CompilerJob(methodinstance(ft, tt, job.world), job.config, job.world)
+    end
+    # possibly defined by a package loaded in a newer world
+    if !Base.invokelatest(applicable, deferred_job, spec, job)
+        throw(KernelError(job, "no method of `GPUCompiler.deferred_job` handles the deferred codegen request $spec"))
+    end
+    return Base.invokelatest(deferred_job, spec, job)::CompilerJob
 end
 
 # In a module that Julia generated, give the legacy markers in the code of requests the
 # id of their request. Unlike the names of functions, that survives linking modules.
-function lower_deferred_requests!(mod::LLVM.Module, compiled)
+function lower_deferred_requests!(@nospecialize(job::CompilerJob), mod::LLVM.Module, compiled)
     marker = get(mod.functions, "deferred_codegen", nothing)
     marker === nothing && return
     T_id = only(LLVM.parameters(marker.function_type))
     for (mi, entry) in compiled
-        mi.def === deferred_codegen_request_method || continue
-        _, ft, tt = Base.unwrap_unionall(mi.specTypes).parameters
-        id = register_deferred_request((ft.parameters[1], tt.parameters[1]))
+        if mi.def === deferred_codegen_request_method
+            _, ft, tt = Base.unwrap_unionall(mi.specTypes).parameters
+            id = register_deferred_request((ft.parameters[1], tt.parameters[1]))
+        elseif mi.def === deferred_codegen_spec_request_method
+            _, S = Base.unwrap_unionall(mi.specTypes).parameters
+            Base.issingletontype(S) ||
+                throw(KernelError(job, "deferred codegen requests take an instance of a singleton type, got a `$S`"))
+            id = register_deferred_request(S.instance)
+        else
+            continue
+        end
         for name in (entry.specfunc, entry.func)
             name === nothing && continue
             f = get(mod.functions, name, nothing)
@@ -344,7 +404,7 @@ function deferred_codegen!(builder::IRBuilder, @nospecialize(job::CompilerJob))
     end
 end
 
-@public deferred_codegen, deferred_codegen!
+@public deferred_codegen, deferred_codegen!, deferred_job
 
 # Register deferred_codegen as a global function so that it can be called with
 # `ccall("extern deferred_codegen", ...)`. Called from __init__.
@@ -437,6 +497,9 @@ end
     if has_deferred_jobs
         dyn_marker = ir.functions["deferred_codegen"]
 
+        # the job of each request, which packages may create (see `deferred_job`)
+        dyn_jobs = Dict{Int, CompilerJob}()
+
         # iterative compilation (non-recursive)
         changed = true
         while changed
@@ -450,7 +513,7 @@ end
                 call = use.user::LLVM.CallInst
                 id = convert(Int, first(call.operands))
 
-                dyn_job = deferred_job(deferred_spec(id), job)
+                dyn_job = get!(() -> resolve_deferred_job(deferred_spec(id), job), dyn_jobs, id)
                 push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
             end
 

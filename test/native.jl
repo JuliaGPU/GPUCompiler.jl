@@ -3733,6 +3733,89 @@ end
     end
 end
 
+@testset "Mock Enzyme deferred spec" begin
+    mod = @eval module $(gensym())
+        import ..Enzyme, ..GPUCompiler
+        function kernel(a)
+            a[1] = a[1]^2
+            return
+        end
+        function dkernel(a)
+            ptr = Enzyme.deferred_codegen_spec(typeof(kernel), Tuple{Vector{Float64}})
+            ccall(ptr, Cvoid, (Vector{Float64},), a)
+            return
+        end
+        function dkernel_inline(a)
+            ptr = Enzyme.deferred_codegen_spec(typeof(kernel), Tuple{Vector{Float64}};
+                                               always_inline=true)
+            ccall(ptr, Cvoid, (Vector{Float64},), a)
+            return
+        end
+        # a deferred function that makes a request itself
+        function ddkernel(a)
+            ptr = Enzyme.deferred_codegen_spec(typeof(dkernel), Tuple{Vector{Float64}})
+            ccall(ptr, Cvoid, (Vector{Float64},), a)
+            return
+        end
+
+        struct UnknownSpec end
+        unknown(p) = (unsafe_store!(p, GPUCompiler.deferred_codegen(UnknownSpec())); return)
+        nonsingleton(p, x) = (unsafe_store!(p, GPUCompiler.deferred_codegen(x)); return)
+    end
+    llvm(f, tt=Tuple{Vector{Float64}}) =
+        sprint(io->Native.code_llvm(io, f, tt; debuginfo=:none, dump_module=true))
+
+    # the request is compiled with the job that Enzyme's `deferred_job` returns, and the
+    # check for the host folds away once the request resolves to a function
+    ir = llvm(mod.dkernel)
+    @test !occursin("deferred_codegen", ir)
+    @test occursin(r"define internal .*@enzyme_(julia|j)_kernel", ir)
+    @test @filecheck begin
+        @check_label "define {{.*}} @{{(julia|j)_dkernel_[0-9]+}}"
+        @check_not "throw"
+        @check "call {{.*}} @enzyme_{{(julia|j)_kernel_[0-9]+}}"
+        @check_label "define internal {{.*}} @enzyme_{{(julia|j)_kernel_[0-9]+}}"
+        Native.code_llvm(mod.dkernel, Tuple{Vector{Float64}}; debuginfo=:none, dump_module=true)
+    end
+
+    ir = llvm(mod.dkernel_inline)
+    @test !occursin("deferred_codegen", ir)
+    @test !occursin(r"@(enzyme_)?(julia|j)_kernel", ir)
+
+    ir = llvm(mod.ddkernel)
+    @test !occursin("deferred_codegen", ir)
+    @test occursin(r"define internal .*@enzyme_(julia|j)_dkernel", ir)
+    @test occursin(r"define internal .*@enzyme_(julia|j)_kernel", ir)
+
+    # on the host, nothing resolves the request
+    @test GPUCompiler.deferred_codegen(
+        Enzyme.DeferredSpec{typeof(mod.kernel),Tuple{Vector{Float64}},false}()) == C_NULL
+    @test_throws Enzyme.DeferredOnHostError mod.dkernel([1.0])
+
+    @test_throws "no method of `GPUCompiler.deferred_job`" llvm(mod.unknown, Tuple{Ptr{Ptr{Cvoid}}})
+    @test_throws "singleton type" llvm(mod.nonsingleton, Tuple{Ptr{Ptr{Cvoid}}, Int})
+
+    # `deferred_job` methods defined after the world the compilation runs in
+    late = @eval module $(gensym())
+        import ..GPUCompiler
+        child(p) = (unsafe_store!(p, 42); return)
+        struct LateSpec end
+        parent(p) = (unsafe_store!(p, GPUCompiler.deferred_codegen(LateSpec())); return)
+    end
+    function define_and_compile()
+        Core.eval(late, quote
+            GPUCompiler.deferred_job(::LateSpec, job::GPUCompiler.CompilerJob) =
+                GPUCompiler.CompilerJob(
+                    GPUCompiler.methodinstance(typeof(child), Tuple{Ptr{Int}}, job.world),
+                    job.config, job.world)
+        end)
+        return llvm(late.parent, Tuple{Ptr{Ptr{Cvoid}}})
+    end
+    ir = define_and_compile()
+    @test !occursin("deferred_codegen", ir)
+    @test occursin(r"define .*@(julia|j)_child", ir)
+end
+
 @testset "stack allocation intrinsic" begin
     mod = @eval module $(gensym())
         import ..GPUCompiler
