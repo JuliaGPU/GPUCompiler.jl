@@ -670,6 +670,35 @@ end
     @test occursin(r"call .*@(julia|j)_kernel", ir)
 end
 
+@testset "Mock Enzyme deferred spec" begin
+    # the deferred function uses the kernel state, so its signature is rewritten, which only
+    # works if the request's check for the host has folded away before
+    mod = @eval module $(gensym())
+        import ..Enzyme
+        function child(a)
+            data = $PTX.kernel_state().data
+            unsafe_store!(a, unsafe_load(a)^2 + data)
+            return
+        end
+        function kernel(a)
+            ptr = Enzyme.deferred_codegen_spec(typeof(child), Tuple{Ptr{Float64}})
+            ccall(ptr, Cvoid, (Ptr{Float64},), a)
+            return
+        end
+    end
+
+    ir = sprint(io->PTX.code_llvm(io, mod.kernel, Tuple{Ptr{Float64}};
+                                  backend, debuginfo=:none, dump_module=true, kernel=true))
+    @test !occursin("deferred_codegen", ir)
+    @test occursin(r"define internal .*@enzyme_(julia|j)_child", ir)
+    @test !occursin(r"icmp .*@enzyme_(julia|j)_child", ir)
+    @test !occursin("exception", ir)
+
+    asm = sprint(io->PTX.code_native(io, mod.kernel, Tuple{Ptr{Float64}};
+                                     backend, kernel=true, dump_module=true))
+    @test occursin(r"\.entry", asm)
+end
+
 end
 
 ############################################################################################
