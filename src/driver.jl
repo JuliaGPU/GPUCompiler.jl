@@ -178,9 +178,14 @@ function compile_unhooked(output::Symbol, @nospecialize(job::CompilerJob);
     error("Unknown compilation output $output")
 end
 
-# primitive mechanism for deferred compilation, for implementing CUDA dynamic parallelism.
-# this could both be generalized (e.g. supporting actual function calls, instead of
-# returning a function pointer), and be integrated with the nonrecursive codegen.
+# Deferred compilation: code obtains the address of a function that the compilation it ends
+# up in compiles too (see `deferred_codegen` and `deferred_codegen!`), through calls to a
+# `deferred_codegen` marker with an id that identifies what to compile.
+#
+# Jobs registered here directly, with the id of their marker as key, are the legacy way of
+# requesting them, which Enzyme.jl and releases of back-ends that predate
+# `deferred_codegen!` use. New code should use `deferred_codegen!` instead, which registers
+# requests without racing with concurrent compilations.
 const deferred_codegen_jobs = Dict{Int, Any}()
 
 # We make this function explicitly callable so that we can drive OrcJIT's
@@ -212,39 +217,63 @@ deferred_codegen(f::Val, tt::Val) = Base.@noinline deferred_codegen_request(f, t
 end
 const deferred_codegen_request_method = which(deferred_codegen_request, Tuple{Val,Val})
 
-# The requests that `irgen` found, by the function and argument types they request. The id
-# of a request is its address, which the jobs in `deferred_codegen_jobs` don't use: they
-# are registered under small integers or addresses of other objects. (Checking that would
-# race with code registering them.) Ids only have a meaning in the process that generated
-# the code, so they aren't stored: addresses change when an image is restored. Requests are
-# registered once, so that this only grows with the number of distinct ones. That may
-# happen in generated functions, so use a lock that doesn't yield, and compare requests by
-# identity, which calls no user-defined `hash`.
+# Requests for deferred code generation: function and argument types relative to the
+# requesting job (from `deferred_codegen(::Val, ::Val)`), or a job (from back-ends).
+#
+# The id of a request is its address, which the jobs in `deferred_codegen_jobs` don't use:
+# they are registered under small integers or addresses of other objects. (Checking that
+# would race with code registering them.) Ids only have a meaning in the process that
+# generated the code: addresses change when an image is restored, so a request found by
+# its id is only used if that is still its address, and registering it again indexes it
+# under its current one. Requests are registered once, so that
+# this only grows with the number of distinct ones. That may happen in generated functions,
+# so use a lock that doesn't yield, and compare requests by identity, which calls no
+# user-defined `hash`.
 mutable struct DeferredRequest
-    const ft::Any
-    const tt::Any
+    const spec::Any
 end
 const deferred_requests = IdDict{Any,DeferredRequest}()
+const deferred_requests_by_id = Dict{Int,DeferredRequest}()
 const deferred_requests_lock = Threads.SpinLock()
 
 request_id(request::DeferredRequest) = reinterpret(Int, pointer_from_objref(request))
 
-function register_deferred_request(@nospecialize(ft), @nospecialize(tt))
+function register_deferred_request(@nospecialize(spec))
     Base.@lock deferred_requests_lock begin
-        request = get!(deferred_requests, (ft, tt)) do
-            DeferredRequest(ft, tt)
+        request = get!(deferred_requests, spec) do
+            DeferredRequest(spec)
         end
-        return request_id(request)
+        id = request_id(request)
+        deferred_requests_by_id[id] = request
+        return id
     end
 end
 
-function lookup_deferred_request(id::Int)
-    Base.@lock deferred_requests_lock begin
-        for request in values(deferred_requests)
-            request_id(request) == id && return request
-        end
-        return nothing
+# the request with a marker's id, or the job registered under it with `deferred_codegen_jobs`
+function deferred_spec(id::Int)
+    request = Base.@lock deferred_requests_lock get(deferred_requests_by_id, id, nothing)
+    if request !== nothing && request_id(request) == id
+        return request.spec
     end
+    global deferred_codegen_jobs
+    spec = get(deferred_codegen_jobs, id, nothing)
+    spec === nothing && error("No deferred codegen request has id $id")
+    return spec
+end
+
+# the job that compiles a request as part of `job`
+function nest_deferred_job(@nospecialize(dyn_job::CompilerJob), @nospecialize(job::CompilerJob))
+    target = nest_target(dyn_job.config.target, job.config.target)
+    params = nest_params(dyn_job.config.params, job.config.params)
+    config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
+    return CompilerJob(dyn_job; config)
+end
+
+# the job a request specifies, for the job whose module contains it
+function deferred_job(@nospecialize(spec), @nospecialize(job::CompilerJob))
+    spec isa CompilerJob && return spec
+    ft, tt = spec
+    return CompilerJob(methodinstance(ft, tt, job.world), job.config, job.world)
 end
 
 # In a module that Julia generated, give the legacy markers in the code of requests the
@@ -256,7 +285,7 @@ function lower_deferred_requests!(mod::LLVM.Module, compiled)
     for (mi, entry) in compiled
         mi.def === deferred_codegen_request_method || continue
         _, ft, tt = Base.unwrap_unionall(mi.specTypes).parameters
-        id = register_deferred_request(ft.parameters[1], tt.parameters[1])
+        id = register_deferred_request((ft.parameters[1], tt.parameters[1]))
         for name in (entry.specfunc, entry.func)
             name === nothing && continue
             f = get(mod.functions, name, nothing)
@@ -272,6 +301,56 @@ function lower_deferred_requests!(mod::LLVM.Module, compiled)
     end
     return
 end
+
+"""
+    deferred_codegen!(builder::IRBuilder, job::CompilerJob) -> LLVM.Value
+
+Emit code at the position of `builder` that evaluates to the address of the function that
+`job` compiles to. This is the counterpart of [`deferred_codegen`](@ref) for code
+generation, e.g. to call a function from [`finish_module!`](@ref) that is only known to be
+needed then. The compilation resolves requests after `finish_module!`, so they can't be made
+later (e.g. from `finish_ir!`), and it doesn't resolve them when compiling only the entry
+point (`only_entry=true`).
+
+`job` is compiled like the functions that [`deferred_codegen`](@ref) requests: as part of
+the requesting compilation, with its target and parameters nested in the requesting job's
+ones (see `nest_target` and `nest_params`), but otherwise with its own source, world and
+configuration (e.g. `kernel=false` for a function that is only called). Only kernels remain
+entry points.
+
+The result is an LLVM pointer. To call the function, cast it to a pointer to the function's
+type (with `pointercast!`, which does nothing with opaque pointers). Once the request is
+resolved, that call is a direct call of a defined function, which LLVM requires to have a
+debug location if the calling function has debug info: set one on `builder` (e.g. with
+`debug_location!`) before emitting the call.
+"""
+function deferred_codegen!(builder::IRBuilder, @nospecialize(job::CompilerJob))
+    bb = builder.insert_block
+    bb === nothing && throw(ArgumentError("The IR builder is not positioned"))
+    mod = LLVM.parent(LLVM.parent(bb))
+    context!(LLVM.context(mod)) do
+        # the marker, as Julia declares it for `ccall("extern deferred_codegen", llvmcall,
+        # Ptr{Cvoid}, (Int,), id)`
+        ft = LLVM.FunctionType(convert(LLVMType, Ptr{Cvoid}), [convert(LLVMType, Int)])
+        marker = get!(mod.functions, "deferred_codegen") do
+            LLVM.Function(mod, "deferred_codegen", ft)
+        end
+        marker.function_type == ft ||
+            error("The deferred_codegen marker in this module has type $(marker.function_type), expected $ft")
+
+        id = register_deferred_request(job)
+        ptr = call!(builder, ft, marker, [ConstantInt(only(LLVM.parameters(ft)), id)])
+        if LLVM.return_type(ft) isa LLVM.IntegerType
+            # Julia before 1.12 represents `Ptr` as an integer
+            T_ptr = supports_typed_pointers(context()) ?
+                    LLVM.PointerType(LLVM.Int8Type()) : LLVM.PointerType()
+            ptr = inttoptr!(builder, ptr, T_ptr)
+        end
+        return ptr
+    end
+end
+
+@public deferred_codegen, deferred_codegen!
 
 # Register deferred_codegen as a global function so that it can be called with
 # `ccall("extern deferred_codegen", ...)`. Called from __init__.
@@ -360,6 +439,7 @@ end
     has_deferred_jobs = job.config.toplevel && !job.config.only_entry &&
                         haskey(ir.functions, "deferred_codegen")
     jobs = Dict{CompilerJob, String}(job => entry_fn)
+    nested_jobs = Dict{CompilerJob, String}()
     if has_deferred_jobs
         dyn_marker = ir.functions["deferred_codegen"]
 
@@ -376,41 +456,30 @@ end
                 call = use.user::LLVM.CallInst
                 id = convert(Int, first(call.operands))
 
-                # requests from `deferred_codegen` (see `lower_deferred_requests!`) or jobs
-                # that back-ends and Enzyme.jl registered with `deferred_codegen_jobs`
-                global deferred_codegen_jobs
-                request = lookup_deferred_request(id)
-                dyn_val = request === nothing ? deferred_codegen_jobs[id] :
-                                                (request.ft, request.tt)
-
-                # get a job in the appopriate world
-                dyn_job = if dyn_val isa CompilerJob
-                    # trust that the user knows what they're doing
-                    dyn_val
-                else
-                    ft, tt = dyn_val
-                    dyn_src = methodinstance(ft, tt, job.world)
-                    CompilerJob(dyn_src, job.config, job.world)
-                end
-
+                dyn_job = deferred_job(deferred_spec(id), job)
                 push!(get!(worklist, dyn_job, LLVM.CallInst[]), call)
-            end
-
-            function deferred_codegen(@nospecialize(dyn_job::CompilerJob), @nospecialize(job::CompilerJob))
-                target = nest_target(dyn_job.config.target, job.config.target)
-                params = nest_params(dyn_job.config.params, job.config.params)
-                config = CompilerConfig(dyn_job.config; toplevel=false, target, params)
-                return compile_unhooked(:llvm, CompilerJob(dyn_job; config))
             end
 
             # compile and link
             for dyn_job in keys(worklist)
-                # cached compilation
+                # cached compilation: of the same job (e.g. a kernel requesting itself), or,
+                # for functions that aren't kernels, of one that is the same once nested in
+                # this compilation (e.g. a function that both a job and its deferred child
+                # request). kernels are entry points, which `finish_ir!` processes with the
+                # requested job, so they are compiled for each one (which can make kernels
+                # requested from different levels of nesting get the same name).
                 dyn_entry_fn = get(jobs, dyn_job, nothing)
                 if dyn_entry_fn === nothing
                     # We are potentially calling into a sibling compiler (Enzyme)
                     # which was loaded in a newer world.
-                    dyn_ir, dyn_meta = @invokelatest deferred_codegen(dyn_job, job)
+                    nested_job = @invokelatest nest_deferred_job(dyn_job, job)
+                    if !dyn_job.config.kernel
+                        dyn_entry_fn = get(nested_jobs, nested_job, nothing)
+                        dyn_entry_fn === nothing || (jobs[dyn_job] = dyn_entry_fn)
+                    end
+                end
+                if dyn_entry_fn === nothing
+                    dyn_ir, dyn_meta = @invokelatest compile_unhooked(:llvm, nested_job)
                     dyn_entry_fn = dyn_meta.entry.name
                     # the sibling compiler's result isn't inferred
                     dyn_compiled = dyn_meta.compiled
@@ -423,6 +492,7 @@ end
                     link_relocatable!(ir, relocations, dyn_ir,
                                       dyn_meta.relocations)
                     jobs[dyn_job] = dyn_entry_fn
+                    dyn_job.config.kernel || (nested_jobs[nested_job] = dyn_entry_fn)
                     changed = true
                 end
                 dyn_entry = ir.functions[dyn_entry_fn]
